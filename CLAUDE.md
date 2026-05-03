@@ -39,10 +39,10 @@ Three-layer structure; dependency flows downward and the `Invariants` tree is wh
 
 `INVARIANTS.md` is the living source of truth for properties the wallet must satisfy. Every invariant is tagged 📝 stated → 🚧 in-progress → ✅ proved (or 🔒 axiomatized for FFI boundaries). The workflow when adding a new property:
 
-1. Add an informal statement and stub `theorem` in `INVARIANTS.md`.
+1. Add an informal statement in `INVARIANTS.md`.
 2. Formalize it under `LeanKohaku/Invariants/<Topic>.lean` (create the module if absent).
-3. Once `theorem … := by sorry` typechecks, flip to 🚧 and update the status table in `README.md`.
-4. Replace `sorry` with a real proof; flip to ✅ and cite the theorem name + module in `INVARIANTS.md`.
+3. Add the theorem with a real proof before merging; no `sorry` lands in the tree.
+4. Flip to ✅ and cite the theorem name + module in `INVARIANTS.md`.
 
 Currently proved: **1.1** (`subChecked_preserves_total` in `Invariants/Amount.lean`) and **1.2** (three theorems in `Invariants/Wallet.lean` — `apply_some_affordable`, `apply_sender_debited`, `apply_non_sender_balance`). **2.1** and **2.3** are `wellFormed`-by-definition in `Invariants/TxWellFormed.lean`.
 

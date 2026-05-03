@@ -1,0 +1,10 @@
+[Unit]
+Description=leanKohaku user daemon socket
+
+[Socket]
+ListenStream=%t/leankohaku/leankohaku.sock
+SocketMode=0600
+DirectoryMode=0700
+
+[Install]
+WantedBy=sockets.target

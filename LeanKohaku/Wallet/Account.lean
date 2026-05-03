@@ -83,4 +83,9 @@ def sepoliaEoaK1 : AccountPolicy :=
 def sepoliaR1Smart : AccountPolicy :=
   { defaultR1Smart with chainId := sepoliaChainId }
 
+-- Mainnet R1 smart-account policy. Identical to `defaultR1Smart` (mainnet
+-- chainId), introduced for the `wallet deploy r1 --chain mainnet` gate.
+def mainnetR1Smart : AccountPolicy :=
+  { defaultR1Smart with chainId := mainnetChainId }
+
 end LeanKohaku.Wallet.Account

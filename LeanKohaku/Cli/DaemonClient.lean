@@ -30,6 +30,57 @@ def socketPath : IO String := do
   | some path => pure path
   | none => defaultSocketPath
 
+def daemonBin : IO String := do
+  match ← IO.getEnv "LEANKOHAKU_DAEMON_BIN" with
+  | some path => pure path
+  | none =>
+      let candidate := (← IO.appDir) / "leankohaku-daemon"
+      if ← candidate.pathExists then
+        pure candidate.toString
+      else
+        pure "leankohaku-daemon"
+
+def autoSpawnDisabled : IO Bool := do
+  match ← IO.getEnv "LEANKOHAKU_NO_AUTOSPAWN" with
+  | none => pure false
+  | some "" => pure false
+  | some "0" => pure false
+  | some "false" => pure false
+  | some "FALSE" => pure false
+  | some _ => pure true
+
+def noAutoSpawnMethod (method : String) : Bool :=
+  method == "daemon.shutdown"
+
+def spawnDaemon (path : String) : IO Unit := do
+  let bin ← daemonBin
+  discard <| IO.Process.spawn
+    { cmd := bin,
+      env := #[("LEANKOHAKU_SOCKET", some path)],
+      stdin := .null,
+      stdout := .null,
+      stderr := .null,
+      setsid := true }
+
+partial def waitForSocketConnect (path : String) (remaining : Nat) : IO Bool := do
+  if remaining == 0 then
+    pure false
+  else
+    try
+      let conn ← LeanKohaku.Transport.Uds.connect path
+      LeanKohaku.Transport.Uds.close conn
+      pure true
+    catch _ =>
+      IO.sleep 100
+      waitForSocketConnect path (remaining - 1)
+
+def ensureDaemon (path method : String) : IO Bool := do
+  if noAutoSpawnMethod method || (← autoSpawnDisabled) then
+    pure false
+  else
+    spawnDaemon path
+    waitForSocketConnect path 20
+
 def requestJson (method : String) (params : Json) : Json :=
   .obj #[
     ("jsonrpc", .str "2.0"),
@@ -53,25 +104,122 @@ def parseRpcError (json : Json) : RpcError :=
     | none => message
   { code := code, message := message }
 
-def call (method : String) (params : Json := .arr #[]) : IO (Except RpcError Json) := do
-  try
-    let conn ← LeanKohaku.Transport.Uds.connect (← socketPath)
-    try
-      discard <| LeanKohaku.Transport.Uds.write conn (compact (requestJson method params) ++ "\n").toByteArray
-      let bytes ← LeanKohaku.Transport.Uds.read conn
-      let some text := String.fromUTF8? bytes
-        | pure (.error { code := -32700, message := "daemon returned non-UTF8 response" })
-      match parse text.trimAscii.toString with
-      | .error err => pure (.error { code := -32700, message := err })
-      | .ok response =>
+/-- Render a JSON-RPC notification frame from the daemon. Known events
+    get a friendly one-liner; unknown events are surfaced verbatim so
+    new event types light up automatically. -/
+def renderNotification (params : Json) : IO Unit := do
+  let event := getField "event" params >>= asString
+  let data := (getField "data" params).getD (.obj #[])
+  let finger := (getField "finger" data >>= asString).getD "fingerprint reader"
+  let attempt := (getField "attempt" data >>= asNat).getD 0
+  let ofN := (getField "of" data >>= asNat).getD 0
+  match event with
+  | some "biometric-required" =>
+      IO.println s!"🔒 Biometric verification required — touch {finger} on your fingerprint reader (attempt {attempt}/{ofN})"
+  | some "biometric-success" =>
+      IO.println "✓ Biometric verified"
+  | some "biometric-failed" =>
+      let reason := (getField "stderr" data >>= asString).getD ""
+      let trimmed := reason.trim
+      if trimmed.isEmpty then
+        IO.println s!"✗ Biometric attempt {attempt}/{ofN} failed"
+      else
+        IO.println s!"✗ Biometric attempt {attempt}/{ofN} failed: {trimmed}"
+  | some "tx-broadcasted" =>
+      let txHash := (getField "txHash" data >>= asString).getD "?"
+      IO.println s!"📡 Broadcast: {txHash}"
+  | some "tx-pending" =>
+      let elapsed := (getField "elapsedSec" data >>= asNat).getD 0
+      IO.println s!"⏳ Waiting for confirmation… ({elapsed}s)"
+  | some "tx-mined" =>
+      let block := (getField "blockNumber" data >>= asString).getD "?"
+      let gasUsed := (getField "gasUsed" data >>= asString).getD "?"
+      let effPrice := (getField "effectiveGasPrice" data >>= asString).getD "?"
+      let status := (getField "status" data >>= asString).getD "?"
+      IO.println s!"✓ Mined in block {block} — gasUsed={gasUsed}, effectivePrice={effPrice}, status={status}"
+  | some name =>
+      IO.println s!"[event] {name} {compact data}"
+  | none =>
+      IO.println s!"[event] {compact params}"
+
+/-- Split a buffer into complete (newline-terminated) frames plus a
+    trailing partial line. Returns `(complete-lines, leftover)`. -/
+def splitFrames (buf : String) : List String × String :=
+  let parts := buf.splitOn "\n"
+  match parts.reverse with
+  | [] => ([], "")
+  | last :: revInit => (revInit.reverse, last)
+
+/-- Try to extract a final response (or render a notification) from
+    one parsed frame. Returns `some` for the response frame, `none`
+    after rendering a notification. -/
+def consumeFrame (trimmed : String) : IO (Option (Except RpcError Json)) := do
+  if trimmed.isEmpty then
+    pure none
+  else
+    match parse trimmed with
+    | .error err =>
+        pure (some (.error { code := -32700, message := err }))
+    | .ok response =>
+        let hasResult := (getField "result" response).isSome
+        let hasError := (getField "error" response).isSome
+        if !hasResult && !hasError then
+          match getField "params" response with
+          | some p => renderNotification p
+          | none => renderNotification response
+          pure none
+        else
           match getField "result" response, getField "error" response with
-          | some result, _ => pure (.ok result)
-          | _, some err => pure (.error (parseRpcError err))
-          | _, _ => pure (.error { code := -32603, message := "malformed daemon response" })
-    finally
-      LeanKohaku.Transport.Uds.close conn
-  catch e =>
-    pure (.error { code := -32000, message := e.toString })
+          | some result, _ => pure (some (.ok result))
+          | _, some err => pure (some (.error (parseRpcError err)))
+          | _, _ => pure (some (.error { code := -32603, message := "malformed daemon response" }))
+
+partial def processFrames :
+    List String → IO (Option (Except RpcError Json))
+  | [] => pure none
+  | frame :: rest => do
+      match ← consumeFrame frame.trim with
+      | some result => pure (some result)
+      | none => processFrames rest
+
+/-- Read & dispatch frames until we get the response frame for our
+    request. Notification frames are rendered inline; the response
+    frame is returned. Buffers across `read` chunks so partial frames
+    don't break parsing. -/
+partial def readUntilResponse (conn : LeanKohaku.Transport.Uds.Conn)
+    (buffer : String) : IO (Except RpcError Json) := do
+  let (complete, leftover) := splitFrames buffer
+  match ← processFrames complete with
+  | some result => pure result
+  | none =>
+      let bytes ← LeanKohaku.Transport.Uds.read conn
+      if bytes.isEmpty then
+        pure (.error { code := -32603, message := "daemon closed connection before responding" })
+      else
+        let some chunk := String.fromUTF8? bytes
+          | pure (.error { code := -32700, message := "daemon returned non-UTF8 response" })
+        readUntilResponse conn (leftover ++ chunk)
+
+def callOnce (path method : String) (params : Json := .arr #[]) : IO (Except RpcError Json) := do
+  let conn ← LeanKohaku.Transport.Uds.connect path
+  try
+    discard <| LeanKohaku.Transport.Uds.write conn (compact (requestJson method params) ++ "\n").toByteArray
+    readUntilResponse conn ""
+  finally
+    LeanKohaku.Transport.Uds.close conn
+
+def call (method : String) (params : Json := .arr #[]) : IO (Except RpcError Json) := do
+  let path ← socketPath
+  try
+    callOnce path method params
+  catch first =>
+    if ← ensureDaemon path method then
+      try
+        callOnce path method params
+      catch second =>
+        pure (.error { code := -32000, message := second.toString })
+    else
+      pure (.error { code := -32000, message := first.toString })
 
 def printCall (method : String) (params : Json := .arr #[]) : IO UInt32 := do
   match ← call method params with
@@ -94,5 +242,7 @@ def printTextResult (method : String) (params : Json := .arr #[]) : IO UInt32 :=
   | .error err =>
       IO.eprintln s!"daemon error {err.code}: {err.message}"
       pure 2
+
+/- Keep no code below this point; the client must stay transport-only. -/
 
 end LeanKohaku.Cli.DaemonClient

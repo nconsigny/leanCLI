@@ -32,6 +32,13 @@ package() {
   cd "${srcdir}/${pkgname}"
   install -Dm755 ".lake/build/bin/leankohaku" "${pkgdir}/usr/bin/leankohaku"
   install -Dm755 ".lake/build/bin/leankohaku-daemon" "${pkgdir}/usr/bin/leankohaku-daemon"
+  install -Dm644 "packaging/systemd/leankohaku.socket" "${pkgdir}/usr/lib/systemd/user/leankohaku.socket"
+  install -Dm644 "packaging/systemd/leankohaku.service" "${pkgdir}/usr/lib/systemd/user/leankohaku.service"
   install -Dm644 "README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"
   install -Dm644 "INVARIANTS.md" "${pkgdir}/usr/share/doc/${pkgname}/INVARIANTS.md"
+  install -Dm644 "SECURITY.md" "${pkgdir}/usr/share/doc/${pkgname}/SECURITY.md"
+  install -Dm644 "docs/CLI.md" "${pkgdir}/usr/share/doc/${pkgname}/CLI.md"
+  install -Dm644 "docs/DAEMON.md" "${pkgdir}/usr/share/doc/${pkgname}/DAEMON.md"
+  install -Dm644 "docs/PRIVACY_SECURITY.md" "${pkgdir}/usr/share/doc/${pkgname}/PRIVACY_SECURITY.md"
+  install -Dm644 "docs/R1_SEPOLIA.md" "${pkgdir}/usr/share/doc/${pkgname}/R1_SEPOLIA.md"
 }

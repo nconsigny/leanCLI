@@ -25,6 +25,15 @@ pkgs.stdenv.mkDerivation rec {
     runHook preInstall
     install -Dm755 .lake/build/bin/leankohaku "$out/bin/leankohaku"
     install -Dm755 .lake/build/bin/leankohaku-daemon "$out/bin/leankohaku-daemon"
+    install -Dm644 packaging/systemd/leankohaku.socket "$out/lib/systemd/user/leankohaku.socket"
+    install -Dm644 packaging/systemd/leankohaku.service "$out/lib/systemd/user/leankohaku.service"
+    install -Dm644 README.md "$out/share/doc/leankohaku/README.md"
+    install -Dm644 INVARIANTS.md "$out/share/doc/leankohaku/INVARIANTS.md"
+    install -Dm644 SECURITY.md "$out/share/doc/leankohaku/SECURITY.md"
+    install -Dm644 docs/CLI.md "$out/share/doc/leankohaku/CLI.md"
+    install -Dm644 docs/DAEMON.md "$out/share/doc/leankohaku/DAEMON.md"
+    install -Dm644 docs/PRIVACY_SECURITY.md "$out/share/doc/leankohaku/PRIVACY_SECURITY.md"
+    install -Dm644 docs/R1_SEPOLIA.md "$out/share/doc/leankohaku/R1_SEPOLIA.md"
     runHook postInstall
   '';
 

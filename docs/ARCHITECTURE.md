@@ -31,9 +31,9 @@ the abstract models defined alongside it (not about runtime IO).
 ## Module reference
 
 ### Entry points
-- `LeanKohaku/App/Main.lean` — CLI executable root; thin stub over
+- `LeanKohaku/App/Main.lean` — CLI executable root; thin wrapper over
   `LeanKohaku.Lib.Client` that dispatches argv via `Cli.Commands`.
-- `LeanKohaku/App/DaemonMain.lean` — Daemon executable root; thin stub over
+- `LeanKohaku/App/DaemonMain.lean` — Daemon executable root; thin wrapper over
   `LeanKohaku.Lib.Core` that loads `Daemon.Config` from env and runs
   `Daemon.Server.run`.
 - `LeanKohaku/Lib/{Client,Core,Spec}.lean` — aggregate library roots
@@ -146,7 +146,8 @@ binaries invoked at runtime.
   and CI helpers.
 - `packaging/arch/PKGBUILD` — Arch Linux package (lake build, install both
   binaries plus `docs/`).
-- `docs/CLI.md`, `docs/PRIVACY_SECURITY.md`, `docs/R1_SEPOLIA.md` — user
+- `docs/CLI.md`, `docs/DAEMON.md`, `docs/PRIVACY_SECURITY.md`,
+  `docs/R1_SEPOLIA.md`, `SECURITY.md` — user
   documentation.
 
 ## Trust boundary summary
@@ -169,9 +170,8 @@ behind a narrow opaque interface.
 
 ## Known gaps
 
-- Daemon RPC transport not wired through `Main.lean` (preflight prints
-  "not implemented yet"; exit code 1).
-- `Daemon/Config.lean` is env-only; no TOML/JSON config file yet.
+- Daemon config supports JSON files plus env overrides; systemd unit
+  installation still needs packaging verification on target distros.
 - No Mathlib dependency, so secp256k1 group-law proofs are out of scope until
   it is added (see `lakefile.lean` comment).
 - Verity-based R1 contract proofs depend on toolchain settlement.

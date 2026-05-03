@@ -71,7 +71,10 @@ def encodeRequest (req : Request) : String :=
     runtime hook for invariant 5.7 (every `Bridge.call` factors through
     `NetworkPolicy.Policy`). -/
 def methodPurpose (method : String) : Purpose :=
-  if method = "shielded.broadcast" || method = "shielded.signAndBroadcast" then
+  if method = "shielded.broadcast" || method = "shielded.signAndBroadcast"
+      || method = "shielded.prepareWithdraw" then
+    -- Why: prepareWithdraw POSTs the withdrawal to the relayer, which counts
+    -- as a shielded broadcast for policy classification.
     Purpose.shieldedBroadcast
   else if method = "ping" || method = "version" || method = "listProtocols" then
     -- Local introspection: classified as daemon control, no egress.
@@ -105,27 +108,48 @@ private def parseResponse (raw : String) : Response :=
           | none => Response.crash s!"bridge response missing result: {raw}" 0
   | .ok _ => Response.crash s!"bridge response not a JSON object: {raw}" 0
 
-/-- Spawn the sidecar for one request, write the encoded request to its
-    stdin, read one line of stdout, and decode the response.
+/-- Spawn the sidecar for one request with optional env overlay, write the
+    encoded request as `--rpc <json>`, read one line of stdout, and decode
+    the response.
 
     M1 uses one-shot invocation (matching the HACL helper pattern). M2+ will
     promote this to a long-lived child process held in `Daemon/State.lean`
     so snarkjs proving keys are not reloaded per call. The public surface
-    (`Bridge.call`) is the same either way; only the internal IO changes. -/
-def call (req : Request) : IO Response := do
+    (`Bridge.call` / `Bridge.callWithEnv`) is the same either way; only the
+    internal IO changes.
+
+    `env` is forwarded by shielded handlers to pass `LEANKOHAKU_RPC_URL`,
+    `LEANKOHAKU_CHAIN_ID`, and the privacy-pools mnemonic without putting
+    secrets on argv. -/
+def callWithEnv (req : Request) (env : Array (String × Option String)) : IO Response := do
   let exe ← resolveExecutable
   let encoded := encodeRequest req
+  let v := ((← IO.getEnv "LEANKOHAKU_VERBOSE").getD "0").toNat?.getD 0
+  let t0 ← IO.monoMsNow
+  if v ≥ 1 then IO.eprintln s!"[bridge→] {req.method} exe={exe}"
   try
-    let out ← IO.Process.output {
+    let child ← IO.Process.spawn {
       cmd := exe,
-      args := #["--rpc", encoded]
+      args := #["--rpc", encoded],
+      env := env,
+      stdin := .null,
+      stdout := .piped,
+      stderr := .inherit
     }
-    if out.exitCode == 0 then
-      pure (parseResponse out.stdout)
+    let stdout ← child.stdout.readToEnd
+    let exitCode ← child.wait
+    if exitCode == 0 then
+      pure (parseResponse stdout)
+    else if !stdout.trim.isEmpty then
+      -- Bridge wrote a JSON-RPC error then exited non-zero. Surface the
+      -- error rather than dropping the payload.
+      pure (parseResponse stdout)
     else
-      pure (Response.crash out.stderr out.exitCode)
+      pure (Response.crash s!"bridge exited with code {exitCode}" exitCode)
   catch e =>
     pure (Response.crash (toString e) 0)
+
+def call (req : Request) : IO Response := callWithEnv req #[]
 
 /-- Convenience: invoke the `ping` method and return the parsed response.
     Used by the `shielded.ping` daemon RPC for liveness checks. -/

@@ -158,6 +158,10 @@ def asString : Json → Option String
   | .str s => some s
   | _ => none
 
+def asBool : Json → Option Bool
+  | .bool b => some b
+  | _ => none
+
 def asNat : Json → Option Nat
   | .num n => if n ≥ 0 then some n.toNat else none
   | _ => none

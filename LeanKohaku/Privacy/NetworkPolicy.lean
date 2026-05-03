@@ -27,6 +27,11 @@ inductive Purpose where
   | crashReport
   | shieldedRead
   | shieldedBroadcast
+  -- Why: third-party block-explorer / indexer history lookups (e.g.
+  -- Etherscan v2 txlist/tokentx). This is a deliberate privacy tradeoff:
+  -- the watch-address(es) are leaked to the indexer. Strict policies must
+  -- reject this purpose; opt-in only via `indexerEnabled` or `dev`.
+  | indexerLookup
   deriving DecidableEq, Repr
 
 inductive Transport where
@@ -75,6 +80,32 @@ def torDaemonPolicy : Policy
   | { peer := .configuredNode, purpose := .shieldedBroadcast, transport := .tor } => true
   | _ => false
 
+/--
+Dev/testnet policy:
+* all local node and configured-node reads and broadcasts are allowed over any transport;
+* intended for Sepolia dev only — never use on mainnet.
+-/
+def devDaemonPolicy : Policy
+  | { peer := .localNode, .. } => true
+  | { peer := .configuredNode, purpose := .nodeRead, .. } => true
+  | { peer := .configuredNode, purpose := .broadcastTx, .. } => true
+  | { peer := .configuredNode, purpose := .shieldedRead, .. } => true
+  | { peer := .configuredNode, purpose := .shieldedBroadcast, .. } => true
+  | _ => false
+
+/--
+Indexer-enabled policy: extends `strictDaemonPolicy` with a single
+allowed third-party purpose, `indexerLookup`. This is opt-in only — the
+user must run `kohaku network allow-indexer <name>` to enable it. Strict
+mode never grants this purpose. Privacy tradeoff: the watch-address(es)
+are revealed to the indexer.
+-/
+def indexerEnabledPolicy : Policy
+  | { peer := .localNode, purpose := .nodeRead, transport := .loopback } => true
+  | { peer := .localNode, purpose := .broadcastTx, transport := .loopback } => true
+  | { peer := .thirdPartyApi, purpose := .indexerLookup, .. } => true
+  | _ => false
+
 /-- Deny-by-default helper for future features that have not been classified. -/
 def denyByDefault : Policy := fun _ => false
 
@@ -85,6 +116,7 @@ def thirdPartyPurpose : Purpose → Bool
   | .metadataLookup => true
   | .fiatOnramp => true
   | .crashReport => true
+  | .indexerLookup => true
   | _ => false
 
 def Peer.asString : Peer → String
@@ -105,6 +137,7 @@ def Purpose.asString : Purpose → String
   | .crashReport => "crash-report"
   | .shieldedRead => "shielded-read"
   | .shieldedBroadcast => "shielded-broadcast"
+  | .indexerLookup => "indexer-lookup"
 
 def Transport.asString : Transport → String
   | .loopback => "loopback"
@@ -130,6 +163,7 @@ def parsePurpose : String → Option Purpose
   | "crash-report" => some .crashReport
   | "shielded-read" => some .shieldedRead
   | "shielded-broadcast" => some .shieldedBroadcast
+  | "indexer-lookup" => some .indexerLookup
   | _ => none
 
 def parseTransport : String → Option Transport
@@ -142,15 +176,17 @@ def parsePolicy : String → Option Policy
   | "cli" => some strictCliPolicy
   | "strict" => some strictDaemonPolicy
   | "tor" => some torDaemonPolicy
+  | "dev" => some devDaemonPolicy
+  | "indexer" => some indexerEnabledPolicy
   | "deny" => some denyByDefault
   | _ => none
 
-def policyNames : List String := ["cli", "strict", "tor", "deny"]
+def policyNames : List String := ["cli", "strict", "tor", "dev", "indexer", "deny"]
 def peerNames : List String := ["local-daemon", "local-node", "configured-node", "third-party-api"]
 def purposeNames : List String :=
   ["daemon-control", "node-read", "broadcast-tx", "peer-discovery", "analytics",
     "price-quote", "metadata-lookup", "fiat-onramp", "crash-report",
-    "shielded-read", "shielded-broadcast"]
+    "shielded-read", "shielded-broadcast", "indexer-lookup"]
 def transportNames : List String := ["loopback", "tor", "direct"]
 
 end LeanKohaku.Privacy.NetworkPolicy

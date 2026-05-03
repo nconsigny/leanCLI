@@ -14,6 +14,13 @@ namespace LeanKohaku.Wallet.EoaStore
 
 open LeanKohaku.Encoding.Json
 
+structure Account where
+  index   : Nat
+  path    : String
+  address : String
+  label   : Option String := none
+  deriving Repr
+
 structure Record where
   version        : Nat
   name           : String
@@ -24,6 +31,14 @@ structure Record where
   derivationPath : String
   address        : String
   createdAt      : Nat
+  -- Why: multi-account support; index 0 mirrors top-level address/derivationPath
+  -- for backward compatibility with consumers that read those fields.
+  accounts       : Array Account := #[]
+  -- Why: optional ChaCha20-Poly1305 ciphertext of the seed under the TPM-sealed
+  -- master attestation key. Layout = nonce(12) || ciphertext+tag. Slots
+  -- without this field continue to work; only `wallet unlock --all --biometric`
+  -- requires it.
+  attestationWrap : Option ByteArray := none
 
 def defaultKdfIters : Nat := 100000
 
@@ -55,8 +70,18 @@ def ensureStoreDir : IO Unit := do
 private def hex (bytes : ByteArray) : Json :=
   .str (LeanKohaku.Crypto.Hex.encode bytes)
 
+def Account.toJson (a : Account) : Json :=
+  let base : Array (String × Json) := #[
+    ("index", .num (Int.ofNat a.index)),
+    ("path", .str a.path),
+    ("address", .str a.address)
+  ]
+  match a.label with
+  | none => .obj base
+  | some lbl => .obj (base.push ("label", .str lbl))
+
 def Record.toJson (r : Record) : Json :=
-  .obj #[
+  let base : Array (String × Json) := #[
     ("version", .num (Int.ofNat r.version)),
     ("name", .str r.name),
     ("kdfSalt", hex r.kdfSalt),
@@ -65,8 +90,12 @@ def Record.toJson (r : Record) : Json :=
     ("ciphertext", hex r.ciphertext),
     ("derivationPath", .str r.derivationPath),
     ("address", .str r.address),
-    ("createdAt", .num (Int.ofNat r.createdAt))
+    ("createdAt", .num (Int.ofNat r.createdAt)),
+    ("accounts", .arr (r.accounts.map Account.toJson))
   ]
+  match r.attestationWrap with
+  | none => .obj base
+  | some w => .obj (base.push ("attestationWrap", hex w))
 
 private def fieldString (obj : Json) (key : String) : Except String String :=
   match getField key obj >>= asString with
@@ -83,6 +112,13 @@ private def fieldBytes (obj : Json) (key : String) : Except String ByteArray :=
   | some value => .ok value
   | none => .error s!"missing hex field: {key}"
 
+def Account.fromJson (json : Json) : Except String Account := do
+  let index ← fieldNat json "index"
+  let path ← fieldString json "path"
+  let address ← fieldString json "address"
+  let label : Option String := getField "label" json >>= asString
+  .ok { index := index, path := path, address := address, label := label }
+
 def Record.fromJson (json : Json) : Except String Record := do
   let version ← fieldNat json "version"
   let name ← fieldString json "name"
@@ -93,6 +129,20 @@ def Record.fromJson (json : Json) : Except String Record := do
   let derivationPath ← fieldString json "derivationPath"
   let address ← fieldString json "address"
   let createdAt ← fieldNat json "createdAt"
+  -- Why: lazy migration — old slot files have no `accounts`; synthesize from
+  -- top-level path/address. Don't rewrite the file just for reading.
+  let accounts : Array Account ←
+    match getField "accounts" json with
+    | none =>
+        .ok #[{ index := 0, path := derivationPath, address := address, label := none }]
+    | some (.arr entries) =>
+        entries.foldlM (init := (#[] : Array Account))
+          (fun acc entry => do
+            let a ← Account.fromJson entry
+            .ok (acc.push a))
+    | some _ => .error "accounts field must be a JSON array"
+  -- Why: missing field → None; preserves backward compat with pre-attestation slot files.
+  let attestationWrap : Option ByteArray := getField "attestationWrap" json >>= asBytes
   if version != 1 then
     .error s!"unsupported EOA store version: {version}"
   else if kdfSalt.size = 0 then
@@ -109,7 +159,9 @@ def Record.fromJson (json : Json) : Except String Record := do
       ciphertext := ciphertext,
       derivationPath := derivationPath,
       address := address,
-      createdAt := createdAt
+      createdAt := createdAt,
+      accounts := accounts,
+      attestationWrap := attestationWrap
     }
 
 private def deriveKey (passphrase : String) (salt : ByteArray) (iters : Nat) :
@@ -148,7 +200,8 @@ def makeRecord (name passphrase : String) (seed : ByteArray)
             ciphertext := ciphertext,
             derivationPath := derivationPath,
             address := address,
-            createdAt := ← IO.monoMsNow
+            createdAt := ← IO.monoMsNow,
+            accounts := #[{ index := 0, path := derivationPath, address := address, label := none }]
           }
 
 def save (record : Record) : IO Unit := do
@@ -184,6 +237,37 @@ def unlockSeedIO (record : Record) (passphrase : String) : IO (Except String Byt
         (LeanKohaku.Crypto.Hex.encode record.aeadNonce)
         (LeanKohaku.Crypto.Hex.encode (aad record.name record.derivationPath record.address))
         (LeanKohaku.Crypto.Hex.encode record.ciphertext)
+
+-- Why: per-slot AAD prevents reusing a wrapped seed for a different slot.
+private def attestationAad (name : String) : ByteArray :=
+  ("pp-attest\n" ++ name).toByteArray
+
+/-- Encrypt a seed under the 32-byte master attestation key. Returns
+    `nonce(12) || ciphertext+tag`. -/
+def wrapWithMaster (masterKey : ByteArray) (slotName : String) (seed : ByteArray) :
+    IO (Except String ByteArray) := do
+  let nonce ← LeanKohaku.Crypto.Random.getRandomBytes 12
+  match ← LeanKohaku.Crypto.Hacl.chacha20Poly1305SealIO
+      (LeanKohaku.Crypto.Hex.encode masterKey)
+      (LeanKohaku.Crypto.Hex.encode nonce)
+      (LeanKohaku.Crypto.Hex.encode (attestationAad slotName))
+      (LeanKohaku.Crypto.Hex.encode seed) with
+  | .error err => pure (.error err)
+  | .ok ct => pure (.ok (nonce ++ ct))
+
+/-- Inverse of `wrapWithMaster`. Expects `nonce(12) || ciphertext+tag`. -/
+def unwrapWithMaster (masterKey : ByteArray) (slotName : String) (wrap : ByteArray) :
+    IO (Except String ByteArray) := do
+  if wrap.size < 12 then
+    pure (.error "attestationWrap too short")
+  else
+    let nonce := wrap.extract 0 12
+    let ct := wrap.extract 12 wrap.size
+    LeanKohaku.Crypto.Hacl.chacha20Poly1305OpenIO
+      (LeanKohaku.Crypto.Hex.encode masterKey)
+      (LeanKohaku.Crypto.Hex.encode nonce)
+      (LeanKohaku.Crypto.Hex.encode (attestationAad slotName))
+      (LeanKohaku.Crypto.Hex.encode ct)
 
 def list : IO (List String) := do
   let dir ← storeDir

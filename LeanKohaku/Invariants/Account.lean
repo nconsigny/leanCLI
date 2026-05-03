@@ -44,6 +44,10 @@ theorem sepoliaR1SmartAccepted :
     accepted sepoliaR1Smart = true := by
   simp [accepted, sepoliaR1Smart, defaultR1Smart, supportedChainId, compatible]
 
+theorem mainnetR1SmartAccepted :
+    accepted mainnetR1Smart = true := by
+  simp [accepted, mainnetR1Smart, defaultR1Smart, supportedChainId, compatible]
+
 theorem eoaK1UsesBip39WhenAccepted (p : AccountPolicy) :
     accepted p = true →
       p.kind = AccountKind.eoaK1 →

@@ -42,3 +42,11 @@ lean_exe leankohaku where
 lean_exe «leankohaku-daemon» where
   root := `LeanKohaku.App.DaemonMain
   supportInterpreter := true
+
+lean_exe «leankohaku-eip712-check» where
+  root := `LeanKohaku.App.Eip712Check
+  supportInterpreter := true
+
+lean_exe «leankohaku-ens-check» where
+  root := `LeanKohaku.App.EnsCheck
+  supportInterpreter := true

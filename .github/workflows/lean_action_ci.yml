@@ -1,4 +1,4 @@
-name: Lean Action CI
+name: LeanKohaku CI
 
 on:
   push:
@@ -12,3 +12,59 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: leanprover/lean-action@v1
+
+  isolation-and-policy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: leanprover/lean-action@v1
+      - name: CLI isolation
+        run: ./script/check_cli_isolation.sh
+      - name: Privacy policy CLI
+        run: ./script/check_privacy_cli.sh
+
+  daemon-bootstrap:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: leanprover/lean-action@v1
+      - name: Keystore daemon routing
+        run: ./script/check_m6_keystore_daemon.sh
+      - name: Daemon auto-spawn and socket activation
+        run: ./script/check_m10_autospawn.sh
+      - name: Daemon config file
+        run: ./script/check_daemon_config.sh
+
+  native-helper-smoke:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: leanprover/lean-action@v1
+      - name: Install native build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build gcc cargo
+      - name: Build HACL and RustCrypto helpers
+        run: ./script/setup_hacl.sh
+      - name: Build libsecp256k1 helpers
+        run: ./script/setup_secp256k1.sh
+      - name: Helper smoke tests
+        run: ./script/check_native_helpers.sh
+
+  chain-rpc:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: leanprover/lean-action@v1
+      - name: Install native build tools
+        run: sudo apt-get update && sudo apt-get install -y cmake ninja-build gcc cargo
+      - name: Build native crypto helpers
+        run: |
+          ./script/setup_hacl.sh
+          ./script/setup_secp256k1.sh
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+      - name: Chain RPC and eoa.send
+        run: ./script/check_m8_chain_rpc.sh

@@ -5,6 +5,15 @@ package and installs:
 
 - `/usr/bin/leankohaku`
 - `/usr/bin/leankohaku-daemon`
+- `/usr/lib/systemd/user/leankohaku.socket`
+- `/usr/lib/systemd/user/leankohaku.service`
+- `/usr/share/doc/leankohaku-git/` project docs
+
+Enable socket activation with:
+
+```bash
+systemctl --user enable --now leankohaku.socket
+```
 
 Before publishing, replace `_repo_url` and `url` with the canonical
 leanKohaku repository URL. The `optdepends` entries are intentionally

@@ -18,11 +18,28 @@ structure DaemonState where
   startedAtMs : Nat
   shuttingDown : Bool := false
   unlocked : List UnlockedSlot := []
+  /--
+  Cooperative cancellation flag for long-running `chain.scanTransfers`.
+  Set to `true` by the `chain.cancel` RPC; the scan handler checks this
+  between chunks and aborts at the next safe point.
+  -/
+  scanCancelled : Bool := false
 
 abbrev Shared := IO.Ref DaemonState
 
 def new : IO Shared := do
   IO.mkRef { startedAtMs := ← IO.monoMsNow }
+
+/-- Reset the scan-cancellation flag at the start of a new scan. -/
+def beginScan (state : Shared) : IO Unit := do
+  state.modify (fun s => { s with scanCancelled := false })
+
+/-- Idempotent: request cancellation of any in-flight `chain.scanTransfers`. -/
+def cancelScan (state : Shared) : IO Unit := do
+  state.modify (fun s => { s with scanCancelled := true })
+
+def isScanCancelled (state : Shared) : IO Bool := do
+  return (← state.get).scanCancelled
 
 def requestShutdown (state : Shared) : IO Unit := do
   state.modify (fun s => { s with shuttingDown := true })

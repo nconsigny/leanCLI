@@ -29,6 +29,8 @@ inductive RpcMethod where
   | gasPrice
   | maxPriorityFeePerGas
   | sendRawTransaction
+  | getTransactionReceipt
+  | getLogs
   deriving DecidableEq, Repr
 
 def RpcMethod.asString : RpcMethod → String
@@ -42,6 +44,8 @@ def RpcMethod.asString : RpcMethod → String
   | .gasPrice => "eth_gasPrice"
   | .maxPriorityFeePerGas => "eth_maxPriorityFeePerGas"
   | .sendRawTransaction => "eth_sendRawTransaction"
+  | .getTransactionReceipt => "eth_getTransactionReceipt"
+  | .getLogs => "eth_getLogs"
 
 def Backend.asString : Backend → String
   | .localNode => "local"
@@ -95,6 +99,8 @@ def parseRpcMethod : String → Option RpcMethod
   | "eth_gasPrice" => some .gasPrice
   | "eth_maxPriorityFeePerGas" => some .maxPriorityFeePerGas
   | "eth_sendRawTransaction" => some .sendRawTransaction
+  | "eth_getTransactionReceipt" => some .getTransactionReceipt
+  | "eth_getLogs" => some .getLogs
   | _ => none
 
 def backendNames : List String := ["local", "light", "configured"]
@@ -102,6 +108,7 @@ def backendNames : List String := ["local", "light", "configured"]
 def rpcMethodNames : List String :=
   ["eth_chainId", "eth_blockNumber", "eth_getBalance", "eth_getTransactionCount",
     "eth_getCode", "eth_call", "eth_estimateGas", "eth_gasPrice",
-    "eth_maxPriorityFeePerGas", "eth_sendRawTransaction"]
+    "eth_maxPriorityFeePerGas", "eth_sendRawTransaction",
+    "eth_getTransactionReceipt", "eth_getLogs"]
 
 end LeanKohaku.Network.Provider

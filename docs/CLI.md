@@ -28,17 +28,22 @@ leankohaku endpoint-check tor configured onion tor false
 leankohaku decode erc20 0xa9059cbb...
 ```
 
-Wallet-action preflight:
+Daemon-backed chain operations:
 
 ```bash
 leankohaku balance 0x0000000000000000000000000000000000000000
-leankohaku send 0x0000000000000000000000000000000000000000 1
+leankohaku nonce 0x0000000000000000000000000000000000000000
+leankohaku gas-price
+leankohaku priority-fee
+leankohaku estimate-gas '{"to":"0x0000000000000000000000000000000000000000","value":"0x1"}'
+leankohaku broadcast 0x...
 ```
 
-These commands validate inputs and print the local daemon/provider plan.
-They currently exit with code `1` after successful preflight because daemon
-transport is not implemented. Invalid inputs exit with code `2` before any
-daemon or network path is attempted.
+These commands validate inputs locally, then call the daemon over the Unix
+socket. If the socket is missing and systemd socket activation is not present,
+the CLI auto-spawns `leankohaku-daemon` unless `LEANKOHAKU_NO_AUTOSPAWN=1` is
+set. Invalid inputs exit with code `2` before any daemon or network path is
+attempted.
 
 Daemon wallet send:
 
@@ -58,10 +63,41 @@ sudo apt install git cmake ninja-build gcc
 ./script/setup_hacl.sh
 ```
 
+EOA send:
+
+```bash
+leankohaku eoa create daily
+leankohaku eoa unlock daily
+leankohaku eoa send daily 0x0000000000000000000000000000000000000000 1
+```
+
+`eoa send` gets nonce, fees, and gas through the daemon, signs an EIP-1559
+transaction inside the daemon, then broadcasts the raw transaction.
+
+## ENS resolution
+
+ENS names are canonical on mainnet, so `kohaku resolve <name>` always queries
+mainnet ENS regardless of the wallet's operating chain. Configure a mainnet
+RPC explicitly — there is no default and no fallback to the operating-chain
+RPC; if unset, resolution fails with JSON-RPC error `-32030`.
+
+```bash
+kohaku network set-ens-rpc "$MAINNET_RPC_URL"   # one-time
+kohaku resolve vitalik.eth
+kohaku network unset-ens-rpc                    # remove
+```
+
+The same value can be supplied via the `LEANKOHAKU_ENS_RPC_URL` environment
+variable or the `ens_rpc_url` field in `daemon.json`.
+
 ## Regression Check
 
 ```bash
 ./script/check_privacy_cli.sh
+./script/check_daemon_config.sh
+./script/check_m10_autospawn.sh
+./script/check_m8_chain_rpc.sh
 ```
 
-This script builds the project and checks representative allow/deny paths.
+These scripts build the project, check representative allow/deny paths, verify
+daemon auto-spawn, and exercise chain RPC plus `eoa.send` against Anvil.

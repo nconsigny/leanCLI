@@ -47,7 +47,7 @@ load_pubkey_xy() {
   local pem="${KEY_DIR}/public.pem"
   if [[ ! -f "$pem" ]]; then
     echo "missing TPM public key: $pem" >&2
-    echo "run: ./.lake/build/bin/leankohaku wallet create sepolia ${KEY_NAME}" >&2
+    echo "run: ./.lake/build/bin/leankohaku wallet create r1 ${KEY_NAME}" >&2
     exit 1
   fi
 
@@ -158,6 +158,35 @@ execute_signed() {
     "$target" "$value" "$data" "$r" "$s"
 }
 
+# Split the inline 64-byte signature hex into r and s files inside the
+# key directory, so execute_signed -> signature_rs can pick them up
+# without having to touch the TPM. The daemon writes the live TPM2
+# signature for us; this mirrors that path for the broadcast-signed
+# subcommand.
+write_signature_from_hex() {
+  local hex="${1:?signature hex required}"
+  local raw="${hex#0x}"
+  # Accept either raw r||s (64 bytes / 128 hex) or DER (typically 70-72 bytes
+  # / 140-144 hex). signature_rs() handles both formats.
+  if (( ${#raw} % 2 != 0 )) || (( ${#raw} < 128 )) || (( ${#raw} > 160 )); then
+    echo "expected 64–80 byte signature hex; got ${#raw} chars" >&2
+    exit 1
+  fi
+  mkdir -p "$KEY_DIR"
+  printf '%s' "$raw" | xxd -r -p > "${KEY_DIR}/signature.bin"
+}
+
+# Print the digest, the R1 account address, and the wei value as three
+# whitespace-separated tokens on stdout. The daemon parses the first
+# token as the digest hex.
+emit_digest_bundle() {
+  local target="$1" value="$2" data="$3"
+  local digest account
+  digest="$(compute_digest "$target" "$value" "$data")"
+  account="$(account_address)"
+  printf '%s %s %s\n' "$digest" "$account" "$value"
+}
+
 cmd="${1:-help}"
 case "$cmd" in
   deploy)
@@ -219,6 +248,41 @@ EOF
     execute_signed "$target" "$value" "$data"
     ;;
 
+  prepare-digest)
+    target="${2:?usage: r1_sepolia.sh prepare-digest <target> <value-wei> [data-hex]}"
+    value="${3:?usage: r1_sepolia.sh prepare-digest <target> <value-wei> [data-hex]}"
+    data="${4:-0x}"
+    emit_digest_bundle "$target" "$value" "$data"
+    ;;
+
+  prepare-digest-eth)
+    target="${2:?usage: r1_sepolia.sh prepare-digest-eth <target> <value-eth> [data-hex]}"
+    valueEth="${3:?usage: r1_sepolia.sh prepare-digest-eth <target> <value-eth> [data-hex]}"
+    data="${4:-0x}"
+    valueWei="$(eth_to_wei "$valueEth")"
+    emit_digest_bundle "$target" "$valueWei" "$data"
+    ;;
+
+  broadcast-signed)
+    sigHex="${2:?usage: r1_sepolia.sh broadcast-signed <signature-hex> <target> <value-wei> [data-hex]}"
+    target="${3:?usage: r1_sepolia.sh broadcast-signed <signature-hex> <target> <value-wei> [data-hex]}"
+    value="${4:?usage: r1_sepolia.sh broadcast-signed <signature-hex> <target> <value-wei> [data-hex]}"
+    data="${5:-0x}"
+    write_signature_from_hex "$sigHex"
+    require cast
+    need_env SEPOLIA_RPC_URL
+    pk="$(deployer_private_key)"
+    account="$(account_address)"
+    read -r r s < <(signature_rs)
+    # Use --async so cast returns the txHash immediately; the daemon
+    # polls eth_getTransactionReceipt itself and emits live progress
+    # notifications during the wait.
+    cast send --async --rpc-url "$SEPOLIA_RPC_URL" \
+      --private-key "$pk" \
+      "$account" "execute(address,uint256,bytes,bytes32,bytes32)" \
+      "$target" "$value" "$data" "$r" "$s"
+    ;;
+
   send-eth)
     target="${2:?usage: r1_sepolia.sh send-eth <target> <value-eth> [data-hex]}"
     valueEth="${3:?usage: r1_sepolia.sh send-eth <target> <value-eth> [data-hex]}"
@@ -243,6 +307,9 @@ Usage:
   ./script/r1_sepolia.sh execute <target> <value-wei> [data-hex]
   ./script/r1_sepolia.sh send <target> <value-wei> [data-hex]
   ./script/r1_sepolia.sh send-eth <target> <value-eth> [data-hex]
+  ./script/r1_sepolia.sh prepare-digest <target> <value-wei> [data-hex]
+  ./script/r1_sepolia.sh prepare-digest-eth <target> <value-eth> [data-hex]
+  ./script/r1_sepolia.sh broadcast-signed <signature-hex> <target> <value-wei> [data-hex]
 
 Required env:
   SEPOLIA_RPC_URL

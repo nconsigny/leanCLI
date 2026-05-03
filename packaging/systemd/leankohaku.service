@@ -1,0 +1,17 @@
+[Unit]
+Description=leanKohaku user daemon
+Requires=leankohaku.socket
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/leankohaku-daemon
+Restart=on-failure
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+
+[Install]
+WantedBy=default.target

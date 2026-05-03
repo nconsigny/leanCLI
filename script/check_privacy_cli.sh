@@ -3,6 +3,12 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/.lake/build/bin/leankohaku"
+SOCK="/tmp/leankohaku-privacy-check-$$.sock"
+
+cleanup() {
+  rm -f "$SOCK"
+}
+trap cleanup EXIT
 
 cd "$ROOT"
 lake build >/dev/null
@@ -74,6 +80,7 @@ check "DENY mode=tor endpoint-kind=configured scheme=onion transport=tor credent
 check "DENY mode=tor endpoint-kind=third-party scheme=http transport=tor credentialed=false" \
   endpoint-check tor third-party http tor false
 
+LEANKOHAKU_SOCKET="$SOCK" LEANKOHAKU_NO_AUTOSPAWN=1 \
 check_exit 2 "daemon error -32000:" \
   balance 0x0000000000000000000000000000000000000000
 

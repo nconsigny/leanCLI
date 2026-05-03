@@ -107,8 +107,8 @@ repository URL before publishing a package.
 ./.lake/build/bin/leankohaku lightclient
 ./.lake/build/bin/leankohaku keystore
 ./.lake/build/bin/leankohaku accounts
-./.lake/build/bin/leankohaku wallet create sepolia
-./.lake/build/bin/leankohaku wallet create sepolia work-key
+./.lake/build/bin/leankohaku wallet create r1 work-key
+./.lake/build/bin/leankohaku wallet deploy r1 work-key --chain sepolia
 ./.lake/build/bin/leankohaku wallet list sepolia
 ./.lake/build/bin/leankohaku daemon help
 ./.lake/build/bin/leankohaku daemon daily send sepolia 0x0000000000000000000000000000000000000000 0.001
@@ -121,8 +121,8 @@ repository URL before publishing a package.
 ./.lake/build/bin/leankohaku endpoint-check tor configured onion tor false
 ./.lake/build/bin/leankohaku decode erc20 0xa9059cbb...
 ./.lake/build/bin/leankohaku balance 0x0000000000000000000000000000000000000000
-./.lake/build/bin/leankohaku send 0x0000000000000000000000000000000000000000 1
-./.lake/build/bin/leankohaku daemon    # starts the daemon (stub for now)
+./.lake/build/bin/leankohaku eoa send daily 0x0000000000000000000000000000000000000000 1
+./.lake/build/bin/leankohaku daemon    # starts the daemon in the foreground
 ```
 
 ## Network Privacy
@@ -140,16 +140,18 @@ Denied categories include peer discovery, analytics, telemetry, price
 quotes, fiat/onramp calls, metadata/indexer APIs, crash reports, and any
 unclassified transport path.
 
-`balance` and `send` are currently preflight-functional: they validate CLI
-inputs, classify the only permitted local-daemon request, and stop before
-network I/O because daemon transport is still a stub. Invalid input exits
-before any daemon or network path is attempted.
+Daemon-backed commands use the local Unix socket. If systemd socket activation
+is not available and the socket is missing, the CLI auto-spawns
+`leankohaku-daemon` unless `LEANKOHAKU_NO_AUTOSPAWN=1` is set. Invalid CLI input
+still exits before any daemon or network path is attempted.
 
-The daemon-side plan is also modeled:
+The daemon-side chain path is implemented and policy-gated:
 
 - `balance` maps to `eth_getBalance` against the local provider.
-- `send` maps to `eth_sendRawTransaction` against the local provider.
-- Tor mode can later switch the provider plan to a configured node over Tor.
+- `nonce`, fee, estimate, token balance, and raw broadcast map to Ethereum
+  JSON-RPC methods through the daemon.
+- `eoa send` derives nonce/fees/gas, signs EIP-1559 locally in the daemon, and
+  broadcasts with `eth_sendRawTransaction`.
 
 Endpoint hygiene is modeled separately:
 
@@ -159,15 +161,23 @@ Endpoint hygiene is modeled separately:
 - Credentialed endpoints are denied to prevent API-key hosted services.
 - Third-party endpoints are denied in every mode.
 
-Run the privacy CLI regression checks with:
+Run the main local regression checks with:
 
 ```bash
+./script/check_native_helpers.sh
+./script/check_cli_isolation.sh
 ./script/check_privacy_cli.sh
+./script/check_m6_keystore_daemon.sh
+./script/check_daemon_config.sh
+./script/check_m10_autospawn.sh
+./script/check_m8_chain_rpc.sh
 ```
 
 More detail:
 
 - [CLI](./docs/CLI.md)
+- [Daemon](./docs/DAEMON.md)
+- [Security](./SECURITY.md)
 - [Privacy And Security](./docs/PRIVACY_SECURITY.md)
 - [Sepolia R1 Account Dev Flow](./docs/R1_SEPOLIA.md)
 

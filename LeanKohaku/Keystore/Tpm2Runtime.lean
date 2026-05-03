@@ -1,6 +1,7 @@
 import LeanKohaku.Keystore.Enclave
 import LeanKohaku.Crypto.Hex
 import LeanKohaku.Wallet.Account
+import LeanKohaku.Encoding.Json
 
 /-!
 # Local TPM2 runtime backend
@@ -26,10 +27,27 @@ open LeanKohaku.Ethereum.P256Precompile
 open LeanKohaku.Crypto.Hex
 open LeanKohaku.Keystore.Enclave
 open LeanKohaku.Wallet.Account
+open LeanKohaku.Encoding.Json
+
+/-- A side-channel for biometric / TPM lifecycle events. The daemon
+    overrides this with a closure that writes JSON-RPC notification
+    frames onto the active UDS connection so the CLI can render
+    user-facing prompts before the final response arrives. The default
+    is a stderr trace (kept off the daemon stdout) for direct,
+    non-daemon invocations. -/
+abbrev Notifier := String → Json → IO Unit
+
+/-- Default notifier: write a one-line trace to stderr. The daemon
+    replaces this with a UDS-backed notifier that emits JSON-RPC
+    notifications to the connected CLI. We deliberately avoid stdout
+    so daemon stdout stays free of biometric noise even without an
+    override. -/
+def stderrNotifier : Notifier := fun event params =>
+  IO.eprintln s!"[leankohaku:event] {event} {compact params}"
 
 structure Config where
   stateDir : System.FilePath := ".leankohaku/keystore/tpm2"
-  keyName  : String := "sepolia-r1"
+  keyName  : String := "default-r1"
   deriving Repr
 
 inductive CreateStatus where
@@ -61,7 +79,6 @@ structure SignReport where
   signature : System.FilePath
   signatureHex : Option String
   keyName   : String
-  chainId   : Nat
   deriving Repr
 
 structure CreateReport where
@@ -69,7 +86,6 @@ structure CreateReport where
   keyDir      : System.FilePath
   publicKey   : System.FilePath
   manifest    : System.FilePath
-  chainId     : Nat
   backend     : Backend
   curve       : Curve
   deriving Repr
@@ -209,37 +225,54 @@ def biometricFinger : IO String := do
         pure finger
   | none => pure defaultBiometricFinger
 
+/-- Build the JSON params for a biometric event notification. -/
+private def biometricEventParams (finger : String) (attempt : Nat)
+    (extra : Array (String × Json) := #[]) : Json :=
+  .obj (#[
+      ("finger", .str finger),
+      ("attempt", .num (Int.ofNat attempt)),
+      ("of", .num (Int.ofNat biometricAttempts))
+    ] ++ extra)
+
 partial def verifyLocalUserLoop
-    (finger : String) : Nat → Nat → IO (Except String Unit)
+    (notify : Notifier) (finger : String) : Nat → Nat → IO (Except String Unit)
   | 0, _ =>
       pure (.error s!"{biometricTool} failed after {biometricAttempts} attempts")
   | remaining + 1, attemptNo => do
       logStep s!"starting biometric verification with fprintd using {finger} (attempt {attemptNo}/{biometricAttempts})"
-      IO.println s!"Biometric verification required. Touch {finger} on your fingerprint sensor now."
+      notify "biometric-required" (biometricEventParams finger attemptNo)
+      -- Spawn fprintd-verify with stdio fully suppressed: stdin/stdout to
+      -- /dev/null and stderr captured into a pipe so we can include it in
+      -- a biometric-failed event without dumping it on the daemon terminal.
       let child ← IO.Process.spawn
         { cmd := biometricTool,
           args := #["-f", finger],
-          stdin := .inherit,
-          stdout := .inherit,
-          stderr := .inherit }
+          stdin := .null,
+          stdout := .null,
+          stderr := .piped }
       let exitCode ← child.wait
+      let errOut ← child.stderr.readToEnd
       if exitCode == 0 then
         logStep "biometric verification succeeded"
+        notify "biometric-success" (biometricEventParams finger attemptNo)
         pure (.ok ())
       else
         logStep s!"biometric verification failed with exit code {exitCode}"
-        verifyLocalUserLoop finger remaining (attemptNo + 1)
+        notify "biometric-failed"
+          (biometricEventParams finger attemptNo
+            #[("exitCode", .num (Int.ofNat exitCode.toNat)),
+              ("stderr", .str errOut)])
+        verifyLocalUserLoop notify finger remaining (attemptNo + 1)
 
-def verifyLocalUser : IO (Except String Unit) := do
-  verifyLocalUserLoop (← biometricFinger) biometricAttempts 1
+def verifyLocalUser (notify : Notifier := stderrNotifier) :
+    IO (Except String Unit) := do
+  verifyLocalUserLoop notify (← biometricFinger) biometricAttempts 1
 
 def fileArg (path : System.FilePath) : String :=
   path.toString
 
 def manifestContents (cfg : Config) : String :=
   "leankohaku TPM2 key manifest\n" ++
-  "chain=sepolia\n" ++
-  s!"chain_id={sepoliaChainId}\n" ++
   "account=r1-smart\n" ++
   "backend=linuxTpm2\n" ++
   "curve=p256\n" ++
@@ -260,7 +293,6 @@ def mkReport (cfg : Config) (status : CreateStatus) : CreateReport :=
     keyDir := cfg.keyDir,
     publicKey := cfg.publicPem,
     manifest := cfg.manifest,
-    chainId := sepoliaChainId,
     backend := .linuxTpm2,
     curve := .p256 }
 
@@ -273,8 +305,7 @@ def mkSignReport
     digest := cfg.digestBin,
     signature := cfg.signatureBin,
     signatureHex := signatureHex,
-    keyName := cfg.keyName,
-    chainId := sepoliaChainId }
+    keyName := cfg.keyName }
 
 def createPrimary (cfg : Config) : IO (Except String String) :=
   runChecked "tpm2_createprimary"
@@ -323,16 +354,17 @@ def signDigest (cfg : Config) : IO (Except String String) :=
       "-o", fileArg cfg.signatureBin,
       fileArg cfg.digestBin]
 
-def createSepoliaR1Key (cfg : Config := {}) : IO CreateReport := do
-  logStep s!"create requested: chain=sepolia key={cfg.keyName}"
+-- Chain-agnostic R1 key creation. The key is a TPM2-wrapped P-256 keypair
+-- usable on any EIP-7951–enabled chain; chain selection happens at deploy
+-- time, not at key creation.
+def createR1Key (cfg : Config := {}) (notify : Notifier := stderrNotifier) :
+    IO CreateReport := do
+  logStep s!"create requested: key={cfg.keyName}"
   logStep s!"state directory: {cfg.stateDir}"
   logStep s!"key directory: {cfg.keyDir}"
   unless validKeyName cfg.keyName do
     logStep "rejected invalid key name"
     return mkReport cfg .invalidKeyName
-  unless accepted sepoliaR1Smart do
-    logStep "rejected by Sepolia R1 account policy"
-    return mkReport cfg .policyRejected
   unless (← deviceAvailable) do
     logStep "no TPM device found at /dev/tpm0 or /dev/tpmrm0"
     return mkReport cfg .missingTpmDevice
@@ -349,7 +381,7 @@ def createSepoliaR1Key (cfg : Config := {}) : IO CreateReport := do
     logStep "biometric tool missing: fprintd-verify"
     return mkReport cfg (.missingTool biometricTool)
 
-  match ← verifyLocalUser with
+  match ← verifyLocalUser notify with
   | .error err => return mkReport cfg (.biometricVerificationFailed err)
   | .ok _ => pure ()
 
@@ -396,7 +428,8 @@ def listSepoliaKeys (stateDir : System.FilePath := ".leankohaku/keystore/tpm2") 
 
 def signSepoliaDigest
     (digestHex : String)
-    (cfg : Config := {}) : IO SignReport := do
+    (cfg : Config := {})
+    (notify : Notifier := stderrNotifier) : IO SignReport := do
   logStep s!"sign requested: chain=sepolia key={cfg.keyName}"
   logStep s!"key directory: {cfg.keyDir}"
   unless validKeyName cfg.keyName do
@@ -426,7 +459,7 @@ def signSepoliaDigest
         logStep "biometric tool missing: fprintd-verify"
         return mkSignReport cfg (.missingTool biometricTool)
 
-      match ← verifyLocalUser with
+      match ← verifyLocalUser notify with
       | .error err => return mkSignReport cfg (.biometricVerificationFailed err)
       | .ok _ => pure ()
 
