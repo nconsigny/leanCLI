@@ -43,7 +43,7 @@ critical signing path.
 ## Non-goals (for now)
 
 - Browser / mobile UI.
-- Multi-LLM agent orchestration (the upstream's main selling point).
+- Multi-LLM agent orchestration
 - Production readiness — this is a research wallet.
 
 ## Layout
@@ -287,13 +287,6 @@ See [`INVARIANTS.md`](./INVARIANTS.md). The current proved inventory:
 | 10.2 | R1 account increments nonce only after EIP-7951 verification | ✅ |
 | everything else | — | 📝 / 🚧 |
 
-## Relationship to upstream `kohaku-ai`
-
-`kohaku-ai` is the reference implementation in TypeScript: LLM agent
-orchestration, web UI, Tauri desktop, Railgun SDK integration. This
-project borrows its domain model (wallet, swaps, shielded notes) but
-rewrites the code path in Lean with a much tighter scope. No runtime
-code is shared.
 
 ## License
 
