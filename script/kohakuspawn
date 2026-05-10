@@ -1,0 +1,373 @@
+#!/usr/bin/env bash
+# kohakuspawn — installer/updater for the kohaku CLI, modeled on `foundryup`.
+#
+# First run (from a clone of this repo):
+#   ./script/kohakuspawn
+#       → builds, copies itself to ~/.kohaku/bin/kohakuspawn, symlinks
+#         ~/.kohaku/bin/{kohaku,kohaku-daemon} → this checkout's lake binaries,
+#         and (unless --no-modify-path) appends ~/.kohaku/bin to your shell rc.
+#
+# Subsequent runs (`kohakuspawn` from anywhere):
+#   pulls + rebuilds + refreshes symlinks against the same checkout it
+#   was first installed from. The checkout location is recorded in
+#   ~/.kohaku/checkout so the script remembers it.
+#
+# Uninstall:
+#   kohakuspawn --uninstall
+set -euo pipefail
+
+# Resolve KOHAKU_HOME (default ~/.kohaku, like foundryup uses ~/.foundry).
+KOHAKU_HOME="${KOHAKU_HOME:-$HOME/.kohaku}"
+KOHAKU_BIN="$KOHAKU_HOME/bin"
+CHECKOUT_FILE="$KOHAKU_HOME/checkout"
+
+# Resolve the script's source location. realpath isn't always present, so
+# fall back to a portable readlink loop. This lets `~/.kohaku/bin/kohakuspawn`
+# (a symlink) trace back to the script in the actual checkout.
+resolve_self() {
+  local src="$1"
+  while [[ -L "$src" ]]; do
+    local dir target
+    dir="$(cd -P "$(dirname "$src")" && pwd)"
+    target="$(readlink "$src")"
+    if [[ "$target" = /* ]]; then
+      src="$target"
+    else
+      src="$dir/$target"
+    fi
+  done
+  cd -P "$(dirname "$src")" && pwd -P
+}
+
+SELF_DIR="$(resolve_self "${BASH_SOURCE[0]}")"
+
+# Locate the checkout: prefer the script's own repo (works when running
+# `./script/kohakuspawn`), otherwise consult $KOHAKU_HOME/checkout (works when
+# running `kohakuspawn` from the user-bin symlink after first install).
+detect_checkout() {
+  if [[ -f "$SELF_DIR/../lakefile.lean" ]]; then
+    (cd "$SELF_DIR/.." && pwd -P)
+    return 0
+  fi
+  if [[ -f "$CHECKOUT_FILE" ]]; then
+    local dir
+    dir="$(cat "$CHECKOUT_FILE")"
+    if [[ -f "$dir/lakefile.lean" ]]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage: kohakuspawn [options]
+
+Installs or updates the `kohaku` CLI from a local clone of leanCLI.
+
+Options:
+  --pull              `git pull` the checkout before building.
+  --no-build          Skip `lake build`. Use when binaries are already current.
+  --no-tui            Skip the Ink TUI bundle build. `kohaku tui` will not work.
+  --rebuild-tui       Force rebuilding the TUI bundle even if dist/ is present.
+  --no-modify-path    Do not append the kohaku bin dir to your shell rc.
+  --force             Overwrite existing kohaku / kohaku-daemon symlinks
+                      that point somewhere else. Default refuses.
+  --uninstall         Remove ~/.kohaku/bin/{kohaku,kohaku-daemon,kohakuspawn}
+                      (only when the kohaku/kohaku-daemon symlinks point at
+                      the recorded checkout; pair with --force to override).
+                      Leaves shell-rc edits in place — they're harmless once
+                      the directory is gone, and removing them automatically
+                      would risk eating other edits.
+  -h, --help          Show this help.
+
+Environment:
+  KOHAKU_HOME         Install root (default: $HOME/.kohaku). Binaries land
+                      under $KOHAKU_HOME/bin.
+EOF
+}
+
+PULL=0
+BUILD_LEAN=1
+BUILD_TUI=auto    # auto | always | never
+MODIFY_PATH=1
+FORCE=0
+MODE=install      # install | uninstall
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --pull) PULL=1; shift;;
+    --no-build) BUILD_LEAN=0; shift;;
+    --no-tui) BUILD_TUI=never; shift;;
+    --rebuild-tui) BUILD_TUI=always; shift;;
+    --no-modify-path) MODIFY_PATH=0; shift;;
+    --force) FORCE=1; shift;;
+    --uninstall) MODE=uninstall; shift;;
+    -h|--help) usage; exit 0;;
+    *) echo "kohakuspawn: unknown option: $1" >&2; usage >&2; exit 2;;
+  esac
+done
+
+require() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "kohakuspawn: required tool not found on PATH: $1" >&2
+    exit 1
+  fi
+}
+
+# ---- uninstall path ---------------------------------------------------------
+
+if [[ "$MODE" == "uninstall" ]]; then
+  if [[ ! -d "$KOHAKU_BIN" ]]; then
+    echo "kohakuspawn: nothing to remove ($KOHAKU_BIN does not exist)"
+    exit 0
+  fi
+
+  expected_checkout=""
+  if [[ -f "$CHECKOUT_FILE" ]]; then
+    expected_checkout="$(cat "$CHECKOUT_FILE")"
+  fi
+
+  remove_link() {
+    local name="$1"
+    local target_basename="$2"
+    local linkpath="$KOHAKU_BIN/$name"
+    if [[ ! -e "$linkpath" && ! -L "$linkpath" ]]; then
+      return 0
+    fi
+    if [[ -L "$linkpath" ]]; then
+      local current
+      current="$(readlink "$linkpath")"
+      if [[ -n "$expected_checkout" \
+            && "$current" == "$expected_checkout/.lake/build/bin/$target_basename" ]]; then
+        rm -f "$linkpath"
+        echo "removed $linkpath"
+      elif [[ $FORCE -eq 1 ]]; then
+        rm -f "$linkpath"
+        echo "removed $linkpath (--force, was -> $current)"
+      else
+        echo "kohakuspawn: $linkpath -> $current does not point at the recorded checkout, leaving it alone (use --force to remove)" >&2
+      fi
+    elif [[ $FORCE -eq 1 ]]; then
+      rm -f "$linkpath"
+      echo "removed $linkpath (--force, was a regular file)"
+    else
+      echo "kohakuspawn: $linkpath is not a symlink, leaving it alone (use --force to remove)" >&2
+    fi
+  }
+
+  remove_link "kohaku" "leankohaku"
+  remove_link "kohaku-daemon" "leankohaku-daemon"
+
+  # kohakuspawn itself was copied (not symlinked) so we can always remove it.
+  if [[ -e "$KOHAKU_BIN/kohakuspawn" ]]; then
+    rm -f "$KOHAKU_BIN/kohakuspawn"
+    echo "removed $KOHAKU_BIN/kohakuspawn"
+  fi
+
+  # Drop the checkout marker but leave KOHAKU_HOME alone in case the user
+  # has other state under it.
+  rm -f "$CHECKOUT_FILE"
+  rmdir "$KOHAKU_BIN" 2>/dev/null || true
+  rmdir "$KOHAKU_HOME" 2>/dev/null || true
+
+  echo
+  echo "Uninstalled. Shell-rc PATH entries (if any) were left in place;"
+  echo "remove them by hand if you don't intend to reinstall."
+  exit 0
+fi
+
+# ---- install / update path --------------------------------------------------
+
+CHECKOUT="$(detect_checkout || true)"
+if [[ -z "${CHECKOUT:-}" ]]; then
+  cat >&2 <<EOF
+kohakuspawn: could not find a leanCLI checkout.
+
+Either:
+  1. Run this script from inside a clone of leanCLI:
+       git clone <repo-url> leanCLI && cd leanCLI && ./script/kohakuspawn
+  2. Or write the checkout path into $CHECKOUT_FILE manually and re-run.
+EOF
+  exit 1
+fi
+
+LEAN_BIN="$CHECKOUT/.lake/build/bin/leankohaku"
+LEAN_DAEMON="$CHECKOUT/.lake/build/bin/leankohaku-daemon"
+TUI_BUNDLE="$CHECKOUT/tui/dist/index.mjs"
+
+if [[ $PULL -eq 1 ]]; then
+  require git
+  echo "==> git pull ($CHECKOUT)"
+  (cd "$CHECKOUT" && git pull --ff-only)
+fi
+
+if [[ $BUILD_LEAN -eq 1 ]]; then
+  require lake
+  echo "==> lake build"
+  (cd "$CHECKOUT" && lake build)
+  if [[ ! -x "$LEAN_BIN" || ! -x "$LEAN_DAEMON" ]]; then
+    echo "kohakuspawn: build succeeded but $LEAN_BIN / $LEAN_DAEMON are missing or not executable" >&2
+    exit 1
+  fi
+fi
+
+build_tui() {
+  if [[ "$BUILD_TUI" == "never" ]]; then
+    echo "==> tui: skipped (--no-tui)"
+    return 0
+  fi
+  if [[ "$BUILD_TUI" == "auto" && -f "$TUI_BUNDLE" ]]; then
+    echo "==> tui: dist/index.mjs present, skipping (use --rebuild-tui to force)"
+    return 0
+  fi
+  if [[ ! -d "$CHECKOUT/tui" ]]; then
+    echo "kohakuspawn: tui/ directory not found in $CHECKOUT, skipping TUI build" >&2
+    return 0
+  fi
+  require node
+  require npm
+  echo "==> tui: npm install"
+  (cd "$CHECKOUT/tui" && npm install --no-audit --no-fund)
+  echo "==> tui: npm run build"
+  (cd "$CHECKOUT/tui" && npm run build)
+  if [[ ! -f "$TUI_BUNDLE" ]]; then
+    echo "kohakuspawn: tui build did not produce $TUI_BUNDLE" >&2
+    exit 1
+  fi
+}
+
+build_tui
+
+mkdir -p "$KOHAKU_BIN"
+
+# Persist the checkout location so future bare `kohakuspawn` invocations
+# (running from $KOHAKU_BIN/kohakuspawn) know where to rebuild.
+printf '%s\n' "$CHECKOUT" > "$CHECKOUT_FILE"
+
+link_one() {
+  local target="$1"
+  local linkname="$2"
+  local linkpath="$KOHAKU_BIN/$linkname"
+
+  if [[ -L "$linkpath" ]]; then
+    local current
+    current="$(readlink "$linkpath")"
+    if [[ "$current" == "$target" ]]; then
+      echo "==> $linkpath -> $target (already linked)"
+      return 0
+    fi
+    if [[ $FORCE -ne 1 ]]; then
+      echo "kohakuspawn: $linkpath already points to $current" >&2
+      echo "  use --force to overwrite, or remove it manually." >&2
+      exit 1
+    fi
+    rm -f "$linkpath"
+  elif [[ -e "$linkpath" ]]; then
+    if [[ $FORCE -ne 1 ]]; then
+      echo "kohakuspawn: $linkpath exists and is not a symlink" >&2
+      echo "  use --force to overwrite, or remove it manually." >&2
+      exit 1
+    fi
+    rm -f "$linkpath"
+  fi
+
+  ln -s "$target" "$linkpath"
+  echo "==> $linkpath -> $target"
+}
+
+link_one "$LEAN_BIN" "kohaku"
+link_one "$LEAN_DAEMON" "kohaku-daemon"
+
+# Self-install: copy this script into $KOHAKU_BIN so the user can run
+# `kohakuspawn` from anywhere. Copy (don't symlink) so deleting the checkout
+# doesn't break the updater. The copy still finds the checkout via
+# $CHECKOUT_FILE.
+SELF_PATH="${BASH_SOURCE[0]}"
+[[ "$SELF_PATH" = /* ]] || SELF_PATH="$PWD/$SELF_PATH"
+INSTALLED_SELF="$KOHAKU_BIN/kohakuspawn"
+if [[ "$(cd -P "$(dirname "$SELF_PATH")" && pwd)/$(basename "$SELF_PATH")" != "$INSTALLED_SELF" ]]; then
+  install -m 0755 "$SELF_PATH" "$INSTALLED_SELF"
+  echo "==> $INSTALLED_SELF (self-installed)"
+fi
+
+# ---- shell-rc PATH integration (foundryup-style) ----------------------------
+#
+# Append a single guarded block to one shell rc so future shells pick up
+# $KOHAKU_BIN. We don't try to merge into existing PATH lines — just append
+# a marker block we can recognize on re-runs.
+
+PATH_LINE="export PATH=\"\$HOME/.kohaku/bin:\$PATH\""
+RC_MARKER="# >>> kohakuspawn PATH >>>"
+RC_END="# <<< kohakuspawn PATH <<<"
+
+pick_rc() {
+  local shell_name
+  shell_name="$(basename "${SHELL:-}")"
+  case "$shell_name" in
+    zsh) printf '%s\n' "$HOME/.zshrc";;
+    bash)
+      if [[ -f "$HOME/.bashrc" ]]; then printf '%s\n' "$HOME/.bashrc"
+      else printf '%s\n' "$HOME/.profile"; fi
+      ;;
+    fish) printf '%s\n' "$HOME/.config/fish/config.fish";;
+    *) printf '%s\n' "$HOME/.profile";;
+  esac
+}
+
+modify_path() {
+  local rc shell_name
+  rc="$(pick_rc)"
+  shell_name="$(basename "${SHELL:-}")"
+  mkdir -p "$(dirname "$rc")"
+  touch "$rc"
+  if grep -q "$RC_MARKER" "$rc" 2>/dev/null; then
+    echo "==> $rc: kohakuspawn PATH block already present"
+    return 0
+  fi
+  if [[ "$shell_name" == "fish" ]]; then
+    {
+      printf '\n%s\n' "$RC_MARKER"
+      printf '%s\n' 'set -gx PATH $HOME/.kohaku/bin $PATH'
+      printf '%s\n' "$RC_END"
+    } >> "$rc"
+  else
+    {
+      printf '\n%s\n' "$RC_MARKER"
+      printf '%s\n' "$PATH_LINE"
+      printf '%s\n' "$RC_END"
+    } >> "$rc"
+  fi
+  echo "==> $rc: appended kohakuspawn PATH block"
+}
+
+if [[ $MODIFY_PATH -eq 1 ]]; then
+  case ":${PATH:-}:" in
+    *":$KOHAKU_BIN:"*) ;;            # already on PATH; no-op
+    *) modify_path;;
+  esac
+fi
+
+echo
+case ":${PATH:-}:" in
+  *":$KOHAKU_BIN:"*)
+    echo "Installed. Try:"
+    echo "  kohaku help"
+    echo "  kohaku tui"
+    echo
+    echo "To update later:  kohakuspawn --pull"
+    ;;
+  *)
+    echo "Installed under $KOHAKU_BIN."
+    if [[ $MODIFY_PATH -eq 1 ]]; then
+      echo "Restart your shell (or 'source $(pick_rc)') to pick up PATH, then:"
+    else
+      echo "Add $KOHAKU_BIN to your PATH, then:"
+    fi
+    echo "  kohaku help"
+    echo "  kohaku tui"
+    echo
+    echo "To update later:  kohakuspawn --pull"
+    ;;
+esac

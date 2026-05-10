@@ -204,16 +204,56 @@ leanKohaku/
 └─ README.md
 ```
 
-## Build
+## Install
+
+First-time bootstrap, from a fresh clone:
 
 ```bash
-elan toolchain install $(cat lean-toolchain)  # installs Lean 4.29.1
-lake build                                     # builds lib + both executables
+elan toolchain install $(cat lean-toolchain)   # one-time: installs Lean 4.29.1
+./script/kohakuspawn                              # build + install
+exec $SHELL -l                                  # pick up PATH
+kohaku help
 ```
 
-Artifacts land in `.lake/build/bin/`:
-- `leankohaku`         — CLI
-- `leankohaku-daemon`  — daemon
+After that, the `kohaku` CLI itself owns install/update/uninstall — no
+need to remember a separate `kohakuspawn` command:
+
+```bash
+kohaku install        # rebuild + relink (e.g. after editing source)
+kohaku update         # git pull + rebuild + relink
+kohaku uninstall      # remove ~/.kohaku/bin symlinks
+```
+
+These three subcommands delegate to `script/kohakuspawn` under the hood,
+so any `kohakuspawn` flag still works if you call the script directly.
+
+What the bootstrap does:
+
+1. `lake build` (Lean lib + `leankohaku` + `leankohaku-daemon`).
+2. `npm install && npm run build` under `tui/` for the Ink TUI bundle.
+3. Creates `~/.kohaku/bin/` with:
+   - `kohaku`         → symlink to `.lake/build/bin/leankohaku`
+   - `kohaku-daemon`  → symlink to `.lake/build/bin/leankohaku-daemon`
+   - `kohakuspawn`       → copy of the script (still callable directly)
+4. Records the checkout location in `~/.kohaku/checkout` so subsequent
+   `kohaku install` / `kohaku update` runs know where to rebuild from.
+5. Appends a guarded `export PATH="$HOME/.kohaku/bin:$PATH"` block to
+   your shell rc (`.zshrc`, `.bashrc`, or `config.fish`). Skip with
+   `./script/kohakuspawn --no-modify-path`.
+
+Direct script flags (when you want finer control than the subcommands):
+`--no-build`, `--no-tui`, `--rebuild-tui`, `--force` (overwrite a stale
+`kohaku` symlink), `--no-modify-path`, `--pull`. Override the install
+root with `KOHAKU_HOME` (default `~/.kohaku`). Override the script
+location the CLI exec's with `LEANKOHAKU_KOHAKUSPAWN=/path/to/kohakuspawn`.
+
+If you'd rather skip the installer entirely:
+
+```bash
+lake build
+export PATH="$PWD/.lake/build/bin:$PATH"
+# binaries are named `leankohaku` / `leankohaku-daemon` in this mode
+```
 
 Nix scaffolding is available:
 
@@ -225,33 +265,62 @@ nix develop
 The Arch Linux scaffold lives in `packaging/arch/`. Replace the placeholder
 repository URL before publishing a package.
 
+## Configure RPC
+
+The CLI and daemon auto-load `./.env` (CWD) and
+`${XDG_CONFIG_HOME:-$HOME/.config}/leankohaku/.env` at startup. Copy the
+template and fill in your endpoints:
+
+```bash
+cp .env.example .env
+$EDITOR .env
+```
+
+Real shell env always wins over `.env`, so you can override any value
+with a one-shot `export …` without editing the file. Disable autoload
+with `LEANKOHAKU_NO_DOTENV=1`.
+
+The keys you'll most often want:
+
+| Variable | Purpose |
+|----------|---------|
+| `LEANKOHAKU_RPC_URL` | Default RPC for `kohaku balance` / `kohaku send` |
+| `MAINNET_RPC_URL` / `SEPOLIA_RPC_URL` | Per-chain RPC (also: `LEANKOHAKU_RPC_URL_MAINNET`, `…_SEPOLIA`) |
+| `LEANKOHAKU_RPC_TRANSPORT` | `loopback` / `direct` / `tor` (auto for loopback URLs) |
+| `LEANKOHAKU_NETWORK_POLICY` | `strict` (default) / `tor` / `permissive` |
+| `LEANKOHAKU_CHAIN_ID` | `1` mainnet, `11155111` sepolia |
+
+`kohaku network` prints the resolved values and their source (env vs
+`daemon.json`) so you can debug "why is mainnet unset" from one command.
+The full list lives in `.env.example`.
+
 ## Quick start
 
 ```bash
-./.lake/build/bin/leankohaku help
-./.lake/build/bin/leankohaku version
-./.lake/build/bin/leankohaku policy                  # overview of policy topics
-./.lake/build/bin/leankohaku policy privacy          # network privacy summary
-./.lake/build/bin/leankohaku policy security         # hard rules + checks
-./.lake/build/bin/leankohaku policy keystore         # custody policy
-./.lake/build/bin/leankohaku policy accounts         # account families
-./.lake/build/bin/leankohaku policy lightclient      # provider-policy plan
-./.lake/build/bin/leankohaku policy all              # everything in one print
-./.lake/build/bin/leankohaku network                 # current network config
-./.lake/build/bin/leankohaku doctor                  # privacy/security status
-./.lake/build/bin/leankohaku wallet create r1 work-key
-./.lake/build/bin/leankohaku wallet deploy work-key
-./.lake/build/bin/leankohaku wallet list
-./.lake/build/bin/leankohaku balance 0x0000000000000000000000000000000000000000
-./.lake/build/bin/leankohaku send 0x0000000000000000000000000000000000000000 1
-./.lake/build/bin/leankohaku from daily send 0x0000000000000000000000000000000000000000 1
-./.lake/build/bin/leankohaku debug policy-check strict configured-node broadcast-tx direct
-./.lake/build/bin/leankohaku debug rpc-check tor configured tor eth_sendRawTransaction
-./.lake/build/bin/leankohaku debug endpoint-check strict local http loopback false
-./.lake/build/bin/leankohaku debug decode erc20 0xa9059cbb...
-./.lake/build/bin/leankohaku daemon ping
-./.lake/build/bin/leankohaku daemon                  # starts the daemon in the foreground
-./.lake/build/bin/leankohaku tui                     # opens the Ink TUI
+kohaku help
+kohaku version
+kohaku policy                  # overview of policy topics
+kohaku policy privacy          # network privacy summary
+kohaku policy security         # hard rules + checks
+kohaku policy keystore         # custody policy
+kohaku policy accounts         # account families
+kohaku policy lightclient      # provider-policy plan
+kohaku policy all              # everything in one print
+kohaku network                 # current network config (rpc urls + sources)
+kohaku doctor                  # privacy/security status
+kohaku wallet create r1 work-key
+kohaku wallet deploy work-key
+kohaku wallet list
+kohaku balance 0x0000000000000000000000000000000000000000
+kohaku send 0x0000000000000000000000000000000000000000 1
+kohaku from daily send 0x0000000000000000000000000000000000000000 1
+kohaku debug policy-check strict configured-node broadcast-tx direct
+kohaku debug rpc-check tor configured tor eth_sendRawTransaction
+kohaku debug endpoint-check strict local http loopback false
+kohaku debug decode erc20 0xa9059cbb...
+kohaku daemon ping
+kohaku daemon                  # starts the daemon in the foreground
+kohaku tui                     # opens the Ink TUI
 ```
 
 ## Pre-sign pipeline
@@ -455,7 +524,7 @@ because they each require their own credential.
 So the minimal local-dev launch is just:
 
 ```bash
-.lake/build/bin/leankohaku-daemon
+kohaku-daemon
 ```
 
 …provided you've run `(cd sidecars/sphincs && make)` once. Without that,
@@ -467,14 +536,14 @@ To enable the credentialed sidecars:
 LEAN_KOHAKU_BRIDGE=$PWD/bridge/bridge.mjs                                  \
 LEAN_KOHAKU_PP_MNEMONIC="abandon abandon …"                                \
 LEAN_KOHAKU_LLM_BRIDGE=$PWD/bridge/llm/bridge.mjs                          \
-.lake/build/bin/leankohaku-daemon
+kohaku-daemon
 ```
 
 Any defaulted entry can still be force-overridden by setting the matching
 `LEAN_KOHAKU_*` env var explicitly — useful when iterating on a sidecar
 under a non-standard path.
 
-The TUI bundle is built separately:
+The TUI bundle is built by `script/install.sh`. To rebuild it on its own:
 
 ```bash
 (cd tui && npm install && npm run build)

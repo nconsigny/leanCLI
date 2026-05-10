@@ -283,6 +283,9 @@ inductive Command where
   | shieldedDelete
   | completion (shell : String)
   | tui
+  | install
+  | update
+  | uninstall
   | resolve (name : String)
   | swapQuote (fromTok toTok amount : String) (chain? : Option String)
   | swapExec (fromTok toTok amount : String) (receiver? : Option String)
@@ -568,6 +571,9 @@ def parse : List String → Command
   | ["completion", shell]  => .completion shell
   | ["tui"]                => .tui
   | ["ui"]                 => .tui
+  | ["install"]            => .install
+  | ["update"]             => .update
+  | ["uninstall"]          => .uninstall
   | ["resolve", name]      => .resolve name
   | args                  => .invalid args
 
@@ -855,7 +861,11 @@ def helpText : String :=
      wallet current                      Print current default wallet.\n\
      resolve <name>                      Resolve an ENS name to an address.\n\
      tui | ui                            Open the interactive Ink-based UI\n\
-                                         (arrow-key navigation, requires Node ≥20).\n\n\
+                                         (arrow-key navigation, requires Node ≥20).\n\
+     install                             Rebuild + relink ~/.kohaku/bin/{kohaku,kohaku-daemon}\n\
+                                         (delegates to script/kohakuspawn).\n\
+     update                              git pull + rebuild + relink (kohakuspawn --pull).\n\
+     uninstall                           Remove ~/.kohaku/bin symlinks (kohakuspawn --uninstall).\n\n\
    SETUP / WALLET MANAGEMENT:\n\
      wallet create eoa <name> [path]     Create an encrypted EOA slot.\n\
      wallet create r1 <name>             Create a TPM2-wrapped P-256 key.\n\
@@ -928,7 +938,7 @@ def bashCompletion : String :=
     "_leankohaku_complete() {",
     "  local cur",
     "  cur=\"${COMP_WORDS[COMP_CWORD]}\"",
-    "  local top=\"help version policy network doctor wallet shield unshield daemon balance balances list send from chain debug resolve tui ui\"",
+    "  local top=\"help version policy network doctor wallet shield unshield daemon balance balances list send from chain debug resolve tui ui install update uninstall\"",
     "  # If we're completing the value after --account, decide whether the value",
     "  # is a wallet name (e.g. for `daemon <wallet> send`) or a sub-account index",
     "  # (e.g. for `send` and `eoa send|sign-*|send-wei`).",

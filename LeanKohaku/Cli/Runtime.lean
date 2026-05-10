@@ -21,6 +21,65 @@ namespace LeanKohaku.Cli
 
 open LeanKohaku.Cli.Commands
 
+/-- Locate the `kohakuspawn` script and exec it with the given args. Search
+    order:
+      1. `$LEANKOHAKU_KOHAKUSPAWN`        — explicit override (dev / packagers)
+      2. `$KOHAKU_HOME/bin/kohakuspawn`   — the self-installed copy
+      3. `$HOME/.kohaku/bin/kohakuspawn`  — default install location
+      4. `<appDir>/../../script/kohakuspawn` — repo-dev layout (Lean binary
+                                            sits at <repo>/.lake/build/bin/)
+      5. PATH lookup `kohakuspawn`         — last resort
+    Returns the script's exit code so `kohaku install` surfaces install
+    failures cleanly. -/
+def runKohakuspawn (extraArgs : Array String) : IO UInt32 := do
+  let envOverride? ← IO.getEnv "LEANKOHAKU_KOHAKUSPAWN"
+  let kohakuHome? ← IO.getEnv "KOHAKU_HOME"
+  let home? ← IO.getEnv "HOME"
+  let appDir ← IO.appDir
+  let repoScript : System.FilePath := appDir / ".." / ".." / "script" / "kohakuspawn"
+  let candidates : Array System.FilePath := #[]
+  let candidates := match envOverride? with
+    | some p => candidates.push (System.FilePath.mk p)
+    | none => candidates
+  let candidates := match kohakuHome? with
+    | some h => candidates.push (System.FilePath.mk h / "bin" / "kohakuspawn")
+    | none => candidates
+  let candidates := match home? with
+    | some h => candidates.push (System.FilePath.mk h / ".kohaku" / "bin" / "kohakuspawn")
+    | none => candidates
+  let candidates := candidates.push repoScript
+  let mut resolved? : Option System.FilePath := none
+  for c in candidates do
+    if (← c.pathExists) then
+      resolved? := some c
+      break
+  let cmdSpec : IO.Process.SpawnArgs ←
+    match resolved? with
+    | some path =>
+        pure { cmd := path.toString,
+               args := extraArgs,
+               stdin := .inherit, stdout := .inherit, stderr := .inherit }
+    | none =>
+        pure { cmd := "kohakuspawn",
+               args := extraArgs,
+               stdin := .inherit, stdout := .inherit, stderr := .inherit }
+  try
+    let child ← IO.Process.spawn cmdSpec
+    let code ← child.wait
+    pure (UInt32.ofNat code.toNat)
+  catch e =>
+    IO.eprintln s!"failed to launch kohakuspawn: {e.toString}"
+    IO.eprintln ""
+    IO.eprintln "Looked for it in:"
+    IO.eprintln s!"  $LEANKOHAKU_KOHAKUSPAWN             ({(envOverride?.getD "<unset>")})"
+    IO.eprintln s!"  $KOHAKU_HOME/bin/kohakuspawn       ({(kohakuHome?.getD "<unset>")})"
+    IO.eprintln s!"  $HOME/.kohaku/bin/kohakuspawn      ({(home?.getD "<unset>")})"
+    IO.eprintln s!"  {repoScript}"
+    IO.eprintln "  kohakuspawn (PATH)"
+    IO.eprintln ""
+    IO.eprintln "First-time install? Run `./script/kohakuspawn` from the repo root."
+    pure 2
+
 /-- Thin wrapper around the daemon's `daemon.preflight` RPC. The policy
     check + plan summary live daemon-side per CLAUDE.md; the CLI just
     formats the response. -/
@@ -2552,6 +2611,9 @@ def run (args : List String) : IO UInt32 := do
             IO.eprintln s!"failed to launch leankohaku-tui ({path}): {e.toString}"
             IO.eprintln "Is `node` (≥20) installed and on PATH?"
             pure 2
+  | .install    => runKohakuspawn #[]
+  | .update     => runKohakuspawn #["--pull"]
+  | .uninstall  => runKohakuspawn #["--uninstall"]
   | .invalid args =>
       match args with
       | "send" :: rest =>
