@@ -206,17 +206,31 @@ leanKohaku/
 
 ## Install
 
-First-time bootstrap, from a fresh clone:
+One-liner (foundryup-style — no manual clone needed):
 
 ```bash
-elan toolchain install $(cat lean-toolchain)   # one-time: installs Lean 4.29.1
-./script/kohakuspawn                              # build + install
-exec $SHELL -l                                  # pick up PATH
+curl -fsSL https://raw.githubusercontent.com/nconsigny/leanCLI/master/script/kohakuspawn | bash
+exec $SHELL -l                                 # pick up PATH
 kohaku help
 ```
 
-After that, the `kohaku` CLI itself owns install/update/uninstall — no
-need to remember a separate `kohakuspawn` command:
+This downloads `kohakuspawn` and runs it. With no checkout in scope, the
+script clones the repo into `~/.kohaku/checkouts/leanCLI/`, runs `lake
+build`, and self-installs into `~/.kohaku/bin/`. You'll need `elan`,
+`git`, and (for the TUI) `node` ≥ 20 on your `PATH`.
+
+If you'd prefer to clone the repo yourself first:
+
+```bash
+git clone https://github.com/nconsigny/leanCLI.git && cd leanCLI
+elan toolchain install $(cat lean-toolchain)   # one-time: installs Lean 4.29.1
+./script/kohakuspawn                            # build + install in-tree
+exec $SHELL -l
+kohaku help
+```
+
+After install, the `kohaku` CLI itself owns install/update/uninstall —
+no need to remember a separate `kohakuspawn` command:
 
 ```bash
 kohaku install        # rebuild + relink (e.g. after editing source)
@@ -243,9 +257,16 @@ What the bootstrap does:
 
 Direct script flags (when you want finer control than the subcommands):
 `--no-build`, `--no-tui`, `--rebuild-tui`, `--force` (overwrite a stale
-`kohaku` symlink), `--no-modify-path`, `--pull`. Override the install
-root with `KOHAKU_HOME` (default `~/.kohaku`). Override the script
-location the CLI exec's with `LEANKOHAKU_KOHAKUSPAWN=/path/to/kohakuspawn`.
+`kohaku` symlink), `--no-modify-path`, `--pull`, `--uninstall`.
+
+Bootstrap-mode env overrides:
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `KOHAKU_HOME` | `~/.kohaku` | Install root (`bin/`, `checkouts/`, `checkout` marker live under it) |
+| `KOHAKU_REPO_URL` | `https://github.com/nconsigny/leanCLI.git` | Repo to clone when no checkout is found |
+| `KOHAKU_REPO_DIR` | `$KOHAKU_HOME/checkouts/leanCLI` | Where the auto-clone lands; point at an existing clone to skip cloning |
+| `LEANKOHAKU_KOHAKUSPAWN` | unset | Override the path the `kohaku` CLI exec's for `install` / `update` / `uninstall` |
 
 If you'd rather skip the installer entirely:
 

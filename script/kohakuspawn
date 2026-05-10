@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # kohakuspawn — installer/updater for the kohaku CLI, modeled on `foundryup`.
 #
-# First run (from a clone of this repo):
-#   ./script/kohakuspawn
-#       → builds, copies itself to ~/.kohaku/bin/kohakuspawn, symlinks
-#         ~/.kohaku/bin/{kohaku,kohaku-daemon} → this checkout's lake binaries,
-#         and (unless --no-modify-path) appends ~/.kohaku/bin to your shell rc.
+# Bootstrap (foundryup-style, no clone needed):
+#   curl -fsSL https://raw.githubusercontent.com/nconsigny/leanCLI/master/script/kohakuspawn | bash
+#       → clones the repo to $KOHAKU_HOME/checkouts/leanCLI, builds, and
+#         self-installs into $KOHAKU_HOME/bin (default: ~/.kohaku/bin).
 #
-# Subsequent runs (`kohakuspawn` from anywhere):
-#   pulls + rebuilds + refreshes symlinks against the same checkout it
-#   was first installed from. The checkout location is recorded in
-#   ~/.kohaku/checkout so the script remembers it.
+# First run from an existing clone:
+#   ./script/kohakuspawn
+#       → uses the current checkout instead of cloning; everything else
+#         is the same.
+#
+# After that, `kohakuspawn` (from anywhere) re-runs against the recorded
+# checkout. The checkout location is persisted in ~/.kohaku/checkout.
 #
 # Uninstall:
 #   kohakuspawn --uninstall
@@ -20,6 +22,10 @@ set -euo pipefail
 KOHAKU_HOME="${KOHAKU_HOME:-$HOME/.kohaku}"
 KOHAKU_BIN="$KOHAKU_HOME/bin"
 CHECKOUT_FILE="$KOHAKU_HOME/checkout"
+
+# Bootstrap defaults: where to clone the repo if no checkout is found.
+KOHAKU_REPO_URL="${KOHAKU_REPO_URL:-https://github.com/nconsigny/leanCLI.git}"
+KOHAKU_REPO_DIR="${KOHAKU_REPO_DIR:-$KOHAKU_HOME/checkouts/leanCLI}"
 
 # Resolve the script's source location. realpath isn't always present, so
 # fall back to a portable readlink loop. This lets `~/.kohaku/bin/kohakuspawn`
@@ -39,13 +45,24 @@ resolve_self() {
   cd -P "$(dirname "$src")" && pwd -P
 }
 
-SELF_DIR="$(resolve_self "${BASH_SOURCE[0]}")"
+# BASH_SOURCE[0] is unbound when bash reads from stdin (`bash -s` /
+# `curl ... | bash`), and `set -u` blows up on the array access. Default
+# to empty: a missing source path means "no on-disk script" — the
+# detect_checkout fast path is skipped and we fall through to the
+# recorded checkout / bootstrap clone.
+_self_src="${BASH_SOURCE[0]:-}"
+if [[ -n "$_self_src" ]]; then
+  SELF_DIR="$(resolve_self "$_self_src")"
+else
+  SELF_DIR=""
+fi
+unset _self_src
 
 # Locate the checkout: prefer the script's own repo (works when running
 # `./script/kohakuspawn`), otherwise consult $KOHAKU_HOME/checkout (works when
 # running `kohakuspawn` from the user-bin symlink after first install).
 detect_checkout() {
-  if [[ -f "$SELF_DIR/../lakefile.lean" ]]; then
+  if [[ -n "$SELF_DIR" && -f "$SELF_DIR/../lakefile.lean" ]]; then
     (cd "$SELF_DIR/.." && pwd -P)
     return 0
   fi
@@ -58,6 +75,27 @@ detect_checkout() {
     fi
   fi
   return 1
+}
+
+# Foundryup-style bootstrap: when no checkout is found (typical for
+# `curl ... | bash`), clone the repo into $KOHAKU_REPO_DIR and use that.
+# Idempotent: if the target already has a lakefile, reuse it.
+bootstrap_clone() {
+  if [[ -f "$KOHAKU_REPO_DIR/lakefile.lean" ]]; then
+    printf '%s\n' "$KOHAKU_REPO_DIR"
+    return 0
+  fi
+  if ! command -v git >/dev/null 2>&1; then
+    echo "kohakuspawn: bootstrap needs git on PATH (set KOHAKU_REPO_DIR to an existing clone to skip)" >&2
+    return 1
+  fi
+  echo "==> bootstrap: cloning $KOHAKU_REPO_URL into $KOHAKU_REPO_DIR" >&2
+  mkdir -p "$(dirname "$KOHAKU_REPO_DIR")"
+  if ! git clone --depth=1 "$KOHAKU_REPO_URL" "$KOHAKU_REPO_DIR" >&2; then
+    echo "kohakuspawn: clone failed" >&2
+    return 1
+  fi
+  printf '%s\n' "$KOHAKU_REPO_DIR"
 }
 
 usage() {
@@ -182,13 +220,20 @@ fi
 
 CHECKOUT="$(detect_checkout || true)"
 if [[ -z "${CHECKOUT:-}" ]]; then
+  CHECKOUT="$(bootstrap_clone || true)"
+fi
+if [[ -z "${CHECKOUT:-}" ]]; then
   cat >&2 <<EOF
-kohakuspawn: could not find a leanCLI checkout.
+kohakuspawn: could not find or clone a leanCLI checkout.
 
-Either:
-  1. Run this script from inside a clone of leanCLI:
-       git clone <repo-url> leanCLI && cd leanCLI && ./script/kohakuspawn
-  2. Or write the checkout path into $CHECKOUT_FILE manually and re-run.
+Tried:
+  1. The script's own repo (running from inside a clone)
+  2. $CHECKOUT_FILE
+  3. Cloning $KOHAKU_REPO_URL into $KOHAKU_REPO_DIR
+
+To fix, either:
+  - git clone $KOHAKU_REPO_URL && cd leanCLI && ./script/kohakuspawn
+  - Or set KOHAKU_REPO_DIR to point at an existing clone.
 EOF
   exit 1
 fi
@@ -280,16 +325,20 @@ link_one() {
 link_one "$LEAN_BIN" "kohaku"
 link_one "$LEAN_DAEMON" "kohaku-daemon"
 
-# Self-install: copy this script into $KOHAKU_BIN so the user can run
-# `kohakuspawn` from anywhere. Copy (don't symlink) so deleting the checkout
-# doesn't break the updater. The copy still finds the checkout via
-# $CHECKOUT_FILE.
-SELF_PATH="${BASH_SOURCE[0]}"
-[[ "$SELF_PATH" = /* ]] || SELF_PATH="$PWD/$SELF_PATH"
+# Self-install: copy the canonical script from $CHECKOUT/script/kohakuspawn
+# into $KOHAKU_BIN so the user can run `kohakuspawn` from anywhere. We
+# always source from the checkout (never $BASH_SOURCE) because the latter
+# can be /dev/stdin under `curl ... | bash`, which has already been
+# consumed by the time we get here. Copy rather than symlink so deleting
+# or moving the checkout doesn't break the updater — the copy still finds
+# the checkout via $CHECKOUT_FILE.
+SCRIPT_SOURCE="$CHECKOUT/script/kohakuspawn"
 INSTALLED_SELF="$KOHAKU_BIN/kohakuspawn"
-if [[ "$(cd -P "$(dirname "$SELF_PATH")" && pwd)/$(basename "$SELF_PATH")" != "$INSTALLED_SELF" ]]; then
-  install -m 0755 "$SELF_PATH" "$INSTALLED_SELF"
-  echo "==> $INSTALLED_SELF (self-installed)"
+if [[ ! -f "$SCRIPT_SOURCE" ]]; then
+  echo "kohakuspawn: $SCRIPT_SOURCE missing — cannot self-install. Is the checkout on a commit older than the script?" >&2
+elif [[ "$SCRIPT_SOURCE" != "$INSTALLED_SELF" ]]; then
+  install -m 0755 "$SCRIPT_SOURCE" "$INSTALLED_SELF"
+  echo "==> $INSTALLED_SELF (self-installed from $SCRIPT_SOURCE)"
 fi
 
 # ---- shell-rc PATH integration (foundryup-style) ----------------------------
