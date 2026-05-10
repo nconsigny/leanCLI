@@ -5,6 +5,7 @@ import LeanKohaku.Cli.Passphrase
 import LeanKohaku.Cli.Runtime
 import LeanKohaku.Encoding.Json
 import LeanKohaku.Transport.Uds
+import LeanKohaku.Util.DotEnv
 
 /-!
 # LeanKohaku client library
