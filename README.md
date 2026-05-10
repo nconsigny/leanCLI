@@ -565,24 +565,6 @@ those libraries or trust them as crypto implementations.
 Mainnet policies are the defaults; Sepolia policies are available for
 explicit dev/testnet use.
 
-## R1 account
-
-`LeanKohaku.Contract.R1Account` is the Lean-level account verifier model:
-it stores the P-256 public key, enforces a supported chain id (`1`
-mainnet or `11155111` Sepolia), checks nonce equality, constructs the
-EIP-7951 `h || r || s || qx || qy` precompile input, and increments
-nonce only after successful verification.
-
-`Contracts/R1Account/` contains the Verity-oriented Lean source for the
-deployable account. `script/r1_sepolia.sh` keeps the local
-digest/sign/execute workflow. For same-day Sepolia testing,
-`solidity/dev/R1AccountDev.sol` provides a temporary Solidity fallback;
-it is not the canonical source.
-
-Verity is pinned by `script/setup_verity.sh`. It is not imported into the
-default Lake graph yet because upstream Verity currently pins Lean 4.22.0
-while leanKohaku pins Lean 4.29.1.
-
 ## SPHINCS+ hybrid account (experimental, Sepolia)
 
 The on-chain `SphincsAccount.sol` contract is a hybrid ECDSA + stateless
