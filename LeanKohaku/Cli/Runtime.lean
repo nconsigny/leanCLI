@@ -6,6 +6,9 @@ import LeanKohaku.Cli.Passphrase
 import LeanKohaku.Encoding.Json
 import LeanKohaku.Invariants.EthAmount
 import LeanKohaku.Wallet.PpSecretStore
+import LeanKohaku.Swap.Tokens
+import LeanKohaku.Swap.UniV3
+import LeanKohaku.Invariants.Swap
 
 /-!
 # CLI runtime
@@ -909,6 +912,337 @@ private def listAllWallets : IO (Array (String × SlotType)) := do
         if !n.isEmpty then out := out.push (n, .tpm)
   | .error _ => pure ()
   pure out
+
+/-! ## Swap helpers (Slice A/B) -/
+
+/-- Parse a non-negative decimal string with a fixed number of fractional
+    decimals into base units. e.g. `parseDecimalToBaseUnits "0.1" 18 = some 100000000000000000`. -/
+private def parseDecimalToBaseUnits (s : String) (decimals : Nat) : Option Nat :=
+  let parts := s.splitOn "."
+  let parseDigits (str : String) : Option Nat :=
+    if str.isEmpty then some 0
+    else str.toList.foldl
+      (init := some 0)
+      (fun acc c =>
+        match acc with
+        | none => none
+        | some n =>
+            if '0' ≤ c && c ≤ '9' then some (n * 10 + (c.toNat - '0'.toNat))
+            else none)
+  match parts with
+  | [whole] => do
+      let w ← parseDigits whole
+      some (w * Nat.pow 10 decimals)
+  | [whole, frac] => do
+      let w ← parseDigits whole
+      if frac.length > decimals then none
+      else
+        let f ← parseDigits frac
+        let pad := decimals - frac.length
+        some (w * Nat.pow 10 decimals + f * Nat.pow 10 pad)
+  | _ => none
+
+/-- Format base units as a decimal string with `decimals` fractional places,
+    trimming trailing zeros. -/
+private def formatBaseUnits (n decimals : Nat) : String :=
+  let scale := Nat.pow 10 decimals
+  let whole := n / scale
+  let frac := n % scale
+  if decimals = 0 || frac = 0 then toString whole
+  else
+    let str := toString frac
+    let pad := String.mk (List.replicate (decimals - str.length) '0')
+    let trimmed := (pad ++ str).dropRightWhile (· = '0')
+    if trimmed.isEmpty then toString whole
+    else s!"{whole}.{trimmed}"
+
+private def parseChainOrDefault (chain? : Option String) :
+    Option LeanKohaku.Swap.Tokens.ChainId :=
+  match chain? with
+  | none => some .mainnet
+  | some s => LeanKohaku.Swap.Tokens.ChainId.fromString? s
+
+private def chainIdToString : LeanKohaku.Swap.Tokens.ChainId → String
+  | .mainnet => "mainnet"
+  | .sepolia => "sepolia"
+
+/-- Resolve a token argument (symbol or 0x address) into `(decimals, label)`
+    for amount conversion / rendering. The pseudo-symbol `ETH` resolves to
+    WETH semantics for swap purposes. Returns the resolved token (when a
+    symbol) and the chain-specific address. Fails with a printable error. -/
+private def resolveSwapToken (raw : String) (chain : LeanKohaku.Swap.Tokens.ChainId) :
+    Except String (Option LeanKohaku.Swap.Tokens.Token × String) :=
+  let s := raw.trimAscii.toString
+  if s.startsWith "0x" || s.startsWith "0X" then
+    .ok (none, s.toLower)
+  else
+    let sym := if s.toLower = "eth" then "WETH" else s
+    match LeanKohaku.Swap.Tokens.findBySymbol sym with
+    | none => .error s!"unknown token symbol: {raw}"
+    | some t =>
+        match LeanKohaku.Swap.Tokens.addressOn t chain with
+        | none =>
+            .error s!"no canonical address for {t.symbol} on {chainIdToString chain}"
+        | some addr => .ok (some t, addr)
+
+private def runSwapQuote (fromTok toTok amount : String) (chain? : Option String) :
+    IO UInt32 := do
+  match parseChainOrDefault chain? with
+  | none =>
+      let c := chain?.getD ""
+      IO.eprintln s!"unknown chain: {c}"
+      return 2
+  | some chain =>
+      match resolveSwapToken fromTok chain, resolveSwapToken toTok chain with
+      | .error e, _ => IO.eprintln e; return 2
+      | _, .error e => IO.eprintln e; return 2
+      | .ok (tin?, tinAddr), .ok (tout?, toutAddr) =>
+          -- decimals fall back to 18 for raw addresses
+          let inDecimals := (tin?.map (·.decimals)).getD 18
+          let outDecimals := (tout?.map (·.decimals)).getD 18
+          match parseDecimalToBaseUnits amount inDecimals with
+          | none => IO.eprintln s!"invalid amount: {amount}"; return 2
+          | some amountIn =>
+              let params : LeanKohaku.Encoding.Json.Json := .obj #[
+                ("chainId", .str (chainIdToString chain)),
+                ("tokenIn", .str tinAddr),
+                ("tokenOut", .str toutAddr),
+                ("amountIn", .num (Int.ofNat amountIn))
+              ]
+              match ← DaemonClient.call "swap.uniV3.quote" params with
+              | .error err =>
+                  IO.eprintln s!"daemon error {err.code}: {err.message}"
+                  return 2
+              | .ok r =>
+                  let amtOut := (LeanKohaku.Encoding.Json.getField "amountOut" r
+                                 >>= LeanKohaku.Encoding.Json.asNat).getD 0
+                  let fee := (LeanKohaku.Encoding.Json.getField "fee" r
+                              >>= LeanKohaku.Encoding.Json.asNat).getD 0
+                  let router := (LeanKohaku.Encoding.Json.getField "router" r
+                                 >>= LeanKohaku.Encoding.Json.asString).getD ""
+                  let inLabel := (tin?.map (·.symbol)).getD tinAddr
+                  let outLabel := (tout?.map (·.symbol)).getD toutAddr
+                  IO.println s!"{amount} {inLabel} → {formatBaseUnits amtOut outDecimals} {outLabel}"
+                  IO.println s!"  fee tier:  {fee} (= {fee} bps)"
+                  IO.println s!"  venue:     Uniswap V3 SwapRouter02 {router}"
+                  IO.println s!"  chainId:   {chainIdToString chain}"
+                  IO.println s!"  amountOut: {amtOut} (base units)"
+                  return 0
+
+private def runSwapExec (fromTok toTok amount : String)
+    (receiver? slippage? chain? : Option String) : IO UInt32 := do
+  match parseChainOrDefault chain? with
+  | none =>
+      let c := chain?.getD ""
+      IO.eprintln s!"unknown chain: {c}"
+      return 2
+  | some chain =>
+      match resolveSwapToken fromTok chain, resolveSwapToken toTok chain with
+      | .error e, _ => IO.eprintln e; return 2
+      | _, .error e => IO.eprintln e; return 2
+      | .ok (tin?, tinAddr), .ok (tout?, toutAddr) =>
+          let inDecimals := (tin?.map (·.decimals)).getD 18
+          match parseDecimalToBaseUnits amount inDecimals with
+          | none => IO.eprintln s!"invalid amount: {amount}"; return 2
+          | some amountIn =>
+              -- slippage: percent string, e.g. "0.5" -> 50 bps. Default 0.5%.
+              let slippageStr := slippage?.getD "0.5"
+              -- Encode slippage as bps via parseDecimalToBaseUnits with 2 fractional digits.
+              let slippageBps : Nat :=
+                (parseDecimalToBaseUnits slippageStr 2).getD 50
+              -- 1) quote
+              let qparams : LeanKohaku.Encoding.Json.Json := .obj #[
+                ("chainId", .str (chainIdToString chain)),
+                ("tokenIn", .str tinAddr),
+                ("tokenOut", .str toutAddr),
+                ("amountIn", .num (Int.ofNat amountIn))
+              ]
+              match ← DaemonClient.call "swap.uniV3.quote" qparams with
+              | .error err =>
+                  IO.eprintln s!"daemon error (quote) {err.code}: {err.message}"
+                  return 2
+              | .ok q =>
+                  let amtOut := (LeanKohaku.Encoding.Json.getField "amountOut" q
+                                 >>= LeanKohaku.Encoding.Json.asNat).getD 0
+                  let fee := (LeanKohaku.Encoding.Json.getField "fee" q
+                              >>= LeanKohaku.Encoding.Json.asNat).getD 0
+                  let amountOutMin :=
+                    LeanKohaku.Invariants.Swap.applySlippageBps amtOut slippageBps
+                  -- 2) need fromAddress: ask daemon for the default account.
+                  let fromAddr ←
+                    match ← DaemonClient.call "account.getDefault" with
+                    | .ok j =>
+                        pure ((LeanKohaku.Encoding.Json.getField "address" j
+                               >>= LeanKohaku.Encoding.Json.asString).getD "")
+                    | .error _ => pure ""
+                  if fromAddr.isEmpty then
+                    IO.eprintln "no default account set; run `leankohaku wallet use <name>` first"
+                    return 2
+                  let recipient := receiver?.getD fromAddr
+                  let bparams : LeanKohaku.Encoding.Json.Json := .obj #[
+                    ("chainId", .str (chainIdToString chain)),
+                    ("fromAddress", .str fromAddr),
+                    ("tokenIn", .str fromTok),
+                    ("tokenOut", .str toTok),
+                    ("amountIn", .num (Int.ofNat amountIn)),
+                    ("amountOutMin", .num (Int.ofNat amountOutMin)),
+                    ("fee", .num (Int.ofNat fee)),
+                    ("recipient", .str recipient)
+                  ]
+                  match ← DaemonClient.call "swap.uniV3.build" bparams with
+                  | .error err =>
+                      IO.eprintln s!"daemon error (build) {err.code}: {err.message}"
+                      return 2
+                  | .ok r =>
+                      IO.println s!"# Uniswap V3 swap plan"
+                      IO.println s!"#   in:           {amountIn} {fromTok} (base units)"
+                      IO.println s!"#   quoted out:   {amtOut}"
+                      IO.println s!"#   slippage:     {slippageBps} bps"
+                      IO.println s!"#   amountOutMin: {amountOutMin}"
+                      IO.println s!"#   fee tier:     {fee}"
+                      IO.println s!"# The daemon returned the following txs."
+                      IO.println s!"# Send each through the existing eoa.send / tx.decodeIntent /"
+                      IO.println s!"# tx.simulate / ConfirmGate pipeline (slice B prints them as JSON;"
+                      IO.println s!"# a TUI flow lands in a follow-up slice)."
+                      match LeanKohaku.Encoding.Json.getField "approval" r with
+                      | some (.obj _) =>
+                          IO.println "## approval:"
+                          IO.println (LeanKohaku.Encoding.Json.pretty
+                            ((LeanKohaku.Encoding.Json.getField "approval" r).getD .null))
+                      | _ => pure ()
+                      IO.println "## swap:"
+                      IO.println (LeanKohaku.Encoding.Json.pretty
+                        ((LeanKohaku.Encoding.Json.getField "tx" r).getD .null))
+                      return 0
+
+/-- Parse a `0x`-prefixed (or bare) hex quantity to a `Nat`. Returns
+    `none` on bad input. Used by `runBalances` to render uint256 balance
+    strings as decimal token amounts. -/
+private def hexQuantityToNat (s : String) : Option Nat :=
+  -- Strip an optional 0x / 0X prefix and walk the remaining nibbles. We
+  -- iterate the original string and skip the first 2 chars when present
+  -- to avoid `String.drop`/`String.extract` slice-vs-string surface area
+  -- in this toolchain.
+  let chars := s.toList
+  let body : List Char :=
+    match chars with
+    | '0' :: 'x' :: rest => rest
+    | '0' :: 'X' :: rest => rest
+    | _ => chars
+  if body.isEmpty then none
+  else body.foldl (init := some 0) fun acc c =>
+    match acc with
+    | none => none
+    | some n =>
+        let d? : Option Nat :=
+          if '0' ≤ c && c ≤ '9' then some (c.toNat - '0'.toNat)
+          else if 'a' ≤ c && c ≤ 'f' then some (c.toNat - 'a'.toNat + 10)
+          else if 'A' ≤ c && c ≤ 'F' then some (c.toNat - 'A'.toNat + 10)
+          else none
+        d?.map (fun d => n * 16 + d)
+
+/-- Resolve the address to use for a balance query: explicit `--address`
+    wins; otherwise we look up the default account name and resolve to its
+    primary address via `account.list`. Returns `none` with an error
+    message for the user. -/
+private def resolveBalancesAddress (address? : Option String) :
+    IO (Except String String) := do
+  match address? with
+  | some a => pure (.ok a)
+  | none =>
+      match ← readDefaultAccount with
+      | none =>
+          pure <| .error
+            "no default account; pass --address 0x… or set one with `kohaku wallet use <name>`"
+      | some name =>
+          for e in (← fetchAccountList) do
+            let n := (LeanKohaku.Encoding.Json.getField "name" e
+                      >>= LeanKohaku.Encoding.Json.asString).getD ""
+            if n = name then
+              let addr := (LeanKohaku.Encoding.Json.getField "address" e
+                           >>= LeanKohaku.Encoding.Json.asString).getD ""
+              if addr.isEmpty then
+                return .error s!"default account '{name}' has no address on file"
+              else
+                return .ok addr
+          pure <| .error s!"default account '{name}' not found"
+
+/-- Resolve the chain to query: explicit `--chain` wins; otherwise we ask
+    the daemon for its current chain via `daemon.ping`. Falls back to
+    mainnet on transport failure (consistent with `parseChainOrDefault`),
+    but propagates a parse error for an explicit unknown name. -/
+private def resolveBalancesChain (chain? : Option String) :
+    IO (Option LeanKohaku.Swap.Tokens.ChainId) := do
+  match chain? with
+  | some s => pure (LeanKohaku.Swap.Tokens.ChainId.fromString? s)
+  | none =>
+      match ← DaemonClient.call "daemon.ping" with
+      | .error _ => pure (some .mainnet)
+      | .ok r =>
+          let id := (LeanKohaku.Encoding.Json.getField "chainId" r
+                     >>= LeanKohaku.Encoding.Json.asNat).getD 1
+          if id = 11155111 then pure (some .sepolia)
+          else if id = 1 then pure (some .mainnet)
+          else pure (some .mainnet)
+
+private def padRight (s : String) (n : Nat) : String :=
+  if s.length ≥ n then s
+  else s ++ String.mk (List.replicate (n - s.length) ' ')
+
+private def runBalances
+    (chain? : Option String) (address? : Option String) (json : Bool) :
+    IO UInt32 := do
+  match ← resolveBalancesChain chain? with
+  | none =>
+      let c := chain?.getD ""
+      IO.eprintln s!"unknown chain: {c}"
+      return 2
+  | some chain =>
+      match ← resolveBalancesAddress address? with
+      | .error msg => IO.eprintln msg; return 2
+      | .ok address =>
+          let params : LeanKohaku.Encoding.Json.Json := .obj #[
+            ("chainId", .str (chainIdToString chain)),
+            ("address", .str address)
+          ]
+          match ← DaemonClient.call "swap.balances" params with
+          | .error err =>
+              IO.eprintln s!"daemon error {err.code}: {err.message}"
+              return 2
+          | .ok r =>
+              if json then
+                -- Print the daemon's full response as one compact JSON
+                -- blob, then echo each balance entry on its own line for
+                -- grep-friendly machine consumers. Reuses the daemon
+                -- shape verbatim — no field synthesis on the CLI side.
+                let arr := (LeanKohaku.Encoding.Json.getField "balances" r
+                            >>= LeanKohaku.Encoding.Json.asArray).getD #[]
+                IO.println (LeanKohaku.Encoding.Json.compact r)
+                for e in arr do
+                  IO.println (LeanKohaku.Encoding.Json.compact e)
+                return 0
+              else
+                let arr := (LeanKohaku.Encoding.Json.getField "balances" r
+                            >>= LeanKohaku.Encoding.Json.asArray).getD #[]
+                IO.println s!"# chain: {chainIdToString chain}"
+                IO.println s!"# address: {address}"
+                IO.println (padRight "symbol" 8 ++ padRight "decimals" 10 ++
+                            padRight "address" 44 ++ "balance")
+                for e in arr do
+                  let sym := (LeanKohaku.Encoding.Json.getField "symbol" e
+                              >>= LeanKohaku.Encoding.Json.asString).getD "?"
+                  let dec := (LeanKohaku.Encoding.Json.getField "decimals" e
+                              >>= LeanKohaku.Encoding.Json.asNat).getD 18
+                  let addrField :=
+                    match LeanKohaku.Encoding.Json.getField "address" e with
+                    | some (.str s) => s
+                    | _ => "—"
+                  let balHex := (LeanKohaku.Encoding.Json.getField "balance" e
+                                 >>= LeanKohaku.Encoding.Json.asString).getD "0x0"
+                  let balN := (hexQuantityToNat balHex).getD 0
+                  IO.println (padRight sym 8 ++ padRight (toString dec) 10 ++
+                              padRight addrField 44 ++ formatBaseUnits balN dec)
+                return 0
 
 def run (args : List String) : IO UInt32 := do
   let (cmd, accountIdx?) := parseTop args
@@ -2154,6 +2488,12 @@ def run (args : List String) : IO UInt32 := do
             else ""
           IO.println s!"{name} = {addr}  (chainId={chainId}{chainTag})"
           return 0
+  | .swapQuote fromTok toTok amount chain? =>
+      runSwapQuote fromTok toTok amount chain?
+  | .swapExec fromTok toTok amount receiver? slippage? chain? =>
+      runSwapExec fromTok toTok amount receiver? slippage? chain?
+  | .balances chain? address? json =>
+      runBalances chain? address? json
   | .completion shell =>
       match shell with
       | "bash" => IO.println bashCompletion; return 0

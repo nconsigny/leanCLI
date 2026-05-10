@@ -242,15 +242,46 @@ def humanReport : IO String := do
     match envChainId with
     | some v => s!"{v} (env)"
     | none => "1 (default)"
-  let chainEndpoints ← listChainRpcUrls
+  let persistedChains ← listChainRpcUrls
+  -- Why: mirror the daemon's env-merge so users can debug "why does the daemon
+  -- say mainnet has no RPC" from a single command. Persisted entries always
+  -- win over env (explicit user config in `daemon.json` is authoritative). For
+  -- the persisted-and-env case we surface a `(env <NAME> shadowed)` note so
+  -- the conflict is visible without leaking the env value.
+  let envChainNames : List String := ["mainnet", "sepolia"]
+  let envChainUrl (chain : String) : IO (Option (String × String)) := do
+    let upper := chain.toUpper
+    let trim? (raw : String) : Option String :=
+      let t := raw.trim
+      if t.isEmpty then none else some t
+    match (← IO.getEnv s!"LEANKOHAKU_RPC_URL_{upper}").bind trim? with
+    | some v => pure (some (v, s!"env: LEANKOHAKU_RPC_URL_{upper}"))
+    | none =>
+        match (← IO.getEnv s!"{upper}_RPC_URL").bind trim? with
+        | some v => pure (some (v, s!"env: {upper}_RPC_URL"))
+        | none => pure none
+  let mut rows : Array (String × String × String) := #[]  -- (chain, url, source)
+  for (chain, url) in persistedChains do
+    let shadow ← envChainUrl chain
+    let src :=
+      match shadow with
+      | some (_, label) => s!"daemon.json (shadows {label})"
+      | none => "daemon.json"
+    rows := rows.push (chain, url, src)
+  for chain in envChainNames do
+    if persistedChains.any (fun (k, _) => k = chain) then continue
+    match ← envChainUrl chain with
+    | some (url, label) => rows := rows.push (chain, url, label)
+    | none => pure ()
   let chainsBlock : String :=
-    if chainEndpoints.isEmpty then
-      "  per-chain rpc:  <none configured — set via `kohaku network set-rpc-chain <name> <url>`>\n"
+    if rows.isEmpty then
+      "  per-chain rpc:  <none configured — set via `kohaku network set-rpc-chain <name> <url>` or " ++
+      "export MAINNET_RPC_URL / SEPOLIA_RPC_URL>\n"
     else
       let header := "  per-chain rpc:\n"
-      let rows := chainEndpoints.foldl (init := "") fun acc (k, u) =>
-        acc ++ s!"    {k}: {u}\n"
-      header ++ rows
+      let body := rows.foldl (init := "") fun acc (k, u, s) =>
+        acc ++ s!"    {k}: {u}  ({s})\n"
+      header ++ body
   let logPath ← networkLogPath
   let logLine :=
     match logPath with
@@ -271,7 +302,9 @@ def humanReport : IO String := do
     s!"  {logLine}\n" ++
     "  env overrides:  LEANKOHAKU_RPC_URL, LEANKOHAKU_RPC_TRANSPORT, LEANKOHAKU_NETWORK_POLICY,\n" ++
     "                  LEANKOHAKU_CHAIN_ID, LEANKOHAKU_SOCKET, LEANKOHAKU_NETWORK_LOG,\n" ++
-    "                  LEANKOHAKU_ENS_RPC_URL\n"
+    "                  LEANKOHAKU_ENS_RPC_URL\n" ++
+    "  per-chain env:  LEANKOHAKU_RPC_URL_<NAME>  (authoritative)\n" ++
+    "                  <NAME>_RPC_URL             (e.g. MAINNET_RPC_URL, SEPOLIA_RPC_URL)\n"
 
 /-- Return the current chain shortname (`sepolia`, `mainnet`, etc.) used for
     chain-aware operations like `wallet deploy`. Falls back to `sepolia` until

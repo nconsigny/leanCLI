@@ -45,24 +45,55 @@ structure Client where
   nextId : IO.Ref Nat
   buf    : IO.Ref ByteArray
 
-/-- Default executable name for the colibri sidecar. -/
+/-- Default executable name for the colibri sidecar (when on PATH). -/
 def defaultExecutable : String := "leankohaku-colibri-bridge"
 
+/-- Walk upward from the working directory looking for the
+    `bridge/colibri/bridge.mjs` script that ships in this repo. Returns
+    the first match within `maxHops` parents, or `none`. Lets the daemon
+    work out-of-the-box from anywhere inside the monorepo without an
+    explicit `LEAN_KOHAKU_COLIBRI_BRIDGE` env var. -/
+private partial def findBridgeMjs (start : System.FilePath) (maxHops : Nat) :
+    IO (Option String) := do
+  let candidate := start / "bridge" / "colibri" / "bridge.mjs"
+  if (← candidate.pathExists) then
+    pure (some candidate.toString)
+  else
+    match maxHops, start.parent with
+    | 0, _ => pure none
+    | _ + 1, none => pure none
+    | n + 1, some parent =>
+        if parent == start then pure none else findBridgeMjs parent n
+
+/-- Resolve the bridge executable in this order:
+    1. `LEAN_KOHAKU_COLIBRI_BRIDGE` env var (explicit override).
+    2. `bridge/colibri/bridge.mjs` walked upward from CWD (monorepo).
+    3. `leankohaku-colibri-bridge` on PATH (installed binary). -/
 def resolveExecutable : IO String := do
   match (← IO.getEnv "LEAN_KOHAKU_COLIBRI_BRIDGE") with
   | some s => pure s
-  | none => pure defaultExecutable
+  | none =>
+      let cwd ← IO.currentDir
+      match ← findBridgeMjs cwd 8 with
+      | some p => pure p
+      | none => pure defaultExecutable
 
 /-- Spawn the sidecar in --listen mode and connect to it. The caller is
     responsible for keeping the returned `Client` alive for the daemon's
     lifetime; closing it terminates the sidecar (it exits on EOF / SIGPIPE). -/
 def start (socketPath : String) : IO Client := do
   let exe ← resolveExecutable
+  -- Helios writes its on-disk cache (`code_<hash>`, `states_<chainId>/`,
+  -- `sync_<chainId>_<block>/`) into the sidecar's CWD. Confine those to a
+  -- dedicated directory so they don't litter the project root.
+  let cacheDir : System.FilePath := (← IO.currentDir) / "cache" / "colibri"
+  IO.FS.createDirAll cacheDir
   -- Spawn the sidecar detached enough that it survives across daemon
   -- request handling but tied to our process group so it exits with us.
   let _child ← IO.Process.spawn {
     cmd := exe,
     args := #["--listen", socketPath],
+    cwd := some cacheDir.toString,
     stdin := .null,
     stdout := .null,
     stderr := .inherit

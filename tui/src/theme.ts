@@ -13,6 +13,10 @@ export const theme = {
   ok: "green",
   warn: "yellow",
   err: "red",
+  // Menu-cursor highlight. Light blue stays legible on both the default
+  // dark terminal and the Ubuntu purple background where bright cyan or
+  // magenta tend to wash out.
+  highlight: "#7ec8ff",
   // Was "gray" (bright black) — illegible on the Ubuntu purple terminal.
   // Light hex stays readable on dark backgrounds without being shouty on light ones.
   dim: "#bdbdbd",

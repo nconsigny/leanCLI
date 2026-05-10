@@ -47,19 +47,54 @@ def encodeRequest (req : Request) : String :=
     ("id", .num (Int.ofNat req.id))
   ]
 
-def callRaw (rpcUrl : String) (req : Request) : IO String := do
+/-- HTTP transport metrics captured from `curl -w`. All fields are best-
+    effort: older curl builds may not surface every variable, so each
+    field is `Option`. -/
+structure RawResponse where
+  body       : String
+  httpStatus : Option Nat := none
+  bytes      : Option Nat := none
+  remoteIp   : Option String := none
+  deriving Repr
+
+private def metricsSentinel : String := "\n--LK_CURL_METRICS--\n"
+
+/-- HTTP shell-out with metric capture. Appends a sentinel-delimited
+    metrics record (status / bytes / remote IP) to the response body via
+    `curl -w` so we can surface "what server did the daemon actually
+    reach" without taking a dep on a Lean HTTP client. -/
+def callRawDetailed (rpcUrl : String) (req : Request) : IO RawResponse := do
+  let writeFmt :=
+    metricsSentinel ++ "%{http_code}|%{size_download}|%{remote_ip}"
   let out ← IO.Process.output
     { cmd := "curl",
       args := #[
         "-sS",
         "-H", "content-type: application/json",
         "--data", encodeRequest req,
+        "-w", writeFmt,
         rpcUrl
       ] }
-  if out.exitCode == 0 then
-    pure out.stdout
-  else
+  if out.exitCode != 0 then
     throw <| IO.userError out.stderr
+  let parts := out.stdout.splitOn metricsSentinel
+  match parts with
+  | [body, metrics] =>
+      match metrics.splitOn "|" with
+      | [statusS, bytesS, ip] =>
+          let trimIp := ip.trimAscii.toString
+          pure {
+            body := body,
+            httpStatus := statusS.trimAscii.toString.toNat?,
+            bytes := bytesS.trimAscii.toString.toNat?,
+            remoteIp := if trimIp.isEmpty then none else some trimIp
+          }
+      | _ => pure { body := body }
+  | _ => pure { body := out.stdout }
+
+def callRaw (rpcUrl : String) (req : Request) : IO String := do
+  let r ← callRawDetailed rpcUrl req
+  pure r.body
 
 def ethSendRawTransaction (rpcUrl rawTxHex : String) : IO String :=
   callRaw rpcUrl { method := "eth_sendRawTransaction", params := .arr #[.str rawTxHex], id := 1 }

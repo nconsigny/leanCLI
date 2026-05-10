@@ -36,7 +36,26 @@ export interface KohakuKoiProps {
   red?: string;
   /** Override the cream body color. */
   cream?: string;
+  /** Override colour for the eye cell. When unset the eye uses the
+   *  baked navy. Intended for transient highlight (e.g. AnimatedKoi
+   *  flashing an amber eye on arrow input). The eye position is
+   *  hardcoded per size — `tiny` is mapped today; other sizes silently
+   *  ignore this prop. */
+  eyeColor?: string;
 }
+
+/** Eye cell coordinates, per render size. The koi cells use half-block
+ *  characters (`▀`/`▄`); each terminal cell encodes two stacked source
+ *  pixels — fg paints one half, bg the other. The eyeball IS the navy
+ *  pixel the artist painted on the cheek (it just happens to share the
+ *  hex of the body outline that runs alongside it), so we override `bg`
+ *  instead of `fg`: at (5, 5) the cell is `▀ fg=cream bg=navy` and the
+ *  bottom-half navy pixel is the eyeball — recolouring `bg` lights
+ *  exactly that one source pixel and leaves the cream cheek above
+ *  untouched. Adjust here if the source grid is regenerated. */
+const EYE_POS: Partial<Record<Size, ReadonlyArray<readonly [number, number]>>> = {
+  tiny: [[5, 5] as const],
+};
 
 const BRAND = {
   "#0f2a3f": "navy",
@@ -79,13 +98,31 @@ const KohakuKoi: React.FC<KohakuKoiProps> = ({
   navy,
   red,
   cream,
+  eyeColor,
 }) => {
   const grid = GRIDS[size];
   const overrides = { navy, red, cream };
 
+  // Apply the eye-cell override before colour-run compaction so the eye
+  // becomes its own run and gets the amber colour without breaking the
+  // navy/red/cream palette logic. We override `bg` at the cell whose
+  // bottom-half navy pixel IS the eyeball (`(5, 5)` on tiny: ▀ fg=cream
+  // bg=navy → top cream cheek, bottom navy eyeball). No allocation when
+  // eyeColor is unset.
+  const eyePositions = eyeColor ? EYE_POS[size] : undefined;
+  const renderRows: Cell[][] = eyePositions
+    ? grid.rows.map((row, y) =>
+        row.map((cell, x) =>
+          eyePositions.some(([r, c]) => r === y && c === x)
+            ? { ...cell, bg: eyeColor! }
+            : cell,
+        ),
+      )
+    : grid.rows;
+
   if (mono) {
     // Brightness-mapped ASCII: navy=#, red=*, cream=., bg=space.
-    const lines: string[] = grid.rows.map((row) =>
+    const lines: string[] = renderRows.map((row) =>
       row
         .map((c) => {
           if (!c.fg && !c.bg) return " ";
@@ -107,7 +144,7 @@ const KohakuKoi: React.FC<KohakuKoiProps> = ({
 
   return (
     <Box flexDirection="column">
-      {grid.rows.map((row, y) => (
+      {renderRows.map((row, y) => (
         <Text key={y}>
           {compactRow(row).map((run, i) => (
             <Text

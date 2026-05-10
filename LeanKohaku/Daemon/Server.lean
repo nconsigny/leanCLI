@@ -6,11 +6,13 @@ import LeanKohaku.Daemon.Uds
 import LeanKohaku.Privacy.NetworkPolicy
 import LeanKohaku.Privacy.Bridge
 import LeanKohaku.Clearsign.Bridge
+import LeanKohaku.Sphincs.Bridge
 import LeanKohaku.Colibri.Bridge
 import LeanKohaku.Colibri.Persistent
 import LeanKohaku.Daemon.TokenMeta
 import LeanKohaku.LlmAgent.Bridge
 import LeanKohaku.Cli.Commands
+import LeanKohaku.Cli.NetworkConfig
 import LeanKohaku.RPC.Outbound
 import LeanKohaku.RPC.Server
 import LeanKohaku.Ethereum.Address
@@ -27,6 +29,9 @@ import LeanKohaku.Wallet.EOA
 import LeanKohaku.Wallet.HDKey
 import LeanKohaku.Wallet.Mnemonic
 import LeanKohaku.Wallet.PpSecretStore
+import LeanKohaku.Swap.Tokens
+import LeanKohaku.Swap.UniV3
+import LeanKohaku.Invariants.Swap
 
 /-!
 # Daemon server
@@ -144,6 +149,22 @@ structure IndexerEntry where
   url  : String
   deriving Repr
 
+/-- Per-chain SPHINCS- verifier contract address, keyed by parameter set.
+    The on-chain `SphincsAccount` contract delegates `verify(...)` to this
+    address via `staticcall`, so an account on chain `chain` with param set
+    `paramSet` must target the matching deployed verifier. Phase 2 ships the
+    schema only; concrete addresses stay `none` until Phase 4's Sepolia
+    deployment lands. -/
+structure SphincsVerifierEntry where
+  chain    : String
+  paramSet : LeanKohaku.Sphincs.ParamSet
+  /-- Lower-case `0x...` hex address as written in the JSON config; the
+      daemon RPC layer will validate it on first use. `none` here means
+      the user has not configured a verifier for this `(chain, paramSet)`
+      pair, and any signing flow under that pair must fail closed. -/
+  address  : Option String
+  deriving Repr
+
 structure Config where
   socketPath : String
   chainId    : Nat
@@ -158,6 +179,10 @@ structure Config where
   -- handler must fail closed rather than fall back to a different chain.
   chainEndpoints : Array (String × LeanKohaku.RPC.Outbound.Endpoint) := #[]
   indexers   : Array IndexerEntry := #[]
+  -- Why: per-(chain, paramSet) SPHINCS- verifier address map. Read by
+  -- Phase 3 daemon RPCs (`sphincs.create`, `sphincs.send`, ...). Empty by
+  -- default; populated from `daemon.json`'s `sphincs_verifiers` block.
+  sphincsVerifiers : Array SphincsVerifierEntry := #[]
 
 instance : Repr Config where
   reprPrec cfg _ :=
@@ -177,7 +202,26 @@ def endpointForChain (cfg : Config) : Option String →
       match cfg.chainEndpoints.find? (fun (k, _) => k = name) with
       | some (_, ep) => .ok ep
       | none =>
-          .error s!"no rpc_url configured for chain '{name}'; add it via `kohaku network set-rpc-chain {name} <url>`"
+          let upper := name.toUpper
+          .error s!"no rpc_url configured for chain '{name}'; add it via `kohaku network set-rpc-chain {name} <url>` or set {upper}_RPC_URL / LEANKOHAKU_RPC_URL_{upper} in your environment"
+
+/-- Look up the deployed SPHINCS- verifier address for a given
+    `(chain, paramSet)` pair. Fails closed when no entry is configured;
+    the caller must surface the error rather than fall back to a
+    different param set. Phase 2 schema-only — Phase 3 RPC handlers
+    consume this. -/
+def sphincsVerifierFor (cfg : Config)
+    (chain : String) (ps : LeanKohaku.Sphincs.ParamSet)
+    : Except String String :=
+  match cfg.sphincsVerifiers.find?
+      (fun e => e.chain = chain && e.paramSet = ps) with
+  | some { address := some addr, .. } => .ok addr
+  | some { address := none, .. } =>
+      .error
+        s!"no sphincs verifier address for chain '{chain}' paramSet '{ps.toString}': set it in daemon.json under `sphincs_verifiers`"
+  | none =>
+      .error
+        s!"no sphincs verifier configured for chain '{chain}' paramSet '{ps.toString}'"
 
 -- Why: no `defaultConfig` with a URL substitute. The daemon must refuse to
 -- start without a user-configured `rpc_url` (env or daemon.json); see
@@ -573,6 +617,28 @@ private def paramNat (params : Json) (key : String) : Except RpcError Nat :=
   match getField key params >>= asNat with
   | some value => .ok value
   | none => .error invalidParams
+
+/-- Read a `Nat` parameter from either a JSON integer (preferred — bigint
+    serialised as a bare numeric literal by `tui/src/daemon.ts`) or a
+    `String` containing a `0x`-prefixed hex quantity or a plain decimal.
+    Used by `r1.sendRawSepolia` where the TUI ships a hex `value`. -/
+private def paramNatOrHexStr (params : Json) (key : String) : Except RpcError Nat :=
+  match getField key params with
+  | none => .error invalidParams
+  | some (.num n) =>
+      if n ≥ 0 then .ok n.toNat else .error invalidParams
+  | some (.str s) =>
+      let trimmed := s.trim
+      if trimmed.isEmpty then .error invalidParams
+      else if trimmed.startsWith "0x" || trimmed.startsWith "0X" then
+        match parseHexQuantity trimmed with
+        | some n => .ok n
+        | none   => .error invalidParams
+      else
+        match trimmed.toNat? with
+        | some n => .ok n
+        | none   => .error invalidParams
+  | _ => .error invalidParams
 
 private def txBytesFieldD (tx : Json) (key : String) (default : ByteArray := ByteArray.empty) :
     Except RpcError ByteArray :=
@@ -1045,6 +1111,18 @@ private def extractTxHash (stdout : String) : Option String := do
       ((line.toList.drop 2).all (fun c =>
         ('0' ≤ c ∧ c ≤ '9') || ('a' ≤ c ∧ c ≤ 'f') || ('A' ≤ c ∧ c ≤ 'F'))))
 
+/-- Parse a raw signed EIP-1559 tx hex printed by `cast mktx`. The
+    command emits a single `0x02…` line (typed-2 envelope, RLP-encoded);
+    we accept any 0x-prefixed even-length hex line that is unambiguously
+    longer than a 32-byte hash (so we don't confuse it with an extra
+    txhash line some cast builds may emit). -/
+private def extractRawSignedTx (stdout : String) : Option String := do
+  let lines := (stdout.splitOn "\n").map String.trim
+  lines.find? (fun line =>
+    line.startsWith "0x" && line.length > 66 && line.length % 2 == 0 &&
+      ((line.toList.drop 2).all (fun c =>
+        ('0' ≤ c ∧ c ≤ '9') || ('a' ≤ c ∧ c ≤ 'f') || ('A' ≤ c ∧ c ≤ 'F'))))
+
 /-- Poll `eth_getTransactionReceipt` until the tx is mined or the
     timeout elapses. Emits `tx-pending` notifications every poll while
     the receipt is still null. Returns the receipt JSON on success, or
@@ -1082,14 +1160,23 @@ private partial def waitForReceipt
     real time over the existing UDS notification channel. -/
 private def r1SendFlow (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
     (notify : LeanKohaku.Keystore.Tpm2Runtime.Notifier)
-    (keyName to : String) (amount : String) (mode : String) :
+    (keyName to : String) (amount : String) (mode : String)
+    (data? : Option String := none) :
     IO (Except RpcError Json) := do
   let scriptEnv : Array (String × Option String) := #[("LEAN_KOHAKU_TPM_KEY", some keyName)]
   -- Step 1: digest preparation. The script prints `<digest> <account> <wei>`
   -- on stdout and any `cast`/setup chatter on stderr.
+  -- When `data?` is `none`, no extra arg is appended — preserving byte-identical
+  -- behaviour for the value-only callers (`r1.sendSepolia`, `r1.sendEthSepolia`).
+  -- When `some hex`, the script's optional `[data-hex]` 4th positional arg is
+  -- forwarded to `prepare-digest(-eth)` and `broadcast-signed`.
+  let dataArgs : Array String :=
+    match data? with
+    | some d => #[d]
+    | none   => #[]
   let prepArgs : Array String :=
-    if mode == "eth" then #["prepare-digest-eth", to, amount]
-    else #["prepare-digest", to, amount]
+    if mode == "eth" then #["prepare-digest-eth", to, amount] ++ dataArgs
+    else #["prepare-digest", to, amount] ++ dataArgs
   let (prepCode, prepOut, prepErr) ← runScriptSplit prepArgs scriptEnv
   if prepCode != 0 then
     return .error
@@ -1108,21 +1195,43 @@ private def r1SendFlow (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                 { code := -32041,
                   message := "tpm sign returned no signature hex",
                   data := none })
-          -- Step 3: broadcast.
+          -- Step 3a: have the script ABI-encode + sign the EIP-1559
+          -- envelope locally (relayer EOA pays gas) but NOT broadcast —
+          -- it prints the raw signed tx hex. Append optional data hex so
+          -- the signed tx carries calldata when the caller is
+          -- `r1.sendRawSepolia`.
           let (bcCode, bcOut, bcErr) ← runScriptSplit
-            #["broadcast-signed", sigHex, to, wei] scriptEnv
+            (#["broadcast-signed", sigHex, to, wei] ++ dataArgs) scriptEnv
           if bcCode != 0 then
             return .error
               { code := -32042,
-                message := "r1 broadcast failed",
+                message := "r1 mktx failed",
                 data := some (.str (bcOut ++ bcErr)) }
-          match extractTxHash bcOut with
-          | none =>
-              pure <| .error
+          let some rawTx := extractRawSignedTx bcOut
+            | pure <| .error
                 { code := -32042,
-                  message := "could not parse txHash from broadcast output",
+                  message := "could not parse raw signed tx from mktx output",
                   data := some (.str (bcOut ++ bcErr)) }
-          | some txHash =>
+          -- Step 3b: broadcast through Outbound so the call lands in the
+          -- daemon's network log (network monitor / audit trail). The
+          -- response is the txHash string — that's the canonical hash
+          -- per eth_sendRawTransaction.
+          let txHashJson ← LeanKohaku.RPC.Outbound.sendRawTransaction
+            cfg.policy cfg.rpcEndpoint rawTx
+          match txHashJson with
+          | .error err =>
+              pure <| .error
+                { code := -32020,
+                  message := "chain RPC failed",
+                  data := some (.str err) }
+          | .ok j =>
+            match asString j with
+            | none =>
+                pure <| .error
+                  { code := -32020,
+                    message := "chain RPC failed",
+                    data := some (.str "eth_sendRawTransaction returned non-string result") }
+            | some txHash =>
               notify "tx-broadcasted" (.obj #[
                 ("txHash", .str txHash),
                 ("from", .str account),
@@ -1137,7 +1246,8 @@ private def r1SendFlow (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
               match ← waitForReceipt cfg notify txHash deadlineMs startMs via? with
               | .error err =>
                   let weiN := wei.toNat?.getD 0
-                  journalRecord keyName account to txHash "" "r1.send"
+                  let dataHexJ := data?.getD ""
+                  journalRecord keyName account to txHash dataHexJ "r1.send"
                     weiN 0 cfg.chainId none (some "pending") none none
                   pure <| .ok <| .obj #[
                     ("text", .str s!"R1 send broadcast {txHash} but receipt wait failed: {err}\n"),
@@ -1164,7 +1274,8 @@ private def r1SendFlow (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                     ("status", .str (if success then "success" else "revert"))
                   ])
                   let weiN := wei.toNat?.getD 0
-                  journalRecord keyName account to txHash "" "r1.send"
+                  let dataHexJ := data?.getD ""
+                  journalRecord keyName account to txHash dataHexJ "r1.send"
                     weiN 0 cfg.chainId none
                     (some (if success then "success" else "revert"))
                     (some blockNumber) (some gasUsed)
@@ -1200,12 +1311,36 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
   match req.method with
   | "daemon.ping" =>
       let shuttingDown ← LeanKohaku.Daemon.State.isShuttingDown state
+      -- Why: surface the user's `network set-rpc-chain` config so TUI/CLI
+      -- callers can pick a chain that actually has an RPC configured. The
+      -- entries are read-only metadata (no URL leaked, just the names the
+      -- user already typed), so no policy gate is required. Today we know
+      -- numeric ids for "mainnet"/"sepolia" and surface 0 for others — the
+      -- TUI uses the *name* as the daemon-RPC chainId selector, never the
+      -- numeric id, since the daemon's `swap.*` handlers parse a string.
+      let chainNumId : String → Int
+        | "mainnet" => 1
+        | "sepolia" => 11155111
+        | _         => 0
+      let isCurrent : String → Bool
+        | "mainnet" => cfg.chainId == 1
+        | "sepolia" => cfg.chainId == 11155111
+        | _         => false
+      let chainsArr : Array Json :=
+        cfg.chainEndpoints.map fun (name, _) =>
+          .obj #[
+            ("name",      .str name),
+            ("chainId",   .num (chainNumId name)),
+            ("hasRpc",    .bool true),
+            ("isCurrent", .bool (isCurrent name))
+          ]
       pure <| .ok <| .obj #[
         ("ok", .bool true),
         ("version", .str LeanKohaku.version),
         ("uptime", .num 0),
         ("locked", .arr ((← LeanKohaku.Daemon.State.unlockedNames state).toArray.map Json.str)),
         ("chainId", .num (Int.ofNat cfg.chainId)),
+        ("chains", .arr chainsArr),
         ("shuttingDown", .bool shuttingDown)
       ]
   | "daemon.version" =>
@@ -1217,6 +1352,68 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       LeanKohaku.Daemon.State.requestShutdown state
       discard <| IO.asTask (exitSoon cfg.socketPath)
       pure <| .ok <| .obj #[("ok", .bool true)]
+  | "network.show" =>
+      -- Structured snapshot of the daemon's *currently-active* network
+      -- config: what handlers will dial *right now*. Mirrors what
+      -- `kohaku network show` prints, but as JSON for the TUI. Read-only;
+      -- mutations still flow through the CLI's NetworkConfig writers (and
+      -- only take effect at daemon restart). Surfacing the resolved policy
+      -- name from env/file lets the UI label "strict | tor | dev | …"
+      -- without re-implementing the resolver.
+      let endpointJson (ep : LeanKohaku.RPC.Outbound.Endpoint) : Json :=
+        .obj #[
+          ("url", .str ep.url),
+          ("transport", .str ep.transport.asString),
+          ("backend", .str ep.backend.asString)
+        ]
+      let chainNumId : String → Int
+        | "mainnet" => 1
+        | "sepolia" => 11155111
+        | _ => 0
+      let isCurrent : String → Bool
+        | "mainnet" => cfg.chainId = 1
+        | "sepolia" => cfg.chainId = 11155111
+        | _ => false
+      let chainsArr : Array Json :=
+        cfg.chainEndpoints.map fun (name, ep) =>
+          .obj #[
+            ("name", .str name),
+            ("chainId", .num (chainNumId name)),
+            ("url", .str ep.url),
+            ("transport", .str ep.transport.asString),
+            ("backend", .str ep.backend.asString),
+            ("isCurrent", .bool (isCurrent name))
+          ]
+      let ensJson : Json :=
+        match cfg.ensRpcEndpoint with
+        | some ep => endpointJson ep
+        | none => .null
+      let logPath ← LeanKohaku.RPC.Outbound.networkLogPath
+      let configPath ← LeanKohaku.Cli.NetworkConfig.configPath
+      -- The daemon's `Config` does not retain the policy *name*; the file/env
+      -- resolver in `NetworkConfig` does. Reading it here matches what the
+      -- daemon would adopt on next start, which is the most useful label
+      -- for the user (the active in-process closure has no name).
+      let (_, _, _, _, policyName) ← LeanKohaku.Cli.NetworkConfig.resolved
+      let lightclientFlag : Bool :=
+        match cfg.rpcEndpoint.transport with
+        | .loopback => true
+        | _ => false
+      let indexersArr : Array Json :=
+        cfg.indexers.map fun e =>
+          .obj #[("name", .str e.name), ("url", .str e.url)]
+      pure <| .ok <| .obj #[
+        ("configFile", .str configPath),
+        ("chainId", .num (Int.ofNat cfg.chainId)),
+        ("rpc", endpointJson cfg.rpcEndpoint),
+        ("ens", ensJson),
+        ("perChain", .arr chainsArr),
+        ("policy", .str policyName),
+        ("socketPath", .str cfg.socketPath),
+        ("logPath", match logPath with | some p => .str p | none => .null),
+        ("lightclient", .bool lightclientFlag),
+        ("indexers", .arr indexersArr)
+      ]
   | "account.getDefault" =>
       -- Why: the default account is process-user state, not chain state, but
       -- the daemon is the right owner because the CLI is supposed to be a
@@ -1365,6 +1562,30 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           | .ok to, .ok amountEth =>
               r1SendFlow cfg state notify keyName to amountEth "eth"
           | _, _ => pure (.error invalidParams)
+  | "r1.sendRawSepolia" =>
+      -- Why: lets the TUI swap flow (and any future R1-side raw-tx surface)
+      -- ship `{to,value,data}` through the same TPM2-backed pre-sign pipeline
+      -- as `r1.sendEthSepolia`, gated by the existing biometric prompt. The
+      -- TUI already round-trips the pre-sign Confirm step before calling here.
+      -- `value` accepts a JSON integer (bigint from `daemon.ts`) or a
+      -- `0x`-prefixed / decimal `String`. `data` must start with `0x` and
+      -- contain at least one byte; for value-only sends use `r1.sendSepolia`.
+      match paramName req.params with
+      | .error err => pure (.error err)
+      | .ok keyName =>
+          match paramString req.params "to",
+                paramNatOrHexStr req.params "value",
+                paramString req.params "data" with
+          | .ok to, .ok value, .ok data =>
+              let trimmed := data.trim
+              if !(trimmed.startsWith "0x" || trimmed.startsWith "0X") then
+                pure (.error invalidParams)
+              else if trimmed.length ≤ 2 then
+                -- "0x" alone is a value-only send; route via r1.sendSepolia.
+                pure (.error invalidParams)
+              else
+                r1SendFlow cfg state notify keyName to (toString value) "wei" (some trimmed)
+          | _, _, _ => pure (.error invalidParams)
   | "chain.balance" =>
       match paramString req.params "address" with
       | .error err => pure (.error err)
@@ -1373,16 +1594,35 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           | none => pure (.error invalidParams)
           | some _ =>
               let block := paramStringD req.params "block" "latest"
-              let via? ← colibriVia state cfg.chainId
-              match ← LeanKohaku.RPC.Outbound.getBalance cfg.policy cfg.rpcEndpoint address block via? with
-              | .ok balance =>
-                  pure <| .ok <| .obj #[
-                    ("address", .str address),
-                    ("block", .str block),
-                    ("balance", balance)
-                  ]
+              -- Honor an optional `chain` selector (e.g. "mainnet"/"sepolia")
+              -- so the TUI wallet list can query each row on its actual
+              -- network — TPM/R1 slots are sepolia-only, while EOAs default
+              -- to whatever the daemon's primary chain is. Falls back to
+              -- `cfg.rpcEndpoint` when omitted, matching prior behavior.
+              let chain? := getField "chain" req.params >>= asString
+              match endpointForChain cfg chain? with
               | .error err =>
-                  pure <| .error { code := -32020, message := "chain RPC failed", data := some (.str err) }
+                  pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
+              | .ok ep =>
+                  let chainIdForVerify :=
+                    match chain? with
+                    | some "mainnet" => 1
+                    | some "sepolia" => 11155111
+                    | _ => cfg.chainId
+                  let via? ← colibriVia state chainIdForVerify
+                  match ← LeanKohaku.RPC.Outbound.getBalance cfg.policy ep address block via? with
+                  | .ok balance =>
+                      pure <| .ok <| .obj #[
+                        ("address", .str address),
+                        ("block", .str block),
+                        ("balance", balance),
+                        ("chain", .str (chain?.getD (
+                          if cfg.chainId = 1 then "mainnet"
+                          else if cfg.chainId = 11155111 then "sepolia"
+                          else "default")))
+                      ]
+                  | .error err =>
+                      pure <| .error { code := -32020, message := "chain RPC failed", data := some (.str err) }
   | "chain.nonce" =>
       match paramString req.params "address" with
       | .error err => pure (.error err)
@@ -1482,6 +1722,301 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                   pure <| .error { code := -32020, message := "chain RPC failed", data := some (.str err) }
           | _, _ => pure (.error invalidParams)
       | _, _ => pure (.error invalidParams)
+  | "swap.tokens.list" =>
+      -- Read-only exposure of `LeanKohaku.Swap.Tokens.registry` filtered by
+      -- the requested chain. The TUI consumes this so it does not duplicate
+      -- the registry in TypeScript. No policy gate: the data is static and
+      -- contains nothing chain-derived.
+      let chainStr := paramStringD req.params "chainId" "mainnet"
+      match LeanKohaku.Swap.Tokens.ChainId.fromString? chainStr with
+      | none =>
+          pure <| .error { code := -32602,
+                           message := "unknown chainId for swap.tokens.list",
+                           data := some (.str chainStr) }
+      | some chainId =>
+          let mut entries : Array Json := #[]
+          for t in LeanKohaku.Swap.Tokens.registry do
+            match LeanKohaku.Swap.Tokens.addressOn t chainId with
+            | some addr =>
+                entries := entries.push <| .obj #[
+                  ("symbol",   .str t.symbol),
+                  ("name",     .str t.name),
+                  ("address",  .str addr),
+                  ("decimals", .num (Int.ofNat t.decimals))
+                ]
+            | none => pure ()
+          pure <| .ok <| .obj #[
+            ("chainId", .num (Int.ofNat chainId.toNat)),
+            ("tokens",  .arr entries)
+          ]
+  | "swap.balances" =>
+      -- Why: fan out ERC-20 `balanceOf` + native `eth_getBalance` across the
+      -- swap registry filtered by chain. This is the data source for the
+      -- TUI swap from-picker (per-token balance column) and the
+      -- `kohaku balances` CLI command. Concurrency is load-bearing: a
+      -- sequential loop over ~10 tokens against a public RPC adds ~1s of
+      -- wall time. We spawn one `IO.asTask` per call and join them so the
+      -- whole response is bounded by the slowest single eth_call.
+      --
+      -- Trust model: balance reads are policy-gated by `Outbound.*`; the
+      -- response is render-only data. `via? := none` is intentional —
+      -- balance fan-out goes direct RPC to keep latency predictable and
+      -- avoid serializing through Colibri's UDS for every token.
+      --
+      -- Fail-soft: a single token whose `balanceOf` reverts (rare, e.g.
+      -- self-destructed contract) is silently dropped from the response,
+      -- mirroring the trace tokenMeta prefetch policy. Other tokens still
+      -- appear. ETH balance failure causes the whole call to error, since
+      -- a valid address should always have a queryable native balance.
+      let chainStr := paramStringD req.params "chainId" "mainnet"
+      match LeanKohaku.Swap.Tokens.ChainId.fromString? chainStr with
+      | none =>
+          pure <| .error { code := -32602,
+                           message := "unknown chainId for swap.balances",
+                           data := some (.str chainStr) }
+      | some chainId =>
+          match paramString req.params "address" with
+          | .error err => pure (.error err)
+          | .ok address =>
+              match LeanKohaku.Ethereum.Address.fromHex address with
+              | none => pure (.error invalidParams)
+              | some ownerAddr =>
+                  let chainName : String :=
+                    match chainId with | .mainnet => "mainnet" | .sepolia => "sepolia"
+                  match endpointForChain cfg (some chainName) with
+                  | .error err =>
+                      pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
+                  | .ok ep =>
+                      -- 1) Spawn ETH (native) balance task.
+                      let ethTask ← IO.asTask <|
+                        LeanKohaku.RPC.Outbound.getBalance cfg.policy ep address "latest" none
+                      -- 2) Build the per-token task list. Each entry carries
+                      --    the (symbol, address, decimals, name) it belongs to
+                      --    so we can join task results in order without
+                      --    re-walking the registry.
+                      let calldata := erc20BalanceOfData ownerAddr
+                      -- Why: `balancesCandidates` is the proved-source-of-truth
+                      -- for which tokens we fan out to (theorem
+                      -- `balancesCandidates_addressOn_some` rules out using a
+                      -- mainnet address on sepolia or vice-versa).
+                      let candidates :
+                          List (LeanKohaku.Swap.Tokens.Token × String) :=
+                        LeanKohaku.Invariants.Swap.balancesCandidates chainId
+                      let mut tokenTasks :
+                          Array (LeanKohaku.Swap.Tokens.Token × String ×
+                                 Task (Except IO.Error (Except String Json))) := #[]
+                      for (t, addr) in candidates do
+                        let task ← IO.asTask <|
+                          LeanKohaku.RPC.Outbound.ethCall cfg.policy ep addr calldata "latest" none
+                        tokenTasks := tokenTasks.push (t, addr, task)
+                      -- 3) Join native first; bail on failure (the address
+                      --    itself is unreachable, so per-token results are
+                      --    moot).
+                      match ← IO.wait ethTask with
+                      | .error e =>
+                          pure <| .error { code := -32020,
+                                           message := "chain RPC failed (eth balance)",
+                                           data := some (.str e.toString) }
+                      | .ok (.error err) =>
+                          pure <| .error { code := -32020,
+                                           message := "chain RPC failed (eth balance)",
+                                           data := some (.str err) }
+                      | .ok (.ok ethBal) =>
+                          let mut entries : Array Json := #[
+                            .obj #[
+                              ("symbol",   .str "ETH"),
+                              ("name",     .str "Ether"),
+                              ("address",  .null),
+                              ("decimals", .num 18),
+                              ("balance",  ethBal)
+                            ]
+                          ]
+                          for (t, addr, task) in tokenTasks do
+                            match ← IO.wait task with
+                            | .ok (.ok bal) =>
+                                entries := entries.push <| .obj #[
+                                  ("symbol",   .str t.symbol),
+                                  ("name",     .str t.name),
+                                  ("address",  .str addr),
+                                  ("decimals", .num (Int.ofNat t.decimals)),
+                                  ("balance",  bal)
+                                ]
+                            -- Fail-soft per token: drop on RPC error or
+                            -- task exception.
+                            | _ => pure ()
+                          pure <| .ok <| .obj #[
+                            ("chain",    .str chainName),
+                            ("chainId",  .num (Int.ofNat chainId.toNat)),
+                            ("address",  .str address),
+                            ("balances", .arr entries)
+                          ]
+  | "swap.uniV3.quote" =>
+      -- Why: try fee tiers [500, 3000, 10000] via QuoterV2.quoteExactInputSingle
+      -- and return the first (and largest amountOut) that doesn't revert.
+      let chainStr := paramStringD req.params "chainId" "mainnet"
+      match LeanKohaku.Swap.Tokens.ChainId.fromString? chainStr with
+      | none => pure <| .error { code := -32602, message := "unknown chainId for swap.uniV3.quote", data := some (.str chainStr) }
+      | some chainId =>
+          let chainName : String :=
+            match chainId with | .mainnet => "mainnet" | .sepolia => "sepolia"
+          match endpointForChain cfg (some chainName) with
+          | .error err => pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
+          | .ok ep =>
+              match paramString req.params "tokenIn", paramString req.params "tokenOut", getField "amountIn" req.params >>= asNat with
+              | .ok tinRaw, .ok toutRaw, some amountIn =>
+                  match LeanKohaku.Swap.Tokens.resolve tinRaw chainId, LeanKohaku.Swap.Tokens.resolve toutRaw chainId with
+                  | some (_, tinAddr), some (_, toutAddr) =>
+                      let quoter := LeanKohaku.Swap.UniV3.quoterFor chainId
+                      let router := LeanKohaku.Swap.UniV3.routerFor chainId
+                      let fees : List Nat := [500, 3000, 10000]
+                      let via? ← colibriVia state chainId.toNat
+                      let mut best : Option (Nat × Nat) := none
+                      for fee in fees do
+                        let data := LeanKohaku.Swap.UniV3.encodeQuoteExactInputSingle
+                          { tokenIn := tinAddr, tokenOut := toutAddr,
+                            amountIn := amountIn, fee := fee }
+                        match ← LeanKohaku.RPC.Outbound.ethCall cfg.policy ep quoter data "latest" via? with
+                        | .ok ret =>
+                            match asString ret with
+                            | some hex =>
+                                match LeanKohaku.Swap.UniV3.decodeQuoteAmountOut hex with
+                                | some amt =>
+                                    match best with
+                                    | none => best := some (amt, fee)
+                                    | some (b, _) =>
+                                        if amt > b then best := some (amt, fee)
+                                | none => pure ()
+                            | none => pure ()
+                        | .error _ => pure ()
+                      match best with
+                      | none =>
+                          pure <| .error { code := -32020, message := "no Uniswap V3 pool returned a quote (all fee tiers reverted)", data := none }
+                      | some (amt, fee) =>
+                          pure <| .ok <| .obj #[
+                            ("amountOut", .num (Int.ofNat amt)),
+                            ("fee", .num (Int.ofNat fee)),
+                            ("quoter", .str quoter),
+                            ("router", .str router),
+                            ("tokenIn", .str tinAddr),
+                            ("tokenOut", .str toutAddr),
+                            ("chainId", .num (Int.ofNat chainId.toNat))
+                          ]
+                  | _, _ =>
+                      pure <| .error { code := -32602, message := "could not resolve tokenIn/tokenOut for chain", data := none }
+              | _, _, _ => pure (.error invalidParams)
+  | "swap.uniV3.build" =>
+      let chainStr := paramStringD req.params "chainId" "mainnet"
+      match LeanKohaku.Swap.Tokens.ChainId.fromString? chainStr with
+      | none => pure <| .error { code := -32602, message := "unknown chainId for swap.uniV3.build", data := some (.str chainStr) }
+      | some chainId =>
+          let chainName : String :=
+            match chainId with | .mainnet => "mainnet" | .sepolia => "sepolia"
+          match endpointForChain cfg (some chainName) with
+          | .error err => pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
+          | .ok ep =>
+              match paramString req.params "fromAddress",
+                    paramString req.params "tokenIn",
+                    paramString req.params "tokenOut",
+                    getField "amountIn" req.params >>= asNat,
+                    getField "amountOutMin" req.params >>= asNat,
+                    getField "fee" req.params >>= asNat with
+              | .ok fromAddr, .ok tinRaw, .ok toutRaw, some amountIn, some amountOutMin, some fee =>
+                  let recipient := paramStringD req.params "recipient" fromAddr
+                  let isEthIn :=
+                    let s := tinRaw.trimAscii.toString.toLower
+                    s = "eth"
+                  let isEthOut :=
+                    let s := toutRaw.trimAscii.toString.toLower
+                    s = "eth"
+                  if isEthOut then
+                    pure <| .error { code := -32602, message := "token→ETH unwrap not yet supported in slice B", data := none }
+                  else
+                    match LeanKohaku.Swap.Tokens.resolve tinRaw chainId,
+                          LeanKohaku.Swap.Tokens.resolve toutRaw chainId with
+                    | some (_, tinAddr), some (_, toutAddr) =>
+                        let router := LeanKohaku.Swap.UniV3.routerFor chainId
+                        if isEthIn then
+                          -- ETH→token: multicall([exactInputSingle, refundETH]).
+                          -- tokenIn for the swap is WETH (already resolved).
+                          let exactCall :=
+                            LeanKohaku.Swap.UniV3.encodeExactInputSingle
+                              { tokenIn := tinAddr, tokenOut := toutAddr,
+                                fee := fee, recipient := recipient,
+                                amountIn := amountIn,
+                                amountOutMinimum := amountOutMin }
+                          let refund := LeanKohaku.Swap.UniV3.encodeRefundETH
+                          let mc := LeanKohaku.Swap.UniV3.encodeMulticall [exactCall, refund]
+                          pure <| .ok <| .obj #[
+                            ("kind", .str "ethToToken"),
+                            ("tx", .obj #[
+                              ("to", .str router),
+                              ("value", .num (Int.ofNat amountIn)),
+                              ("data", .str mc)
+                            ]),
+                            ("router", .str router),
+                            ("tokenIn", .str tinAddr),
+                            ("tokenOut", .str toutAddr),
+                            ("approval", .null)
+                          ]
+                        else
+                          -- token→token: plain exactInputSingle, no value.
+                          let data :=
+                            LeanKohaku.Swap.UniV3.encodeExactInputSingle
+                              { tokenIn := tinAddr, tokenOut := toutAddr,
+                                fee := fee, recipient := recipient,
+                                amountIn := amountIn,
+                                amountOutMinimum := amountOutMin }
+                          -- Allowance check: read allowance(fromAddr, router).
+                          let allowanceData :=
+                            LeanKohaku.Swap.UniV3.encodeAllowance fromAddr router
+                          let via? ← colibriVia state chainId.toNat
+                          let approval ←
+                            (do
+                              match ← LeanKohaku.RPC.Outbound.ethCall cfg.policy ep tinAddr allowanceData "latest" via? with
+                              | .ok ret =>
+                                  match asString ret with
+                                  | some hex =>
+                                      match LeanKohaku.Swap.UniV3.decodeWordAt hex 0 with
+                                      | some current =>
+                                          if current ≥ amountIn then pure Json.null
+                                          else
+                                            let approveData :=
+                                              LeanKohaku.Swap.UniV3.encodeApprove
+                                                router LeanKohaku.Swap.UniV3.maxUint256
+                                            pure <| Json.obj #[
+                                              ("to", .str tinAddr),
+                                              ("value", .num 0),
+                                              ("data", .str approveData),
+                                              ("currentAllowance", .num (Int.ofNat current))
+                                            ]
+                                      | none => pure Json.null
+                                  | none => pure Json.null
+                              | .error _ =>
+                                  -- best-effort: assume approval may be needed
+                                  let approveData :=
+                                    LeanKohaku.Swap.UniV3.encodeApprove
+                                      router LeanKohaku.Swap.UniV3.maxUint256
+                                  pure <| Json.obj #[
+                                    ("to", .str tinAddr),
+                                    ("value", .num 0),
+                                    ("data", .str approveData),
+                                    ("currentAllowance", .null)
+                                  ])
+                          pure <| .ok <| .obj #[
+                            ("kind", .str "tokenToToken"),
+                            ("tx", .obj #[
+                              ("to", .str router),
+                              ("value", .num 0),
+                              ("data", .str data)
+                            ]),
+                            ("router", .str router),
+                            ("tokenIn", .str tinAddr),
+                            ("tokenOut", .str toutAddr),
+                            ("approval", approval)
+                          ]
+                    | _, _ =>
+                        pure <| .error { code := -32602, message := "could not resolve tokenIn/tokenOut for chain", data := none }
+              | _, _, _, _, _, _ => pure (.error invalidParams)
   | "chain.sendRawTransaction" =>
       match paramString req.params "raw" with
       | .error err => pure (.error err)
@@ -1982,9 +2517,14 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
               let txObj : Json := .obj <|
                 (match from? with | some f => #[("from", .str f)] | none => #[])
                 ++ #[("to", .str to), ("value", .str value), ("data", .str data)]
-              let chainIdForVia :=
-                ((getField "chainId" req.params) >>= asNat).getD cfg.chainId
-              let via? ← colibriVia state chainIdForVia
+              -- Why: tx.simulate must run against a full execution node.
+              -- Colibri's stateless light-client model verifies state reads
+              -- but cannot faithfully replay arbitrary contract execution
+              -- (multicall, router calls, etc.) — light-client validation
+              -- of a multicall eth_call surfaces as a spurious revert.
+              -- The opt-in tx.simulateColibri method covers the verified
+              -- case explicitly. Keep this path on direct RPC.
+              let via? : Option LeanKohaku.RPC.Outbound.VerifyVia := none
               let callRes ← LeanKohaku.RPC.Outbound.call cfg.policy endpoint
                 .call (.arr #[txObj, .str block]) via?
               let gasRes ← LeanKohaku.RPC.Outbound.estimateGas
@@ -2816,6 +3356,26 @@ def run (cfg : Config) : IO Unit := do
         LeanKohaku.Daemon.Uds.bind cfg.socketPath
   let state ← LeanKohaku.Daemon.State.new
   IO.eprintln s!"leankohaku-daemon: listening on {cfg.socketPath}"
+  -- Default-on Colibri stateless verification. Spawning the sidecar is
+  -- cheap (no committee bootstrap until the first proofable read), so
+  -- enabling at startup costs us almost nothing and means proofable
+  -- reads are verified out-of-the-box. Opt out with `KOHAKU_COLIBRI=0`.
+  -- Failure is non-fatal: the daemon keeps serving and reads transparently
+  -- fall through to the configured HTTP RPC.
+  let colibriDisabled :=
+    match ← IO.getEnv "KOHAKU_COLIBRI" with
+    | some "0" | some "off" | some "false" | some "no" => true
+    | _ => false
+  unless colibriDisabled do
+    let runtimeRoot := match ← IO.getEnv "XDG_RUNTIME_DIR" with
+      | some d => d
+      | none => "/tmp"
+    let colibriSocket := s!"{runtimeRoot}/leankohaku/colibri.sock"
+    try
+      let _ ← LeanKohaku.Daemon.State.colibriEnable state colibriSocket
+      IO.eprintln s!"leankohaku-daemon: colibri verified-reads enabled (socket={colibriSocket})"
+    catch e =>
+      IO.eprintln s!"leankohaku-daemon: colibri auto-enable failed ({e}); reads will use the configured RPC"
   try
     acceptLoop cfg state listener
   finally

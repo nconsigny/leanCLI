@@ -284,6 +284,10 @@ inductive Command where
   | completion (shell : String)
   | tui
   | resolve (name : String)
+  | swapQuote (fromTok toTok amount : String) (chain? : Option String)
+  | swapExec (fromTok toTok amount : String) (receiver? : Option String)
+      (slippage? : Option String) (chain? : Option String)
+  | balances (chain? : Option String) (address? : Option String) (json : Bool)
   | invalid (args : List String)
   deriving Repr
 
@@ -366,6 +370,23 @@ def extractLimit : List String → (List String × Option Nat)
         let (rest', x) := extractLimit rest
         (flag :: rest', x)
 
+/-- Strip a long flag `--<name> <value>` (or `--<name>=<value>`) from anywhere
+    in argv. Returns the remainder and the captured string value if present. -/
+def extractStringFlag (name : String) : List String → (List String × Option String)
+  | [] => ([], none)
+  | flag :: v :: rest =>
+      if flag = "--" ++ name then (rest, some v)
+      else if flag.startsWith ("--" ++ name ++ "=") then
+        (v :: rest, some (flag.drop ("--" ++ name ++ "=").length).toString)
+      else
+        let (rest', x) := extractStringFlag name (v :: rest)
+        (flag :: rest', x)
+  | [flag] =>
+      if flag.startsWith ("--" ++ name ++ "=") then
+        ([], some (flag.drop ("--" ++ name ++ "=").length).toString)
+      else
+        ([flag], none)
+
 /-- Strip a boolean `--all` / `-a` flag from anywhere in argv. -/
 def extractAllFlag : List String → (List String × Bool)
   | [] => ([], false)
@@ -377,6 +398,16 @@ def extractAllFlag : List String → (List String × Bool)
       (rest', true)
   | flag :: rest =>
       let (rest', b) := extractAllFlag rest
+      (flag :: rest', b)
+
+/-- Strip a boolean `--json` flag from anywhere in argv. -/
+def extractJsonFlag : List String → (List String × Bool)
+  | [] => ([], false)
+  | "--json" :: rest =>
+      let (rest', _) := extractJsonFlag rest
+      (rest', true)
+  | flag :: rest =>
+      let (rest', b) := extractJsonFlag rest
       (flag :: rest', b)
 
 def parse : List String → Command
@@ -505,6 +536,35 @@ def parse : List String → Command
   | ["shield", "import", mnemonic] => .shieldedImport mnemonic
   | ["shield", walletName, amountEth] => .shieldedDeposit walletName amountEth
   | ["unshield", to, amountEth] => .shieldedWithdraw to amountEth
+  | "swap" :: "quote" :: rest =>
+      let (rest, fromTok?) := extractStringFlag "from" rest
+      let (rest, toTok?) := extractStringFlag "to" rest
+      let (rest, amount?) := extractStringFlag "amount" rest
+      let (rest, chain?) := extractChain rest
+      match fromTok?, toTok?, amount?, rest with
+      | some f, some t, some a, [] => .swapQuote f t a chain?
+      | _, _, _, _ => .invalid ("swap" :: "quote" :: rest)
+  | "swap" :: "exec" :: rest =>
+      let (rest, fromTok?) := extractStringFlag "from" rest
+      let (rest, toTok?) := extractStringFlag "to" rest
+      let (rest, amount?) := extractStringFlag "amount" rest
+      let (rest, receiver?) := extractStringFlag "receiver" rest
+      let (rest, slippage?) := extractStringFlag "slippage" rest
+      let (rest, chain?) := extractChain rest
+      match fromTok?, toTok?, amount?, rest with
+      | some f, some t, some a, [] => .swapExec f t a receiver? slippage? chain?
+      | _, _, _, _ => .invalid ("swap" :: "exec" :: rest)
+  | "balances" :: rest =>
+      -- `kohaku balances [--chain mainnet|sepolia] [--address 0x...] [--json]`
+      -- Print one row per registry token (filtered by chain) plus an ETH
+      -- synthetic row. Defaults: chain = daemon's current chain;
+      -- address = active EOA's default account.
+      let (rest, chain?) := extractChain rest
+      let (rest, address?) := extractStringFlag "address" rest
+      let (rest, json) := extractJsonFlag rest
+      match rest with
+      | [] => .balances chain? address? json
+      | _  => .invalid ("balances" :: rest)
   | ["completion", shell]  => .completion shell
   | ["tui"]                => .tui
   | ["ui"]                 => .tui
@@ -787,6 +847,9 @@ def helpText : String :=
      balance | balance -a                Sum balances across all wallets (Sepolia).\n\
                                          With -a also adds shielded (Privacy-Pools) totals.\n\
      balance <address>                   Read ETH balance of one address.\n\
+     balances [--chain <c>] [--address 0x..] [--json]\n\
+                                         Per-token balances (registry + ETH) for one address.\n\
+                                         Defaults: current chain, default account.\n\
      list | list -a                      Tree view of EOA + TPM/R1 wallets.\n\
      wallet use <wallet>                 Set default wallet for `send`.\n\
      wallet current                      Print current default wallet.\n\
@@ -865,7 +928,7 @@ def bashCompletion : String :=
     "_leankohaku_complete() {",
     "  local cur",
     "  cur=\"${COMP_WORDS[COMP_CWORD]}\"",
-    "  local top=\"help version policy network doctor wallet shield unshield daemon balance list send from chain debug resolve tui ui\"",
+    "  local top=\"help version policy network doctor wallet shield unshield daemon balance balances list send from chain debug resolve tui ui\"",
     "  # If we're completing the value after --account, decide whether the value",
     "  # is a wallet name (e.g. for `daemon <wallet> send`) or a sub-account index",
     "  # (e.g. for `send` and `eoa send|sign-*|send-wei`).",

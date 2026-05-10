@@ -7,8 +7,9 @@ import LeanKohaku.Ethereum.Tx
 # EOA signing helpers
 
 This module keeps EOA signing typed: it signs EIP-1559 transaction payloads,
-not arbitrary bytes. Runtime Keccak and secp256k1 signing go through native
-helpers; pure signing is retained as a spec target.
+not arbitrary bytes. Runtime Keccak and secp256k1 signing go exclusively
+through the `*IO` entry points, which shell out to the native
+HACL/libsecp256k1 helpers (`INVARIANTS.md` Category 13).
 -/
 
 namespace LeanKohaku.Wallet.EOA
@@ -28,16 +29,6 @@ private def take (bytes : ByteArray) (start len : Nat) : ByteArray :=
 private def expectOk {α : Type} : Except String α → IO α
   | .ok value => pure value
   | .error err => throw <| IO.userError err
-
-def signingDigest (tx : TxEip1559) : Nat :=
-  bytesToNat (Hacl.keccak256Ethereum tx.signingPayload)
-
-def signEip1559WithNonce
-    (tx : TxEip1559)
-    (privateKey nonceK : Nat)
-    (recovery : UInt8 := 0) : Option SignedTx := do
-  let sig ← signWithNonce privateKey (signingDigest tx) nonceK recovery
-  some { unsigned := tx, sig := sig }
 
 def encodeSignedEip1559 (tx : SignedTx) : ByteArray :=
   tx.encode

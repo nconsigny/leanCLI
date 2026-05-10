@@ -2,6 +2,7 @@ import LeanKohaku.Daemon.Server
 import LeanKohaku.Encoding.Json
 import LeanKohaku.Privacy.NetworkPolicy
 import LeanKohaku.RPC.Outbound
+import LeanKohaku.Sphincs.Bridge
 
 /-!
 # Daemon configuration
@@ -75,6 +76,56 @@ def parseTransport? : String → Option Transport
   | "direct" => some Transport.direct
   | "loopback" => some Transport.loopback
   | _ => none
+
+/-- Known chain names that participate in env-var fallback resolution. -/
+def envChainNames : List String := ["mainnet", "sepolia"]
+
+/-- Source of a resolved per-chain RPC URL, used both by `network show` for
+    display and by precedence-correctness proofs. -/
+inductive ChainUrlSource
+  | persisted   -- daemon.json `rpc_urls.<name>`
+  | namespaced  -- LEANKOHAKU_RPC_URL_<UPPER>
+  | generic     -- <UPPER>_RPC_URL
+  deriving Repr, DecidableEq
+
+def ChainUrlSource.envVarName (name : String) : ChainUrlSource → Option String
+  | .persisted  => none
+  | .namespaced => some ("LEANKOHAKU_RPC_URL_" ++ name.toUpper)
+  | .generic    => some (name.toUpper ++ "_RPC_URL")
+
+/-- Pure model of per-chain RPC URL resolution. Persisted (`daemon.json`)
+    wins; otherwise the namespaced env var beats the generic one. Empty inputs
+    must be filtered by callers (env reads trim and discard empty values). -/
+def pickChainUrl (persisted envNamespaced envGeneric : Option String)
+    : Option (String × ChainUrlSource) :=
+  match persisted with
+  | some u => some (u, .persisted)
+  | none =>
+      match envNamespaced with
+      | some u => some (u, .namespaced)
+      | none =>
+          match envGeneric with
+          | some u => some (u, .generic)
+          | none => none
+
+/-- Lookup an env-supplied RPC URL for `chain`, with the namespaced form
+    `LEANKOHAKU_RPC_URL_<UPPER>` taking precedence over the generic
+    `<UPPER>_RPC_URL`. Empty or whitespace-only values are treated as unset,
+    consistent with how `LEANKOHAKU_RPC_URL` is handled.
+    Note: per-chain transport overrides via env (e.g. `LEANKOHAKU_RPC_TRANSPORT_<UPPER>`)
+    are intentionally not supported for now. -/
+def envChainUrl? (chain : String) : IO (Option (String × ChainUrlSource)) := do
+  let readTrimmed (key : String) : IO (Option String) := do
+    match ← IO.getEnv key with
+    | some raw =>
+        let trimmed := raw.trim
+        if trimmed.isEmpty then pure none else pure (some trimmed)
+    | none => pure none
+  let envNs ← readTrimmed ("LEANKOHAKU_RPC_URL_" ++ chain.toUpper)
+  let envGen ← readTrimmed (chain.toUpper ++ "_RPC_URL")
+  -- Persisted = none here: callers handle persisted-wins separately at the
+  -- chainEndpoints merge site. This call only resolves the env half.
+  pure (pickChainUrl none envNs envGen)
 
 def resolve : IO LeanKohaku.Daemon.Server.Config := do
   let fileCfg ← readConfigJson
@@ -157,7 +208,7 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
   -- Why: per-chain RPC URL map. Picked at call time when a request specifies
   -- `chain`. We accept either bare strings (`{ "mainnet": "https://..." }`) or
   -- objects with optional transport (`{ "mainnet": { "url": "...", "transport": "direct" } }`).
-  let chainEndpoints : Array (String × LeanKohaku.RPC.Outbound.Endpoint) :=
+  let persistedChainEndpoints : Array (String × LeanKohaku.RPC.Outbound.Endpoint) :=
     match fileCfg.bind (getField "rpc_urls") with
     | some (.obj fields) =>
         fields.filterMap fun (name, value) =>
@@ -179,6 +230,42 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
               | none => none
           | _ => none
     | _ => #[]
+  -- Why: env-var fallback for per-chain RPC URLs. Persisted entries always win
+  -- (explicit user config in `daemon.json`); env only fills in missing chains.
+  -- For each known chain, we look at `LEANKOHAKU_RPC_URL_<UPPER>` first
+  -- (authoritative, namespaced) and then `<UPPER>_RPC_URL` (matches typical
+  -- `.env` ergonomics). See `envChainUrl?` for empty-string handling.
+  let mut chainEndpoints := persistedChainEndpoints
+  for chain in envChainNames do
+    if chainEndpoints.any (fun (k, _) => k = chain) then
+      continue
+    match ← envChainUrl? chain with
+    | some (url, _src) => chainEndpoints := chainEndpoints.push (chain, endpointFromUrl url none)
+    | none => pure ()
+  -- Why: SPHINCS- verifier address map. Per-(chain × paramSet); each entry's
+  -- address is optional (null in JSON = "schema known, address pending").
+  -- We accept `paramSet` keys exactly as `Sphincs.ParamSet.toString` emits them
+  -- ("SLH-DSA-SHA2-128-24", "C7") and silently drop unknown values rather than
+  -- error — the daemon enforces fail-closed at use time via `sphincsVerifierFor`.
+  let sphincsVerifiers : Array LeanKohaku.Daemon.Server.SphincsVerifierEntry :=
+    match fileCfg.bind (getField "sphincs_verifiers") with
+    | some (.obj chains) =>
+        chains.flatMap fun (chain, value) =>
+          match value with
+          | .obj psFields =>
+              psFields.filterMap fun (psName, addrJson) =>
+                match LeanKohaku.Sphincs.ParamSet.parse? psName with
+                | some ps =>
+                    let address : Option String :=
+                      match addrJson with
+                      | .str s =>
+                          let trimmed := s.trimAscii.toString
+                          if trimmed.isEmpty then none else some trimmed
+                      | _ => none
+                    some { chain := chain, paramSet := ps, address := address }
+                | none => none
+          | _ => #[]
+    | _ => #[]
   -- Why: read configured indexers (urls only — never api keys on disk).
   let indexers : Array LeanKohaku.Daemon.Server.IndexerEntry :=
     match fileCfg.bind (getField "indexers") with
@@ -195,6 +282,7 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
   pure { socketPath := socketPath, chainId := chainId, policy := policy,
          rpcEndpoint := rpcEndpoint, ensRpcEndpoint := ensRpcEndpoint,
          chainEndpoints := chainEndpoints,
-         indexers := indexers }
+         indexers := indexers,
+         sphincsVerifiers := sphincsVerifiers }
 
 end LeanKohaku.Daemon.Config

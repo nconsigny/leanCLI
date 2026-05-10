@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
-import SelectInput from "ink-select-input";
+import Select from "../widgets/Select.js";
 import { Wallet } from "../types.js";
 import { Layout, Banner } from "../widgets/Layout.js";
 import Form, { Field } from "../widgets/Form.js";
@@ -56,7 +56,7 @@ export default function RevealMnemonicFlow({ wallet, onDone }: Props) {
               daemon will refuse and only the raw seed could be exported.
           </Text>
         </Box>
-        <SelectInput
+        <Select
           items={[
             { label: "← Cancel",                         value: "cancel" },
             { label: "I understand — show the mnemonic", value: "go" },

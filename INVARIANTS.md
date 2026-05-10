@@ -338,6 +338,21 @@ transport.
 
 **Status:** ✅ proved — `LeanKohaku/Invariants/Network.lean`
 
+### 6.6 Per-chain RPC URL precedence
+Persisted `daemon.json` entries always win over env-supplied URLs; the
+namespaced env form `LEANKOHAKU_RPC_URL_<UPPER>` always wins over the generic
+`<UPPER>_RPC_URL`. This rules out a stale env value silently overriding
+explicit user config or the legacy generic form shadowing the leanKohaku-
+namespaced one.
+
+**Props:**
+- `pickChainUrl (some p) ns gen = some (p, .persisted)`
+- `pickChainUrl none (some ns) (some gen) = some (ns, .namespaced)`
+- `pickChainUrl none none (some gen) = some (gen, .generic)`
+- `pickChainUrl none none none = none`
+
+**Status:** ✅ proved — `LeanKohaku/Invariants/Network.lean::pickChainUrl_*`
+
 ---
 
 ## Category 7 — Provider policy
@@ -448,6 +463,234 @@ precompile input, and pass the verifier hook before nonce advances.
 - `apply st op verify = some st' → st'.nonce = st.nonce + 1`
 
 **Status:** ✅ proved — `LeanKohaku/Invariants/R1Account.lean`
+
+---
+
+## Category 12 — Sphincs hybrid account contract
+
+The on-chain `SphincsAccount.sol` contract is a hybrid ECDSA + stateless
+SPHINCS+ ERC-4337 account with rotatable key material. Every UserOp is
+gated by **both** ECDSA recovery to a stored `owner` AND a stateless
+SPHINCS+ verifier keyed by stored `(pkSeed, pkRoot)`. Rotation goes
+through dedicated self-call paths `rotateKeys(bytes32,bytes32)` and
+`rotateOwner(address)`. The Lean abstract model lives in
+`LeanKohaku/Contract/SphincsAccount.lean`.
+
+The verifier contract address is part of the deployed account's immutable
+configuration, so SPHINCS+ parameter-set selection (e.g. JARDIN SPX vs
+SLH-DSA-SHA2-128-24) lives outside this abstract model: the user's local
+signer must produce signatures that match the parameter set the deployed
+verifier accepts.
+
+### 12.1 Sphincs account accepts only supported-chain operations
+The account model rejects any operation whose chain id is not explicitly
+supported by the wallet policy.
+
+**Prop:** `apply st op verify = some st' → supportedChainId op.chainId = true`
+**Status:** ✅ proved — `LeanKohaku/Invariants/SphincsAccount.lean::applySomeSupportedChainOnly`
+
+### 12.2 Sphincs account nonce monotonicity
+Accepted operations consume the current nonce and advance it by one.
+
+**Props:**
+- `apply st op verify = some st' → op.nonce = st.nonce`
+- `apply st op verify = some st' → st'.nonce = st.nonce + 1`
+
+**Status:** ✅ proved — `applySomeConsumesCurrentNonce`,
+`applySomeIncrementsNonce`
+
+### 12.3 Sphincs account hybrid signature gate
+Every accepted operation passed both the ECDSA recovery check (recovers
+to the **pre-state** `owner`) and the stateless SPHINCS+ verifier
+(against the **pre-state** `(pkSeed, pkRoot)`). A break of either
+primitive alone is insufficient to forge a UserOp.
+
+**Props:**
+- `apply st op verify = some st' →
+     verify.ecdsaRecover op.digest op.ecdsaSig = some st.key.owner`
+- `apply st op verify = some st' →
+     verify.sphincsVerify st.key.pkSeed st.key.pkRoot op.digest op.sphincsSig = true`
+
+**Status:** ✅ proved — `applySomeEcdsaRecoversToOwner`,
+`applySomePqVerifies`
+
+### 12.4 Sphincs account rotation isolation
+Each payload preserves exactly the half of the key material it does not
+rotate.
+
+**Props:**
+- `apply st op verify = some st' → op.payload = .regular →
+     st'.key = st.key`
+- `apply st op verify = some st' → op.payload = .rotateKeys s r →
+     st'.key.owner = st.key.owner`
+- `apply st op verify = some st' → op.payload = .rotateOwner o →
+     st'.key.pkSeed = st.key.pkSeed ∧ st'.key.pkRoot = st.key.pkRoot`
+
+**Status:** ✅ proved — `applyRegularKeysUnchanged`,
+`applyRotateKeysPreservesOwner`, `applyRotateOwnerPreservesKeys`
+
+### 12.5 Sphincs account owner rotation safety
+The `rotateOwner(0x0…0)` call is rejected by the contract (`require(newOwner != address(0))`).
+
+**Prop:** `op.payload = .rotateOwner addressZero → apply st op verify = none`
+**Status:** ✅ proved — `LeanKohaku/Invariants/SphincsAccount.lean::applyRotateOwnerNonZero`
+
+### 12.6 Sphincs PQ key supersession
+After a successful `rotateKeys` to `(s', r')`, every subsequent accepted
+op must SPHINCS+-verify against `(s', r')`. Equivalently: an oracle that
+only accepts the previous `(pkSeed, pkRoot)` cannot accept any op after
+the rotation. This is the load-bearing PQ-recovery property: `rotateKeys`
+genuinely supersedes a compromised SPHINCS+ key.
+
+**Prop:** `apply st op1 verify = some st' →
+           op1.payload = .rotateKeys s' r' →
+           apply st' op2 verify = some st'' →
+             verify.sphincsVerify s' r' op2.digest op2.sphincsSig = true`
+**Status:** ✅ proved — `LeanKohaku/Invariants/SphincsAccount.lean::applyRotateKeysSupersedesOldPq`
+
+### 12.7 Sphincs owner rotation supersession
+Symmetric to 12.6 for `rotateOwner`: after a successful owner rotation,
+every subsequent accepted op must ECDSA-recover to the new owner. An
+attacker holding only the previous owner's ECDSA key cannot produce a
+further accepted op.
+
+**Prop:** `apply st op1 verify = some st' →
+           op1.payload = .rotateOwner newOwner →
+           apply st' op2 verify = some st'' →
+             verify.ecdsaRecover op2.digest op2.ecdsaSig = some newOwner`
+**Status:** ✅ proved — `LeanKohaku/Invariants/SphincsAccount.lean::applyRotateOwnerSupersedesOldOwner`
+
+---
+
+## Category 11 — Swap (Uniswap V3)
+
+### 11.1 Slippage zero is identity
+A 0-bps slippage tolerance applied to a quoted output amount must leave
+the amount untouched. Rules out off-by-one rounding bugs in the slippage
+helper used by `swap exec` when assembling `amountOutMinimum`.
+
+**Prop:** `applySlippageBps amountOut 0 = amountOut`
+**Status:** ✅ proved — `LeanKohaku/Invariants/Swap.lean::slippageZeroIsIdentity`
+
+### 11.2 swap.balances candidate set is chain-correct
+The token list `swap.balances` fans out to (per `balancesCandidates`)
+contains only `(token, addr)` pairs where `addressOn token chain = some
+addr`. Rules out using a mainnet address on sepolia (or vice-versa) when
+querying `balanceOf` — a silent fall-through here would produce a
+balance for a non-deployed contract and mis-render in the TUI.
+
+**Prop:** `(t, addr) ∈ balancesCandidates chain → addressOn t chain = some addr`
+**Status:** ✅ proved — `LeanKohaku/Invariants/Swap.lean::balancesCandidates_addressOn_some`
+
+---
+
+## Category 13 — Cryptographic assumptions (axiomatized)
+
+The wallet's end-to-end security cannot be discharged by Lean proofs alone —
+hash collision-resistance, signature unforgeability, AEAD authenticity, and
+KDF/PRF properties are standard cryptographic assumptions, not theorems.
+Every entry below is 🔒 axiomatized: it lives behind an `opaque` in
+`LeanKohaku/Crypto/Hacl.lean` (bound to HACL\*/RustCrypto), behind
+`LeanKohaku/Crypto/Secp256k1Native.lean`, or as an oracle parameter in an
+account contract model. None can be flipped to ✅; they exist to be cited
+by the load-bearing proofs above.
+
+### 13.1 Keccak-256 collision and preimage resistance
+`Crypto/Hacl.lean::keccak256Ethereum` (Ethereum delimiter `0x01`). Load-bearing
+for EIP-1559 signing (`Wallet/EOA.lean`), address derivation
+(`Wallet/Address.lean`), EIP-712 (`Ethereum/Eip712.lean`), ENS namehash
+(`Ethereum/Ens.lean`), 4-byte selectors (`Swap/UniV3.lean`), and ERC-4337
+`userOpHash` (`Sphincs/UserOp.lean`).
+
+**Assumption:** collision/preimage/second-preimage-resistance at 128-bit
+security. A break invalidates every signing flow and every
+domain-separation tag.
+
+### 13.2 SHA-256 collision and preimage resistance
+`Crypto/Hacl.lean::sha256`. Load-bearing for the BIP-39 mnemonic checksum
+(`Wallet/Mnemonic.lean`) and the BIP-32 HASH160 fingerprint input
+(`Wallet/HDKey.lean`).
+
+**Assumption:** collision and preimage resistance at 128-bit security.
+
+### 13.3 RIPEMD-160 second-preimage resistance for HASH160
+`Crypto/Hacl.lean::ripemd160` (separate RustCrypto helper; pinned HACL does
+not expose RIPEMD-160). Used only for BIP-32 HASH160 child-key fingerprints
+(`Wallet/HDKey.lean`), never for Ethereum addresses.
+
+**Assumption:** second-preimage-resistance sufficient for HD-wallet
+fingerprint disambiguation. Full collision-resistance is not required —
+fingerprints are advisory.
+
+### 13.4 HMAC-SHA-512 is a PRF
+`Crypto/Hacl.lean::hmacSha512`. Load-bearing for BIP-32 child-key
+derivation (`Wallet/HDKey.lean`).
+
+**Assumption:** HMAC-SHA-512 is a secure pseudo-random function under the
+standard NMAC/dual-PRF assumptions. A break leaks the chain code and
+breaks BIP-32 path independence.
+
+### 13.5 PBKDF2-HMAC-SHA-512 is a slow KDF
+`Crypto/Hacl.lean::pbkdf2HmacSha512`. Load-bearing for BIP-39 seed
+derivation (`Wallet/Mnemonic.lean`) and at-rest keystore wrapping
+(`Wallet/EoaStore.lean`).
+
+**Assumption:** PBKDF2 with the configured iteration count provides the
+documented work factor against passphrase brute force.
+
+### 13.6 ChaCha20-Poly1305 is IND-CCA / INT-CTXT secure
+`Crypto/Hacl.lean::{chacha20Poly1305Seal,chacha20Poly1305Open}`.
+Load-bearing for at-rest keystore encryption (`Wallet/EoaStore.lean`).
+
+**Assumption:** ChaCha20-Poly1305 with a fresh 96-bit nonce per
+encryption is IND-CCA secure and provides ciphertext integrity.
+Nonce-uniqueness is a wallet-side obligation; nonce reuse on the same
+key voids both guarantees.
+
+### 13.7 secp256k1 ECDSA is EUF-CMA
+`Crypto/Secp256k1Native.lean::{signIO,recoverIO,verifyIO,pubkeyIO}`, bound
+to libsecp256k1. The pure spec module `Crypto/Secp256k1.lean` is not used
+at runtime. Load-bearing for EOA signing (`Wallet/EOA.lean`) and the
+ECDSA half of the Sphincs hybrid gate (12.3, 12.7).
+
+**Assumption:** existential unforgeability under chosen-message attack of
+ECDSA over secp256k1 with low-S signatures, and faithful behavior of
+libsecp256k1.
+
+### 13.8 P-256 / EIP-7951 P256VERIFY is EUF-CMA
+Modeled by the `verify : PrecompileInput → Bool` parameter of
+`Invariants/R1Account.lean::apply`; on-chain by the EIP-7951 precompile
+at address `0x100`. Hardware backends are modeled in Category 8. The 9.1
+and 10.x proofs are vacuous unless the oracle reflects ECDSA-P-256
+EUF-CMA.
+
+**Assumption:** existential unforgeability under chosen-message attack of
+ECDSA over NIST P-256, and faithful implementation by the deployed
+EIP-7951 precompile.
+
+### 13.9 SPHINCS+ is EUF-CMA (post-quantum)
+Modeled by `Contract/SphincsAccount.lean::VerifyOracle.sphincsVerify`;
+runtime signing goes through the SPHINCS+ sidecars under `bridge/`. The
+12.3 and 12.6 proofs are vacuous unless the oracle reflects SPHINCS+
+EUF-CMA, in particular preimage-resistance of the underlying tweakable
+hash family.
+
+**Assumption:** existential unforgeability under chosen-message attack of
+the configured SPHINCS+ parameter set against quantum and classical
+adversaries, and faithful implementation by both the local sidecar and
+the on-chain verifier contract.
+
+### 13.10 Native helper integrity
+Every primitive in this category is reached through a one-shot
+subprocess (`runHexHelper` in `Crypto/Hacl.lean`, mirrored in
+`Crypto/Secp256k1Native.lean`). The Lean side does not link the
+implementations; it spawns a binary by basename (see
+`Crypto/Hacl.lean:42-49` and `Crypto/Secp256k1Native.lean:14-17`) and
+parses hex from stdout.
+
+**Assumption:** the helper binaries on `$PATH` faithfully implement the
+named primitive and have not been substituted by an attacker. A
+compromised helper defeats every higher-level invariant.
 
 ---
 

@@ -1,0 +1,41 @@
+Upstream provenance: nconsigny/SPHINCS- @ 63617e166d2e3a576ec5a8c99bebef344c9ca645
+                     signer-wasm/ subtree (Rust SPHINCS+ C6 signer)
+                     verifier source: legacy/src/SPHINCs-C9Asm.sol @
+                                      5964b61d9912f7fa510b07e0bf63e529148b304a
+
+The cryptographic core (hash.rs, wots.rs, fors.rs, merkle.rs, sphincs.rs)
+is a direct copy of the upstream `signer-wasm/src/` Rust source at the
+signer-wasm commit above. Only `params.rs` has been retuned from C6
+(n=16, h=32, d=4, a=8, k=14, w=16, l=32, target_sum=240, sig=3352) to C9
+(n=16, h=20, d=2, a=12, k=11, w=8, l=43, target_sum=208, sig=3816),
+matching the on-chain verifier `legacy/src/SPHINCs-C9Asm.sol` at the
+referenced upstream commit. C9 is deployed on Sepolia at
+0x18F005EECd41624644AA364bA8857258FEB3C26D.
+
+Files added (not copied from upstream):
+- main.rs       — JSON-RPC stdio dispatcher matching `shim/shim_main.c`
+                  (info / keygen / sign / verify), so the Lean bridge in
+                  `LeanKohaku/Sphincs/Bridge.lean` is unchanged across
+                  parameter sets.
+- verifier.rs   — Rust port of `SPHINCs-C9Asm.sol`, used for local
+                  verify-after-sign in `signWithVerify`. The on-chain
+                  Yul verifier remains the trust anchor for any sig that
+                  travels to a chain.
+- lib.rs        — module root; the upstream lib.rs included wasm-bindgen
+                  exports we don't need.
+- keygen.rs     — replaced; the upstream version pulled in BIP-39 / k256.
+                  We instead derive (pk_seed, sk_seed, pk_root) from a
+                  raw 32-byte seed via keccak256 with the domain tag
+                  "sphincs-c9-v1" (parameter-set-distinct from C7).
+                  Mnemonic / BIP-32 derivation lives in the daemon, not
+                  here.
+
+Upstream license: the SPHINCS- repository carries no LICENSE file as of
+the pinned commit (verified via `gh api repos/nconsigny/SPHINCS-`). Treat
+the vendored cryptographic core as a research-prototype copy under the
+implicit "all rights reserved" default; obtain an explicit license from
+upstream before any production use.
+
+The leanKohaku-authored files (main.rs, verifier.rs, lib.rs, keygen.rs,
+this file, Cargo.toml) are released under the leanKohaku project's
+license terms.

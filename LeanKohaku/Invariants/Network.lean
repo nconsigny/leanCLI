@@ -1,4 +1,5 @@
 import LeanKohaku.Cli.Commands
+import LeanKohaku.Daemon.Config
 import LeanKohaku.Network.Endpoint
 import LeanKohaku.Network.Provider
 
@@ -208,5 +209,33 @@ theorem torConfiguredProviderOnlyTor (cfg : Config) (op : Operation) :
 theorem denyByDefault_denies (req : NetworkRequest) :
     denyByDefault req = false := by
   simp [denyByDefault]
+
+/-! ## Per-chain RPC URL precedence (`pickChainUrl`)
+
+Pure model for `Daemon.Config.pickChainUrl`. Persisted (`daemon.json`) wins
+over both env forms; the namespaced env var (`LEANKOHAKU_RPC_URL_<UPPER>`)
+wins over the generic `<UPPER>_RPC_URL`. This rules out a regression where a
+stale env value silently overrides explicit user config or the legacy generic
+form shadows the leanKohaku-namespaced one. -/
+
+open LeanKohaku.Daemon.Config in
+theorem pickChainUrl_persisted_wins (p ns gen : String) :
+    pickChainUrl (some p) (some ns) (some gen) = some (p, ChainUrlSource.persisted) := by
+  rfl
+
+open LeanKohaku.Daemon.Config in
+theorem pickChainUrl_namespaced_beats_generic (ns gen : String) :
+    pickChainUrl none (some ns) (some gen) = some (ns, ChainUrlSource.namespaced) := by
+  rfl
+
+open LeanKohaku.Daemon.Config in
+theorem pickChainUrl_generic_only (gen : String) :
+    pickChainUrl none none (some gen) = some (gen, ChainUrlSource.generic) := by
+  rfl
+
+open LeanKohaku.Daemon.Config in
+theorem pickChainUrl_none_when_unset :
+    pickChainUrl none none none = none := by
+  rfl
 
 end LeanKohaku.Invariants.Network

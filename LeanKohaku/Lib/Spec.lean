@@ -8,6 +8,7 @@ import LeanKohaku.Invariants.Mainnet
 import LeanKohaku.Invariants.Nonce
 import LeanKohaku.Invariants.Network
 import LeanKohaku.Invariants.R1Account
+import LeanKohaku.Invariants.SphincsAccount
 import LeanKohaku.Invariants.TxWellFormed
 import LeanKohaku.Invariants.Wallet
 

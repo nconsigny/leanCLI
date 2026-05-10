@@ -60,6 +60,28 @@ function getClient(chainId) {
   return c;
 }
 
+// Drop log entries that cannot have been emitted by EVM execution. The
+// colibri stateless client surfaces native ETH movements as synthetic
+// "Transfer"-shaped rows alongside real ABI-decoded logs, which the TUI
+// renders indistinguishably from real events. Real EVM logs always carry
+// the emitting contract's `address`; synthesized rows lack it. Also: a tx
+// that consumed exactly 21000 gas (intrinsic floor) ran no contract code
+// and therefore cannot have any real logs at all.
+function stripSyntheticLogs(result) {
+  if (!result || typeof result !== "object" || !Array.isArray(result.logs)) {
+    return result;
+  }
+  let gasUsed;
+  try { gasUsed = BigInt(result.gasUsed ?? "0x0"); } catch { gasUsed = -1n; }
+  const noEvmCodeRan = gasUsed === 21000n;
+  const logs = noEvmCodeRan
+    ? []
+    : result.logs.filter((l) => l && typeof l === "object"
+        && typeof l.address === "string"
+        && l.address.startsWith("0x"));
+  return { ...result, logs };
+}
+
 async function dispatch(method, params, id) {
   switch (method) {
     case "ping":
@@ -121,7 +143,7 @@ async function dispatch(method, params, id) {
           method: "colibri_simulateTransaction",
           params: [txObj, block],
         });
-        return ok(id, result);
+        return ok(id, stripSyntheticLogs(result));
       } catch (e) {
         return err(id, -32603, `simulate failed: ${e?.message ?? e}`, {
           stack: String(e?.stack ?? ""),

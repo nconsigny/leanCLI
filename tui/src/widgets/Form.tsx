@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
 import { theme } from "../theme.js";
+import RecipientInput from "./RecipientInput.js";
 
 export type Field = {
   name: string;
@@ -17,6 +18,13 @@ export type Field = {
   /** Optional — skip the field if `false`. Lets a single Form definition
    *  conditionally drop fields based on prior answers. */
   when?: (values: Record<string, string>) => boolean;
+  /** When set to "recipient", the field renders a RecipientInput that
+   *  lets the user cycle their own accounts with ↑/↓ and colorizes the
+   *  address when it matches one. */
+  kind?: "recipient";
+  /** For `kind: "recipient"` — the sender address, surfaced as "(self)"
+   *  in the matched-account hint. */
+  excludeAddress?: string;
 };
 
 type Props = {
@@ -63,25 +71,47 @@ export default function Form({ fields, onSubmit, onCancel }: Props) {
       ))}
       <Box>
         <Text color={theme.accent}>{current.label}: </Text>
-        <TextInput
-          value={draft}
-          onChange={(v) => {
-            setDraft(v);
-            if (error) setError(null);
-          }}
-          mask={current.secret ? "*" : undefined}
-          placeholder={current.placeholder}
-          onSubmit={(v) => {
-            const err = current.validate?.(v) ?? null;
-            if (err) {
-              setError(err);
-              return;
-            }
-            setValues((prev) => ({ ...prev, [current.name]: v }));
-            setDraft("");
-            setIdx((i) => i + 1);
-          }}
-        />
+        {current.kind === "recipient" ? (
+          <RecipientInput
+            value={draft}
+            onChange={(v) => {
+              setDraft(v);
+              if (error) setError(null);
+            }}
+            placeholder={current.placeholder}
+            excludeAddress={current.excludeAddress}
+            onSubmit={(v) => {
+              const err = current.validate?.(v) ?? null;
+              if (err) {
+                setError(err);
+                return;
+              }
+              setValues((prev) => ({ ...prev, [current.name]: v }));
+              setDraft("");
+              setIdx((i) => i + 1);
+            }}
+          />
+        ) : (
+          <TextInput
+            value={draft}
+            onChange={(v) => {
+              setDraft(v);
+              if (error) setError(null);
+            }}
+            mask={current.secret ? "*" : undefined}
+            placeholder={current.placeholder}
+            onSubmit={(v) => {
+              const err = current.validate?.(v) ?? null;
+              if (err) {
+                setError(err);
+                return;
+              }
+              setValues((prev) => ({ ...prev, [current.name]: v }));
+              setDraft("");
+              setIdx((i) => i + 1);
+            }}
+          />
+        )}
       </Box>
       {error && <Text color={theme.err}>error: {error}</Text>}
       <Text color={theme.dim}>enter • next · esc • cancel</Text>

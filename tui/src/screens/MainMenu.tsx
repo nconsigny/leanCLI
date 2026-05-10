@@ -1,16 +1,16 @@
 import React from "react";
 import { Box, Text, useInput } from "ink";
-import SelectInput from "ink-select-input";
+import Select from "../widgets/Select.js";
 import { Layout } from "../widgets/Layout.js";
-import KohakuKoi from "../widgets/KohakuKoi.js";
+import AnimatedKoi from "../widgets/AnimatedKoi.js";
 import { theme } from "../theme.js";
 
 export type MainAction =
   | "wallets"
   | "create-wallet"
   | "import-wallet"
-  | "privacy"
-  | "daemon"
+  | "private"
+  | "network"
   | "toggle-colibri"
   | "more"
   | "quit";
@@ -21,43 +21,44 @@ type Props = {
   colibriPending?: boolean;
 };
 
-/** Top-level entry. The "Wallets" item is the most-used path; everything
- *  else is workflow-organized rather than namespace-organized so users
- *  don't need to know the CLI verb tree. */
-export default function MainMenu({ onPick, colibriEnabled, colibriPending }: Props) {
+/** Top-level entry. Labels are intentionally short — the verbose
+ *  "(balance / mnemonic / unshield)"-type subtitles moved to the
+ *  destination screens. The koi-red rectangle is the canonical leanKohaku
+ *  framing; every hub-style screen reuses it. */
+export default function MainMenu({
+  onPick,
+  colibriEnabled,
+  colibriPending,
+}: Props) {
   useInput((input) => {
     if (input === "q") onPick("quit");
   });
 
   const items: { label: string; value: MainAction }[] = [
-    { label: "Wallets — list, send, shield, history",         value: "wallets" },
-    { label: "Create wallet",                                 value: "create-wallet" },
-    { label: "Import wallet",                                 value: "import-wallet" },
-    { label: "Privacy Pools (balance / mnemonic / unshield)", value: "privacy" },
-    { label: "Daemon status",                                 value: "daemon" },
+    { label: "Wallets",                                                  value: "wallets" },
+    { label: "Privacy Plugins",                                          value: "private" },
+    { label: "Create wallet / Add account",                              value: "create-wallet" },
+    { label: "Import wallet",                                            value: "import-wallet" },
+    { label: "Network",                                                  value: "network" },
     {
-      label: `Colibri stateless simulation: ${
-        colibriPending
-          ? "…"
-          : colibriEnabled
-            ? "ON  ✓ (verified, persistent)"
-            : "off"
+      label: `Colibri RPC verification: ${
+        colibriPending ? "…" : colibriEnabled ? "ON  ✓" : "off"
       }`,
       value: "toggle-colibri",
     },
-    { label: "More commands (advanced)",                      value: "more" },
-    { label: "Quit",                                          value: "quit" },
+    { label: "More commands",                                            value: "more" },
+    { label: "Quit",                                                     value: "quit" },
   ];
 
   return (
     <Layout
       title="leanKohaku — interactive wallet"
       subtitle="formally-verified Ethereum wallet · daemon: leankohaku-daemon"
-      hint="↑/↓ move · enter select · q quit"
+      hint="↑/↓ move · → / enter select · q quit"
     >
       <Box flexDirection="row">
         <Box marginRight={2}>
-          <KohakuKoi size="tiny" />
+          <AnimatedKoi size="tiny" />
         </Box>
         <Box
           flexDirection="column"
@@ -71,7 +72,11 @@ export default function MainMenu({ onPick, colibriEnabled, colibriPending }: Pro
             {" leanKohaku · interactive wallet "}
           </Text>
           <Box marginTop={1}>
-            <SelectInput items={items} onSelect={(it) => onPick(it.value)} />
+            <Select
+              items={items}
+              onSelect={(it) => onPick(it.value)}
+              arrowNav
+            />
           </Box>
         </Box>
       </Box>

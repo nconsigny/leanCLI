@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
-import SelectInput from "ink-select-input";
+import Select from "./Select.js";
 import Spinner from "ink-spinner";
 import { call, Notification, RpcError } from "../daemon.js";
 import { theme } from "../theme.js";
@@ -103,7 +103,7 @@ export default function RpcRunner({
       </Box>
       {state.kind !== "running" && (
         <Box flexDirection="column" marginTop={1}>
-          <SelectInput
+          <Select
             items={[{ label: "Continue", value: "continue" }]}
             onSelect={() => onDone(state.kind === "ok")}
           />

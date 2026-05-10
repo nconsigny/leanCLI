@@ -274,10 +274,12 @@ EOF
     pk="$(deployer_private_key)"
     account="$(account_address)"
     read -r r s < <(signature_rs)
-    # Use --async so cast returns the txHash immediately; the daemon
-    # polls eth_getTransactionReceipt itself and emits live progress
-    # notifications during the wait.
-    cast send --async --rpc-url "$SEPOLIA_RPC_URL" \
+    # Build & sign locally with `cast mktx`; do NOT broadcast. We print
+    # the raw signed EIP-1559 tx hex on stdout so the daemon can submit
+    # it via the logged Outbound.sendRawTransaction path (otherwise the
+    # cast subprocess would dial the RPC directly and bypass network.log,
+    # i.e. the network monitor would never see eth_sendRawTransaction).
+    cast mktx --rpc-url "$SEPOLIA_RPC_URL" \
       --private-key "$pk" \
       "$account" "execute(address,uint256,bytes,bytes32,bytes32)" \
       "$target" "$value" "$data" "$r" "$s"

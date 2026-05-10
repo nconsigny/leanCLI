@@ -50,3 +50,54 @@ lean_exe «leankohaku-eip712-check» where
 lean_exe «leankohaku-ens-check» where
   root := `LeanKohaku.App.EnsCheck
   supportInterpreter := true
+
+/--
+SPHINCS- shim smoke test. Build with `lake build leankohaku-sphincs-test`,
+run with `lake env .lake/build/bin/leankohaku-sphincs-test`. Exits 0 on
+success or when the shim binaries are absent; non-zero on a real
+roundtrip failure. See `LeanKohaku/Sphincs/Test.lean`.
+-/
+lean_exe «leankohaku-sphincs-test» where
+  root := `LeanKohaku.Sphincs.Test
+  supportInterpreter := true
+
+/--
+Build the SPHINCS- shim binaries (`sphincs-slhdsa-128-24` and `sphincs-c7`)
+into `.lake/build/bin/`. Skips with a clear non-fatal message if `make`
+or `cc` is unavailable, so non-Linux dev hosts are not blocked. Linux CI
+should invoke `lake script run sphincs-shims` and check its stderr for
+the `[sphincs-shims] built` confirmation. We deliberately do not hook
+this into `lean_exe`/`extern_lib` because the C signer does not
+participate in incremental Lean compilation.
+-/
+script «sphincs-shims» (args) do
+  let _ := args
+  let pkgDir ← IO.currentDir
+  let sidecarDir := pkgDir / "sidecars" / "sphincs"
+  if !(← sidecarDir.pathExists) then
+    IO.eprintln s!"[sphincs-shims] no sidecar dir at {sidecarDir}, skipping"
+    return 0
+  let outDir := pkgDir / ".lake" / "build" / "bin"
+  IO.FS.createDirAll outDir
+  let runOk : IO Bool := do
+    try
+      let child ← IO.Process.spawn {
+        cmd := "make",
+        args := #["-C", sidecarDir.toString, s!"OUT_DIR={outDir}", "all"],
+        stdin := .null,
+        stdout := .inherit,
+        stderr := .inherit
+      }
+      let code ← child.wait
+      pure (code == 0)
+    catch e =>
+      IO.eprintln s!"[sphincs-shims] make failed: {e}"
+      pure false
+  if (← runOk) then
+    IO.println s!"[sphincs-shims] built into {outDir}"
+  else
+    IO.eprintln
+      "[sphincs-shims] build failed (cc/make missing or compile error); continuing"
+  -- Skip-on-failure: dev hosts without `cc` are not blocked; CI grep the
+  -- log line above and fails loudly if it is missing.
+  return 0

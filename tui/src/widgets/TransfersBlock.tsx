@@ -54,8 +54,8 @@ export function TransfersBlock({ sim }: { sim: any }) {
 }
 
 function shortAddr(a: string): string {
-  if (typeof a !== "string" || a.length < 12) return a;
-  return `${a.slice(0, 6)}…${a.slice(-4)}`;
+  // Signing-time displays must show the full address — see `format.ts`.
+  return typeof a === "string" ? a : String(a ?? "");
 }
 
 function metaFor(addr: string, tokenMeta: Record<string, { decimals: number; symbol: string }>) {

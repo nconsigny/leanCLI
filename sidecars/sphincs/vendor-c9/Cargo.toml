@@ -1,0 +1,26 @@
+[package]
+name = "sphincs-c9-shim"
+version = "0.1.0"
+edition = "2021"
+description = "leanKohaku C9 (WOTS+C / FORS+C, h=20 d=2 a=12 k=11 w=8) signer shim — adapted from upstream nconsigny/SPHINCS- signer-wasm @ 63617e1, retuned against legacy/src/SPHINCs-C9Asm.sol @ 5964b61"
+
+# Single binary target. The upstream crate also builds as a wasm cdylib via
+# wasm-bindgen; we strip that here because the daemon spawns a native stdio
+# JSON-RPC binary. Keeping wasm-bindgen out of the build avoids pulling
+# wasm32-unknown-unknown into the toolchain requirement.
+[[bin]]
+name = "sphincs-c9"
+path = "src/main.rs"
+
+[lib]
+name = "sphincs_c9_signer"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+tiny-keccak = { version = "2", features = ["keccak"] }
+hex = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true

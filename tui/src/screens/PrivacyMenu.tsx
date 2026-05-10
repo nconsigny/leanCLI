@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Text } from "ink";
-import SelectInput from "ink-select-input";
+import Select from "../widgets/Select.js";
 import { Layout } from "../widgets/Layout.js";
 import Form from "../widgets/Form.js";
 import RpcRunner from "../widgets/RpcRunner.js";
@@ -24,18 +24,20 @@ export default function PrivacyMenu({ onDone }: Props) {
 
   if (!pick) {
     return (
-      <Layout title="Privacy Pools" hint="↑/↓ move · enter select · esc back">
-        <SelectInput
+      <Layout title="Privacy Pools" hint="↑/↓ move · → / enter select · ← / esc back">
+        <Select
           items={[
-            { label: "Show shielded balance",                 value: "balance" },
-            { label: "Reveal stored mnemonic (one-shot)",      value: "reveal" },
-            { label: "Import a 12/24-word mnemonic",           value: "import" },
-            { label: "Delete the stored PP secret (warning)", value: "delete" },
-            { label: "Unshield to a recipient",                value: "unshield" },
-            { label: "← Back",                                 value: "back" },
+            { label: "Show shielded balance",                 value: "balance" as PpAction },
+            { label: "Reveal stored mnemonic (one-shot)",      value: "reveal" as PpAction },
+            { label: "Import a 12/24-word mnemonic",           value: "import" as PpAction },
+            { label: "Delete the stored PP secret (warning)", value: "delete" as PpAction },
+            { label: "Unshield to a recipient",                value: "unshield" as PpAction },
+            { label: "← Back",                                 value: "back" as PpAction },
           ]}
+          arrowNav
+          onBack={() => onDone(false)}
           onSelect={(it) => {
-            const v = it.value as PpAction;
+            const v = it.value;
             if (v === "back") onDone(false);
             else setPick(v);
           }}

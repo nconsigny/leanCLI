@@ -1,6 +1,6 @@
 import React from "react";
 import { Text, useInput } from "ink";
-import SelectInput from "ink-select-input";
+import Select from "../widgets/Select.js";
 import { Layout } from "../widgets/Layout.js";
 import { theme } from "../theme.js";
 
@@ -30,10 +30,12 @@ export default function ImportWalletPicker({ onPick }: Props) {
     <Layout
       title="Import wallet"
       subtitle="Choose the source format."
-      hint="↑/↓ move · enter select · esc back"
+      hint="↑/↓ move · → / enter select · ← / esc back"
     >
-      <SelectInput
+      <Select
         items={items}
+        arrowNav
+        onBack={() => onPick("back")}
         onSelect={(it) => {
           if (it.value === "soon") return; // ignore — disabled item
           onPick(it.value);

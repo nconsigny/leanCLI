@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import Spinner from "ink-spinner";
-import SelectInput from "ink-select-input";
+import Select from "../widgets/Select.js";
 import { Layout, Banner } from "../widgets/Layout.js";
 import Form, { Field } from "../widgets/Form.js";
 import { call } from "../daemon.js";
@@ -254,7 +254,7 @@ function CandidatePicker({
       subtitle="Pick one to decode + simulate. Each candidate still goes through the confirm gate."
       hint="↑/↓ move · enter pick · esc cancel"
     >
-      <SelectInput items={items} onSelect={(it) => setPickedIdx(it.value)} />
+      <Select items={items} onSelect={(it) => setPickedIdx(it.value)} />
       {pickedIdx !== null && (decoded === null || sim === null) && (
         <Text color={theme.dim}>
           <Spinner type="dots" /> decoding + simulating…

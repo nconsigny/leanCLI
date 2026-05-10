@@ -2,9 +2,11 @@ import React, { useEffect, useState } from "react";
 import { useApp } from "ink";
 import { call } from "./daemon.js";
 import MainMenu, { MainAction } from "./screens/MainMenu.js";
-import WalletList from "./screens/WalletList.js";
+import WalletsHub, { WalletsAction } from "./screens/WalletsHub.js";
 import ActionPicker, { Action as WalletAction } from "./screens/ActionPicker.js";
+import PrivateActionsMenu from "./screens/PrivateActionsMenu.js";
 import SendFlow from "./screens/SendFlow.js";
+import SwapFlow from "./screens/SwapFlow.js";
 import ShieldFlow from "./screens/ShieldFlow.js";
 import CreateEoaFlow from "./screens/CreateEoaFlow.js";
 import CreateR1Flow from "./screens/CreateR1Flow.js";
@@ -16,7 +18,12 @@ import LlmDraftFlow from "./screens/LlmDraftFlow.js";
 import SendRawFlow from "./screens/SendRawFlow.js";
 import DecodeTypedDataFlow from "./screens/DecodeTypedDataFlow.js";
 import RevealMnemonicFlow from "./screens/RevealMnemonicFlow.js";
+import AddAccountFlow from "./screens/AddAccountFlow.js";
+import ArchivedAccountsScreen from "./screens/ArchivedAccountsScreen.js";
+import { archiveKey, toggleArchive } from "./archiveStore.js";
 import PrivacyMenu from "./screens/PrivacyMenu.js";
+import NetworkScreen from "./screens/NetworkScreen.js";
+import NetworkMonitor from "./screens/NetworkMonitor.js";
 import {
   LockToggleFlow,
   ResolveFlow,
@@ -33,6 +40,7 @@ type Screen =
   | { kind: "wallets" }
   | { kind: "actions"; wallet: Wallet }
   | { kind: "send"; wallet: Wallet }
+  | { kind: "swap"; wallet: Wallet }
   | { kind: "shield"; wallet: Wallet }
   | { kind: "lock-toggle"; wallet: Wallet }
   | { kind: "reveal-mnemonic"; wallet: Wallet }
@@ -42,15 +50,20 @@ type Screen =
   | { kind: "create-wallet" }
   | { kind: "create-eoa" }
   | { kind: "create-r1" }
+  | { kind: "add-account" }
   | { kind: "import-wallet" }
   | { kind: "import-eoa" }
+  | { kind: "private" }
   | { kind: "privacy" }
+  | { kind: "network" }
+  | { kind: "network-monitor" }
   | { kind: "resolve" }
   | { kind: "daemon" }
   | { kind: "more" }
   | { kind: "decode-intent" }
   | { kind: "llm-draft" }
   | { kind: "decode-typed-data" }
+  | { kind: "archived-accounts" }
   | {
       kind: "send-raw";
       tx: { to: string; value: string; data: string; rationale?: string };
@@ -111,8 +124,8 @@ export default function App() {
       case "wallets":         return push({ kind: "wallets" });
       case "create-wallet":   return push({ kind: "create-wallet" });
       case "import-wallet":   return push({ kind: "import-wallet" });
-      case "privacy":         return push({ kind: "privacy" });
-      case "daemon":          return push({ kind: "daemon" });
+      case "private":         return push({ kind: "private" });
+      case "network":         return push({ kind: "network" });
       case "toggle-colibri":  return void toggleColibri();
       case "more":            return push({ kind: "more" });
       case "quit":            return exit();
@@ -122,11 +135,15 @@ export default function App() {
   const handleCreatePick = (k: CreateKind) => {
     if (k === "back") return pop();
     // Replace the picker on the stack with the chosen flow so Esc from the
-    // form returns to MainMenu rather than back to the picker.
-    setStack((prev) => [
-      ...prev.slice(0, -1),
-      k === "eoa" ? { kind: "create-eoa" } : { kind: "create-r1" },
-    ]);
+    // form returns to MainMenu rather than back to the picker. The
+    // `add-account` branch reuses the same convention because it shares
+    // the entry-point semantics of "create something" — landing back on
+    // the picker after a successful derivation would be redundant.
+    const next: Screen =
+      k === "eoa" ? { kind: "create-eoa" }
+      : k === "r1" ? { kind: "create-r1" }
+      : { kind: "add-account" };
+    setStack((prev) => [...prev.slice(0, -1), next]);
   };
 
   const handleImportPick = (k: ImportKind) => {
@@ -137,13 +154,30 @@ export default function App() {
   const handleWalletAction = (w: Wallet, a: WalletAction) => {
     switch (a) {
       case "send":             return push({ kind: "send", wallet: w });
+      case "swap":             return push({ kind: "swap", wallet: w });
       case "shield":           return push({ kind: "shield", wallet: w });
       case "lock-toggle":      return push({ kind: "lock-toggle", wallet: w });
       case "reveal-mnemonic":  return push({ kind: "reveal-mnemonic", wallet: w });
       case "details":          return push({ kind: "details", wallet: w });
       case "history":          return push({ kind: "history", wallet: w });
       case "balance-refresh":  return push({ kind: "balance-refresh", wallet: w });
+      case "add-account":      return push({ kind: "add-account" });
+      case "archive":
+        toggleArchive(archiveKey(w.kind, w.name, w.accountIndex));
+        return finishAction();
       case "back":             return pop();
+    }
+  };
+
+  /** Hub picked an action+wallet. SEND/SWAP/SHIELD jump straight into
+   *  their flow; CUSTOM lands on the per-wallet ActionPicker so the user
+   *  can drive any of the wallet-management ops. */
+  const handleHubPick = (a: WalletsAction, w: Wallet) => {
+    switch (a) {
+      case "send":   return push({ kind: "send", wallet: w });
+      case "swap":   return push({ kind: "swap", wallet: w });
+      case "shield": return push({ kind: "shield", wallet: w });
+      case "custom": return push({ kind: "actions", wallet: w });
     }
   };
 
@@ -165,10 +199,10 @@ export default function App() {
       );
     case "wallets":
       return (
-        <WalletList
+        <WalletsHub
           refreshKey={walletsRefreshKey}
-          onSelect={(w) => push({ kind: "actions", wallet: w })}
-          onQuit={pop}
+          onPick={handleHubPick}
+          onBack={pop}
         />
       );
     case "actions":
@@ -187,6 +221,8 @@ export default function App() {
           onDone={finishAction}
         />
       );
+    case "swap":
+      return <SwapFlow wallet={top.wallet} onDone={finishAction} />;
     case "shield":
       return <ShieldFlow wallet={top.wallet} onDone={finishAction} />;
     case "lock-toggle":
@@ -205,12 +241,35 @@ export default function App() {
       return <CreateEoaFlow onDone={finishAction} />;
     case "create-r1":
       return <CreateR1Flow onDone={finishAction} />;
+    case "add-account":
+      return <AddAccountFlow onDone={finishAction} />;
     case "import-wallet":
       return <ImportWalletPicker onPick={handleImportPick} />;
     case "import-eoa":
       return <ImportEoaFlow onDone={finishAction} />;
+    case "private":
+      return (
+        <PrivateActionsMenu
+          onPick={(a) => {
+            if (a === "back") return pop();
+            if (a === "privacy-pools") push({ kind: "privacy" });
+          }}
+        />
+      );
     case "privacy":
       return <PrivacyMenu onDone={pop} />;
+    case "network":
+      return (
+        <NetworkScreen
+          onPick={(a) => {
+            if (a === "monitor") push({ kind: "network-monitor" });
+            else if (a === "back") pop();
+          }}
+          onBack={pop}
+        />
+      );
+    case "network-monitor":
+      return <NetworkMonitor onDone={pop} />;
     case "resolve":
       return <ResolveFlow onDone={pop} />;
     case "daemon":
@@ -224,6 +283,8 @@ export default function App() {
             else if (a === "decode-intent") push({ kind: "decode-intent" });
             else if (a === "llm-draft") push({ kind: "llm-draft" });
             else if (a === "decode-typed-data") push({ kind: "decode-typed-data" });
+            else if (a === "archived-accounts") push({ kind: "archived-accounts" });
+            else if (a === "daemon") push({ kind: "daemon" });
           }}
         />
       );
@@ -246,5 +307,7 @@ export default function App() {
       );
     case "decode-typed-data":
       return <DecodeTypedDataFlow onDone={pop} />;
+    case "archived-accounts":
+      return <ArchivedAccountsScreen onDone={finishAction} />;
   }
 }

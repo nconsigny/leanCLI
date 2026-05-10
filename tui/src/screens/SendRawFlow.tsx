@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import Spinner from "ink-spinner";
-import SelectInput from "ink-select-input";
+import Select from "../widgets/Select.js";
 import { Layout, Banner } from "../widgets/Layout.js";
 import Form, { Field } from "../widgets/Form.js";
 import RpcRunner from "../widgets/RpcRunner.js";
@@ -10,11 +10,26 @@ import { theme } from "../theme.js";
 import { formatEth, hexToBigInt, shortAddr } from "../format.js";
 import { TransfersBlock } from "../widgets/TransfersBlock.js";
 
+/** A pre-selected signing wallet. Threaded in by callers (e.g. SwapFlow)
+ *  who already know which wallet is active — skips the EOA picker and
+ *  routes TPM/R1 wallets to the biometric path. */
+export type SendRawWallet = {
+  kind: "eoa" | "tpm";
+  name: string;
+  address: string;
+};
+
 type Props = {
   /** The unsigned tx the caller (e.g. LlmDraftFlow) wants signed. */
   tx: { to: string; value: string; data: string; rationale?: string };
   /** Optional chain id; defaults to whatever the daemon is configured for. */
   chainId?: number;
+  /** Optional pre-selected wallet. When omitted, the historic behaviour
+   *  (EOA picker + passphrase) is used. When provided as `tpm`, the
+   *  flow skips the picker and routes through `r1.sendRawSepolia`,
+   *  streaming the biometric prompt via the standard notification feed
+   *  exactly like `r1.sendEthSepolia` in `SendFlow`. */
+  wallet?: SendRawWallet;
   onDone: (success: boolean) => void;
 };
 
@@ -23,9 +38,16 @@ type Phase =
   | { kind: "pick-wallet"; eoas: EoaSlot[] }
   | { kind: "passphrase"; wallet: EoaSlot }
   | { kind: "unlock-error"; message: string }
-  | { kind: "simulate"; wallet: EoaSlot; passphrase: string }
-  | { kind: "confirm"; wallet: EoaSlot; passphrase: string; decoded: any; sim: any }
-  | { kind: "send"; wallet: EoaSlot; passphrase: string };
+  | { kind: "simulate"; wallet: EoaSlot; passphrase: string; tpm: boolean }
+  | {
+      kind: "confirm";
+      wallet: EoaSlot;
+      passphrase: string;
+      decoded: any;
+      sim: any;
+      tpm: boolean;
+    }
+  | { kind: "send"; wallet: EoaSlot; passphrase: string; tpm: boolean };
 
 type EoaSlot = { name: string; address: string };
 
@@ -34,10 +56,25 @@ type EoaSlot = { name: string; address: string };
  *  Pipeline: pick wallet → passphrase → unlock → simulate → confirm → sign.
  *  ConfirmGate is the load-bearing security step; the rationale from the
  *  caller is shown alongside the simulation result. */
-export default function SendRawFlow({ tx, chainId, onDone }: Props) {
-  const [phase, setPhase] = useState<Phase>({ kind: "loading-wallets" });
+export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
+  // If the caller already knows the wallet, skip the picker entirely:
+  //   - TPM/R1 → straight to simulate (no passphrase; biometric is at sign time)
+  //   - EOA    → straight to passphrase prompt (still need to unlock the slot)
+  const initialPhase: Phase =
+    wallet?.kind === "tpm"
+      ? {
+          kind: "simulate",
+          wallet: { name: wallet.name, address: wallet.address },
+          passphrase: "",
+          tpm: true,
+        }
+      : wallet?.kind === "eoa"
+        ? { kind: "passphrase", wallet: { name: wallet.name, address: wallet.address } }
+        : { kind: "loading-wallets" };
+  const [phase, setPhase] = useState<Phase>(initialPhase);
 
-  // Step 1: list EOA wallets the user can sign with.
+  // Step 1: list EOA wallets the user can sign with. Only runs when
+  // the caller did not pre-select a wallet.
   useEffect(() => {
     if (phase.kind !== "loading-wallets") return;
     let cancelled = false;
@@ -95,7 +132,7 @@ export default function SendRawFlow({ tx, chainId, onDone }: Props) {
         subtitle={`tx → ${shortAddr(tx.to)} · value ${tx.value} · data ${tx.data === "0x" ? "0x (native)" : tx.data.slice(0, 10) + "…"}`}
         hint="↑/↓ move · enter pick · esc cancel"
       >
-        <SelectInput
+        <Select
           items={phase.eoas.map((e) => ({
             label: `${e.name.padEnd(16)}  ${shortAddr(e.address)}`,
             value: e.name,
@@ -131,6 +168,7 @@ export default function SendRawFlow({ tx, chainId, onDone }: Props) {
               kind: "simulate",
               wallet: phase.wallet,
               passphrase: v.passphrase ?? "",
+              tpm: false,
             })
           }
         />
@@ -143,6 +181,7 @@ export default function SendRawFlow({ tx, chainId, onDone }: Props) {
       <UnlockAndSimulate
         wallet={phase.wallet}
         passphrase={phase.passphrase}
+        tpm={phase.tpm}
         tx={tx}
         chainId={chainId}
         onError={(message) => setPhase({ kind: "unlock-error", message })}
@@ -153,6 +192,7 @@ export default function SendRawFlow({ tx, chainId, onDone }: Props) {
             passphrase: phase.passphrase,
             decoded,
             sim,
+            tpm: phase.tpm,
           })
         }
       />
@@ -166,11 +206,13 @@ export default function SendRawFlow({ tx, chainId, onDone }: Props) {
         tx={tx}
         decoded={phase.decoded}
         sim={phase.sim}
+        tpm={phase.tpm}
         onConfirm={() =>
           setPhase({
             kind: "send",
             wallet: phase.wallet,
             passphrase: phase.passphrase,
+            tpm: phase.tpm,
           })
         }
         onCancel={() => onDone(false)}
@@ -178,8 +220,27 @@ export default function SendRawFlow({ tx, chainId, onDone }: Props) {
     );
   }
 
-  // Phase 6: actually sign + broadcast. The daemon's eoa.send already
-  // accepts a `data` field; we just plumb it through.
+  // Phase 6: actually sign + broadcast. EOA → eoa.send (already accepts
+  // `data`). TPM/R1 → r1.sendRawSepolia, which streams the biometric
+  // prompt via the same `RpcRunner` notification feed used by
+  // `r1.sendEthSepolia` in SendFlow.
+  if (phase.tpm) {
+    return (
+      <RpcRunner
+        title={`Sending tx as ${phase.wallet.name} (TPM/R1)`}
+        subtitle={`to ${tx.to} · biometric verification will be requested`}
+        method="r1.sendRawSepolia"
+        params={{
+          name: phase.wallet.name,
+          to: tx.to,
+          value: hexToBigInt(tx.value),
+          data: tx.data,
+        }}
+        renderResult={(r) => <RawResult result={r} />}
+        onDone={onDone}
+      />
+    );
+  }
   return (
     <RpcRunner
       title={`Sending tx as ${phase.wallet.name}`}
@@ -200,6 +261,7 @@ export default function SendRawFlow({ tx, chainId, onDone }: Props) {
 function UnlockAndSimulate({
   wallet,
   passphrase,
+  tpm,
   tx,
   chainId,
   onError,
@@ -207,6 +269,7 @@ function UnlockAndSimulate({
 }: {
   wallet: EoaSlot;
   passphrase: string;
+  tpm: boolean;
   tx: Props["tx"];
   chainId?: number;
   onError: (msg: string) => void;
@@ -215,10 +278,13 @@ function UnlockAndSimulate({
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      // Unlock first; if it fails, no point in simulating.
-      const u = await call<any>("eoa.unlock", { name: wallet.name, passphrase });
-      if (cancelled) return;
-      if (!u.ok) return onError(`unlock: ${u.error.message}`);
+      // Unlock first (EOA only); if it fails, no point in simulating.
+      // TPM/R1 wallets are unlocked at sign time via biometric, not here.
+      if (!tpm) {
+        const u = await call<any>("eoa.unlock", { name: wallet.name, passphrase });
+        if (cancelled) return;
+        if (!u.ok) return onError(`unlock: ${u.error.message}`);
+      }
 
       // Decode + simulate in parallel, exactly like the manual decode
       // screen does.
@@ -266,6 +332,7 @@ function ConfirmGate({
   tx,
   decoded,
   sim,
+  tpm,
   onConfirm,
   onCancel,
 }: {
@@ -273,6 +340,7 @@ function ConfirmGate({
   tx: Props["tx"];
   decoded: any;
   sim: any;
+  tpm: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -283,8 +351,12 @@ function ConfirmGate({
   const okSim = sim?.ok === true;
   return (
     <Layout
-      title={`Confirm: sign as ${wallet.name}`}
-      subtitle={`address ${shortAddr(wallet.address)}`}
+      title={`Confirm: sign as ${wallet.name}${tpm ? " (TPM/R1)" : ""}`}
+      subtitle={
+        tpm
+          ? `address ${shortAddr(wallet.address)} · biometric verification will be requested`
+          : `address ${shortAddr(wallet.address)}`
+      }
       hint="enter — sign & broadcast · esc — cancel"
     >
       {tx.rationale && (

@@ -29,6 +29,37 @@ def isLoopbackUrl (url : String) : Bool :=
   url.startsWith "http://[::1]" ||
   url.startsWith "http://0.0.0.0"
 
+/-- Best-effort host extraction from a URL: strips the scheme and returns
+    everything up to the first `/` or `?`. Surfaces `<unknown>` when the
+    URL doesn't look like one we recognise. Used purely for logging — no
+    network logic depends on this. -/
+def hostOfUrl (url : String) : String := Id.run do
+  let chars := url.toList
+  let afterScheme : List Char :=
+    let dropPrefix (p : List Char) (xs : List Char) : Option (List Char) :=
+      let rec go : List Char → List Char → Option (List Char)
+        | [], rest => some rest
+        | _ :: _, [] => none
+        | a :: as, b :: bs => if a = b then go as bs else none
+      go p xs
+    match dropPrefix "https://".toList chars with
+    | some r => r
+    | none =>
+        match dropPrefix "http://".toList chars with
+        | some r => r
+        | none =>
+            match dropPrefix "wss://".toList chars with
+            | some r => r
+            | none =>
+                match dropPrefix "ws://".toList chars with
+                | some r => r
+                | none => chars
+  let mut acc : String := ""
+  for c in afterScheme do
+    if c = '/' || c = '?' then return acc
+    acc := acc.push c
+  return acc
+
 def endpointFromUrl (url : String) (transport? : Option Transport := none) : Endpoint :=
   if isLoopbackUrl url then
     { url := url, backend := .localNode, transport := .loopback }
@@ -166,6 +197,8 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
           IO.eprintln s!"[rpc→colibri] {method.asString} chainId={chainId} params={paramsRender}"
         logEvent "request" method.asString
           #[("backend", .str "colibri"),
+            ("host", .str "colibri.uds"),
+            ("transport", .str "loopback"),
             ("chainId", .num (Int.ofNat chainId)),
             ("params", params)]
         let result ← callViaColibri client chainId method params
@@ -177,6 +210,8 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
               IO.eprintln s!"[rpc←colibri] {method.asString} {dt}ms ok{resRender}"
             logEvent "response" method.asString
               #[("backend", .str "colibri"),
+                ("host", .str "colibri.uds"),
+                ("transport", .str "loopback"),
                 ("ms", .num (Int.ofNat dt)),
                 ("result", j)]
             return .ok j
@@ -184,15 +219,19 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
             if v ≥ 1 then IO.eprintln s!"[rpc✗colibri] {method.asString} {dt}ms {e}"
             logEvent "rpc-error" method.asString
               #[("backend", .str "colibri"),
+                ("host", .str "colibri.uds"),
+                ("transport", .str "loopback"),
                 ("ms", .num (Int.ofNat dt)),
                 ("error", .str e)]
             return .error e
   | none => pure ()
   if endpoint.url.trim.isEmpty then
     return .error "no rpc_url configured: refusing to dial (set LEANKOHAKU_RPC_URL or 'rpc_url' in daemon.json)"
+  let host := hostOfUrl endpoint.url
   unless requestAllowed policy endpoint method do
     logEvent "denied" method.asString
       #[("url", .str endpoint.url),
+        ("host", .str host),
         ("backend", .str endpoint.backend.asString),
         ("transport", .str endpoint.transport.asString)]
     return .error s!"network policy denied method={method.asString} backend={endpoint.backend.asString} transport={endpoint.transport.asString}"
@@ -203,18 +242,31 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
     IO.eprintln s!"[rpc→] {method.asString} url={endpoint.url} params={paramsRender}"
   logEvent "request" method.asString
     #[("url", .str endpoint.url),
+      ("host", .str host),
       ("backend", .str endpoint.backend.asString),
       ("transport", .str endpoint.transport.asString),
       ("params", params)]
   try
-    let raw ← LeanKohaku.RPC.JsonRpc.callRaw endpoint.url
+    let raw ← LeanKohaku.RPC.JsonRpc.callRawDetailed endpoint.url
       { method := method.asString, params := params, id := 1 }
     let dt := (← IO.monoMsNow) - t0
-    match parse raw.trimAscii.toString with
+    let txExtra : Array (String × Json) :=
+      let s : Array (String × Json) :=
+        match raw.httpStatus with
+        | some n => #[("httpStatus", .num (Int.ofNat n))]
+        | none => #[]
+      let s := s ++ (match raw.bytes with
+        | some n => #[("bytes", .num (Int.ofNat n))]
+        | none => #[])
+      let s := s ++ (match raw.remoteIp with
+        | some ip => #[("remoteIp", .str ip)]
+        | none => #[])
+      s ++ #[("host", .str host)]
+    match parse raw.body.trimAscii.toString with
     | .error err =>
         if v ≥ 1 then IO.eprintln s!"[rpc✗] {method.asString} {dt}ms parse-error"
         logEvent "parse-error" method.asString
-          #[("ms", .num (Int.ofNat dt)), ("error", .str err)]
+          (#[("ms", .num (Int.ofNat dt)), ("error", .str err)] ++ txExtra)
         pure (.error s!"invalid JSON-RPC response: {err}")
     | .ok json =>
         match getField "result" json, getField "error" json with
@@ -223,23 +275,25 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
               let resRender := if v ≥ 2 then s!" result={compact result}" else ""
               IO.eprintln s!"[rpc←] {method.asString} {dt}ms ok{resRender}"
             logEvent "response" method.asString
-              #[("ms", .num (Int.ofNat dt)), ("result", result)]
+              (#[("ms", .num (Int.ofNat dt)), ("result", result)] ++ txExtra)
             pure (.ok result)
         | _, some err =>
             if v ≥ 1 then IO.eprintln s!"[rpc✗] {method.asString} {dt}ms error={compact err}"
             logEvent "rpc-error" method.asString
-              #[("ms", .num (Int.ofNat dt)), ("error", err)]
+              (#[("ms", .num (Int.ofNat dt)), ("error", err)] ++ txExtra)
             pure (.error s!"Ethereum JSON-RPC error: {compact err}")
         | _, _ =>
             if v ≥ 1 then IO.eprintln s!"[rpc✗] {method.asString} {dt}ms malformed"
             logEvent "malformed" method.asString
-              #[("ms", .num (Int.ofNat dt))]
+              (#[("ms", .num (Int.ofNat dt))] ++ txExtra)
             pure (.error "malformed Ethereum JSON-RPC response")
   catch e =>
     let dt := (← IO.monoMsNow) - t0
     if v ≥ 1 then IO.eprintln s!"[rpc✗] {method.asString} {dt}ms exception={e.toString}"
     logEvent "exception" method.asString
-      #[("ms", .num (Int.ofNat dt)), ("error", .str e.toString)]
+      #[("ms", .num (Int.ofNat dt)),
+        ("host", .str host),
+        ("error", .str e.toString)]
     pure (.error e.toString)
 
 def getBalance (policy : Policy) (endpoint : Endpoint)

@@ -1,0 +1,74 @@
+leanKohaku SPHINCS- shim — vendoring provenance and license notes
+==================================================================
+
+This directory contains a vendored copy (subtree, not submodule) of the
+sphincs/sphincsplus reference C signer, plus a small JSON-RPC shim
+(`shim/shim_main.c`) written for leanKohaku. Two binaries are produced,
+one per parameter set, sharing the same shim source.
+
+Submodule was rejected in favour of a subtree because:
+  1. The vendored tree is small (~30 files, source-only).
+  2. Lake's `lake build` step does not currently shell out to git, so a
+     submodule would require a separate `git submodule update --init`
+     contributors must remember to run.
+  3. CI bandwidth: subtree avoids an extra clone on every build.
+The upstream LICENSE.upstream files inside each vendor-* subdirectory are
+preserved verbatim as required by their own SPDX header.
+
+vendor-slhdsa-sha2-128-24/
+--------------------------
+Source:  https://github.com/nconsigny/SPHINCS-
+Path:    signers/sphincsplus-128-24/
+Pin:     63617e166d2e3a576ec5a8c99bebef344c9ca645
+Pin msg: "sphincsplus-128-24: fork ref SHA-2 impl, adapt for SLH-DSA-128-24"
+Vendored: 2026-05 by leanKohaku Phase 2 work.
+
+Files copied verbatim (no edits, no patches):
+  address.[ch] api.h context.h fors.[ch] hash.h hash_sha2.c
+  merkle.[ch] params.h randombytes.[ch] sha2.[ch] sha2_offsets.h
+  sign.c thash.h thash_sha2_simple.c utils.[ch] utilsx1.[ch]
+  wots.[ch] wotsx1.[ch] LICENSE.upstream
+
+Excluded from the copy:
+  main.c     — replaced by shim/shim_main.c (the JSON-RPC dispatcher).
+  Makefile   — replaced by sidecars/sphincs/Makefile (drives both builds).
+  crosscheck.py — test scaffolding, not needed at runtime.
+
+Parameter set: SLH-DSA-SHA2-128-24 (NIST FIPS 205 candidate variant).
+  SPX_N=16, SPX_BYTES=3856 (signature), SPX_PK_BYTES=32, SPX_SK_BYTES=64.
+  Seed input: 48 bytes (= 3 * SPX_N).
+
+vendor-c9/
+----------
+Status: WORKING — Rust implementation, full keygen / sign / verify.
+
+Source:  https://github.com/nconsigny/SPHINCS-
+Path:    signer-wasm/ (Rust SPHINCS+ C6 reference)
+Pin:     63617e166d2e3a576ec5a8c99bebef344c9ca645
+Verifier source: legacy/src/SPHINCs-C9Asm.sol @
+                 5964b61d9912f7fa510b07e0bf63e529148b304a
+
+The cryptographic core (hash.rs, wots.rs, fors.rs, merkle.rs, sphincs.rs)
+is a direct copy of upstream signer-wasm/src/. Only `params.rs` has been
+retuned from C6 to C9 (h=20, d=2, a=12, k=11, w=8, l=43, target_sum=208,
+sig=3816 bytes), matching the on-chain Yul verifier
+`SphincsC9Asm.verify`. Local files added on top of the upstream copy:
+main.rs (stdio JSON-RPC dispatcher), verifier.rs (Rust port of the Yul
+verifier for verify-after-sign), lib.rs (module root sans wasm-bindgen),
+keygen.rs (raw 32-byte seed → key derivation, replacing the upstream
+BIP-39/k256 path).
+
+The C9 verifier is deployed on Sepolia at
+0x18F005EECd41624644AA364bA8857258FEB3C26D and exercised by the
+SphincsAccount contract at 0xA941116763AE386a50133c5af40356c9D93b2978
+through EntryPoint v0.9 (0x433709009B8330FDa32311DF1C2AFA402eD8D009).
+The Rust verify-after-sign in `verifier.rs` is byte-for-byte equivalent
+to the on-chain verifier, so a signature accepted by the local roundtrip
+will be accepted on chain (and vice versa).
+
+shim/shim_main.c
+----------------
+Original code, written for leanKohaku, MIT-licensed under the project's
+top-level LICENSE. JSON-RPC dispatcher with a hand-rolled minimal JSON
+scanner — no external dependencies beyond libc — so it builds cleanly on
+any C99-capable host that can build the upstream signer.

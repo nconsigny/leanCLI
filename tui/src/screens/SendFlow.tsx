@@ -71,6 +71,8 @@ export default function SendFlow({ wallet, colibriEnabled, onDone }: Props) {
         name: "to",
         label: "Recipient (0x… or ENS)",
         placeholder: "0xAa65… or vitalik.eth",
+        kind: "recipient",
+        excludeAddress: wallet.address,
         validate: (v) =>
           v.length === 0
             ? "required"
@@ -265,15 +267,25 @@ export default function SendFlow({ wallet, colibriEnabled, onDone }: Props) {
   // (EOA) or about to prompt the user for biometric (R1/TPM).
   if (wallet.kind === "eoa") {
     const wei = ethToWei(phase.amountEth);
+    // Pass the sub-account index when the picker handed us a derived
+    // wallet — the daemon's `resolveAccount` then signs from that branch
+    // instead of the slot's primary. Primaries (index 0 or undefined)
+    // intentionally omit the field for backward compatibility.
+    const subAcct = (wallet.accountIndex ?? 0) > 0 ? wallet.accountIndex : undefined;
+    const titleSuffix =
+      subAcct !== undefined
+        ? ` · account #${subAcct}${wallet.accountLabel ? ` (${wallet.accountLabel})` : ""}`
+        : "";
     return (
       <RpcRunner
-        title={`Sending ${phase.amountEth} ETH from ${wallet.name}`}
+        title={`Sending ${phase.amountEth} ETH from ${wallet.name}${titleSuffix}`}
         subtitle={`to ${phase.to}`}
         method="eoa.send"
         params={{
           name: wallet.name,
           to: phase.to,
           value: wei,
+          ...(subAcct !== undefined ? { account: subAcct } : {}),
         }}
         renderResult={(r) => <SendResult result={r} />}
         onDone={onDone}

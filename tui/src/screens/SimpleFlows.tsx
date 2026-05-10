@@ -1,12 +1,12 @@
 import React, { useState } from "react";
 import { Box, Text, useInput } from "ink";
-import SelectInput from "ink-select-input";
+import Select from "../widgets/Select.js";
 import { Wallet } from "../types.js";
 import { Layout } from "../widgets/Layout.js";
 import Form, { Field } from "../widgets/Form.js";
 import RpcRunner from "../widgets/RpcRunner.js";
 import { theme } from "../theme.js";
-import { formatEth } from "../format.js";
+import { formatEth, hexToBigInt } from "../format.js";
 
 /** Lock or unlock an EOA. Called from the action picker; we infer which
  *  direction based on `wallet.unlocked`. */
@@ -237,7 +237,10 @@ function HistoryRow({ entry }: { entry: any }) {
   );
 }
 
-/** chain.balance — re-renders the daemon's view of the wallet's balance. */
+/** chain.balance — re-renders the daemon's view of the wallet's balance.
+ *  Daemon returns hex wei; we convert to a human-readable ETH amount so
+ *  the user doesn't have to read `0x16345785d8a0000`. TPM slots query
+ *  sepolia explicitly because they have no mainnet signing path. */
 export function BalanceRefreshScreen({
   wallet,
   onDone,
@@ -245,11 +248,31 @@ export function BalanceRefreshScreen({
   wallet: Wallet;
   onDone: (s: boolean) => void;
 }) {
+  const params: { address: string; chain?: string } = { address: wallet.address };
+  if (wallet.kind === "tpm") params.chain = "sepolia";
   return (
     <RpcRunner
       title={`Balance: ${wallet.name}`}
       method="chain.balance"
-      params={{ address: wallet.address }}
+      params={params}
+      renderResult={(r: any) => {
+        const wei = hexToBigInt(r?.balance);
+        const chainLabel: string = r?.chain ?? (wallet.kind === "tpm" ? "sepolia" : "mainnet");
+        const block: string = r?.block ?? "latest";
+        return (
+          <Box flexDirection="column">
+            <Box>
+              <Text bold color={theme.primary}>
+                {formatEth(wei)}
+              </Text>
+              <Text color={theme.dim}>{`  on ${chainLabel} @ ${block}`}</Text>
+            </Box>
+            <Text color={theme.dim}>
+              {wallet.address}  ·  raw {r?.balance ?? "0x0"}
+            </Text>
+          </Box>
+        );
+      }}
       onDone={onDone}
     />
   );
@@ -262,6 +285,8 @@ export type MoreAction =
   | "decode-intent"
   | "decode-typed-data"
   | "llm-draft"
+  | "archived-accounts"
+  | "daemon"
   | "back";
 
 export function MoreCommandsScreen({
@@ -280,6 +305,8 @@ export function MoreCommandsScreen({
     { label: "Decode transaction (ERC-7730)",                 value: "decode-intent" },
     { label: "Decode typed data (EIP-712)",                   value: "decode-typed-data" },
     { label: "Resolve ENS name",                              value: "resolve" },
+    { label: "Archived accounts",                             value: "archived-accounts" },
+    { label: "Daemon status",                                 value: "daemon" },
     { label: "← Back",                                         value: "back" },
   ];
 
@@ -287,10 +314,12 @@ export function MoreCommandsScreen({
     <Layout
       title="More commands"
       subtitle="Less-frequent flows. Most CLI verbs still live in the shell — run `kohaku help`."
-      hint="↑/↓ move · enter select · esc back"
+      hint="↑/↓ move · → / enter select · ← / esc back"
     >
-      <SelectInput
+      <Select
         items={items}
+        arrowNav
+        onBack={() => onDone(false)}
         onSelect={(it: { value: MoreAction }) =>
           it.value === "back" ? onDone(false) : onPick(it.value)
         }

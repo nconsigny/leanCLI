@@ -22,6 +22,8 @@ export type TpmListEntry = {
 export type ChainBalance = {
   /** Hex-encoded wei, e.g. "0x16345785d8a0000". */
   balance: string;
+  /** Chain name the balance was fetched on; daemon echoes it back. */
+  chain?: string;
 };
 
 export type Wallet = {
@@ -30,6 +32,18 @@ export type Wallet = {
   address: string;
   /** wei as bigint, undefined while loading. */
   balanceWei?: bigint;
+  /** Chain the balance was fetched on — used by the wallet list to render
+   *  e.g. `0.05 ETH (sepolia)` so EOAs (mainnet) and TPMs (sepolia) don't
+   *  look like they share one number. */
+  balanceChain?: string;
   /** present for EOAs; absent for TPM. */
   unlocked?: boolean;
+  /** Slot-local account index. Undefined or 0 = primary account; >0 =
+   *  sub-account derived via `eoa.account.add` (BIP-32 hardened branch).
+   *  Daemon RPCs that take an `account` parameter use this. */
+  accountIndex?: number;
+  /** Optional human label for sub-accounts (set at creation time). */
+  accountLabel?: string;
+  /** Derivation path for sub-accounts. */
+  accountPath?: string;
 };

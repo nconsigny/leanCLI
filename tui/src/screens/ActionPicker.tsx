@@ -1,18 +1,23 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
-import SelectInput from "ink-select-input";
+import Select from "../widgets/Select.js";
 import { theme } from "../theme.js";
 import { Wallet } from "../types.js";
 import { formatEth, shortAddr } from "../format.js";
+import { call } from "../daemon.js";
+import { archiveKey, readArchive } from "../archiveStore.js";
 
 export type Action =
   | "send"
+  | "swap"
   | "shield"
   | "history"
   | "details"
   | "balance-refresh"
   | "lock-toggle"
   | "reveal-mnemonic"
+  | "add-account"
+  | "archive"
   | "back";
 
 type Props = {
@@ -26,8 +31,40 @@ export default function ActionPicker({ wallet, onPick, onBack }: Props) {
     if (key.escape || input === "q") onBack();
   });
 
+  // R1/TPM wallets can only swap on sepolia today (`r1.sendRawSepolia` is
+  // sepolia-only). Hide the Swap entry entirely (no disabled item) when
+  // the daemon has no sepolia RPC configured for an R1 wallet. EOA
+  // wallets keep the existing behaviour (always shown — SwapFlow handles
+  // the no-RPC case with a clear error). We start with `null` =
+  // "unknown" so the menu doesn't flicker the entry in and out.
+  const [sepoliaConfigured, setSepoliaConfigured] = useState<boolean | null>(
+    null,
+  );
+  useEffect(() => {
+    if (wallet.kind !== "tpm") return;
+    let cancelled = false;
+    call<{
+      chains?: Array<{ name: string; hasRpc: boolean }>;
+    }>("daemon.ping").then((r) => {
+      if (cancelled) return;
+      if (!r.ok) return setSepoliaConfigured(false);
+      const has = (r.result?.chains ?? []).some(
+        (c) => c?.name === "sepolia" && c?.hasRpc,
+      );
+      setSepoliaConfigured(has);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [wallet.kind]);
+
+  const r1SwapAllowed = wallet.kind === "tpm" && sepoliaConfigured === true;
+
   const items: { label: string; value: Action }[] = [
     { label: "Send ETH",                       value: "send" },
+    ...(wallet.kind === "eoa" || r1SwapAllowed
+      ? [{ label: "Swap (Uniswap V3)",          value: "swap" as Action }]
+      : []),
     ...(wallet.kind === "eoa"
       ? [{ label: "Shield (Privacy Pools deposit)", value: "shield" as Action }]
       : []),
@@ -45,8 +82,19 @@ export default function ActionPicker({ wallet, onPick, onBack }: Props) {
     { label: "Show wallet details",            value: "details" },
     { label: "Refresh balance",                value: "balance-refresh" },
     ...(wallet.kind === "eoa"
-      ? [{ label: "Reveal mnemonic (DANGER)",   value: "reveal-mnemonic" as Action }]
+      ? [
+          { label: "Add account (BIP-32 hardened branch)", value: "add-account" as Action },
+          { label: "Reveal mnemonic (DANGER)",              value: "reveal-mnemonic" as Action },
+        ]
       : []),
+    {
+      label: readArchive().has(
+        archiveKey(wallet.kind, wallet.name, wallet.accountIndex),
+      )
+        ? "Unarchive (show again in wallet list)"
+        : "Archive (hide from wallet list)",
+      value: "archive",
+    },
     { label: "← Back to wallet list",          value: "back" },
   ];
 
@@ -66,8 +114,10 @@ export default function ActionPicker({ wallet, onPick, onBack }: Props) {
         {wallet.balanceWei !== undefined ? formatEth(wallet.balanceWei) : "…"}
       </Text>
       <Box marginTop={1}>
-        <SelectInput
+        <Select
           items={items}
+          arrowNav
+          onBack={onBack}
           onSelect={(it) => {
             if (it.value === "back") onBack();
             else onPick(it.value);
@@ -75,7 +125,7 @@ export default function ActionPicker({ wallet, onPick, onBack }: Props) {
         />
       </Box>
       <Box marginTop={1}>
-        <Text color={theme.dim}>↑/↓ move · enter select · esc back</Text>
+        <Text color={theme.dim}>↑/↓ move · → / enter select · ← / esc back</Text>
       </Box>
     </Box>
   );

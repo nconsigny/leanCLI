@@ -18,3 +18,11 @@
 states_*
 sync_*
 code_*
+
+# Local Claude Code agent state (memory, transcripts, agent definitions).
+.claude/
+
+# Sphincs sidecar build artifacts (binaries built by sidecars/sphincs/Makefile,
+# copied into .lake/build/bin/ by the lake hook). Source stays tracked.
+/sidecars/sphincs/bin/
+/sidecars/sphincs/vendor-c9/target/
