@@ -437,53 +437,6 @@ export PATH="$PWD/.lake/build/bin:$PATH"
 or substituted helper defeats every higher-level invariant
 (see 13.10).
 
-## Network privacy
-
-`LeanKohaku.Privacy.NetworkPolicy` is the deny-by-default boundary:
-
-- CLI traffic is limited to local daemon control over loopback.
-- Daemon reads use local/light-client loopback by default.
-- Broadcast is limited to `eth_sendRawTransaction`.
-- Strict mode denies configured-node traffic, including direct broadcast.
-- Tor mode may read and broadcast through a configured node over Tor.
-- Third-party APIs (analytics, telemetry, price quotes, fiat/onramp,
-  metadata, indexers, crash reports, discovery) remain denied even when
-  Tor is enabled.
-
-Daemon-backed commands use the local Unix socket. If systemd socket
-activation is not available and the socket is missing, the CLI auto-
-spawns `leankohaku-daemon` unless `LEANKOHAKU_NO_AUTOSPAWN=1` is set.
-Invalid CLI input still exits before any daemon or network path is
-attempted.
-
-The daemon-side chain path is implemented and policy-gated:
-
-- `balance` maps to `eth_getBalance` against the local provider.
-- `nonce`, fee, estimate, token balance, and raw broadcast map to
-  Ethereum JSON-RPC methods through the daemon.
-- `eoa send` derives nonce/fees/gas, signs EIP-1559 locally in the
-  daemon, and broadcasts with `eth_sendRawTransaction`.
-
-Endpoint hygiene is modeled separately:
-
-- Strict mode accepts only local, uncredentialed endpoints over loopback.
-- Tor mode accepts local loopback endpoints and uncredentialed configured
-  endpoints over Tor.
-- Credentialed endpoints are denied (rules out API-key hosted services).
-- Third-party endpoints are denied in every mode.
-
-Run the local regression checks with:
-
-```bash
-./script/check_native_helpers.sh
-./script/check_cli_isolation.sh
-./script/check_privacy_cli.sh
-./script/check_m6_keystore_daemon.sh
-./script/check_daemon_config.sh
-./script/check_m10_autospawn.sh
-./script/check_m8_chain_rpc.sh
-```
-
 ## Running the daemon with sidecars
 
 Three of the five sidecars are zero-config from the monorepo: when no
