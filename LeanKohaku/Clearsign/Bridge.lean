@@ -23,15 +23,39 @@ namespace LeanKohaku.Clearsign.Bridge
 
 open LeanKohaku.Encoding.Json
 
-/-- Default executable name for the clearsign sidecar. -/
+/-- Default executable name for the clearsign sidecar (when on PATH). -/
 def defaultExecutable : String := "leankohaku-clearsign-bridge"
 
-/-- Resolve the bridge executable. The `LEAN_KOHAKU_CLEARSIGN_BRIDGE`
-    environment variable overrides for local development. -/
+/-- Walk upward from the working directory looking for the
+    `bridge/clearsign/bridge.mjs` script that ships in this repo. Returns
+    the first match within `maxHops` parents, or `none`. Mirrors the
+    `Colibri/Persistent.lean::findBridgeMjs` helper so the daemon works
+    out-of-the-box from anywhere inside the monorepo without an explicit
+    `LEAN_KOHAKU_CLEARSIGN_BRIDGE` env var. -/
+private partial def findBridgeMjs (start : System.FilePath) (maxHops : Nat) :
+    IO (Option String) := do
+  let candidate := start / "bridge" / "clearsign" / "bridge.mjs"
+  if (← candidate.pathExists) then
+    pure (some candidate.toString)
+  else
+    match maxHops, start.parent with
+    | 0, _ => pure none
+    | _ + 1, none => pure none
+    | n + 1, some parent =>
+        if parent == start then pure none else findBridgeMjs parent n
+
+/-- Resolve the bridge executable in this order:
+    1. `LEAN_KOHAKU_CLEARSIGN_BRIDGE` env var (explicit override).
+    2. `bridge/clearsign/bridge.mjs` walked upward from CWD (monorepo).
+    3. `leankohaku-clearsign-bridge` on PATH (installed binary). -/
 def resolveExecutable : IO String := do
   match (← IO.getEnv "LEAN_KOHAKU_CLEARSIGN_BRIDGE") with
   | some s => pure s
-  | none => pure defaultExecutable
+  | none =>
+      let cwd ← IO.currentDir
+      match ← findBridgeMjs cwd 8 with
+      | some p => pure p
+      | none => pure defaultExecutable
 
 structure Request where
   method : String

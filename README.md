@@ -486,22 +486,40 @@ Run the local regression checks with:
 
 ## Running the daemon with sidecars
 
-Each env var is optional; if a sidecar isn't pointed at, the corresponding
-RPC range fails gracefully with `method not found` or sidecar-spawn errors.
+Three of the five sidecars are zero-config from the monorepo: when no
+env var is set, the daemon walks the working directory upward (≤ 8 hops)
+looking for the in-repo entrypoint. The other two need explicit wiring
+because they each require their own credential.
+
+| Sidecar | Default behavior with no env var | Explicit override |
+|---|---|---|
+| Clearsign | walks up for `bridge/clearsign/bridge.mjs`; fallback PATH basename | `LEAN_KOHAKU_CLEARSIGN_BRIDGE` |
+| Colibri | walks up for `bridge/colibri/bridge.mjs`; fallback PATH basename | `LEAN_KOHAKU_COLIBRI_BRIDGE` |
+| Sphincs (C9, SLHDSA) | walks up for `sidecars/sphincs/bin/sphincs-{c9,slhdsa-128-24}`; fallback PATH basename. Requires you to have run `make` under `sidecars/sphincs/` first. | `LEAN_KOHAKU_SPHINCS_C9` / `LEAN_KOHAKU_SPHINCS_SLHDSA` |
+| Privacy Pools / Railgun | basename `leankohaku-kohaku-bridge` on PATH (likely missing) | `LEAN_KOHAKU_BRIDGE` plus `LEAN_KOHAKU_PP_MNEMONIC` (separate spending secret) |
+| LLM | basename `leankohaku-llm-bridge` on PATH (likely missing) | `LEAN_KOHAKU_LLM_BRIDGE`; the model tool-use loop only fires when an LLM API key is also configured in the daemon's environment, otherwise the rule-based matcher is the only path |
+
+So the minimal local-dev launch is just:
 
 ```bash
-LEAN_KOHAKU_BRIDGE=$PWD/bridge/bridge.mjs                                  \
-LEAN_KOHAKU_CLEARSIGN_BRIDGE=$PWD/bridge/clearsign/bridge.mjs              \
-LEAN_KOHAKU_LLM_BRIDGE=$PWD/bridge/llm/bridge.mjs                          \
-LEAN_KOHAKU_COLIBRI_BRIDGE=$PWD/bridge/colibri/bridge.mjs                  \
-LEAN_KOHAKU_SPHINCS_C9=$PWD/sidecars/sphincs/bin/sphincs-c9                \
-LEAN_KOHAKU_SPHINCS_SLHDSA=$PWD/sidecars/sphincs/bin/sphincs-slhdsa-128-24 \
 .lake/build/bin/leankohaku-daemon
 ```
 
-The LLM bridge's tool-use loop only activates when the daemon is
-launched with the appropriate LLM provider API key in its environment;
-otherwise the rule-based matcher is the only path.
+…provided you've run `(cd sidecars/sphincs && make)` once. Without that,
+SPHINCS+ flows fail with a spawn error; the other surfaces work.
+
+To enable the credentialed sidecars:
+
+```bash
+LEAN_KOHAKU_BRIDGE=$PWD/bridge/bridge.mjs                                  \
+LEAN_KOHAKU_PP_MNEMONIC="abandon abandon …"                                \
+LEAN_KOHAKU_LLM_BRIDGE=$PWD/bridge/llm/bridge.mjs                          \
+.lake/build/bin/leankohaku-daemon
+```
+
+Any defaulted entry can still be force-overridden by setting the matching
+`LEAN_KOHAKU_*` env var explicitly — useful when iterating on a sidecar
+under a non-standard path.
 
 The TUI bundle is built separately:
 

@@ -87,22 +87,50 @@ def ParamSet.parse? : String → Option ParamSet
   | _                     => none
 
 /-- Default executable basenames produced by `sidecars/sphincs/Makefile`
-    and copied into `.lake/build/bin/` by the lake hook. -/
+    and copied into `.lake/build/bin/` by the lake hook. Used as the
+    PATH-fallback when neither the env override nor the in-monorepo
+    binary directory resolves. -/
 def ParamSet.defaultExecutable : ParamSet → String
   | .slhDsaSha2_128_24 => "sphincs-slhdsa-128-24"
   | .c9                => "sphincs-c9"
 
-/-- Resolve the shim binary path. The `LEAN_KOHAKU_SPHINCS_<PARAMSET>`
-    environment variables override for local development; otherwise we
-    fall back to the default binary name (which must be on `PATH` or in
-    `.lake/build/bin/`). -/
+/-- Walk upward from the working directory looking for
+    `sidecars/sphincs/bin/<basename>` that ships in this repo. Returns
+    the first match within `maxHops` parents, or `none`. Mirrors the
+    `Clearsign/Bridge.lean::findBridgeMjs` and
+    `Colibri/Persistent.lean::findBridgeMjs` helpers so the daemon picks
+    up locally-built shim binaries (`make` under `sidecars/sphincs/`)
+    without an explicit `LEAN_KOHAKU_SPHINCS_*` env var. -/
+private partial def findShimBinary (basename : String)
+    (start : System.FilePath) (maxHops : Nat) : IO (Option String) := do
+  let candidate := start / "sidecars" / "sphincs" / "bin" / basename
+  if (← candidate.pathExists) then
+    pure (some candidate.toString)
+  else
+    match maxHops, start.parent with
+    | 0, _ => pure none
+    | _ + 1, none => pure none
+    | n + 1, some parent =>
+        if parent == start then pure none
+        else findShimBinary basename parent n
+
+/-- Resolve the shim binary path in this order:
+    1. `LEAN_KOHAKU_SPHINCS_<PARAMSET>` env var (explicit override).
+    2. `sidecars/sphincs/bin/<basename>` walked upward from CWD
+       (monorepo build output of `make`).
+    3. `<basename>` on PATH (or `.lake/build/bin/` when the lake hook
+       has copied it there). -/
 def resolveExecutable (ps : ParamSet) : IO String := do
   let envKey := match ps with
     | .slhDsaSha2_128_24 => "LEAN_KOHAKU_SPHINCS_SLHDSA"
     | .c9                => "LEAN_KOHAKU_SPHINCS_C9"
   match (← IO.getEnv envKey) with
   | some s => pure s
-  | none => pure ps.defaultExecutable
+  | none =>
+      let cwd ← IO.currentDir
+      match ← findShimBinary ps.defaultExecutable cwd 8 with
+      | some p => pure p
+      | none => pure ps.defaultExecutable
 
 /-- A SPHINCS- key pair. Hex-encoded; the daemon owns sealing to TPM /
     keystore. The shim itself never persists secret material. -/
