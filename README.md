@@ -10,203 +10,15 @@ signing live in untrusted sidecars or native helper binaries. Every produced
 calldata is gated through a `decode → simulate → user-confirm` pipeline
 before any signing.
 
-This README tries to be honest about scope: most of the load-bearing crypto
-is *not* in Lean — it lives in vetted external implementations called over
+Most of the load-bearing crypto is *not* in Lean it lives in vetted external implementations called over
 process boundaries. The proof effort is over the orchestration layer, not the
 primitives. See [INVARIANTS.md](./INVARIANTS.md) for the proof inventory and
 [What is verified vs trusted](#what-is-verified-vs-trusted) below for the
 trust surface.
 
-## Goals
-
-- **CLI-first.** Local CLI talks to a long-running daemon over a Unix socket.
-- **Lean orchestration with machine-checked invariants.** CLI/daemon policy,
-  abstract wallet/account/contract models, network and keystore policy live
-  in Lean alongside their proofs. We grow `INVARIANTS.md` from 📝 *stated*
-  → 🚧 *in-progress* → ✅ *proved*; some are 🔒 *axiomatized* at FFI
-  boundaries on purpose.
-- **Untrusted sidecars at the boundary.** All ZK / EVM / decoder / NL /
-  post-quantum work runs in pinned external processes treated as malicious.
-  The daemon re-decodes everything they emit and routes every produced
-  calldata through `tx.decodeIntent → tx.simulate → ConfirmGate` before
-  signing.
-- **Privacy and security by default.** Network policy is deny-by-default,
-  classified by peer / purpose / transport, with strict and Tor modes
-  proved against third-party API access.
-- **Local enclave-first key custody.** TPM2 / FIDO2 / Apple Secure Enclave
-  for P-256/R1; never an online keystore, never raw secret import/export.
-- **Two account families plus an experimental third.** BIP-39/32 EOAs (k1)
-  and local hardware-backed R1 smart accounts; SPHINCS+ hybrid accounts on
-  Sepolia as a research third family.
-- **Ethereum mainnet first, Sepolia for dev.**
-
-## Non-goals (for now)
-
-- Production readiness — this is a research wallet.
-- Browser / mobile UI.
-- WalletConnect / OpenLV. We deliberately bypass dApp integrations: the
-  LLM agent drafts calldata in natural language; the ERC-7730 walker
-  renders intent for any pasted calldata; Colibri or `eth_call` simulates
-  what tokens actually move. The user confirms ground-truth simulated
-  effects, not dApp marketing copy.
-- Reimplementing crypto, ZK, EVM, or light-client logic in Lean.
-
-## What is verified vs trusted
-
-The trust boundary is concrete. If something is not in the "verified"
-column, treat it as trusted code.
-
-### ✅ Lean-verified (machine-checked)
-
-These properties have non-`sorry` Lean proofs. See
-[INVARIANTS.md](./INVARIANTS.md) for the full list and theorem names.
-
-- Verified-core properties (Cat 0): no key exfiltration, no raw signing
-  oracle, no wrong-chain signing, approval / signer-kind correspondence,
-  R1 TPM policy and EIP-7702 guardrails.
-- Amount arithmetic (Cat 1): checked subtraction never underflows;
-  multi-output sends conserve total balance and only debit affordable
-  amounts.
-- EIP-1559 fee relation and chain-ID match (Cat 2, by definition).
-- Account policies are supported-chain and local-only (4.3); JSON
-  destructors agree with constructors (4.4).
-- Network policy (Cat 6 + 7): CLI only contacts the local daemon; daemon
-  policies deny third-party peers; strict mode denies configured-node
-  access; Tor mode is transport-scoped; non-broadcast methods classify as
-  reads.
-- Keystore (Cat 8): accepted requests never export secrets, are local-
-  only, require user authorization; Linux HP/Lenovo profiles select TPM2
-  first; Apple Secure Enclave accepts the local R1 signing policy.
-- EIP-7951 P256VERIFY constants and chain ids (9.1).
-- R1 account contract (Cat 10): only supported chains; nonce advances
-  only after EIP-7951 verification.
-- SPHINCS+ hybrid account contract (Cat 12): nonce monotonicity, hybrid
-  signature gate (ECDSA AND SPHINCS+), rotation isolation, key
-  supersession after rotation, owner-rotation safety.
-- Uniswap V3 swap helper (Cat 11): zero-slippage identity; balances
-  candidates are chain-correct.
-- Bridge response framing (5.8): the daemon cannot mistake a sidecar
-  crash for a successful proof.
-
-### 🚧 Stated but not yet proved
-
-Sketched in `INVARIANTS.md` with a Lean proposition; proof partial or
-absent. Treat these as design intent, not guarantees.
-
-- 2.2 Calldata-aware intrinsic gas lower bound — only bare-transfer bound
-  is currently in `wellFormed`.
-- 3.1 Signed-amount integrity through CLI/TUI — requires threading a
-  `UserIntent` type end-to-end.
-- 3.2 Deterministic nonce use across restarts.
-- 3.3 R1 signature verifiability against the stored public key.
-- 4.1 RLP roundtrip — only structural lemmas; full round-trip blocked on
-  a non-`partial` decoder.
-- 4.2 Hex roundtrip — nibble-level proved; byte-level lift pending.
-- 5.1 / 5.2 Railgun double-spend / shield conservation — modeled
-  informally only; the Railgun primitives live in the privacy bridge and
-  are not re-derived in Lean.
-- 5.3 Bridge cannot return spending-key material — by-construction
-  inspection of `Privacy/Bridge.lean`, not a machine-checked predicate yet.
-- 5.7 Bridge methods are policy-classified — classification + strict/tor
-  lemmas proved; the runtime gate that *forces* every `Bridge.call`
-  through `policyAllows` is still pending. There is no Lean theorem yet
-  saying the daemon cannot bypass the gate.
-
-### 🔒 Cryptographically axiomatized
-
-End-to-end security cannot be proved by Lean alone — collision resistance,
-signature unforgeability, AEAD authenticity, KDF/PRF, and ZK soundness are
-standard cryptographic *assumptions*. Each is documented in
-`INVARIANTS.md` Cat 13 and bound to a specific external implementation:
-
-- Keccak-256, SHA-256, HMAC-SHA-256/512, PBKDF2-HMAC-SHA-512, HMAC-DRBG,
-  ChaCha20-Poly1305 → HACL Packages binaries (Project Everest).
-- RIPEMD-160 → RustCrypto `ripemd` helper (HASH160 only, never
-  Ethereum addresses).
-- secp256k1 ECDSA → Bitcoin Core libsecp256k1 helpers.
-- P-256 / EIP-7951 P256VERIFY → on-chain precompile + hardware backends.
-- SPHINCS+ → vendored `sphincs/sphincsplus` reference (C) for
-  SLH-DSA-SHA2-128-24, vendored `nconsigny/SPHINCS-/signer-wasm` (Rust)
-  for the C9 parameter set.
-
-A compromised or substituted helper defeats every higher-level invariant
-(13.10).
-
-### 🔌 Trusted external code (not modeled in Lean)
-
-The proof corpus does not extend to:
-
-- The Privacy Pools v1 SDK
-  (`@kohaku-eth/{plugins,railgun,privacy-pools}`) and its snarkjs witness
-  generation.
-- The Colibri stateless light client (`@corpus-core/colibri-stateless`)
-  used for `colibri_simulateTransaction`.
-- The viem ABI walker, ERC-7730 descriptors, and 4-byte selector dict
-  used by the clearsign sidecar.
-- The LLM tool-use loop in the LLM sidecar (model output is treated as
-  adversarial regardless).
-- The Solidity contracts deployed on Sepolia: `R1Account`,
-  `SphincsAccount` at `0xA941116763AE386a50133c5af40356c9D93b2978`, the
-  C9 verifier at `0x18F005EECd41624644AA364bA8857258FEB3C26D`, EntryPoint
-  v0.9.
-- The 0xBow ASP (third-party Approval Service Provider for Privacy Pools)
-  and FastRelay broadcaster.
-
-The mitigation for trusting external code is uniform: nothing the daemon
-signs depends on what a sidecar *reports*. Every produced calldata is
-re-decoded in Lean and run through `tx.simulate → ConfirmGate` before any
-key touches it.
-
-## Layout
-
-```
-leanKohaku/
-├─ lakefile.lean                  # Lake build config
-├─ lean-toolchain                 # pinned Lean version (4.29.1)
-├─ flake.nix / default.nix        # Nix scaffold
-├─ LeanKohaku.lean                # Root module (re-exports)
-├─ LeanKohaku/
-│  ├─ App/         CLI / daemon executable roots
-│  ├─ Crypto/      Hex, Hacl (opaque + IO helpers), Secp256k1Native
-│  ├─ Encoding/    Json, Rlp
-│  ├─ Ethereum/    Address, Chain, P256Precompile, Tx, Abi, Eip712, Ens
-│  ├─ Privacy/     NetworkPolicy, Bridge (privacy-pools/railgun spawn)
-│  ├─ Clearsign/   Bridge (ERC-7730 + EIP-712 spawn)
-│  ├─ LlmAgent/    Bridge (NL → tx draft spawn)
-│  ├─ Colibri/     Bridge, Persistent (light-client spawn)
-│  ├─ Sphincs/     Bridge, UserOp (SPHINCS+ shim spawn, EIP-712 userOpHash)
-│  ├─ Network/     Endpoint, Provider (incl. debug_traceCall)
-│  ├─ Keystore/    Enclave, Linux, Tpm2Runtime, MasterKey
-│  ├─ Contract/    R1Account, SphincsAccount (abstract)
-│  ├─ Swap/        UniV3, Tokens (abstract)
-│  ├─ Wallet/      Account, Bip39Wordlist, Bip44, HDKey, EOA, EoaStore, …
-│  ├─ RPC/         JsonRpc, Outbound, Server
-│  ├─ Daemon/      Config, Log, State, TokenMeta, TxJournal, Uds, Server
-│  ├─ Cli/         Commands, DaemonClient, Passphrase, NetworkConfig
-│  └─ Invariants/  Amount, Wallet, TxWellFormed, Network, R1Account,
-│                  SphincsAccount, Swap, Bridge, Encoding, Keystore,
-│                  Core, Mainnet, …
-├─ Contracts/R1Account/           # Lean source for the deployable R1 contract
-├─ solidity/dev/R1AccountDev.sol  # Sepolia dev fallback (not canonical)
-├─ bridge/                        # Untrusted Node sidecars
-│  ├─ <root>/      Privacy Pools / Railgun (snarkjs, libp2p, viem)
-│  ├─ clearsign/   ERC-7730 walker + 4byte fallback + EIP-712 (viem)
-│  ├─ llm/         LLM tool-use loop + viem
-│  └─ colibri/     Colibri stateless light client (one-shot or --listen)
-├─ sidecars/sphincs/              # Untrusted local SPHINCS+ shims (C / Rust)
-│  ├─ vendor-slhdsa-sha2-128-24/  vendored sphincsplus reference (C)
-│  ├─ vendor-c9/                  vendored signer-wasm (Rust)
-│  └─ shim/                       JSON-RPC dispatcher around the C signer
-├─ tui/                           # Ink-based TUI (esbuild-bundled)
-├─ packaging/arch/                # Arch Linux PKGBUILD scaffold
-├─ INVARIANTS.md                  # Living invariant inventory + proof status
-├─ SECURITY.md                    # Trust boundary statement
-└─ README.md
-```
-
 ## Install
 
-One-liner (foundryup-style — no manual clone needed):
+One-liner :
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/nconsigny/leanCLI/master/script/kohakuspawn | bash
@@ -342,6 +154,192 @@ kohaku debug decode erc20 0xa9059cbb...
 kohaku daemon ping
 kohaku daemon                  # starts the daemon in the foreground
 kohaku tui                     # opens the Ink TUI
+```
+
+
+## Goals
+
+- **CLI-first.** Local CLI talks to a long-running daemon over a Unix socket.
+- **Lean orchestration with machine-checked invariants.** CLI/daemon policy,
+  abstract wallet/account/contract models, network and keystore policy live
+  in Lean alongside their proofs. We grow `INVARIANTS.md` from 📝 *stated*
+  → 🚧 *in-progress* → ✅ *proved*; some are 🔒 *axiomatized* at FFI
+  boundaries on purpose.
+- **Untrusted sidecars at the boundary.** All ZK / EVM / decoder / NL /
+  post-quantum work runs in pinned external processes treated as malicious.
+  The daemon re-decodes everything they emit and routes every produced
+  calldata through `tx.decodeIntent → tx.simulate → ConfirmGate` before
+  signing.
+- **Privacy and security by default.** Network policy is deny-by-default,
+  classified by peer / purpose / transport, with strict and Tor modes
+  proved against third-party API access.
+- **Local enclave-first key custody.** TPM2 / FIDO2 / Apple Secure Enclave
+  for P-256/R1; never an online keystore, never raw secret import/export.
+- **Two account families plus an experimental third.** BIP-39/32 EOAs (k1)
+  and local hardware-backed R1 smart accounts; SPHINCS+ hybrid accounts on
+  Sepolia as a research third family.
+- **Ethereum mainnet first, Sepolia for dev.**
+
+## Non-goals (for now)
+
+- Production readiness — this is a research wallet.
+- Browser / mobile UI.
+- WalletConnect / OpenLV. We deliberately bypass dApp integrations: the
+  LLM agent drafts calldata in natural language; the ERC-7730 walker
+  renders intent for any pasted calldata; Colibri or `eth_call` simulates
+  what tokens actually move. The user confirms ground-truth simulated
+  effects, not dApp marketing copy.
+- Reimplementing crypto, ZK, EVM, or light-client logic in Lean.
+
+## What is verified vs trusted
+
+The trust boundary is concrete. If something is not in the "verified"
+column, treat it as trusted code.
+
+### ✅ Lean-verified (machine-checked)
+
+These properties have non-`sorry` Lean proofs. See
+[INVARIANTS.md](./INVARIANTS.md) for the full list and theorem names.
+
+- Verified-core properties (Cat 0): no key exfiltration, no raw signing
+  oracle, no wrong-chain signing, approval / signer-kind correspondence,
+  R1 TPM policy and EIP-7702 guardrails.
+- Amount arithmetic (Cat 1): checked subtraction never underflows;
+  multi-output sends conserve total balance and only debit affordable
+  amounts.
+- EIP-1559 fee relation and chain-ID match (Cat 2, by definition).
+- Account policies are supported-chain and local-only (4.3); JSON
+  destructors agree with constructors (4.4).
+- Network policy (Cat 6 + 7): CLI only contacts the local daemon; daemon
+  policies deny third-party peers; strict mode denies configured-node
+  access; Tor mode is transport-scoped; non-broadcast methods classify as
+  reads.
+- Keystore (Cat 8): accepted requests never export secrets, are local-
+  only, require user authorization; Linux HP/Lenovo profiles select TPM2
+  first; Apple Secure Enclave accepts the local R1 signing policy.
+- EIP-7951 P256VERIFY constants and chain ids (9.1).
+- R1 account contract (Cat 10): only supported chains; nonce advances
+  only after EIP-7951 verification.
+- SPHINCS+ hybrid account contract (Cat 12): nonce monotonicity, hybrid
+  signature gate (ECDSA AND SPHINCS+), rotation isolation, key
+  supersession after rotation, owner-rotation safety.
+- Uniswap V3 swap helper (Cat 11): zero-slippage identity; balances
+  candidates are chain-correct.
+- Bridge response framing (5.8): the daemon cannot mistake a sidecar
+  crash for a successful proof.
+
+### 🚧 Stated but not yet proved
+
+Sketched in `INVARIANTS.md` with a Lean proposition; proof partial or
+absent. Treat these as design intent, not guarantees.
+
+- 2.2 Calldata-aware intrinsic gas lower bound — only bare-transfer bound
+  is currently in `wellFormed`.
+- 3.1 Signed-amount integrity through CLI/TUI — requires threading a
+  `UserIntent` type end-to-end.
+- 3.2 Deterministic nonce use across restarts.
+- 3.3 R1 signature verifiability against the stored public key.
+- 4.1 RLP roundtrip — only structural lemmas; full round-trip blocked on
+  a non-`partial` decoder.
+- 4.2 Hex roundtrip — nibble-level proved; byte-level lift pending.
+- 5.1 / 5.2 Railgun double-spend / shield conservation — modeled
+  informally only; the Railgun primitives live in the privacy bridge and
+  are not re-derived in Lean.
+- 5.3 Bridge cannot return spending-key material — by-construction
+  inspection of `Privacy/Bridge.lean`, not a machine-checked predicate yet.
+- 5.7 Bridge methods are policy-classified — classification + strict/tor
+  lemmas proved; the runtime gate that *forces* every `Bridge.call`
+  through `policyAllows` is still pending. There is no Lean theorem yet
+  saying the daemon cannot bypass the gate.
+
+### 🔒 Cryptographically axiomatized
+
+End-to-end security cannot be proved by Lean alone — collision resistance,
+signature unforgeability, AEAD authenticity, KDF/PRF, and ZK soundness are
+standard cryptographic *assumptions*. Each is documented in
+`INVARIANTS.md` Cat 13 and bound to a specific external implementation:
+
+- Keccak-256, SHA-256, HMAC-SHA-256/512, PBKDF2-HMAC-SHA-512, HMAC-DRBG,
+  ChaCha20-Poly1305 → HACL Packages binaries (Project Everest).
+- RIPEMD-160 → RustCrypto `ripemd` helper (HASH160 only, never
+  Ethereum addresses).
+- secp256k1 ECDSA → Bitcoin Core libsecp256k1 helpers.
+- P-256 / EIP-7951 P256VERIFY → on-chain precompile + hardware backends.
+- SPHINCS+ → vendored `sphincs/sphincsplus` reference (C) for
+  SLH-DSA-SHA2-128-24, vendored `nconsigny/SPHINCS-/signer-wasm` (Rust)
+  for the C9 parameter set.
+
+
+### 🔌 Trusted external code (not modeled in Lean)
+
+The proof corpus does not extend to:
+
+- The Privacy Pools v1 SDK
+  (`@kohaku-eth/{plugins,railgun,privacy-pools}`) and its snarkjs witness
+  generation.
+- The Colibri stateless light client (`@corpus-core/colibri-stateless`)
+  used for `colibri_simulateTransaction`.
+- The viem ABI walker, ERC-7730 descriptors, and 4-byte selector dict
+  used by the clearsign sidecar.
+- The LLM tool-use loop in the LLM sidecar (model output is treated as
+  adversarial regardless).
+- The Solidity contracts deployed on Sepolia: `R1Account`,
+  `SphincsAccount` at `0xA941116763AE386a50133c5af40356c9D93b2978`, the
+  C9 verifier at `0x18F005EECd41624644AA364bA8857258FEB3C26D`, EntryPoint
+  v0.9.
+- The 0xBow ASP (third-party Approval Service Provider for Privacy Pools)
+  and FastRelay broadcaster.
+
+The mitigation for trusting external code is uniform: nothing the daemon
+signs depends on what a sidecar *reports*. Every produced calldata is
+re-decoded in Lean and run through `tx.simulate → ConfirmGate` before any
+key touches it.
+
+## Layout
+
+```
+leanKohaku/
+├─ lakefile.lean                  # Lake build config
+├─ lean-toolchain                 # pinned Lean version (4.29.1)
+├─ flake.nix / default.nix        # Nix scaffold
+├─ LeanKohaku.lean                # Root module (re-exports)
+├─ LeanKohaku/
+│  ├─ App/         CLI / daemon executable roots
+│  ├─ Crypto/      Hex, Hacl (opaque + IO helpers), Secp256k1Native
+│  ├─ Encoding/    Json, Rlp
+│  ├─ Ethereum/    Address, Chain, P256Precompile, Tx, Abi, Eip712, Ens
+│  ├─ Privacy/     NetworkPolicy, Bridge (privacy-pools/railgun spawn)
+│  ├─ Clearsign/   Bridge (ERC-7730 + EIP-712 spawn)
+│  ├─ LlmAgent/    Bridge (NL → tx draft spawn)
+│  ├─ Colibri/     Bridge, Persistent (light-client spawn)
+│  ├─ Sphincs/     Bridge, UserOp (SPHINCS+ shim spawn, EIP-712 userOpHash)
+│  ├─ Network/     Endpoint, Provider (incl. debug_traceCall)
+│  ├─ Keystore/    Enclave, Linux, Tpm2Runtime, MasterKey
+│  ├─ Contract/    R1Account, SphincsAccount (abstract)
+│  ├─ Swap/        UniV3, Tokens (abstract)
+│  ├─ Wallet/      Account, Bip39Wordlist, Bip44, HDKey, EOA, EoaStore, …
+│  ├─ RPC/         JsonRpc, Outbound, Server
+│  ├─ Daemon/      Config, Log, State, TokenMeta, TxJournal, Uds, Server
+│  ├─ Cli/         Commands, DaemonClient, Passphrase, NetworkConfig
+│  └─ Invariants/  Amount, Wallet, TxWellFormed, Network, R1Account,
+│                  SphincsAccount, Swap, Bridge, Encoding, Keystore,
+│                  Core, Mainnet, …
+├─ Contracts/R1Account/           # Lean source for the deployable R1 contract
+├─ solidity/dev/R1AccountDev.sol  # Sepolia dev fallback (not canonical)
+├─ bridge/                        # Untrusted Node sidecars
+│  ├─ <root>/      Privacy Pools / Railgun (snarkjs, libp2p, viem)
+│  ├─ clearsign/   ERC-7730 walker + 4byte fallback + EIP-712 (viem)
+│  ├─ llm/         LLM tool-use loop + viem
+│  └─ colibri/     Colibri stateless light client (one-shot or --listen)
+├─ sidecars/sphincs/              # Untrusted local SPHINCS+ shims (C / Rust)
+│  ├─ vendor-slhdsa-sha2-128-24/  vendored sphincsplus reference (C)
+│  ├─ vendor-c9/                  vendored signer-wasm (Rust)
+│  └─ shim/                       JSON-RPC dispatcher around the C signer
+├─ tui/                           # Ink-based TUI (esbuild-bundled)
+├─ packaging/arch/                # Arch Linux PKGBUILD scaffold
+├─ INVARIANTS.md                  # Living invariant inventory + proof status
+├─ SECURITY.md                    # Trust boundary statement
+└─ README.md
 ```
 
 ## Pre-sign pipeline
