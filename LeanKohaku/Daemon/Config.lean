@@ -80,6 +80,25 @@ def parseTransport? : String → Option Transport
 /-- Known chain names that participate in env-var fallback resolution. -/
 def envChainNames : List String := ["mainnet", "sepolia"]
 
+/-- Extract `rpc_urls.<chain>` from a parsed daemon.json. Accepts the bare
+    string form (`{ "mainnet": "https://..." }`) and the object form
+    (`{ "mainnet": { "url": "https://...", "transport": "direct" } }`).
+    Empty/whitespace-only values are treated as missing. -/
+def configChainRpcUrl? (fileCfg : Option Json) (chain : String) : Option String :=
+  fileCfg.bind (getField "rpc_urls") |>.bind (getField chain) |>.bind fun entry =>
+    match entry with
+    | .str url =>
+        let trimmed := url.trim
+        if trimmed.isEmpty then none else some trimmed
+    | .obj sub =>
+        sub.findSome? fun (k, v) =>
+          if k = "url" then
+            asString v |>.bind fun s =>
+              let t := s.trim
+              if t.isEmpty then none else some t
+          else none
+    | _ => none
+
 /-- Source of a resolved per-chain RPC URL, used both by `network show` for
     display and by precedence-correctness proofs. -/
 inductive ChainUrlSource
@@ -161,6 +180,17 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
             | some p => p
             | none => strictDaemonPolicy
         | none => strictDaemonPolicy
+  -- Top-level `rpc_url` is the daemon's "default" endpoint (used when a
+  -- request doesn't name a chain). When unset, fall back to the chain
+  -- matching the configured chainId so `kohaku network set-rpc-chain
+  -- mainnet <url>` alone is enough to start the daemon — no separate
+  -- `set-rpc` needed. An explicit empty `rpc_url` still throws (treated
+  -- as "user attempted to unset").
+  let chainNameFromId : Option String :=
+    match chainId with
+    | 1 => some "mainnet"
+    | 11155111 => some "sepolia"
+    | _ => none
   let rpcUrl ← match firstSome [
       ← envString? "LEANKOHAKU_RPC_URL",
       configString? fileCfg "rpc_url",
@@ -176,8 +206,17 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
         else
           pure trimmed
     | none =>
-        throw <| IO.userError
-          "no rpc_url configured: set LEANKOHAKU_RPC_URL or 'rpc_url' in daemon.json"
+        match chainNameFromId with
+        | none =>
+            throw <| IO.userError
+              s!"no rpc_url configured (chain id {chainId}): set LEANKOHAKU_RPC_URL or 'rpc_url' in daemon.json"
+        | some chain =>
+            let envChain? := (← envChainUrl? chain).map (·.1)
+            match firstSome [configChainRpcUrl? fileCfg chain, envChain?] with
+            | some url => pure url
+            | none =>
+                throw <| IO.userError
+                  s!"no rpc_url configured: run `kohaku network set-rpc-chain {chain} <url>` (or set LEANKOHAKU_RPC_URL / 'rpc_url' in daemon.json)"
   let transport? :=
     match ← envString? "LEANKOHAKU_RPC_TRANSPORT" with
     | some s => parseTransport? s
@@ -188,20 +227,32 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
         ] >>= parseTransport?
   let rpcEndpoint := endpointFromUrl rpcUrl transport?
   -- Why: ENS resolution is always against mainnet (names canonical there).
-  -- Optional, no fallback: if unset, the daemon refuses ENS resolution at
-  -- request time rather than silently dialing the operating-chain RPC.
+  -- Fallback chain so users only set one mainnet RPC and ENS just works:
+  --   1. Explicit ENS RPC (env or file) — escape hatch for a different
+  --      mainnet endpoint than the operating one.
+  --   2. Top-level mainnet_rpc_url / mainnetRpcUrl (legacy spelling).
+  --   3. rpc_urls.mainnet (whatever `kohaku network set-rpc-chain mainnet`
+  --      wrote — the primary path).
+  --   4. LEANKOHAKU_RPC_URL_MAINNET or MAINNET_RPC_URL env, with the
+  --      namespaced form winning per envChainUrl? convention.
+  -- If none of these are set, ENS resolution stays disabled — the daemon
+  -- refuses ENS requests at call time rather than silently dialing the
+  -- operating chain's RPC.
+  let envMainnetUrl? := (← envChainUrl? "mainnet").map (·.1)
   let ensRpcEndpoint : Option LeanKohaku.RPC.Outbound.Endpoint ← match firstSome [
       ← envString? "LEANKOHAKU_ENS_RPC_URL",
       configString? fileCfg "ens_rpc_url",
       configString? fileCfg "ensRpcUrl",
       configString? fileCfg "mainnet_rpc_url",
-      configString? fileCfg "mainnetRpcUrl"
+      configString? fileCfg "mainnetRpcUrl",
+      configChainRpcUrl? fileCfg "mainnet",
+      envMainnetUrl?
     ] with
     | some url =>
         let trimmed := url.trim
         if trimmed.isEmpty then
           throw <| IO.userError
-            "no ens_rpc_url configured: set LEANKOHAKU_ENS_RPC_URL or 'ens_rpc_url' in daemon.json (empty value rejected)"
+            "no ens_rpc_url configured: set a mainnet RPC via `kohaku network set-rpc-chain mainnet <url>` (or LEANKOHAKU_ENS_RPC_URL / ens_rpc_url for an explicit override; empty value rejected)"
         else
           pure (some (endpointFromUrl trimmed none))
     | none => pure none

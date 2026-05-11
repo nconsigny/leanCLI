@@ -100,32 +100,29 @@ repository URL before publishing a package.
 
 ## Configure RPC
 
-The CLI and daemon auto-load `./.env` (CWD) and
-`${XDG_CONFIG_HOME:-$HOME/.config}/leankohaku/.env` at startup. Copy the
-template and fill in your endpoints:
+Two commands cover everything — each one propagates to balance, send,
+swap, and (for mainnet) ENS resolution:
 
 ```bash
-cp .env.example .env
-$EDITOR .env
+kohaku network set-rpc-chain mainnet https://your-mainnet-rpc/
+kohaku network set-rpc-chain sepolia https://your-sepolia-rpc/
+kohaku network show       # resolved URLs + source (env vs daemon.json)
 ```
 
-Real shell env always wins over `.env`, so you can override any value
-with a one-shot `export …` without editing the file. Disable autoload
-with `LEANKOHAKU_NO_DOTENV=1`.
+ENS always resolves against mainnet. Setting the mainnet RPC above is
+enough; only use `kohaku network set-ens-rpc <url>` if you want a
+different mainnet endpoint for ENS than for everything else.
 
-The keys you'll most often want:
+Equivalent `.env` entries — both CLI and daemon autoload `./.env` and
+`${XDG_CONFIG_HOME:-$HOME/.config}/leankohaku/.env`:
 
-| Variable | Purpose |
-|----------|---------|
-| `LEANKOHAKU_RPC_URL` | Default RPC for `kohaku balance` / `kohaku send` |
-| `MAINNET_RPC_URL` / `SEPOLIA_RPC_URL` | Per-chain RPC (also: `LEANKOHAKU_RPC_URL_MAINNET`, `…_SEPOLIA`) |
-| `LEANKOHAKU_RPC_TRANSPORT` | `loopback` / `direct` / `tor` (auto for loopback URLs) |
-| `LEANKOHAKU_NETWORK_POLICY` | `strict` (default) / `tor` / `permissive` |
-| `LEANKOHAKU_CHAIN_ID` | `1` mainnet, `11155111` sepolia |
+```bash
+MAINNET_RPC_URL=https://your-mainnet-rpc/
+SEPOLIA_RPC_URL=https://your-sepolia-rpc/
+```
 
-`kohaku network` prints the resolved values and their source (env vs
-`daemon.json`) so you can debug "why is mainnet unset" from one command.
-The full list lives in `.env.example`.
+Shell env beats `.env`. Disable autoload with `LEANKOHAKU_NO_DOTENV=1`.
+See `.env.example` for the rest (transport, policy, chain id, Tor mode).
 
 ## Quick start
 

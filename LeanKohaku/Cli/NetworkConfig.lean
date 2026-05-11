@@ -198,12 +198,46 @@ def humanReport : IO String := do
           | some (_, .str v) => some v
           | _ => none) none
   let fileRpc := fileLookup ["rpc_url", "rpcUrl", "rpc_endpoint", "rpcEndpoint"]
-  let fileEns := fileLookup ["ens_rpc_url", "ensRpcUrl", "mainnet_rpc_url", "mainnetRpcUrl"]
+  -- Pluck `rpc_urls.<chain>` from the file. Accepts both bare string and
+  -- `{ url, transport }` object forms (matches `LeanKohaku.Daemon.Config`).
+  let fileChainRpc (chain : String) : Option String :=
+    fileFields.find? (fun (k, _) => k = "rpc_urls") |>.bind fun (_, v) =>
+      match v with
+      | .obj inner =>
+          inner.find? (fun (k, _) => k = chain) |>.bind fun (_, entry) =>
+            match entry with
+            | .str u =>
+                let t := u.trim
+                if t.isEmpty then none else some t
+            | .obj sub =>
+                sub.findSome? fun (k, v') =>
+                  if k = "url" then
+                    asString v' |>.bind fun s =>
+                      let t := s.trim
+                      if t.isEmpty then none else some t
+                  else none
+            | _ => none
+      | _ => none
+  -- ENS falls back to rpc_urls.mainnet so `kohaku network set-rpc-chain
+  -- mainnet <url>` alone is enough to enable ENS resolution. Mirrors the
+  -- daemon-side resolver in `LeanKohaku/Daemon/Config.lean`.
+  let fileEns :=
+    (fileLookup ["ens_rpc_url", "ensRpcUrl", "mainnet_rpc_url", "mainnetRpcUrl"]).orElse
+      (fun () => fileChainRpc "mainnet")
   let fileTransport := fileLookup ["rpc_transport", "rpcTransport"]
   let filePolicy := fileLookup ["network_policy", "networkPolicy"]
   let fileSocket := fileLookup ["socket_path", "socketPath"]
   let envRpc ← IO.getEnv "LEANKOHAKU_RPC_URL"
-  let envEns ← IO.getEnv "LEANKOHAKU_ENS_RPC_URL"
+  -- Same fallback chain as the daemon: namespaced env > generic env.
+  let trim? (s : String) : Option String :=
+    let t := s.trim
+    if t.isEmpty then none else some t
+  let envEnsRaw ← IO.getEnv "LEANKOHAKU_ENS_RPC_URL"
+  let envEnsNs ← IO.getEnv "LEANKOHAKU_RPC_URL_MAINNET"
+  let envEnsGen ← IO.getEnv "MAINNET_RPC_URL"
+  let envEns := (envEnsRaw.bind trim?).orElse fun () =>
+                  (envEnsNs.bind trim?).orElse fun () =>
+                    (envEnsGen.bind trim?)
   let envTransport ← IO.getEnv "LEANKOHAKU_RPC_TRANSPORT"
   let envPolicy ← IO.getEnv "LEANKOHAKU_NETWORK_POLICY"
   let envSocket ← IO.getEnv "LEANKOHAKU_SOCKET"
