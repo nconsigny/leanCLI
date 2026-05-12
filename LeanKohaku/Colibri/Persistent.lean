@@ -65,10 +65,29 @@ private partial def findBridgeMjs (start : System.FilePath) (maxHops : Nat) :
     | n + 1, some parent =>
         if parent == start then pure none else findBridgeMjs parent n
 
+/-- Read the recorded checkout path written by `script/kohakuspawn` to
+    `$KOHAKU_HOME/checkout` (default `$HOME/.kohaku/checkout`). Returns
+    the path to `bridge/colibri/bridge.mjs` inside that checkout if both
+    the index file and the script exist. -/
+private def findBridgeViaRecordedCheckout : IO (Option String) := do
+  let kohakuHome ← match (← IO.getEnv "KOHAKU_HOME") with
+    | some s => pure (System.FilePath.mk s)
+    | none =>
+        match (← IO.getEnv "HOME") with
+        | some h => pure ((System.FilePath.mk h) / ".kohaku")
+        | none   => pure (System.FilePath.mk ".kohaku")
+  let indexFile := kohakuHome / "checkout"
+  if !(← indexFile.pathExists) then return none
+  let raw ← IO.FS.readFile indexFile
+  let checkout := (System.FilePath.mk raw.toSubstring.trim.toString)
+  let candidate := checkout / "bridge" / "colibri" / "bridge.mjs"
+  if (← candidate.pathExists) then pure (some candidate.toString) else pure none
+
 /-- Resolve the bridge executable in this order:
     1. `LEAN_KOHAKU_COLIBRI_BRIDGE` env var (explicit override).
     2. `bridge/colibri/bridge.mjs` walked upward from CWD (monorepo).
-    3. `leankohaku-colibri-bridge` on PATH (installed binary). -/
+    3. `$KOHAKU_HOME/checkout` → `bridge/colibri/bridge.mjs` (kohakuspawn-installed).
+    4. `leankohaku-colibri-bridge` on PATH (installed binary). -/
 def resolveExecutable : IO String := do
   match (← IO.getEnv "LEAN_KOHAKU_COLIBRI_BRIDGE") with
   | some s => pure s
@@ -76,7 +95,10 @@ def resolveExecutable : IO String := do
       let cwd ← IO.currentDir
       match ← findBridgeMjs cwd 8 with
       | some p => pure p
-      | none => pure defaultExecutable
+      | none =>
+          match ← findBridgeViaRecordedCheckout with
+          | some p => pure p
+          | none => pure defaultExecutable
 
 /-- Spawn the sidecar in --listen mode and connect to it. The caller is
     responsible for keeping the returned `Client` alive for the daemon's

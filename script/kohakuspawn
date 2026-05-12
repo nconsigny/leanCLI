@@ -124,6 +124,10 @@ Options:
   --no-build          Skip `lake build`. Use when binaries are already current.
   --no-tui            Skip the Ink TUI bundle build. `kohaku tui` will not work.
   --rebuild-tui       Force rebuilding the TUI bundle even if dist/ is present.
+  --no-bridges        Skip `npm install` for the bridge/ sidecars. Colibri,
+                      clearsign, privacy and LLM features will be degraded.
+  --rebuild-bridges   Force reinstalling sidecar deps even when node_modules
+                      already exists.
   --no-modify-path    Do not append the kohaku bin dir to your shell rc.
   --force             Overwrite existing kohaku / kohaku-daemon symlinks
                       that point somewhere else. Default refuses.
@@ -143,7 +147,8 @@ EOF
 
 PULL=0
 BUILD_LEAN=1
-BUILD_TUI=auto    # auto | always | never
+BUILD_TUI=auto        # auto | always | never
+BUILD_BRIDGES=auto    # auto | always | never
 MODIFY_PATH=1
 FORCE=0
 MODE=install      # install | uninstall
@@ -154,6 +159,8 @@ while [[ $# -gt 0 ]]; do
     --no-build) BUILD_LEAN=0; shift;;
     --no-tui) BUILD_TUI=never; shift;;
     --rebuild-tui) BUILD_TUI=always; shift;;
+    --no-bridges) BUILD_BRIDGES=never; shift;;
+    --rebuild-bridges) BUILD_BRIDGES=always; shift;;
     --no-modify-path) MODIFY_PATH=0; shift;;
     --force) FORCE=1; shift;;
     --uninstall) MODE=uninstall; shift;;
@@ -299,6 +306,43 @@ build_tui() {
 }
 
 build_tui
+
+# Sidecar JSON-RPC bridges (privacy/Railgun, clearsign, colibri light client,
+# LLM agent). Each is a stdio Node process spawned by the daemon; deps must
+# be installed for `kohaku daemon` to use them. Missing deps degrade
+# gracefully — e.g. the daemon falls back to the configured RPC instead of
+# Colibri's stateless verification — but the warnings are noisy.
+build_bridges() {
+  if [[ "$BUILD_BRIDGES" == "never" ]]; then
+    echo "==> bridges: skipped (--no-bridges)"
+    return 0
+  fi
+  if [[ ! -d "$CHECKOUT/bridge" ]]; then
+    return 0
+  fi
+  require node
+  require npm
+  local any=0
+  # Top-level bridge/ (privacy) plus each bridge/<name>/ subpackage.
+  for pkg_json in "$CHECKOUT/bridge/package.json" "$CHECKOUT/bridge"/*/package.json; do
+    [[ -f "$pkg_json" ]] || continue
+    local dir
+    dir="$(dirname "$pkg_json")"
+    local rel="${dir#$CHECKOUT/}"
+    if [[ "$BUILD_BRIDGES" == "auto" && -d "$dir/node_modules" ]]; then
+      echo "==> $rel: node_modules present, skipping (use --rebuild-bridges to force)"
+      continue
+    fi
+    echo "==> $rel: npm install"
+    (cd "$dir" && npm install --no-audit --no-fund)
+    any=1
+  done
+  if [[ $any -eq 0 && "$BUILD_BRIDGES" == "auto" ]]; then
+    echo "==> bridges: all up to date"
+  fi
+}
+
+build_bridges
 
 mkdir -p "$KOHAKU_BIN"
 
