@@ -465,7 +465,7 @@ export default function SwapFlow({ wallet, onDone }: Props) {
         {isR1 && (
           <Box marginBottom={1}>
             <Text color={theme.warn}>
-              R1 wallets: ERC20 sells need 2 biometric prompts (approve + swap); ETH sells need 1.
+              R1 wallets: ERC20 sells need 2 PIN entries (approve + swap); ETH sells need 1.
             </Text>
           </Box>
         )}
@@ -510,7 +510,7 @@ export default function SwapFlow({ wallet, onDone }: Props) {
         {r1NeedsTwoPrompts && (
           <Box marginBottom={1}>
             <Text color={theme.warn}>
-              R1 ERC20 sell: 2 biometric prompts will be requested (approve + swap).
+              R1 ERC20 sell: 2 PIN entries will be requested (approve + swap).
             </Text>
           </Box>
         )}
@@ -876,7 +876,7 @@ export default function SwapFlow({ wallet, onDone }: Props) {
         tx={{
           ...phase.approval,
           rationale: `Approve Uniswap V3 router to spend ${phase.ctx.from.symbol}${
-            isR1 ? " (R1: biometric prompt #1 of 2)" : " (required before swap)"
+            isR1 ? " (R1: PIN entry #1 of 2)" : " (required before swap)"
           }`,
         }}
         onDone={(success) => {

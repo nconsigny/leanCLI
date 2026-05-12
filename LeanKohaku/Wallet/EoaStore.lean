@@ -36,8 +36,8 @@ structure Record where
   accounts       : Array Account := #[]
   -- Why: optional ChaCha20-Poly1305 ciphertext of the seed under the TPM-sealed
   -- master attestation key. Layout = nonce(12) || ciphertext+tag. Slots
-  -- without this field continue to work; only `wallet unlock --all --biometric`
-  -- requires it.
+  -- without this field continue to work; only the master-PIN-gated
+  -- `eoa.attestation.unlockAll` flow requires it.
   attestationWrap : Option ByteArray := none
   -- Why: optional ChaCha20-Poly1305 ciphertext of the BIP-39 mnemonic phrase
   -- (UTF-8 bytes of the space-joined words) under the same passphrase-derived

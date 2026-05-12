@@ -3,6 +3,7 @@ import LeanKohaku.Cli.Commands
 import LeanKohaku.Cli.DaemonClient
 import LeanKohaku.Cli.NetworkConfig
 import LeanKohaku.Cli.Passphrase
+import LeanKohaku.Keystore.Tpm2Runtime
 import LeanKohaku.Encoding.Json
 import LeanKohaku.Invariants.EthAmount
 import LeanKohaku.Wallet.PpSecretStore
@@ -120,17 +121,24 @@ def runR1WalletDeploy (keyName chain : String) : IO UInt32 := do
     (.obj #[("name", .str keyName), ("chain", .str chain)])
 
 def runR1WalletCreate (keyName : String) : IO UInt32 := do
-  let createCode ← DaemonClient.printTextResult "tpm.create" (.obj #[("name", .str keyName)])
-  if createCode ≠ 0 then return createCode
-  IO.print s!"\nDeploy R1 account for '{keyName}' on Sepolia now? [Y/n] "
-  (← IO.getStdout).flush
-  let answer := (← (← IO.getStdin).getLine).trim.toLower
-  if answer = "" || answer = "y" || answer = "yes" then
-    IO.println "→ deploying…"
-    runR1WalletDeploy keyName "sepolia"
-  else
-    IO.println s!"Skipped. Deploy later with: kohaku wallet deploy r1 {keyName}"
-    pure 0
+  IO.eprintln s!"Choose a PIN for the new TPM2 key (min {LeanKohaku.Keystore.Tpm2Runtime.minPinLength} chars).\nThe PIN will be bound to the key as the TPM auth value and required for every signature."
+  match ← LeanKohaku.Cli.Pin.readConfirmed LeanKohaku.Keystore.Tpm2Runtime.minPinLength with
+  | .error err =>
+      IO.eprintln s!"error: {err}"
+      return 2
+  | .ok pin =>
+      let createCode ← DaemonClient.printTextResult "tpm.create"
+        (.obj #[("name", .str keyName), ("pin", .str pin)])
+      if createCode ≠ 0 then return createCode
+      IO.print s!"\nDeploy R1 account for '{keyName}' on Sepolia now? [Y/n] "
+      (← IO.getStdout).flush
+      let answer := (← (← IO.getStdin).getLine).trim.toLower
+      if answer = "" || answer = "y" || answer = "yes" then
+        IO.println "→ deploying…"
+        runR1WalletDeploy keyName "sepolia"
+      else
+        IO.println s!"Skipped. Deploy later with: kohaku wallet deploy r1 {keyName}"
+        pure 0
 
 def runSepoliaWalletList : IO UInt32 := do
   DaemonClient.printTextResult "tpm.listSepolia"
@@ -776,7 +784,7 @@ private def renderTpmShow (name addr : String) : IO Unit := do
     IO.println s!"  key directory:   {keyDir}"
     IO.println s!"  manifest:        {manifestPath}{tag manExists}"
     IO.println s!"  public key:      {publicPath}{tag pubExists}"
-  IO.println "  signing requires biometric verification (fprintd)"
+  IO.println "  signing requires the TPM-bound PIN (checked by the TPM)"
 
 private def prettyEoaShow (name : String) : IO UInt32 := do
   match ← DaemonClient.call "eoa.show" (.obj #[("name", .str name)]) with
@@ -1455,7 +1463,7 @@ def run (args : List String) : IO UInt32 := do
       match ← resolveSlotType name with
       | some .eoa => eoaUnlock name
       | some .tpm =>
-          IO.println "(r1 wallet — no unlock needed; signing prompts via fprintd)"
+          IO.println "(r1 wallet — no unlock needed; signing prompts for the TPM PIN)"
           pure 0
       | none =>
           IO.eprintln s!"error: unknown wallet '{name}'"
@@ -1617,8 +1625,9 @@ def run (args : List String) : IO UInt32 := do
   | .walletSignDigest name digest =>
       match ← resolveSlotType name with
       | some .tpm =>
+          let pin ← LeanKohaku.Cli.Pin.read s!"PIN for {name}: "
           DaemonClient.printTextResult "tpm.signSepolia"
-            (.obj #[("name", .str name), ("digest", .str digest)])
+            (.obj #[("name", .str name), ("digest", .str digest), ("pin", .str pin)])
       | _ => eoaSignDigestCall name digest accountIdx?
   | .walletSignMessage name message path? =>
       match ← resolveSlotType name with
@@ -2227,10 +2236,12 @@ def run (args : List String) : IO UInt32 := do
                           IO.eprintln s!"invalid send recipient: {err}"
                           return 2
                       | .ok toResolved =>
+                          let pin ← LeanKohaku.Cli.Pin.read s!"PIN for {slotName}: "
                           let rc ← DaemonClient.printTextResult "r1.sendEthSepolia"
                             (.obj #[("name", .str slotName),
                                     ("to", .str toResolved),
-                                    ("amountEth", .str amount)])
+                                    ("amountEth", .str amount),
+                                    ("pin", .str pin)])
                           if rc = 0 then
                             match ← DaemonClient.call "tpm.listSepoliaAddresses" with
                             | .ok r =>

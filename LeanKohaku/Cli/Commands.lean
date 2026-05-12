@@ -740,8 +740,8 @@ def daemonHelpText (walletName? : Option String) : String :=
      1. Read the deployed R1 account address for the wallet key\n\
      2. Convert ETH to wei locally with cast\n\
      3. Ask the R1 account for the operation digest\n\
-     4. Require fprintd biometric verification, default right-index-finger, up to 3 tries\n\
-     5. Sign the digest with the local TPM P-256 key\n\
+     4. Prompt for the TPM PIN (auth value bound at key-creation time)\n\
+     5. Sign the digest with the local TPM P-256 key (TPM checks the PIN)\n\
      6. Broadcast execute(...) through the deployed R1 account\n\n\
    Setup commands:\n\
      leankohaku wallet create r1 " ++ walletName ++ "\n\
@@ -752,7 +752,8 @@ def daemonHelpText (walletName? : Option String) : String :=
      ./script/r1_sepolia.sh address\n\n\
    Safety notes:\n\
      - The TPM private blob stays local under .leankohaku/ and is gitignored\n\
-     - Fingerprint verification gates signing but is not yet a TPM policy session\n\
+     - PIN is bound to the TPM key as a userwithauth value; wrong-PIN attempts are\n\
+       rate-limited by the TPM's hardware dictionary-attack protection\n\
      - The current Sepolia contract is a temporary Solidity fallback\n\
      - Contracts/R1Account/ remains the Lean/Verity source of truth\n"
 
@@ -787,8 +788,9 @@ def keystoreText : String :=
      - wallet create r1 <name> creates a chain-agnostic TPM2-wrapped P-256 key\n\
      - wallet deploy r1 <name> --chain sepolia deploys the R1 smart account on Sepolia\n\
      - wallet sign sepolia <name> <digest> signs a 32-byte digest locally\n\
-     - new key creation requires local fprintd biometric verification\n\
-     - signing requires local fprintd biometric verification\n\
+     - new key creation prompts for a PIN that is set as the TPM auth value\n\
+     - signing requires that PIN, checked by the TPM in hardware\n\
+     - wrong-PIN attempts are rate-limited by the TPM's dictionary-attack lockout\n\
      - key material is stored under .leankohaku/ and is ignored by git\n\n\
    See LeanKohaku.Keystore.Enclave, LeanKohaku.Keystore.Linux, and\n\
    LeanKohaku.Keystore.Tpm2Runtime.\n"

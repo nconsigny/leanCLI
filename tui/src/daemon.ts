@@ -8,9 +8,10 @@ import os from "node:os";
  * JSON, requests carry an integer `id`, the daemon may emit notification
  * frames (no `result`/`error` field) interleaved with the response.
  *
- * This module holds no secrets. Every passphrase or biometric prompt is
- * driven by the daemon itself; we only forward the user's request and
- * render whatever the daemon sends back.
+ * This module holds no secrets in steady state — passphrases and PINs
+ * are captured by per-flow form widgets, included once in the request
+ * params, and the TUI only renders whatever notifications/responses the
+ * daemon sends back.
  */
 
 export type RpcError = { code: number; message: string };

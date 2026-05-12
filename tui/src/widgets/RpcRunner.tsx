@@ -116,12 +116,13 @@ export default function RpcRunner({
 
 function notifColor(n: Notification): string {
   switch (n.event) {
-    case "biometric-required":
+    case "pin-required":
       return theme.warn;
-    case "biometric-success":
+    case "pin-success":
     case "tx-mined":
       return theme.ok;
-    case "biometric-failed":
+    case "pin-auth-failed":
+    case "pin-locked-out":
       return theme.err;
     case "tx-broadcasted":
     case "tx-pending":
@@ -133,13 +134,16 @@ function notifColor(n: Notification): string {
 
 function notifLine(n: Notification): string {
   const d: any = n.data ?? {};
+  const opTag = d.op ? ` (${d.op})` : "";
   switch (n.event) {
-    case "biometric-required":
-      return `🔒 touch ${d.finger ?? "fingerprint reader"} (attempt ${d.attempt ?? "?"}/${d.of ?? "?"})`;
-    case "biometric-success":
-      return "✓ biometric verified";
-    case "biometric-failed":
-      return `✗ biometric attempt ${d.attempt ?? "?"}/${d.of ?? "?"} failed`;
+    case "pin-required":
+      return `🔒 verifying TPM PIN${opTag}…`;
+    case "pin-success":
+      return `✓ PIN accepted${opTag}`;
+    case "pin-auth-failed":
+      return `✗ PIN rejected by TPM${opTag}`;
+    case "pin-locked-out":
+      return `⛔ TPM dictionary-attack lockout${opTag}`;
     case "tx-broadcasted":
       return `📡 broadcast: ${d.txHash ?? "(no hash)"}`;
     case "tx-pending":

@@ -15,10 +15,13 @@ The private key is never exported as raw key material. The `*.priv` file
 created by `tpm2_create` is a TPM-wrapped private blob that must be loaded
 back into the same TPM hierarchy to sign.
 
-User verification is currently enforced as a local Linux gate through
-`fprintd-verify` before creating a new key. This is not yet a cryptographic
-TPM policy session, so signing must also require user verification when that
-runtime path is added.
+User verification is bound to the TPM object itself: the PIN is set as the
+`userwithauth` value at `tpm2_create` time and re-checked by the TPM on every
+`tpm2_sign`. Dictionary-attack protection (lockout after N consecutive
+failures) is enforced by the TPM in hardware — it cannot be bypassed by a
+compromised daemon. The PIN bytes never appear on `argv`; we route them
+through a chmod-600 temp file (`auth.tmp` in the key directory) and pass
+`-p file:<path>` to tpm2-tools.
 -/
 
 namespace LeanKohaku.Keystore.Tpm2Runtime
@@ -29,12 +32,11 @@ open LeanKohaku.Keystore.Enclave
 open LeanKohaku.Wallet.Account
 open LeanKohaku.Encoding.Json
 
-/-- A side-channel for biometric / TPM lifecycle events. The daemon
-    overrides this with a closure that writes JSON-RPC notification
-    frames onto the active UDS connection so the CLI can render
-    user-facing prompts before the final response arrives. The default
-    is a stderr trace (kept off the daemon stdout) for direct,
-    non-daemon invocations. -/
+/-- A side-channel for PIN / TPM lifecycle events. The daemon overrides
+    this with a closure that writes JSON-RPC notification frames onto
+    the active UDS connection so the CLI can render user-facing status
+    updates before the final response arrives. The default is a stderr
+    trace (kept off the daemon stdout) for direct, non-daemon invocations. -/
 abbrev Notifier := String → Json → IO Unit
 
 /-- Default notifier: write a one-line trace to stderr. The daemon
@@ -54,9 +56,11 @@ inductive CreateStatus where
   | created
   | alreadyExists
   | invalidKeyName
+  | invalidPin
   | missingTpmDevice
   | missingTool (tool : String)
-  | biometricVerificationFailed (stderr : String)
+  | pinAuthFailed (stderr : String)
+  | pinDictionaryLockout (stderr : String)
   | policyRejected
   | commandFailed (cmd : String) (stderr : String)
   deriving Repr
@@ -65,10 +69,12 @@ inductive SignStatus where
   | signed
   | invalidKeyName
   | invalidDigest
+  | invalidPin
   | missingKey
   | missingTpmDevice
   | missingTool (tool : String)
-  | biometricVerificationFailed (stderr : String)
+  | pinAuthFailed (stderr : String)
+  | pinDictionaryLockout (stderr : String)
   | commandFailed (cmd : String) (stderr : String)
   deriving Repr
 
@@ -117,20 +123,25 @@ def Config.digestBin (cfg : Config) : System.FilePath :=
 def Config.signatureBin (cfg : Config) : System.FilePath :=
   cfg.keyDir / "signature.bin"
 
+/-- Transient auth-value file. Holds the user's PIN bytes only for the
+    duration of a single tpm2-tools invocation, then is unlinked. Lives
+    inside the chmod-700 key directory; mode is forced to 600. -/
+def Config.authFile (cfg : Config) : System.FilePath :=
+  cfg.keyDir / "auth.tmp"
+
 def requiredTools : List String :=
   ["tpm2_createprimary", "tpm2_create", "tpm2_load", "tpm2_readpublic"]
 
 def signingTools : List String :=
   ["tpm2_createprimary", "tpm2_load", "tpm2_sign"]
 
-def biometricTool : String :=
-  "fprintd-verify"
+/-- Minimum acceptable PIN length, in characters. Below this we reject
+    the request before touching the TPM, so an obvious mistype doesn't
+    burn a slot in the dictionary-attack counter. -/
+def minPinLength : Nat := 4
 
-def defaultBiometricFinger : String :=
-  "right-index-finger"
-
-def biometricAttempts : Nat :=
-  3
+def validPin (pin : String) : Bool :=
+  decide (pin.length ≥ minPinLength)
 
 def logStep (msg : String) : IO Unit :=
   IO.println s!"[leankohaku:tpm2] {msg}"
@@ -154,13 +165,6 @@ def validKeyName (name : String) : Bool :=
 def toolAvailable (tool : String) : IO Bool := do
   try
     let out ← IO.Process.output { cmd := tool, args := #["--version"] }
-    pure (out.exitCode == 0)
-  catch _ =>
-    pure false
-
-def fprintdAvailable : IO Bool := do
-  try
-    let out ← IO.Process.output { cmd := biometricTool, args := #["--help"] }
     pure (out.exitCode == 0)
   catch _ =>
     pure false
@@ -216,60 +220,58 @@ def hardenKeyFiles (cfg : Config) : IO Unit := do
     if ← path.pathExists then
       hardenFile path
 
-def biometricFinger : IO String := do
-  match ← IO.getEnv "LEAN_KOHAKU_BIOMETRIC_FINGER" with
-  | some finger =>
-      if finger.isEmpty then
-        pure defaultBiometricFinger
-      else
-        pure finger
-  | none => pure defaultBiometricFinger
+/-- Build the JSON params for a PIN lifecycle notification. The PIN itself
+    NEVER appears in these events — only the operation tag and any TPM
+    stderr text that escaped to the daemon. -/
+private def pinEventParams (op : String) (extra : Array (String × Json) := #[]) : Json :=
+  .obj (#[("op", .str op)] ++ extra)
 
-/-- Build the JSON params for a biometric event notification. -/
-private def biometricEventParams (finger : String) (attempt : Nat)
-    (extra : Array (String × Json) := #[]) : Json :=
-  .obj (#[
-      ("finger", .str finger),
-      ("attempt", .num (Int.ofNat attempt)),
-      ("of", .num (Int.ofNat biometricAttempts))
-    ] ++ extra)
+/-- Write the user-supplied PIN to a chmod-600 file inside the key directory.
+    Why a file: passing `-p str:<pin>` on argv would expose the PIN in
+    `/proc/<pid>/cmdline`, which is readable by same-UID processes by default.
+    Why the key directory: it is already chmod-700, so the auth file is
+    confined to the wallet's own state tree. -/
+private def writePinFile (path : System.FilePath) (pin : String) : IO Unit := do
+  IO.FS.writeBinFile path pin.toUTF8
+  chmodPath "600" path
 
-partial def verifyLocalUserLoop
-    (notify : Notifier) (finger : String) : Nat → Nat → IO (Except String Unit)
-  | 0, _ =>
-      pure (.error s!"{biometricTool} failed after {biometricAttempts} attempts")
-  | remaining + 1, attemptNo => do
-      logStep s!"starting biometric verification with fprintd using {finger} (attempt {attemptNo}/{biometricAttempts})"
-      notify "biometric-required" (biometricEventParams finger attemptNo)
-      -- Spawn fprintd-verify with stdio fully suppressed: stdin/stdout to
-      -- /dev/null and stderr captured into a pipe so we can include it in
-      -- a biometric-failed event without dumping it on the daemon terminal.
-      let child ← IO.Process.spawn
-        { cmd := biometricTool,
-          args := #["-f", finger],
-          stdin := .null,
-          stdout := .null,
-          stderr := .piped }
-      let exitCode ← child.wait
-      let errOut ← child.stderr.readToEnd
-      if exitCode == 0 then
-        logStep "biometric verification succeeded"
-        notify "biometric-success" (biometricEventParams finger attemptNo)
-        pure (.ok ())
-      else
-        logStep s!"biometric verification failed with exit code {exitCode}"
-        notify "biometric-failed"
-          (biometricEventParams finger attemptNo
-            #[("exitCode", .num (Int.ofNat exitCode.toNat)),
-              ("stderr", .str errOut)])
-        verifyLocalUserLoop notify finger remaining (attemptNo + 1)
+/-- Best-effort removal of the transient auth file. Suppresses failures
+    because the file may have already been unlinked or never created. -/
+private def clearPinFile (path : System.FilePath) : IO Unit := do
+  try
+    if ← path.pathExists then
+      IO.FS.removeFile path
+  catch _ => pure ()
 
-def verifyLocalUser (notify : Notifier := stderrNotifier) :
-    IO (Except String Unit) := do
-  verifyLocalUserLoop notify (← biometricFinger) biometricAttempts 1
+/-- Case-insensitive substring check. Lean's stdlib has `endsWith`/`startsWith`
+    but no built-in substring search; `splitOn` returns `[haystack]` (one
+    element) when the needle is absent and a longer list otherwise. -/
+private def containsCI (haystack needle : String) : Bool :=
+  decide ((haystack.toLower.splitOn needle.toLower).length > 1)
+
+/-- Recognize TPM error patterns produced by `tpm2-tools` when an auth value
+    is wrong. tpm2-tools surfaces both numeric Esys/RC codes and English
+    fragments; we match generously to cover firmware/tool-version drift. -/
+private def isAuthFailureStderr (stderr : String) : Bool :=
+  containsCI stderr "auth fail" ||
+    containsCI stderr "0x9a2" ||
+    containsCI stderr "0x922" ||
+    containsCI stderr "0x98e" ||
+    containsCI stderr "bad_auth" ||
+    containsCI stderr "authorization hmac check failed"
+
+/-- Recognize TPM dictionary-attack lockout responses. After enough wrong-PIN
+    attempts, the TPM refuses to evaluate auth values until the lockout
+    interval elapses (or an admin reset). -/
+private def isLockoutStderr (stderr : String) : Bool :=
+  containsCI stderr "lockout" || containsCI stderr "0x921"
 
 def fileArg (path : System.FilePath) : String :=
   path.toString
+
+/-- Format the `-p` argument that points tpm2-tools at the auth file. -/
+def pinAuthArg (cfg : Config) : String :=
+  s!"file:{cfg.authFile.toString}"
 
 def manifestContents (cfg : Config) : String :=
   "leankohaku TPM2 key manifest\n" ++
@@ -281,10 +283,10 @@ def manifestContents (cfg : Config) : String :=
   "private_blob=key.priv\n" ++
   "loaded_context=key.ctx\n" ++
   "custody=local-tpm2\n" ++
-  "creation_user_verification=fprintd-verify\n" ++
-  s!"creation_user_verification_finger={defaultBiometricFinger}\n" ++
-  s!"creation_user_verification_attempts={biometricAttempts}\n" ++
-  "creation_user_verification_tpm_bound=false\n" ++
+  "creation_user_verification=tpm-auth-value\n" ++
+  s!"creation_user_verification_pin_min_length={minPinLength}\n" ++
+  "creation_user_verification_tpm_bound=true\n" ++
+  "creation_user_verification_dictionary_attack_protection=tpm-hardware\n" ++
   "raw_private_key_exported=false\n" ++
   s!"key_name={cfg.keyName}\n"
 
@@ -321,7 +323,8 @@ def createSigningKeyWithAlg (cfg : Config) (alg : String) : IO (Except String St
       "-g", "sha256",
       "-a", "sign|fixedtpm|fixedparent|sensitivedataorigin|userwithauth",
       "-u", fileArg cfg.publicBlob,
-      "-r", fileArg cfg.privateBlob]
+      "-r", fileArg cfg.privateBlob,
+      "-p", pinAuthArg cfg]
 
 def createSigningKey (cfg : Config) : IO (Except String String) := do
   match ← createSigningKeyWithAlg cfg "ecc_nist_p256" with
@@ -352,19 +355,24 @@ def signDigest (cfg : Config) : IO (Except String String) :=
       "-d",
       "-f", "plain",
       "-o", fileArg cfg.signatureBin,
+      "-p", pinAuthArg cfg,
       fileArg cfg.digestBin]
 
 -- Chain-agnostic R1 key creation. The key is a TPM2-wrapped P-256 keypair
 -- usable on any EIP-7951–enabled chain; chain selection happens at deploy
--- time, not at key creation.
-def createR1Key (cfg : Config := {}) (notify : Notifier := stderrNotifier) :
-    IO CreateReport := do
+-- time, not at key creation. The supplied `pin` becomes the TPM auth value
+-- on the new key object and will be required by every subsequent sign.
+def createR1Key (pin : String) (cfg : Config := {})
+    (notify : Notifier := stderrNotifier) : IO CreateReport := do
   logStep s!"create requested: key={cfg.keyName}"
   logStep s!"state directory: {cfg.stateDir}"
   logStep s!"key directory: {cfg.keyDir}"
   unless validKeyName cfg.keyName do
     logStep "rejected invalid key name"
     return mkReport cfg .invalidKeyName
+  unless validPin pin do
+    logStep s!"rejected PIN: must be at least {minPinLength} characters"
+    return mkReport cfg .invalidPin
   unless (← deviceAvailable) do
     logStep "no TPM device found at /dev/tpm0 or /dev/tpmrm0"
     return mkReport cfg .missingTpmDevice
@@ -377,37 +385,50 @@ def createR1Key (cfg : Config := {}) (notify : Notifier := stderrNotifier) :
     logStep s!"existing manifest found, refusing overwrite: {cfg.manifest}"
     return mkReport cfg .alreadyExists
 
-  unless (← fprintdAvailable) do
-    logStep "biometric tool missing: fprintd-verify"
-    return mkReport cfg (.missingTool biometricTool)
-
-  match ← verifyLocalUser notify with
-  | .error err => return mkReport cfg (.biometricVerificationFailed err)
-  | .ok _ => pure ()
-
   logStep s!"creating key directory: {cfg.keyDir}"
   IO.FS.createDirAll cfg.keyDir
   hardenKeyDir cfg
 
+  notify "pin-required" (pinEventParams "create")
+  writePinFile cfg.authFile pin
+
   logStep "running tpm2_createprimary"
   match ← createPrimary cfg with
-  | .error err => return mkReport cfg (.commandFailed "tpm2_createprimary" err)
+  | .error err =>
+      clearPinFile cfg.authFile
+      return mkReport cfg (.commandFailed "tpm2_createprimary" err)
   | .ok _ => pure ()
 
-  logStep "running tpm2_create for P-256 signing key"
+  logStep "running tpm2_create for P-256 signing key (auth value bound)"
   match ← createSigningKey cfg with
-  | .error err => return mkReport cfg (.commandFailed "tpm2_create" err)
+  | .error err =>
+      clearPinFile cfg.authFile
+      if isLockoutStderr err then
+        return mkReport cfg (.pinDictionaryLockout err)
+      else if isAuthFailureStderr err then
+        -- Should not happen on create (no prior auth value), but mapping
+        -- it explicitly keeps the surface symmetric with sign.
+        return mkReport cfg (.pinAuthFailed err)
+      else
+        return mkReport cfg (.commandFailed "tpm2_create" err)
   | .ok _ => pure ()
 
   logStep "running tpm2_load"
   match ← loadSigningKey cfg with
-  | .error err => return mkReport cfg (.commandFailed "tpm2_load" err)
+  | .error err =>
+      clearPinFile cfg.authFile
+      return mkReport cfg (.commandFailed "tpm2_load" err)
   | .ok _ => pure ()
 
   logStep "running tpm2_readpublic"
   match ← readPublicKey cfg with
-  | .error err => return mkReport cfg (.commandFailed "tpm2_readpublic" err)
+  | .error err =>
+      clearPinFile cfg.authFile
+      return mkReport cfg (.commandFailed "tpm2_readpublic" err)
   | .ok _ => pure ()
+
+  clearPinFile cfg.authFile
+  notify "pin-success" (pinEventParams "create")
 
   logStep s!"writing manifest: {cfg.manifest}"
   IO.FS.writeFile cfg.manifest (manifestContents cfg)
@@ -428,6 +449,7 @@ def listSepoliaKeys (stateDir : System.FilePath := ".leankohaku/keystore/tpm2") 
 
 def signSepoliaDigest
     (digestHex : String)
+    (pin : String)
     (cfg : Config := {})
     (notify : Notifier := stderrNotifier) : IO SignReport := do
   logStep s!"sign requested: chain=sepolia key={cfg.keyName}"
@@ -435,6 +457,9 @@ def signSepoliaDigest
   unless validKeyName cfg.keyName do
     logStep "rejected invalid key name"
     return mkSignReport cfg .invalidKeyName
+  unless validPin pin do
+    logStep s!"rejected PIN: must be at least {minPinLength} characters"
+    return mkSignReport cfg .invalidPin
   unless (← deviceAvailable) do
     logStep "no TPM device found at /dev/tpm0 or /dev/tpmrm0"
     return mkSignReport cfg .missingTpmDevice
@@ -455,34 +480,44 @@ def signSepoliaDigest
       | some tool => return mkSignReport cfg (.missingTool tool)
       | none => pure ()
 
-      unless (← fprintdAvailable) do
-        logStep "biometric tool missing: fprintd-verify"
-        return mkSignReport cfg (.missingTool biometricTool)
-
-      match ← verifyLocalUser notify with
-      | .error err => return mkSignReport cfg (.biometricVerificationFailed err)
-      | .ok _ => pure ()
-
       logStep s!"writing digest file: {cfg.digestBin}"
       IO.FS.writeBinFile cfg.digestBin digest
       hardenKeyDir cfg
       hardenFile cfg.digestBin
 
+      notify "pin-required" (pinEventParams "sign")
+      writePinFile cfg.authFile pin
+
       logStep "running tpm2_createprimary"
       match ← createPrimary cfg with
-      | .error err => return mkSignReport cfg (.commandFailed "tpm2_createprimary" err)
+      | .error err =>
+          clearPinFile cfg.authFile
+          return mkSignReport cfg (.commandFailed "tpm2_createprimary" err)
       | .ok _ => pure ()
 
       logStep "running tpm2_load"
       match ← loadSigningKey cfg with
-      | .error err => return mkSignReport cfg (.commandFailed "tpm2_load" err)
+      | .error err =>
+          clearPinFile cfg.authFile
+          return mkSignReport cfg (.commandFailed "tpm2_load" err)
       | .ok _ => pure ()
 
       logStep "running tpm2_sign"
       match ← signDigest cfg with
-      | .error err => return mkSignReport cfg (.commandFailed "tpm2_sign" err)
+      | .error err =>
+          clearPinFile cfg.authFile
+          if isLockoutStderr err then
+            notify "pin-locked-out" (pinEventParams "sign" #[("stderr", .str err)])
+            return mkSignReport cfg (.pinDictionaryLockout err)
+          else if isAuthFailureStderr err then
+            notify "pin-auth-failed" (pinEventParams "sign" #[("stderr", .str err)])
+            return mkSignReport cfg (.pinAuthFailed err)
+          else
+            return mkSignReport cfg (.commandFailed "tpm2_sign" err)
       | .ok _ =>
           let sig ← IO.FS.readBinFile cfg.signatureBin
+          clearPinFile cfg.authFile
+          notify "pin-success" (pinEventParams "sign")
           hardenKeyFiles cfg
           logStep s!"signature written: {cfg.signatureBin}"
           return mkSignReport cfg .signed (some (encode sig))

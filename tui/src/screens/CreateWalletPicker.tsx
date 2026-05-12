@@ -18,7 +18,7 @@ export default function CreateWalletPicker({ onPick }: Props) {
 
   const items: { label: string; value: CreateKind }[] = [
     { label: "EOA — BIP-39 mnemonic, passphrase-encrypted at rest",   value: "eoa" },
-    { label: "TPM/R1 — hardware-backed P-256 key, biometric prompts", value: "r1" },
+    { label: "TPM/R1 — hardware-backed P-256 key, PIN-protected",     value: "r1" },
     { label: "Add account — new BIP-32 hardened branch on existing EOA", value: "add-account" },
     { label: "← Back",                                                value: "back" },
   ];

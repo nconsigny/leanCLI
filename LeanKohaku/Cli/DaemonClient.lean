@@ -110,21 +110,27 @@ def parseRpcError (json : Json) : RpcError :=
 def renderNotification (params : Json) : IO Unit := do
   let event := getField "event" params >>= asString
   let data := (getField "data" params).getD (.obj #[])
-  let finger := (getField "finger" data >>= asString).getD "fingerprint reader"
-  let attempt := (getField "attempt" data >>= asNat).getD 0
-  let ofN := (getField "of" data >>= asNat).getD 0
+  let op := (getField "op" data >>= asString).getD ""
+  let opLabel := if op.isEmpty then "" else s!" ({op})"
   match event with
-  | some "biometric-required" =>
-      IO.println s!"🔒 Biometric verification required — touch {finger} on your fingerprint reader (attempt {attempt}/{ofN})"
-  | some "biometric-success" =>
-      IO.println "✓ Biometric verified"
-  | some "biometric-failed" =>
+  | some "pin-required" =>
+      IO.println s!"🔒 Verifying TPM PIN{opLabel}…"
+  | some "pin-success" =>
+      IO.println s!"✓ PIN accepted{opLabel}"
+  | some "pin-auth-failed" =>
       let reason := (getField "stderr" data >>= asString).getD ""
       let trimmed := reason.trim
       if trimmed.isEmpty then
-        IO.println s!"✗ Biometric attempt {attempt}/{ofN} failed"
+        IO.println s!"✗ PIN rejected by TPM{opLabel}"
       else
-        IO.println s!"✗ Biometric attempt {attempt}/{ofN} failed: {trimmed}"
+        IO.println s!"✗ PIN rejected by TPM{opLabel}: {trimmed}"
+  | some "pin-locked-out" =>
+      let reason := (getField "stderr" data >>= asString).getD ""
+      let trimmed := reason.trim
+      if trimmed.isEmpty then
+        IO.println s!"⛔ TPM dictionary-attack lockout — wait for the lockout to elapse{opLabel}"
+      else
+        IO.println s!"⛔ TPM dictionary-attack lockout{opLabel}: {trimmed}"
   | some "tx-broadcasted" =>
       let txHash := (getField "txHash" data >>= asString).getD "?"
       IO.println s!"📡 Broadcast: {txHash}"

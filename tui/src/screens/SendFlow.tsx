@@ -18,7 +18,7 @@ type Props = {
 
 type Phase =
   | { kind: "form" }
-  | { kind: "resolving"; raw: string; amountEth: string; passphrase?: string }
+  | { kind: "resolving"; raw: string; amountEth: string; passphrase?: string; pin?: string }
   | {
       kind: "unlocking";
       to: string;
@@ -30,12 +30,14 @@ type Phase =
       to: string;
       amountEth: string;
       passphrase?: string;
+      pin?: string;
     }
   | {
       kind: "confirm";
       to: string;
       amountEth: string;
       passphrase?: string;
+      pin?: string;
       decoded: any;
       sim: any;
       colibri: any;
@@ -45,6 +47,7 @@ type Phase =
       to: string;
       amountEth: string;
       passphrase?: string;
+      pin?: string;
     }
   | { kind: "resolveError"; raw: string; message: string }
   | { kind: "unlockError"; message: string };
@@ -58,7 +61,7 @@ function ethToWei(amountEth: string): bigint {
 }
 
 /** Send ETH from any wallet. EOA → eoa.send (passphrase prompt). TPM/R1 →
- *  r1.sendEthSepolia (biometric prompt streamed via notifications). */
+ *  r1.sendEthSepolia (PIN entered in form; verified by the TPM at sign time). */
 export default function SendFlow({ wallet, colibriEnabled, onDone }: Props) {
   // Default off; can be overridden via app-level toggle (MainMenu) or the
   // KOHAKU_COLIBRI env seed at startup.
@@ -96,7 +99,15 @@ export default function SendFlow({ wallet, colibriEnabled, onDone }: Props) {
               validate: (v: string) => (v.length === 0 ? "required" : null),
             } as Field,
           ]
-        : []),
+        : [
+            {
+              name: "pin",
+              label: `TPM PIN for ${wallet.name}`,
+              secret: true,
+              validate: (v: string) =>
+                v.length < 4 ? "at least 4 characters" : null,
+            } as Field,
+          ]),
     ];
     return (
       <Layout
@@ -122,6 +133,7 @@ export default function SendFlow({ wallet, colibriEnabled, onDone }: Props) {
                     kind: "simulating",
                     to,
                     amountEth: v.amountEth ?? "",
+                    pin: v.pin,
                   } as Phase);
             // If the user typed a 0x address, skip ENS resolution. Otherwise
             // resolve before dispatch — the daemon's send paths expect a
@@ -134,6 +146,7 @@ export default function SendFlow({ wallet, colibriEnabled, onDone }: Props) {
                 raw,
                 amountEth: v.amountEth ?? "",
                 passphrase: v.passphrase,
+                pin: v.pin,
               });
             }
           }}
@@ -159,6 +172,7 @@ export default function SendFlow({ wallet, colibriEnabled, onDone }: Props) {
                   kind: "simulating",
                   to: addr,
                   amountEth: phase.amountEth,
+                  pin: phase.pin,
                 },
           )
         }
@@ -191,7 +205,7 @@ export default function SendFlow({ wallet, colibriEnabled, onDone }: Props) {
   }
 
   // EOA-only: unlock the slot before simulating. R1/TPM skip this step —
-  // biometric is gated by the daemon at signing time.
+  // the TPM PIN is captured in the form and checked at sign time.
   if (phase.kind === "unlocking") {
     return (
       <UnlockStep
@@ -227,6 +241,7 @@ export default function SendFlow({ wallet, colibriEnabled, onDone }: Props) {
             to: phase.to,
             amountEth: phase.amountEth,
             passphrase: phase.passphrase,
+            pin: phase.pin,
             decoded,
             sim,
             colibri,
@@ -245,7 +260,7 @@ export default function SendFlow({ wallet, colibriEnabled, onDone }: Props) {
         subtitle={
           wallet.kind === "eoa"
             ? `to ${phase.to}`
-            : `to ${phase.to} · biometric verification will be requested`
+            : `to ${phase.to} · PIN will be checked by the TPM`
         }
         decoded={phase.decoded}
         sim={phase.sim}
@@ -256,6 +271,7 @@ export default function SendFlow({ wallet, colibriEnabled, onDone }: Props) {
             to: phase.to,
             amountEth: phase.amountEth,
             passphrase: phase.passphrase,
+            pin: phase.pin,
           })
         }
         onCancel={() => onDone(false)}
@@ -264,7 +280,8 @@ export default function SendFlow({ wallet, colibriEnabled, onDone }: Props) {
   }
 
   // phase.kind === "run" — actually broadcast. The slot is already unlocked
-  // (EOA) or about to prompt the user for biometric (R1/TPM).
+  // (EOA) or the PIN is captured in `phase.pin` (R1/TPM) for the daemon
+  // to forward to the TPM auth check.
   if (wallet.kind === "eoa") {
     const wei = ethToWei(phase.amountEth);
     // Pass the sub-account index when the picker handed us a derived
@@ -295,12 +312,13 @@ export default function SendFlow({ wallet, colibriEnabled, onDone }: Props) {
   return (
     <RpcRunner
       title={`Sending ${phase.amountEth} ETH from ${wallet.name} (TPM/R1)`}
-      subtitle={`to ${phase.to} · biometric verification will be requested`}
+      subtitle={`to ${phase.to} · TPM PIN will be checked at sign time`}
       method="r1.sendEthSepolia"
       params={{
         name: wallet.name,
         to: phase.to,
         amountEth: phase.amountEth,
+        pin: phase.pin ?? "",
       }}
       renderResult={(r) => <SendResult result={r} />}
       onDone={onDone}

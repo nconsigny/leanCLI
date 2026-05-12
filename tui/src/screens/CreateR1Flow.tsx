@@ -8,13 +8,15 @@ import { theme } from "../theme.js";
 type Props = { onDone: (success: boolean) => void };
 
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
+const MIN_PIN_LENGTH = 4;
 
-/** Inline TPM/R1 wallet creation. The daemon will request fingerprint
- *  verification via `fprintd-verify` (gated by the local Linux TPM2
- *  hierarchy); progress is rendered live by RpcRunner from the daemon's
- *  `biometric-required` / `biometric-success` notifications. */
+/** Inline TPM/R1 wallet creation. The user picks a name and a PIN; the daemon
+ *  binds the PIN as the TPM2 key's `userwithauth` value so the TPM itself
+ *  enforces it on every signature. Wrong-PIN attempts trigger the TPM's
+ *  hardware dictionary-attack lockout. */
 export default function CreateR1Flow({ onDone }: Props) {
   const [name, setName] = useState<string | null>(null);
+  const [pin, setPin] = useState<string | null>(null);
 
   if (!name) {
     const fields: Field[] = [
@@ -31,7 +33,7 @@ export default function CreateR1Flow({ onDone }: Props) {
     return (
       <Layout
         title="Create TPM/R1 wallet"
-        subtitle="P-256 keypair generated inside the TPM. Touch the fingerprint reader when prompted."
+        subtitle="A P-256 keypair will be generated inside the TPM and bound to a PIN you choose."
       >
         <Form
           fields={fields}
@@ -42,12 +44,49 @@ export default function CreateR1Flow({ onDone }: Props) {
     );
   }
 
+  if (!pin) {
+    const fields: Field[] = [
+      {
+        name: "pin",
+        label: `New PIN (min ${MIN_PIN_LENGTH} chars)`,
+        secret: true,
+        validate: (v) =>
+          v.length >= MIN_PIN_LENGTH
+            ? null
+            : `at least ${MIN_PIN_LENGTH} characters`,
+      },
+      {
+        name: "confirm",
+        label: "Confirm PIN",
+        secret: true,
+        validate: (v) => (v.length >= MIN_PIN_LENGTH ? null : "must match"),
+      },
+    ];
+    return (
+      <Layout
+        title="Set TPM PIN"
+        subtitle={`name: ${name} · the PIN becomes the TPM auth value for this key`}
+      >
+        <Form
+          fields={fields}
+          onCancel={() => onDone(false)}
+          onSubmit={(v) => {
+            if (v.pin !== v.confirm) {
+              return;
+            }
+            setPin(v.pin ?? null);
+          }}
+        />
+      </Layout>
+    );
+  }
+
   return (
     <RpcRunner
       title="Creating TPM/R1 wallet…"
-      subtitle={`name: ${name} · biometric verification will be requested`}
+      subtitle={`name: ${name} · PIN bound to TPM key`}
       method="tpm.create"
-      params={{ name }}
+      params={{ name, pin }}
       renderResult={(r: any) => (
         <Box flexDirection="column">
           <Text color={theme.ok}>✓ created</Text>
