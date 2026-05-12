@@ -2562,14 +2562,16 @@ def run (args : List String) : IO UInt32 := do
           return 2
   | .tui =>
       -- Locate the bundled TUI in this priority order:
-      --   1. $LEANKOHAKU_TUI_BIN          — explicit override (dev / packagers)
-      --   2. <appDir>/../share/leankohaku/tui/index.mjs — installed layout
-      --   3. <appDir>/../tui/dist/index.mjs            — repo dev layout
-      --   4. ./tui/dist/index.mjs (cwd)               — last-ditch dev fallback
+      --   1. $LEANKOHAKU_TUI_BIN                          — explicit override
+      --   2. <appDir>/../share/leankohaku/tui/index.mjs   — installed layout
+      --   3. <appDir>/../../../tui/dist/index.mjs         — repo dev layout
+      --        (appDir is .lake/build/bin/; repo root is three levels up)
+      --   4. ./tui/dist/index.mjs (cwd)                   — last-ditch fallback
       let appDir ← IO.appDir
       let installedBundle :=
         appDir / ".." / "share" / "leankohaku" / "tui" / "index.mjs"
-      let devBundle := appDir / ".." / "tui" / "dist" / "index.mjs"
+      let devBundle :=
+        appDir / ".." / ".." / ".." / "tui" / "dist" / "index.mjs"
       let cwdBundle : System.FilePath := "tui/dist/index.mjs"
       let envBundle? ← IO.getEnv "LEANKOHAKU_TUI_BIN"
       let bundle? : Option System.FilePath ← do
