@@ -79,15 +79,30 @@ detect_checkout() {
 
 # Foundryup-style bootstrap: when no checkout is found (typical for
 # `curl ... | bash`), clone the repo into $KOHAKU_REPO_DIR and use that.
-# Idempotent: if the target already has a lakefile, reuse it.
+# If the target already has a lakefile, refresh it to origin's default
+# branch so a second `curl | bash` actually picks up new commits. The
+# bootstrap dir is treated as a managed install location, not a dev tree
+# — users who develop in their own clone go through the detect_checkout
+# fast path instead and never reach here.
 bootstrap_clone() {
-  if [[ -f "$KOHAKU_REPO_DIR/lakefile.lean" ]]; then
-    printf '%s\n' "$KOHAKU_REPO_DIR"
-    return 0
-  fi
   if ! command -v git >/dev/null 2>&1; then
     echo "kohakuspawn: bootstrap needs git on PATH (set KOHAKU_REPO_DIR to an existing clone to skip)" >&2
     return 1
+  fi
+  if [[ -f "$KOHAKU_REPO_DIR/lakefile.lean" ]]; then
+    if [[ -d "$KOHAKU_REPO_DIR/.git" ]]; then
+      echo "==> bootstrap: refreshing $KOHAKU_REPO_DIR from origin" >&2
+      local default_branch
+      default_branch="$(git -C "$KOHAKU_REPO_DIR" symbolic-ref --short HEAD 2>/dev/null || echo master)"
+      if git -C "$KOHAKU_REPO_DIR" fetch --depth=1 origin "$default_branch" >&2 \
+         && git -C "$KOHAKU_REPO_DIR" reset --hard FETCH_HEAD >&2; then
+        :
+      else
+        echo "kohakuspawn: refresh failed, continuing with current checkout" >&2
+      fi
+    fi
+    printf '%s\n' "$KOHAKU_REPO_DIR"
+    return 0
   fi
   echo "==> bootstrap: cloning $KOHAKU_REPO_URL into $KOHAKU_REPO_DIR" >&2
   mkdir -p "$(dirname "$KOHAKU_REPO_DIR")"
