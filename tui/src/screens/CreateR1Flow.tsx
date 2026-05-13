@@ -86,15 +86,48 @@ export default function CreateR1Flow({ onDone }: Props) {
         subtitle={`name: ${name} · PIN bound to TPM key`}
         method="tpm.create"
         params={{ name, pin: phase.pin }}
-        renderResult={(r: any) => (
-          <Box flexDirection="column">
-            <Text color={theme.ok}>✓ created</Text>
-            {r?.address && <Text color={theme.dim}>address: {r.address}</Text>}
-            <Text color={theme.dim}>
-              Next: deploy the smart-account wrapper on Sepolia.
-            </Text>
-          </Box>
-        )}
+        renderResult={(r: any) => {
+          // Daemon reports `{text, exitCode}` — `text` carries the status line.
+          // alreadyExists has exitCode 0 (intentional, so scripts can re-run
+          // create idempotently), so we cannot rely on exitCode alone.
+          const text = typeof r?.text === "string" ? r.text : "";
+          const exitCode = typeof r?.exitCode === "number" ? r.exitCode : 0;
+          const alreadyExisted = /status:\s*already exists/i.test(text);
+          const created = /status:\s*created/i.test(text);
+          if (alreadyExisted) {
+            return (
+              <Box flexDirection="column">
+                <Text color={theme.warn}>
+                  ⚠ A TPM key named "{name}" already exists. NOT recreated;
+                  the PIN you typed was NOT bound to it.
+                </Text>
+                <Text color={theme.dim}>
+                  If the existing slot was created under the old fprintd build,
+                  delete it and retry with a fresh name:
+                </Text>
+                <Text color={theme.dim}>
+                  rm -rf .leankohaku/keystore/tpm2/{name}
+                </Text>
+              </Box>
+            );
+          }
+          if (!created || exitCode !== 0) {
+            return (
+              <Box flexDirection="column">
+                <Text color={theme.err}>✗ create did not report success</Text>
+                {text && <Text color={theme.dim}>{text.slice(0, 400)}</Text>}
+              </Box>
+            );
+          }
+          return (
+            <Box flexDirection="column">
+              <Text color={theme.ok}>✓ created (PIN bound to TPM key)</Text>
+              <Text color={theme.dim}>
+                Next: deploy the smart-account wrapper on Sepolia.
+              </Text>
+            </Box>
+          );
+        }}
         successActions={[
           {
             label: "Deploy on Sepolia now",
@@ -117,12 +150,32 @@ export default function CreateR1Flow({ onDone }: Props) {
       subtitle="relayer EOA pays gas · no TPM signature required for deploy"
       method="tpm.deploy"
       params={{ name: phase.name, chain: "sepolia" }}
-      renderResult={(r: any) => (
-        <Box flexDirection="column">
-          <Text color={theme.ok}>✓ deployed</Text>
-          {r?.text && <Text color={theme.dim}>{String(r.text).split("\n")[0]}</Text>}
-        </Box>
-      )}
+      renderResult={(r: any) => {
+        // tpm.deploy also returns {text, exitCode}. The deploy script
+        // exits non-zero on failure; idempotent re-runs over an already-
+        // deployed slot exit 0 with a "already deployed" hint in text.
+        const text = typeof r?.text === "string" ? r.text : "";
+        const exitCode = typeof r?.exitCode === "number" ? r.exitCode : 1;
+        if (exitCode !== 0) {
+          return (
+            <Box flexDirection="column">
+              <Text color={theme.err}>✗ deploy failed (exit {exitCode})</Text>
+              {text && <Text color={theme.dim}>{text.slice(0, 600)}</Text>}
+            </Box>
+          );
+        }
+        const alreadyDeployed = /already deployed/i.test(text);
+        return (
+          <Box flexDirection="column">
+            <Text color={theme.ok}>
+              {alreadyDeployed ? "✓ already deployed" : "✓ deployed"}
+            </Text>
+            {text && (
+              <Text color={theme.dim}>{text.split("\n")[0]}</Text>
+            )}
+          </Box>
+        );
+      }}
       onDone={onDone}
     />
   );
