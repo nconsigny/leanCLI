@@ -418,10 +418,21 @@ partial def streamNetLog (h : IO.FS.Handle) : IO Unit := do
     streamNetLog h
 
 def runDaemonForeground : IO UInt32 := do
+  -- Resolve in the same order as DaemonClient.daemonBin:
+  -- 1. explicit env override
+  -- 2. sibling of the running `leankohaku` binary (the canonical install layout)
+  -- 3. bare name, letting $PATH resolve (last-resort fallback)
+  -- Why: a stale `leankohaku-daemon` on $PATH from a sibling checkout would
+  -- otherwise be picked over a freshly-built one in the same .lake/build/bin/.
   let bin ←
     match ← IO.getEnv "LEANKOHAKU_DAEMON_BIN" with
     | some path => pure path
-    | none => pure "leankohaku-daemon"
+    | none =>
+        let candidate := (← IO.appDir) / "leankohaku-daemon"
+        if ← candidate.pathExists then
+          pure candidate.toString
+        else
+          pure "leankohaku-daemon"
   let child ← IO.Process.spawn
     { cmd := bin,
       stdin := .inherit,
