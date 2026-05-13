@@ -80,8 +80,15 @@ export default function CreateR1Flow({ onDone }: Props) {
 
   if (phase.kind === "creating") {
     const name = phase.name;
+    // `key` forces a fresh RpcRunner mount when we transition from
+    // "creating" to "deploying". Without it React reuses the same
+    // component instance because both phases render <RpcRunner /> at
+    // the same JSX position; the events/state from create leak into
+    // deploy and the deploy useEffect (deps [] ) never re-runs, so
+    // tpm.deploy is never actually called.
     return (
       <RpcRunner
+        key="r1-create"
         title="Creating TPM/R1 wallet…"
         subtitle={`name: ${name} · PIN bound to TPM key`}
         method="tpm.create"
@@ -146,6 +153,7 @@ export default function CreateR1Flow({ onDone }: Props) {
   // phase.kind === "deploying"
   return (
     <RpcRunner
+      key="r1-deploy"
       title={`Deploying R1 smart account for ${phase.name} on Sepolia…`}
       subtitle="relayer EOA pays gas · no TPM signature required for deploy"
       method="tpm.deploy"
