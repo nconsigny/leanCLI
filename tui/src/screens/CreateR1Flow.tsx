@@ -48,34 +48,23 @@ export default function CreateR1Flow({ onDone }: Props) {
     const fields: Field[] = [
       {
         name: "pin",
-        label: `New PIN (min ${MIN_PIN_LENGTH} chars)`,
+        label: `TPM PIN (min ${MIN_PIN_LENGTH} chars)`,
         secret: true,
         validate: (v) =>
           v.length >= MIN_PIN_LENGTH
             ? null
             : `at least ${MIN_PIN_LENGTH} characters`,
       },
-      {
-        name: "confirm",
-        label: "Confirm PIN",
-        secret: true,
-        validate: (v) => (v.length >= MIN_PIN_LENGTH ? null : "must match"),
-      },
     ];
     return (
       <Layout
         title="Set TPM PIN"
-        subtitle={`name: ${name} · the PIN becomes the TPM auth value for this key`}
+        subtitle={`name: ${name} · this PIN will be required on every signature; the TPM cannot recover it for you`}
       >
         <Form
           fields={fields}
           onCancel={() => onDone(false)}
-          onSubmit={(v) => {
-            if (v.pin !== v.confirm) {
-              return;
-            }
-            setPin(v.pin ?? null);
-          }}
+          onSubmit={(v) => setPin(v.pin ?? null)}
         />
       </Layout>
     );
