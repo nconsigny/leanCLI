@@ -22,6 +22,11 @@ type Props = {
   subtitle?: string;
   /** Called when user presses Enter or Esc on the result screen. */
   onDone: (success: boolean) => void;
+  /** Optional custom items to show in place of the default "Continue" item
+   *  when the RPC succeeded. Each item's `onSelect` fires on Enter. Used by
+   *  flows that want a "Deploy now" / "Skip" branching after creation. The
+   *  error path and the running-state UI are unaffected. */
+  successActions?: Array<{ label: string; onSelect: () => void }>;
   /** Custom timeout in ms. Default 5min — generous because shielded.deposit
    *  can take 30-60s on first run for SDK init + chain sync. */
   timeoutMs?: number;
@@ -36,6 +41,7 @@ export default function RpcRunner({
   title,
   subtitle,
   onDone,
+  successActions,
   timeoutMs = 300_000,
 }: Props) {
   const [state, setState] = useState<State>({ kind: "running" });
@@ -103,11 +109,24 @@ export default function RpcRunner({
       </Box>
       {state.kind !== "running" && (
         <Box flexDirection="column" marginTop={1}>
-          <Select
-            items={[{ label: "Continue", value: "continue" }]}
-            onSelect={() => onDone(state.kind === "ok")}
-          />
-          <Text color={theme.dim}>enter • continue · esc • back</Text>
+          {state.kind === "ok" && successActions && successActions.length > 0 ? (
+            <Select
+              items={successActions.map((a, i) => ({
+                label: a.label,
+                value: String(i),
+              }))}
+              onSelect={(it) => {
+                const i = Number(it.value);
+                successActions[i]?.onSelect();
+              }}
+            />
+          ) : (
+            <Select
+              items={[{ label: "Continue", value: "continue" }]}
+              onSelect={() => onDone(state.kind === "ok")}
+            />
+          )}
+          <Text color={theme.dim}>↑/↓ pick · enter • select · esc • back</Text>
         </Box>
       )}
     </Box>
