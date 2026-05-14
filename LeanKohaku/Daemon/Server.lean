@@ -1585,7 +1585,10 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                                         message := "deployer EOA pk derivation failed",
                                         data := some (.str err) })
                                 | .ok pk =>
-                                    let pkHex := "0x" ++ LeanKohaku.Crypto.Hex.encode pk
+                                    -- Hex.encode already prepends "0x"; do NOT
+                                    -- add another one (forge rejects "0x0x…"
+                                    -- with "Failed to decode private key").
+                                    let pkHex := LeanKohaku.Crypto.Hex.encode pk
                                     pure (.ok #[
                                       ("LEAN_KOHAKU_TPM_KEY", some keyName),
                                       ("SEPOLIA_DEPLOYER_PRIVATE_KEY", some pkHex),
