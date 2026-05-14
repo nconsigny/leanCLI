@@ -387,13 +387,40 @@ private def formatKeyList : List String → String
       "Local Sepolia TPM2 keys:\n" ++
         String.join (names.map (fun name => "- " ++ name ++ "\n"))
 
-private def runScript (args : Array String) (env : Array (String × Option String) := #[]) :
-    IO (UInt32 × String) := do
+/-- Build the chain-RPC env vars passed to every shell script we spawn.
+    Anchors the user's daemon config as the single source of truth for RPC
+    URLs: `SEPOLIA_RPC_URL` / `MAINNET_RPC_URL` are populated when the
+    matching endpoint exists in `cfg.chainEndpoints`, and `ETH_RPC_URL`
+    (the default name `cast` / `forge` look for) is bound to whichever
+    chain matches the daemon's active `chainId`. We deliberately emit
+    only entries that resolve — passing `none` would *unset* the var
+    in the child env, which would clobber a value the user exported
+    manually for some other reason. -/
+private def chainScriptEnv (cfg : Config) : Array (String × Option String) :=
+  let urlFor (name : String) : Option String :=
+    (cfg.chainEndpoints.find? (fun (k, _) => k = name)).map (fun (_, ep) => ep.url)
+  let sepoliaUrl := urlFor "sepolia"
+  let mainnetUrl := urlFor "mainnet"
+  let activeUrl :=
+    if cfg.chainId == 11155111 then sepoliaUrl
+    else if cfg.chainId == 1 then mainnetUrl
+    else none
+  let pairs : List (String × Option String) :=
+    [ ("SEPOLIA_RPC_URL", sepoliaUrl)
+    , ("MAINNET_RPC_URL", mainnetUrl)
+    , ("ETH_RPC_URL",    activeUrl) ]
+  pairs.foldl (init := (#[] : Array (String × Option String))) fun acc (k, v) =>
+    match v with
+    | some s => acc.push (k, some s)
+    | none   => acc
+
+private def runScript (cfg : Config) (args : Array String)
+    (env : Array (String × Option String) := #[]) : IO (UInt32 × String) := do
   try
     let out ← IO.Process.output
       { cmd := "./script/r1_sepolia.sh",
         args := args,
-        env := env }
+        env := chainScriptEnv cfg ++ env }
     pure (out.exitCode, out.stdout ++ out.stderr)
   catch e =>
     pure (1, e.toString ++ "\n")
@@ -401,13 +428,14 @@ private def runScript (args : Array String) (env : Array (String × Option Strin
 /-- Like `runScript` but returns stdout and stderr separately, so the
     daemon can parse a structured first token from stdout (e.g. the
     digest hex) without having to disentangle script status chatter. -/
-private def runScriptSplit (args : Array String) (env : Array (String × Option String) := #[]) :
+private def runScriptSplit (cfg : Config) (args : Array String)
+    (env : Array (String × Option String) := #[]) :
     IO (UInt32 × String × String) := do
   try
     let out ← IO.Process.output
       { cmd := "./script/r1_sepolia.sh",
         args := args,
-        env := env }
+        env := chainScriptEnv cfg ++ env }
     pure (out.exitCode, out.stdout, out.stderr)
   catch e =>
     pure (1, "", e.toString ++ "\n")
@@ -1184,7 +1212,7 @@ private def r1SendFlow (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
   let prepArgs : Array String :=
     if mode == "eth" then #["prepare-digest-eth", to, amount] ++ dataArgs
     else #["prepare-digest", to, amount] ++ dataArgs
-  let (prepCode, prepOut, prepErr) ← runScriptSplit prepArgs scriptEnv
+  let (prepCode, prepOut, prepErr) ← runScriptSplit cfg prepArgs scriptEnv
   if prepCode != 0 then
     return .error
       { code := -32040,
@@ -1207,7 +1235,7 @@ private def r1SendFlow (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           -- it prints the raw signed tx hex. Append optional data hex so
           -- the signed tx carries calldata when the caller is
           -- `r1.sendRawSepolia`.
-          let (bcCode, bcOut, bcErr) ← runScriptSplit
+          let (bcCode, bcOut, bcErr) ← runScriptSplit cfg
             (#["broadcast-signed", sigHex, to, wei] ++ dataArgs) scriptEnv
           if bcCode != 0 then
             return .error
@@ -1519,7 +1547,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
               match chain with
               | "sepolia" =>
                   if accepted sepoliaR1Smart then
-                    let (exitCode, text) ← runScript #["deploy"]
+                    let (exitCode, text) ← runScript cfg #["deploy"]
                       #[("LEAN_KOHAKU_TPM_KEY", some keyName)]
                     pure <| .ok <| textResultJson text exitCode
                   else
