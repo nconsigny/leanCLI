@@ -1,24 +1,40 @@
-import React, { useState } from "react";
-import { Box, Text } from "ink";
-import { Layout } from "../widgets/Layout.js";
+import React, { useEffect, useState } from "react";
+import { Box, Text, useInput } from "ink";
+import Spinner from "ink-spinner";
+import { Layout, Banner } from "../widgets/Layout.js";
 import Form, { Field } from "../widgets/Form.js";
+import Select from "../widgets/Select.js";
 import RpcRunner from "../widgets/RpcRunner.js";
+import { call } from "../daemon.js";
 import { theme } from "../theme.js";
+import { shortAddr } from "../format.js";
 
 type Props = { onDone: (success: boolean) => void };
 
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const MIN_PIN_LENGTH = 4;
 
+type EoaSlot = { name: string; address: string };
+
 type Phase =
   | { kind: "form" }
   | { kind: "creating"; name: string; pin: string }
-  | { kind: "deploying"; name: string };
+  | { kind: "deploy-pick"; name: string }
+  | { kind: "deploy-eoa-load"; name: string }
+  | { kind: "deploy-eoa-pick"; name: string; eoas: EoaSlot[] }
+  | { kind: "deploy-eoa-form"; name: string; deployer: EoaSlot }
+  | { kind: "deploy-error"; name: string; message: string }
+  | {
+      kind: "deploying";
+      name: string;
+      params: Record<string, unknown>;
+      via: "env" | "eoa";
+    };
 
 /** Inline TPM/R1 wallet creation. Collects wallet name + TPM PIN (with a
  *  matching confirm field) in a single sequential form, runs `tpm.create`,
- *  then offers a choice between deploying the smart account on Sepolia
- *  immediately or returning to the main menu. */
+ *  then offers a choice of deployer (.env relayer or an in-wallet EOA)
+ *  before launching `tpm.deploy`. */
 export default function CreateR1Flow({ onDone }: Props) {
   const [phase, setPhase] = useState<Phase>({ kind: "form" });
 
@@ -61,8 +77,6 @@ export default function CreateR1Flow({ onDone }: Props) {
           fields={fields}
           onCancel={() => onDone(false)}
           onSubmit={(v) => {
-            // Match CreateEoaFlow's pattern: on mismatch, re-render the
-            // form (cheapest path; user retypes both fields).
             if (v.pin !== v.confirm) {
               setPhase({ kind: "form" });
               return;
@@ -80,12 +94,6 @@ export default function CreateR1Flow({ onDone }: Props) {
 
   if (phase.kind === "creating") {
     const name = phase.name;
-    // `key` forces a fresh RpcRunner mount when we transition from
-    // "creating" to "deploying". Without it React reuses the same
-    // component instance because both phases render <RpcRunner /> at
-    // the same JSX position; the events/state from create leak into
-    // deploy and the deploy useEffect (deps [] ) never re-runs, so
-    // tpm.deploy is never actually called.
     return (
       <RpcRunner
         key="r1-create"
@@ -94,9 +102,6 @@ export default function CreateR1Flow({ onDone }: Props) {
         method="tpm.create"
         params={{ name, pin: phase.pin }}
         renderResult={(r: any) => {
-          // Daemon reports `{text, exitCode}` — `text` carries the status line.
-          // alreadyExists has exitCode 0 (intentional, so scripts can re-run
-          // create idempotently), so we cannot rely on exitCode alone.
           const text = typeof r?.text === "string" ? r.text : "";
           const exitCode = typeof r?.exitCode === "number" ? r.exitCode : 0;
           const alreadyExisted = /status:\s*already exists/i.test(text);
@@ -109,10 +114,7 @@ export default function CreateR1Flow({ onDone }: Props) {
                   the PIN you typed was NOT bound to it.
                 </Text>
                 <Text color={theme.dim}>
-                  If the existing slot was created under the old fprintd build,
-                  delete it and retry with a fresh name:
-                </Text>
-                <Text color={theme.dim}>
+                  Delete the old slot and retry with a fresh name:
                   rm -rf .leankohaku/keystore/tpm2/{name}
                 </Text>
               </Box>
@@ -130,7 +132,8 @@ export default function CreateR1Flow({ onDone }: Props) {
             <Box flexDirection="column">
               <Text color={theme.ok}>✓ created (PIN bound to TPM key)</Text>
               <Text color={theme.dim}>
-                Next: deploy the smart-account wrapper on Sepolia.
+                Next: pick a deployer to pay gas for the R1 smart account
+                deployment.
               </Text>
             </Box>
           );
@@ -138,10 +141,11 @@ export default function CreateR1Flow({ onDone }: Props) {
         successActions={[
           {
             label: "Deploy on Sepolia now",
-            onSelect: () => setPhase({ kind: "deploying", name }),
+            onSelect: () => setPhase({ kind: "deploy-pick", name }),
           },
           {
-            label: "Skip — return to menu (deploy later with `kohaku wallet deploy`)",
+            label:
+              "Skip — return to menu (deploy later with `kohaku wallet deploy`)",
             onSelect: () => onDone(true),
           },
         ]}
@@ -150,18 +154,155 @@ export default function CreateR1Flow({ onDone }: Props) {
     );
   }
 
+  if (phase.kind === "deploy-pick") {
+    // Two relayer choices: a wallet EOA (we'll unlock + derive pk) or
+    // the `.env` / shell-exported SEPOLIA_DEPLOYER_PRIVATE_KEY. The
+    // wallet-EOA path is the user-friendly default since the daemon's
+    // .env autoload covers the env path automatically when the file
+    // exists.
+    return (
+      <Layout
+        title="Pick a deployer"
+        subtitle={`who pays gas for the ${phase.name} R1 smart-account deploy on Sepolia?`}
+        hint="↑/↓ move · enter pick · esc cancel"
+      >
+        <Select
+          items={[
+            {
+              label: "Use a wallet EOA (recommended)",
+              value: "eoa",
+            },
+            {
+              label:
+                "Use .env relayer (SEPOLIA_DEPLOYER_PRIVATE_KEY from .env or shell)",
+              value: "env",
+            },
+          ]}
+          onSelect={(it) => {
+            if (it.value === "env") {
+              setPhase({
+                kind: "deploying",
+                name: phase.name,
+                params: { name: phase.name, chain: "sepolia", deployer: "env" },
+                via: "env",
+              });
+            } else {
+              setPhase({ kind: "deploy-eoa-load", name: phase.name });
+            }
+          }}
+        />
+      </Layout>
+    );
+  }
+
+  if (phase.kind === "deploy-eoa-load") {
+    return (
+      <DeployerEoaLoader
+        onLoaded={(eoas) =>
+          setPhase({ kind: "deploy-eoa-pick", name: phase.name, eoas })
+        }
+        onError={(message) =>
+          setPhase({ kind: "deploy-error", name: phase.name, message })
+        }
+      />
+    );
+  }
+
+  if (phase.kind === "deploy-eoa-pick") {
+    if (phase.eoas.length === 0) {
+      return (
+        <Layout title="No deployer EOA available" hint="esc — back">
+          <Banner
+            kind="err"
+            text="No EOA wallets configured. Create one with `kohaku wallet create eoa <name>` or use the .env deployer instead."
+          />
+        </Layout>
+      );
+    }
+    return (
+      <Layout
+        title="Pick deployer EOA"
+        subtitle="this EOA's private key will pay gas for the R1 deploy; passphrase prompted next"
+        hint="↑/↓ move · enter pick · esc cancel"
+      >
+        <Select
+          items={phase.eoas.map((e) => ({
+            label: `${e.name.padEnd(16)}  ${shortAddr(e.address)}`,
+            value: e.name,
+          }))}
+          onSelect={(it) => {
+            const eoa = phase.eoas.find((e) => e.name === it.value);
+            if (eoa) {
+              setPhase({
+                kind: "deploy-eoa-form",
+                name: phase.name,
+                deployer: eoa,
+              });
+            }
+          }}
+        />
+      </Layout>
+    );
+  }
+
+  if (phase.kind === "deploy-eoa-form") {
+    const fields: Field[] = [
+      {
+        name: "passphrase",
+        label: `Passphrase for ${phase.deployer.name}`,
+        secret: true,
+        validate: (v) => (v.length === 0 ? "required" : null),
+      },
+    ];
+    return (
+      <Layout
+        title={`Unlock ${phase.deployer.name} to deploy`}
+        subtitle={`address: ${phase.deployer.address}`}
+      >
+        <Form
+          fields={fields}
+          onCancel={() => onDone(false)}
+          onSubmit={(v) =>
+            setPhase({
+              kind: "deploying",
+              name: phase.name,
+              via: "eoa",
+              params: {
+                name: phase.name,
+                chain: "sepolia",
+                deployer: "eoa",
+                deployerEoa: phase.deployer.name,
+                deployerPassphrase: v.passphrase ?? "",
+              },
+            })
+          }
+        />
+      </Layout>
+    );
+  }
+
+  if (phase.kind === "deploy-error") {
+    return (
+      <Layout title="Deployer setup failed" hint="enter / esc — back to menu">
+        <Banner kind="err" text={phase.message} />
+        <BackOnInput onDone={() => onDone(false)} />
+      </Layout>
+    );
+  }
+
   // phase.kind === "deploying"
   return (
     <RpcRunner
       key="r1-deploy"
       title={`Deploying R1 smart account for ${phase.name} on Sepolia…`}
-      subtitle="relayer EOA pays gas · no TPM signature required for deploy"
+      subtitle={
+        phase.via === "eoa"
+          ? "wallet EOA pays gas · TPM key isn't used (P-256 sig not needed for deploy)"
+          : ".env relayer pays gas · TPM key isn't used (P-256 sig not needed for deploy)"
+      }
       method="tpm.deploy"
-      params={{ name: phase.name, chain: "sepolia" }}
+      params={phase.params}
       renderResult={(r: any) => {
-        // tpm.deploy also returns {text, exitCode}. The deploy script
-        // exits non-zero on failure; idempotent re-runs over an already-
-        // deployed slot exit 0 with a "already deployed" hint in text.
         const text = typeof r?.text === "string" ? r.text : "";
         const exitCode = typeof r?.exitCode === "number" ? r.exitCode : 1;
         if (exitCode !== 0) {
@@ -178,13 +319,58 @@ export default function CreateR1Flow({ onDone }: Props) {
             <Text color={theme.ok}>
               {alreadyDeployed ? "✓ already deployed" : "✓ deployed"}
             </Text>
-            {text && (
-              <Text color={theme.dim}>{text.split("\n")[0]}</Text>
-            )}
+            {text && <Text color={theme.dim}>{text.split("\n")[0]}</Text>}
           </Box>
         );
       }}
       onDone={onDone}
     />
   );
+}
+
+/** Load EOAs from the daemon for the deployer picker. Returned list is
+ *  whatever `eoa.list` reports, address-mapped for display + identity. */
+function DeployerEoaLoader({
+  onLoaded,
+  onError,
+}: {
+  onLoaded: (eoas: EoaSlot[]) => void;
+  onError: (message: string) => void;
+}) {
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const r = await call<any[]>("eoa.list");
+      if (cancelled) return;
+      if (!r.ok) return onError(`eoa.list failed: ${r.error.message}`);
+      const list = Array.isArray(r.result) ? r.result : [];
+      const eoas: EoaSlot[] = [];
+      for (const e of list) {
+        if (e?.name && e?.address) {
+          eoas.push({ name: e.name, address: e.address });
+        }
+      }
+      onLoaded(eoas);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return (
+    <Layout title="Loading EOAs…">
+      <Text>
+        <Text color={theme.primary}>
+          <Spinner type="dots" />
+        </Text>{" "}
+        <Text color={theme.dim}>asking the daemon for deployer candidates</Text>
+      </Text>
+    </Layout>
+  );
+}
+
+function BackOnInput({ onDone }: { onDone: () => void }) {
+  useInput((_, key) => {
+    if (key.return || key.escape) onDone();
+  });
+  return null;
 }

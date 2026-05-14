@@ -1538,27 +1538,84 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
               let report ← createR1Key pin { keyName := keyName } notify
               pure <| .ok <| textResultJson (tpm2CreateReportText report) report.status.exitCode
   | "tpm.deploy" =>
+      -- Params:
+      --   name             : string  (R1 key slot to deploy)
+      --   chain            : string  ("sepolia" today; "mainnet" not yet enabled)
+      --   deployer         : optional string ("env" | "eoa"; default "env")
+      --   deployerEoa      : required when deployer="eoa" — slot name
+      --   deployerPassphrase : required when deployer="eoa" — slot passphrase
+      -- Why: the deploy script's deployer_private_key() reads
+      -- SEPOLIA_DEPLOYER_PRIVATE_KEY (or PRIVATE_KEY) from env. When
+      -- deployer="eoa" we transiently inject that env var from an
+      -- unlocked-on-the-fly EOA seed → BIP-32-derived secp256k1 key,
+      -- so users don't have to keep a raw pk in .env.
       match paramName req.params with
       | .error err => pure (.error err)
       | .ok keyName =>
           match paramString req.params "chain" with
           | .error err => pure (.error err)
           | .ok chain =>
-              match chain with
-              | "sepolia" =>
-                  if accepted sepoliaR1Smart then
-                    let (exitCode, text) ← runScript cfg #["deploy"]
-                      #[("LEAN_KOHAKU_TPM_KEY", some keyName)]
-                    pure <| .ok <| textResultJson text exitCode
-                  else
-                    pure <| .ok <| textResultJson
-                      "Sepolia R1 account policy rejected\n" 1
-              | "mainnet" =>
-                  pure <| .ok <| textResultJson
-                    "mainnet R1 deploy is not enabled yet; deploy and verify the account path on Sepolia first\n" 2
-              | other =>
-                  pure <| .ok <| textResultJson
-                    s!"unsupported chain: {other} (expected sepolia or mainnet)\n" 2
+              let deployer := (getField "deployer" req.params >>= asString).getD "env"
+              let deployerEnvRes : IO (Except RpcError (Array (String × Option String))) := do
+                match deployer with
+                | "env" =>
+                    pure (.ok #[("LEAN_KOHAKU_TPM_KEY", some keyName)])
+                | "eoa" =>
+                    match paramString req.params "deployerEoa",
+                          paramString req.params "deployerPassphrase" with
+                    | .ok eoaName, .ok pp =>
+                        match ← LeanKohaku.Wallet.EoaStore.load eoaName with
+                        | .error err =>
+                            pure (.error
+                              { code := -32050,
+                                message := "deployer EOA load failed",
+                                data := some (.str err) })
+                        | .ok record =>
+                            match ← LeanKohaku.Wallet.EoaStore.unlockSeedIO record pp with
+                            | .error err =>
+                                pure (.error
+                                  { code := -32051,
+                                    message := "deployer EOA unlock failed",
+                                    data := some (.str err) })
+                            | .ok seed =>
+                                match ← derivePrivateKeyFromSeed seed record.derivationPath with
+                                | .error err =>
+                                    pure (.error
+                                      { code := -32052,
+                                        message := "deployer EOA pk derivation failed",
+                                        data := some (.str err) })
+                                | .ok pk =>
+                                    let pkHex := "0x" ++ LeanKohaku.Crypto.Hex.encode pk
+                                    pure (.ok #[
+                                      ("LEAN_KOHAKU_TPM_KEY", some keyName),
+                                      ("SEPOLIA_DEPLOYER_PRIVATE_KEY", some pkHex),
+                                      ("PRIVATE_KEY", some pkHex)
+                                    ])
+                    | _, _ =>
+                        pure (.error
+                          { code := -32602,
+                            message := "deployer=\"eoa\" requires deployerEoa and deployerPassphrase" })
+                | other =>
+                    pure (.error
+                      { code := -32602,
+                        message := s!"unknown deployer: {other} (expected \"env\" or \"eoa\")" })
+              match ← deployerEnvRes with
+              | .error err => pure (.error err)
+              | .ok scriptEnv =>
+                  match chain with
+                  | "sepolia" =>
+                      if accepted sepoliaR1Smart then
+                        let (exitCode, text) ← runScript cfg #["deploy"] scriptEnv
+                        pure <| .ok <| textResultJson text exitCode
+                      else
+                        pure <| .ok <| textResultJson
+                          "Sepolia R1 account policy rejected\n" 1
+                  | "mainnet" =>
+                      pure <| .ok <| textResultJson
+                        "mainnet R1 deploy is not enabled yet; deploy and verify the account path on Sepolia first\n" 2
+                  | other =>
+                      pure <| .ok <| textResultJson
+                        s!"unsupported chain: {other} (expected sepolia or mainnet)\n" 2
   | "tpm.listSepolia" =>
       let names ← listSepoliaKeys
       pure <| .ok <| textResultJson (formatKeyList names) 0
