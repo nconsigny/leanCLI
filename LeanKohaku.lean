@@ -18,6 +18,7 @@ import LeanKohaku.Ethereum.Address
 import LeanKohaku.Ethereum.Chain
 import LeanKohaku.Ethereum.Eip712
 import LeanKohaku.Ethereum.Ens
+import LeanKohaku.Ethereum.Intent
 import LeanKohaku.Ethereum.P256Precompile
 import LeanKohaku.Ethereum.Tx
 
@@ -68,6 +69,8 @@ import LeanKohaku.Cli.NetworkConfig
 import LeanKohaku.Cli.Passphrase
 import LeanKohaku.Cli.Runtime
 import LeanKohaku.Cli.Commands
+
+import LeanKohaku.Registry.KnownProtocols
 
 import LeanKohaku.Swap.Tokens
 import LeanKohaku.Swap.UniV3

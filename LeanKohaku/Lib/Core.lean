@@ -14,8 +14,11 @@ import LeanKohaku.Util.DotEnv
 import LeanKohaku.Ethereum.Abi
 import LeanKohaku.Ethereum.Address
 import LeanKohaku.Ethereum.Chain
+import LeanKohaku.Ethereum.Intent
 import LeanKohaku.Ethereum.P256Precompile
 import LeanKohaku.Ethereum.Tx
+
+import LeanKohaku.Registry.KnownProtocols
 
 import LeanKohaku.Privacy.NetworkPolicy
 import LeanKohaku.Network.Provider
