@@ -14,6 +14,7 @@ import LeanKohaku.Colibri.Bridge
 import LeanKohaku.Colibri.Persistent
 import LeanKohaku.Daemon.TokenMeta
 import LeanKohaku.LlmAgent.Bridge
+import LeanKohaku.LlmAgent.DirectSynth
 import LeanKohaku.LlmAgent.IntentParser
 import LeanKohaku.LlmAgent.RuleParser
 import LeanKohaku.Cli.Commands
@@ -38,6 +39,7 @@ import LeanKohaku.Wallet.EOA
 import LeanKohaku.Wallet.HDKey
 import LeanKohaku.Wallet.Mnemonic
 import LeanKohaku.Wallet.PpSecretStore
+import LeanKohaku.Registry.KnownProtocols
 import LeanKohaku.Swap.Tokens
 import LeanKohaku.Swap.UniV3
 import LeanKohaku.Util.Units
@@ -2062,9 +2064,14 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                   let isEthOut :=
                     let s := toutRaw.trimAscii.toString.toLower
                     s = "eth"
-                  if isEthOut then
-                    pure <| .error { code := -32602, message := "token→ETH unwrap not yet supported in slice B", data := none }
+                  if isEthIn && isEthOut then
+                    pure <| .error { code := -32602, message := "ETH→ETH is not a swap", data := none }
                   else
+                    -- `resolve` maps "ETH" → WETH on the selected chain, so
+                    -- both legs land on the actual pool token regardless of
+                    -- direction. The branch below decides how to wrap
+                    -- (deposit ETH up front) or unwrap (multicall ending in
+                    -- unwrapWETH9) at the router boundary.
                     match LeanKohaku.Swap.Tokens.resolve tinRaw chainId,
                           LeanKohaku.Swap.Tokens.resolve toutRaw chainId with
                     | some (_, tinAddr), some (_, toutAddr) =>
@@ -2091,6 +2098,70 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                             ("tokenIn", .str tinAddr),
                             ("tokenOut", .str toutAddr),
                             ("approval", .null)
+                          ]
+                        else if isEthOut then
+                          -- token→ETH: multicall([exactInputSingle(recipient=ADDRESS_THIS),
+                          --                       unwrapWETH9(amountOutMin, userRecipient)]).
+                          -- WETH stays in the router after the swap leg, then
+                          -- unwrapWETH9 withdraws it to native ETH for the user.
+                          -- Approval against `tinAddr` is still required (same
+                          -- as token→token); the unwrap leg costs no allowance.
+                          let exactCall :=
+                            LeanKohaku.Swap.UniV3.encodeExactInputSingle
+                              { tokenIn := tinAddr, tokenOut := toutAddr,
+                                fee := fee,
+                                recipient := LeanKohaku.Swap.UniV3.addressThis,
+                                amountIn := amountIn,
+                                amountOutMinimum := amountOutMin }
+                          let unwrapCall :=
+                            LeanKohaku.Swap.UniV3.encodeUnwrapWETH9 amountOutMin recipient
+                          let mc :=
+                            LeanKohaku.Swap.UniV3.encodeMulticall [exactCall, unwrapCall]
+                          let allowanceData :=
+                            LeanKohaku.Swap.UniV3.encodeAllowance fromAddr router
+                          let via? ← colibriVia state chainId.toNat
+                          let approval ←
+                            (do
+                              match ← LeanKohaku.RPC.Outbound.ethCall cfg.policy ep tinAddr allowanceData "latest" via? with
+                              | .ok ret =>
+                                  match asString ret with
+                                  | some hex =>
+                                      match LeanKohaku.Swap.UniV3.decodeWordAt hex 0 with
+                                      | some current =>
+                                          if current ≥ amountIn then pure Json.null
+                                          else
+                                            let approveData :=
+                                              LeanKohaku.Swap.UniV3.encodeApprove
+                                                router LeanKohaku.Swap.UniV3.maxUint256
+                                            pure <| Json.obj #[
+                                              ("to", .str tinAddr),
+                                              ("value", .num 0),
+                                              ("data", .str approveData),
+                                              ("currentAllowance", .num (Int.ofNat current))
+                                            ]
+                                      | none => pure Json.null
+                                  | none => pure Json.null
+                              | .error _ =>
+                                  let approveData :=
+                                    LeanKohaku.Swap.UniV3.encodeApprove
+                                      router LeanKohaku.Swap.UniV3.maxUint256
+                                  pure <| Json.obj #[
+                                    ("to", .str tinAddr),
+                                    ("value", .num 0),
+                                    ("data", .str approveData),
+                                    ("currentAllowance", .null)
+                                  ])
+                          pure <| .ok <| .obj #[
+                            ("kind", .str "tokenToEth"),
+                            ("tx", .obj #[
+                              ("to", .str router),
+                              ("value", .num 0),
+                              ("data", .str mc)
+                            ]),
+                            ("router", .str router),
+                            ("tokenIn", .str tinAddr),
+                            ("tokenOut", .str toutAddr),
+                            ("approval", approval)
                           ]
                         else
                           -- token→token: plain exactInputSingle, no value.
@@ -2955,9 +3026,36 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                       ("name",     .str t.name)
                     ]))
                 .arr tokens.toArray
+          -- Surface canonical protocol addresses the wallet already knows
+          -- so the LLM never has to ask "what's the Aave Pool?". Every
+          -- entry the model uses must round-trip back through
+          -- Registry.KnownProtocols on the security-check side
+          -- (LlmAgent.IntentParser already enforces this), so passing
+          -- them in is information-disclosure only — not a new trust
+          -- vector. The address book + token registry follow the same
+          -- pattern.
+          let knownProtocolsJson : Json := match chainEnumOpt with
+            | none => .arr #[]
+            | some ce =>
+                let entries : List (String × String × Option String) := [
+                  ("Aave V3 Pool", "aave",
+                    LeanKohaku.Registry.KnownProtocols.aaveV3PoolFor ce),
+                  ("Morpho Blue",  "morpho",
+                    LeanKohaku.Registry.KnownProtocols.morphoBlueFor ce)
+                ]
+                let filled := entries.filterMap (fun e =>
+                  match e.snd.snd with
+                  | none      => none
+                  | some addr => some (Json.obj #[
+                      ("name",    .str e.fst),
+                      ("alias",   .str e.snd.fst),
+                      ("address", .str addr)
+                    ]))
+                .arr filled.toArray
           let chainContextJson : Json := .obj #[
-            ("chainId",     .num (Int.ofNat chainId)),
-            ("knownTokens", knownTokensJson)
+            ("chainId",        .num (Int.ofNat chainId)),
+            ("knownTokens",    knownTokensJson),
+            ("knownProtocols", knownProtocolsJson)
           ]
           -- 1d. Build walletContext: what the daemon knows about the
           -- user's local wallets + their address-book. Putting this in
@@ -2988,6 +3086,66 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           ] ++ (match defaultWallet? with
                 | some n => #[("defaultWallet", .str n)]
                 | none   => #[])
+          -- 1e. DirectSynth short-circuit (pure Lean, no LLM).
+          -- When the regex pipeline has already produced everything an
+          -- Intent needs — recipient resolved to a 0x address, asset
+          -- resolved to a registry token, amountBase computed via
+          -- parseUnits — synthesize the Intent in Lean and encode it
+          -- directly. Skips the LLM round-trip entirely for the regular
+          -- nativeTransfer / erc20Transfer / erc20Approve / revoke
+          -- cases. Falls through to the LLM on .error (the model gets
+          -- the same regex seed, chainContext, walletContext as before).
+          --
+          -- This is the load-bearing piece of the "wallet does the
+          -- regular work, LLM does the complex work" split: simple txs
+          -- never touch a model. Display + verification on the encoded
+          -- bytes still goes through tx.decodeIntent (ERC-7730 +
+          -- 4byte) and tx.simulate before any signature.
+          -- Resolve the default wallet name to a 0x address (DirectSynth
+          -- uses it as onBehalfOf for Aave supply and recipient for Aave
+          -- withdraw). Falls back to none when no default is set or the
+          -- name doesn't resolve in walletEntries.
+          let defaultSenderAddr? : Option String :=
+            match defaultWallet? with
+            | none => none
+            | some n =>
+                let lower := n.toLower
+                (walletEntries.find? (fun kv => kv.fst.toLower = lower)).map Prod.snd
+          let earlyReturn : Option Json :=
+            match LeanKohaku.LlmAgent.DirectSynth.synth regex chainId defaultSenderAddr? with
+            | .error _ => none
+            | .ok intent =>
+                match LeanKohaku.Ethereum.IntentEncode.encode intent with
+                | .error msg =>
+                    -- Encoder rejected a Lean-synthesized intent. Surface
+                    -- it AND don't fall back to the LLM: if Lean's own
+                    -- encoder said no, the model shouldn't be asked to
+                    -- reinterpret.
+                    some <| .obj #[
+                      ("regex", regexJson),
+                      ("intentActionTag",
+                        .str (LeanKohaku.Ethereum.IntentCanonical.actionTag intent)),
+                      ("encodeError", .str msg),
+                      ("synth", .str "wallet-direct")
+                    ]
+                | .ok enc =>
+                    some <| .obj #[
+                      ("regex", regexJson),
+                      ("intentActionTag",
+                        .str (LeanKohaku.Ethereum.IntentCanonical.actionTag intent)),
+                      ("canonical",
+                        .str (LeanKohaku.Ethereum.IntentCanonical.toCanonicalString intent)),
+                      ("encoded", .obj #[
+                        ("to",      .str enc.to),
+                        ("value",   .num (Int.ofNat enc.valueWei)),
+                        ("data",    .str enc.data),
+                        ("chainId", .num (Int.ofNat chainId))
+                      ]),
+                      ("synth", .str "wallet-direct")
+                    ]
+          match earlyReturn with
+          | some j => return .ok j
+          | none   => pure ()
           -- 2. Call LLM sidecar with the regex as a seed + the matching
           -- skill body + the chain's token registry.
           let llmReq : Json :=
@@ -3429,7 +3587,21 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                                   data := some prepared }
                           | some txns =>
                               IO.eprintln s!"[shield] signing and broadcasting {txns.size} tx(s)"
-                              match ← signAndBroadcastBridgeTxns cfg slot privateKey txns (some notify) with
+                              -- Privacy Pools v1 is Sepolia-only. Pin
+                              -- the broadcast cfg to the sepolia
+                              -- endpoint + chainId regardless of the
+                              -- daemon's default. Same reasoning as
+                              -- shieldedBridgeCall (slice 31) — without
+                              -- this, txns prepared for chain 11155111
+                              -- got signed with cfg.chainId (mainnet)
+                              -- and the broadcast surfaced as the
+                              -- vague "chain RPC failed".
+                              let cfgShield : Config :=
+                                let sepEp := match endpointForChain cfg (some "sepolia") with
+                                  | .ok ep => ep
+                                  | .error _ => cfg.rpcEndpoint
+                                { cfg with rpcEndpoint := sepEp, chainId := 11155111 }
+                              match ← signAndBroadcastBridgeTxns cfgShield slot privateKey txns (some notify) with
                               | .error err =>
                                   IO.eprintln s!"[shield] broadcast failed: {err.message}"
                                   pure (.error err)

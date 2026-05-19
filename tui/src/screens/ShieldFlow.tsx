@@ -98,6 +98,13 @@ export default function ShieldFlow({ wallet, onDone }: Props) {
           amountEth: phase.v.amountEth,
           passphrase: phase.v.ppPass,
         }}
+        // First-run PP state sync can take 10+ minutes — the SDK
+        // walks every relevant on-chain event from the pool's birth.
+        // Cached runs return in seconds. 20-minute window covers both
+        // with margin so the TUI doesn't give up before the daemon
+        // does. Bridge stderr is captured (slice 32) so a real error
+        // still surfaces.
+        timeoutMs={20 * 60 * 1000}
         renderResult={(r) => <ShieldResult result={r} />}
         onDone={onDone}
       />

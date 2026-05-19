@@ -96,11 +96,20 @@ export default function PrivacyMenu({ onDone }: Props) {
     pick === "delete"  ? "shielded.delete"  :
                          "shielded.unshieldDrain";
 
+  // PP-state sync (balance/unshield) and import all trigger the same
+  // chain walk the deposit flow does — first-run can take 10+ minutes
+  // because the bridge scans every relevant on-chain event since the
+  // pool's birth. Cached runs return in seconds. 20-minute window
+  // covers both. reveal and delete are local-only and finish fast;
+  // they pay no penalty for the larger budget.
+  const ppTimeoutMs = 20 * 60 * 1000;
+
   return (
     <RpcRunner
       title={pick === "unshield" ? "Unshield via relayer…" : `Privacy Pools: ${pick}`}
       method={method}
       params={params}
+      timeoutMs={ppTimeoutMs}
       renderResult={(r: any) =>
         pick === "balance" ? (
           <BalanceResult result={r} />
