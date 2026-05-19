@@ -164,12 +164,19 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
       configNat? fileCfg "chain_id",
       configNat? fileCfg "chainId"
     ] |>.getD 1
+  -- Default policy: when neither env nor daemon.json names one we use
+  -- the chain-aware mainnetSafeDaemonPolicy (what `parsePolicy "strict"`
+  -- now returns). The previous bare `strictDaemonPolicy` fallback was
+  -- the loopback-only version — it denied configured-node traffic on
+  -- every chain including sepolia, which is the wrong default for a
+  -- testnet wallet whose RPC is configured but not loopback-hosted.
+  let defaultPolicy := mainnetSafeDaemonPolicy
   let policy :=
     match ← IO.getEnv "LEANKOHAKU_NETWORK_POLICY" with
     | some s =>
         match LeanKohaku.Privacy.NetworkPolicy.parsePolicy s with
         | some p => p
-        | none => strictDaemonPolicy
+        | none => defaultPolicy
     | none =>
         match firstSome [
           configString? fileCfg "network_policy",
@@ -178,8 +185,8 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
         | some s =>
             match LeanKohaku.Privacy.NetworkPolicy.parsePolicy s with
             | some p => p
-            | none => strictDaemonPolicy
-        | none => strictDaemonPolicy
+            | none => defaultPolicy
+        | none => defaultPolicy
   -- Top-level `rpc_url` is the daemon's "default" endpoint (used when a
   -- request doesn't name a chain). When unset, fall back to the chain
   -- matching the configured chainId so `kohaku network set-rpc-chain
