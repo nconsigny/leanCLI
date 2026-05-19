@@ -1,4 +1,5 @@
 import LeanKohaku.Encoding.Json
+import LeanKohaku.Util.Sandbox
 
 /-!
 # LLM-agent bridge
@@ -71,9 +72,16 @@ def call (req : Request) : IO Response := do
   let exe ← resolveExecutable
   let encoded := encodeRequest req
   try
+    -- Sandbox the LLM sidecar. needsTcpLoopback=true keeps the host
+    -- network namespace because this sidecar must reach the local
+    -- llama-server at 127.0.0.1:8080. The loopback-only URL guard in
+    -- bridge/llm/src/clients/ is the policy layer that prevents the
+    -- sidecar from reaching anything *but* loopback.
+    let (cmd, args) ← LeanKohaku.Util.Sandbox.wrap
+      { cmd := exe, args := #["--rpc", encoded], needsTcpLoopback := true }
     let child ← IO.Process.spawn {
-      cmd := exe,
-      args := #["--rpc", encoded],
+      cmd := cmd,
+      args := args,
       stdin := .null,
       stdout := .piped,
       stderr := .inherit

@@ -10,6 +10,7 @@ import LeanKohaku.Encoding.Json
 import LeanKohaku.Encoding.Rlp
 import LeanKohaku.Transport.Uds
 import LeanKohaku.Util.DotEnv
+import LeanKohaku.Util.Sandbox
 
 import LeanKohaku.Ethereum.Abi
 import LeanKohaku.Ethereum.Address

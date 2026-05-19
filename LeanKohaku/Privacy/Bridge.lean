@@ -1,5 +1,6 @@
 import LeanKohaku.Encoding.Json
 import LeanKohaku.Privacy.NetworkPolicy
+import LeanKohaku.Util.Sandbox
 
 /-!
 # Kohaku-bridge sidecar boundary
@@ -128,9 +129,16 @@ def callWithEnv (req : Request) (env : Array (String × Option String)) : IO Res
   let t0 ← IO.monoMsNow
   if v ≥ 1 then IO.eprintln s!"[bridge→] {req.method} exe={exe}"
   try
+    -- Sandbox the privacy sidecar. Conservatively keep host network
+    -- namespace (needsTcpLoopback := true): the snarkjs / libp2p / Waku
+    -- sidecar may reach beyond loopback today; tightening to UDS-only
+    -- belongs in a follow-up after auditing the sidecar's actual
+    -- traffic. PID/UTS/IPC isolation still applies regardless.
+    let (cmd, args) ← LeanKohaku.Util.Sandbox.wrap
+      { cmd := exe, args := #["--rpc", encoded], needsTcpLoopback := true }
     let child ← IO.Process.spawn {
-      cmd := exe,
-      args := #["--rpc", encoded],
+      cmd := cmd,
+      args := args,
       env := env,
       stdin := .null,
       stdout := .piped,

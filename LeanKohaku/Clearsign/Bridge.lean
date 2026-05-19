@@ -1,4 +1,5 @@
 import LeanKohaku.Encoding.Json
+import LeanKohaku.Util.Sandbox
 
 /-!
 # Clearsign-bridge sidecar boundary
@@ -106,9 +107,14 @@ def call (req : Request) : IO Response := do
   let exe ← resolveExecutable
   let encoded := encodeRequest req
   try
+    -- Sandbox the clearsign sidecar. needsTcpLoopback=false — this
+    -- sidecar walks vendored ERC-7730 JSON files at boot and has no
+    -- network needs; running it in a fresh netns is purely upside.
+    let (cmd, args) ← LeanKohaku.Util.Sandbox.wrap
+      { cmd := exe, args := #["--rpc", encoded] }
     let child ← IO.Process.spawn {
-      cmd := exe,
-      args := #["--rpc", encoded],
+      cmd := cmd,
+      args := args,
       stdin := .null,
       stdout := .piped,
       stderr := .inherit
