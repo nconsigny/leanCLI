@@ -207,12 +207,16 @@ export async function parseIntent({ prompt, seed, chainId, skillContext, chainCo
   const body = {
     model,
     messages,
+    // reasoning_effort is a gpt-oss extension; harmless on other models
+    // when llama.cpp tolerates unknown fields. Override via env if a
+    // server complains.
     reasoning_effort: reasoning,
     response_format: { type: "json_object" },
-    // Bounded; intent JSON is small. Keeps a runaway model from eating
-    // the context window.
-    max_tokens: 1024,
-    // No streaming for one-shot sidecar use.
+    // Bumped from 1024 — the skill body + chain context push the
+    // prompt long, and some models put reasoning tokens in the
+    // response too. Cap is still per-call so a runaway model can't
+    // wedge the chat.
+    max_tokens: 4096,
     stream: false,
   };
 
@@ -241,9 +245,24 @@ export async function parseIntent({ prompt, seed, chainId, skillContext, chainCo
       throw e;
     }
   }
-  const raw = resp?.choices?.[0]?.message?.content;
-  if (typeof raw !== "string") {
-    throw new Error("local LLM returned no content");
+  // Multi-shape extraction. OpenAI / llama.cpp default = message.content.
+  // gpt-oss sometimes puts the actual JSON in `reasoning_content` and
+  // leaves `content` empty. Legacy completions servers use `text`.
+  // Try each in order; the first non-empty string wins.
+  const choice = resp?.choices?.[0];
+  const candidates = [
+    choice?.message?.content,
+    choice?.message?.reasoning_content,
+    choice?.text,
+  ];
+  const raw = candidates.find(
+    (s) => typeof s === "string" && s.trim().length > 0,
+  );
+  if (!raw) {
+    // Surface the full response (truncated) so the daemon's error
+    // tells us which shape we got that we couldn't extract from.
+    const dump = JSON.stringify(resp ?? {}).slice(0, 400);
+    throw new Error(`local LLM returned no usable content. response was: ${dump}`);
   }
   return {
     raw,

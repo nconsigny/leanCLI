@@ -3000,13 +3000,17 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
               ]
           | .ok llmResult =>
               -- Sidecar returned { raw, backend, model }. Extract raw.
+              -- When `raw` is missing we surface the FULL result object as
+              -- the llmRaw so the TUI shows what the sidecar actually
+              -- returned — diagnoses model-shape mismatches (e.g. some
+              -- models put output only in reasoning_content).
               let rawStr :=
                 (getField "raw" llmResult >>= asString).getD ""
               if rawStr.isEmpty then
                 pure <| .ok <| .obj #[
                   ("regex", regexJson),
-                  ("llmRaw", llmResult),
-                  ("validateError", .str "llm.parseIntent returned no `raw` field")
+                  ("llmRaw", .str (LeanKohaku.Encoding.Json.compact llmResult)),
+                  ("validateError", .str "llm.parseIntent returned no `raw` field (full sidecar response shown above)")
                 ]
               else
                 -- 3. Parse + validate via Lean's IntentParser. Three outcomes:
