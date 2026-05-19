@@ -19,7 +19,13 @@ export type WalletsAction = "send" | "swap" | "shield" | "custom";
 
 type Props = {
   refreshKey?: number;
-  onPick: (action: WalletsAction, wallet: Wallet) => void;
+  /** `chain` carries the user's WalletsHub-level chain selection — the
+   *  `eoaChain` toggle (mainnet/sepolia) for EOAs, "sepolia" for TPM
+   *  wallets (their only supported chain today). Downstream flows
+   *  (SendFlow / SwapFlow) pass this through to eoa.send so the call
+   *  hits the per-chain endpoint matching what the user just saw on
+   *  the balance row. */
+  onPick: (action: WalletsAction, wallet: Wallet, chain: string) => void;
   onBack: () => void;
 };
 
@@ -87,6 +93,12 @@ export default function WalletsHub({
   // dedicated review surface lives under More commands → Archived
   // accounts (`ArchivedAccountsScreen`).
   const [archived, setArchived] = useState<Set<string>>(() => readArchive());
+  // Why: EOA-side chain override. Defaults to mainnet to match the daemon's
+  // typical config; `n` toggles to sepolia and back so the user can flip
+  // the wallet list between live and testnet balances without a daemon
+  // reconfigure. TPM rows stay pinned to sepolia (their only supported
+  // network today), so this state only affects EOA balance fetches.
+  const [eoaChain, setEoaChain] = useState<"mainnet" | "sepolia">("mainnet");
 
   useEffect(() => {
     let cancelled = false;
@@ -172,7 +184,7 @@ export default function WalletsHub({
       for (const w of out) {
         if (cancelled) return;
         const params: { address: string; chain?: string } = { address: w.address };
-        if (w.kind === "tpm") params.chain = "sepolia";
+        params.chain = w.kind === "tpm" ? "sepolia" : eoaChain;
         const r = await call<ChainBalance>("chain.balance", params);
         if (cancelled) return;
         const key = balanceKey(w.kind, w.name, w.accountIndex);
@@ -193,13 +205,18 @@ export default function WalletsHub({
     return () => {
       cancelled = true;
     };
-  }, [refreshKey]);
+  }, [refreshKey, eoaChain]);
 
   // Esc / q falls back to the main menu. ←/→ are owned by the TabStrip,
   // ↑/↓/Enter by the Select below — letting Ink dispatch each key to the
-  // right consumer keeps the navigation predictable.
+  // right consumer keeps the navigation predictable. `n` flips the EOA
+  // chain between mainnet and sepolia; the useEffect dep above triggers
+  // a re-fetch of every row's balance on the new chain.
   useInput((input, key) => {
     if (key.escape || input === "q") onBack();
+    else if (input === "n") {
+      setEoaChain((c) => (c === "mainnet" ? "sepolia" : "mainnet"));
+    }
   });
 
   const tab = TABS[tabIdx]!;
@@ -247,14 +264,16 @@ export default function WalletsHub({
   // the EOA chain (whatever the daemon's primary is) and the TPM chain
   // (always sepolia today) separately and only show both badges when
   // they diverge — a single "chain: X" line suffices when they match.
-  const eoaChainName = pickChainFor(wallets, balances, "eoa");
+  // EOA falls back to the current `eoaChain` toggle so the header updates
+  // the moment `n` is pressed, not only once balances repopulate.
+  const eoaChainName = pickChainFor(wallets, balances, "eoa") ?? eoaChain;
   const tpmChainName = pickChainFor(wallets, balances, "tpm");
 
   return (
     <Layout
       title="Wallets"
       subtitle={`${tab.label} — ${tab.help}`}
-      hint="←/→ action · ↑/↓ wallet · enter run · esc back"
+      hint="←/→ action · ↑/↓ wallet · enter run · n chain · esc back"
     >
       <Box
         flexDirection="column"
@@ -297,7 +316,10 @@ export default function WalletsHub({
               items={items}
               onSelect={(it) => {
                 const cast = it as typeof items[number];
-                onPick(tab.value, cast.__wallet);
+                // TPM wallets are sepolia-only today; EOAs follow the
+                // hub's chain toggle (defaults to mainnet, `n` to flip).
+                const chain = cast.__wallet.kind === "tpm" ? "sepolia" : eoaChain;
+                onPick(tab.value, cast.__wallet, chain);
               }}
             />
           </Box>

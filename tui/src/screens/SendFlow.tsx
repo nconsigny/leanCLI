@@ -12,6 +12,14 @@ import { TransfersBlock } from "../widgets/TransfersBlock.js";
 
 type Props = {
   wallet: Wallet;
+  /** The chain the user picked in WalletsHub (mainnet/sepolia for
+   *  EOAs, sepolia for TPM). Forwarded to eoa.send / r1.send* so the
+   *  daemon's per-chain endpoint override kicks in. Without this the
+   *  daemon falls back to cfg.rpcEndpoint (the configured default),
+   *  which silently misroutes sepolia testing through the mainnet
+   *  endpoint and shows "insufficient funds" because the wallet has
+   *  zero balance on whatever the default is. */
+  chain?: string;
   colibriEnabled?: boolean;
   onDone: (success: boolean) => void;
 };
@@ -62,7 +70,7 @@ function ethToWei(amountEth: string): bigint {
 
 /** Send ETH from any wallet. EOA → eoa.send (passphrase prompt). TPM/R1 →
  *  r1.sendEthSepolia (PIN entered in form; verified by the TPM at sign time). */
-export default function SendFlow({ wallet, colibriEnabled, onDone }: Props) {
+export default function SendFlow({ wallet, chain, colibriEnabled, onDone }: Props) {
   // Default off; can be overridden via app-level toggle (MainMenu) or the
   // KOHAKU_COLIBRI env seed at startup.
   const useColibri = colibriEnabled ?? false;
@@ -296,12 +304,16 @@ export default function SendFlow({ wallet, colibriEnabled, onDone }: Props) {
     return (
       <RpcRunner
         title={`Sending ${phase.amountEth} ETH from ${wallet.name}${titleSuffix}`}
-        subtitle={`to ${phase.to}`}
+        subtitle={`${chain ? `${chain} · ` : ""}to ${phase.to}`}
         method="eoa.send"
         params={{
           name: wallet.name,
           to: phase.to,
           value: wei,
+          // The daemon's per-call chain override goes here. Without it,
+          // eoa.send hits cfg.rpcEndpoint (the daemon's default), not the
+          // chain the user just saw highlighted in WalletsHub.
+          ...(chain ? { chain } : {}),
           ...(subAcct !== undefined ? { account: subAcct } : {}),
         }}
         renderResult={(r) => <SendResult result={r} />}
@@ -312,7 +324,7 @@ export default function SendFlow({ wallet, colibriEnabled, onDone }: Props) {
   return (
     <RpcRunner
       title={`Sending ${phase.amountEth} ETH from ${wallet.name} (TPM/R1)`}
-      subtitle={`to ${phase.to} · TPM PIN will be checked at sign time`}
+      subtitle={`${chain ? `${chain} · ` : ""}to ${phase.to} · TPM PIN will be checked at sign time`}
       method="r1.sendEthSepolia"
       params={{
         name: wallet.name,

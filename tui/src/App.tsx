@@ -38,7 +38,7 @@ type Screen =
   | { kind: "main" }
   | { kind: "wallets" }
   | { kind: "actions"; wallet: Wallet }
-  | { kind: "send"; wallet: Wallet }
+  | { kind: "send"; wallet: Wallet; chain?: string }
   | { kind: "swap"; wallet: Wallet }
   | { kind: "shield"; wallet: Wallet }
   | { kind: "lock-toggle"; wallet: Wallet }
@@ -165,12 +165,13 @@ export default function App() {
     }
   };
 
-  /** Hub picked an action+wallet. SEND/SWAP/SHIELD jump straight into
+  /** Hub picked an action+wallet+chain. SEND/SWAP/SHIELD jump straight into
    *  their flow; CUSTOM lands on the per-wallet ActionPicker so the user
-   *  can drive any of the wallet-management ops. */
-  const handleHubPick = (a: WalletsAction, w: Wallet) => {
+   *  can drive any of the wallet-management ops. `chain` is the WalletsHub
+   *  toggle (mainnet/sepolia for EOAs, "sepolia" for TPM). */
+  const handleHubPick = (a: WalletsAction, w: Wallet, chain: string) => {
     switch (a) {
-      case "send":   return push({ kind: "send", wallet: w });
+      case "send":   return push({ kind: "send", wallet: w, chain });
       case "swap":   return push({ kind: "swap", wallet: w });
       case "shield": return push({ kind: "shield", wallet: w });
       case "custom": return push({ kind: "actions", wallet: w });
@@ -213,6 +214,7 @@ export default function App() {
       return (
         <SendFlow
           wallet={top.wallet}
+          chain={top.chain}
           colibriEnabled={colibriEnabled}
           onDone={finishAction}
         />
