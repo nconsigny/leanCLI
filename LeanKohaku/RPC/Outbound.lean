@@ -21,6 +21,12 @@ structure Endpoint where
   url       : String
   backend   : Backend
   transport : Transport
+  /-- The chain this endpoint serves, when known. Populated by
+  `endpointForChain` (which knows the chain name → id mapping) and
+  read by the policy layer so testnet endpoints can have a more
+  permissive default than mainnet. Optional for backward
+  compatibility with callers that don't yet know the chain. -/
+  chainId   : Option Nat := none
   deriving Repr
 
 def isLoopbackUrl (url : String) : Bool :=
@@ -60,11 +66,34 @@ def hostOfUrl (url : String) : String := Id.run do
     acc := acc.push c
   return acc
 
-def endpointFromUrl (url : String) (transport? : Option Transport := none) : Endpoint :=
+def endpointFromUrl (url : String) (transport? : Option Transport := none)
+    (chainId? : Option Nat := none) : Endpoint :=
   if isLoopbackUrl url then
-    { url := url, backend := .localNode, transport := .loopback }
+    { url := url, backend := .localNode, transport := .loopback, chainId := chainId? }
   else
-    { url := url, backend := .configuredNode, transport := transport?.getD .direct }
+    { url := url, backend := .configuredNode, transport := transport?.getD .direct, chainId := chainId? }
+
+/-- Map a configured chain *name* to its canonical chain ID. Used at
+endpoint-construction time so the policy layer can branch on testnet vs
+mainnet without re-parsing the name. Returns `none` for chains we
+haven't mapped yet — the policy treats unknown chains as strict, which
+is the safe default. -/
+def chainNameToId : String → Option Nat
+  | "mainnet"          => some 1
+  | "ethereum"         => some 1
+  | "homestead"        => some 1
+  | "sepolia"          => some 11155111
+  | "holesky"          => some 17000
+  | "base"             => some 8453
+  | "base-sepolia"     => some 84532
+  | "optimism"         => some 10
+  | "op-sepolia"       => some 11155420
+  | "arbitrum"         => some 42161
+  | "arbitrum-sepolia" => some 421614
+  | "polygon"          => some 137
+  | name               =>
+      -- Accept a numeric string as the literal chain id.
+      name.toNat?
 
 /-- Resolve an endpoint from environment only. Fails closed with a clear
 error if `LEANKOHAKU_RPC_URL` is unset/empty. The daemon proper uses
@@ -95,7 +124,7 @@ def providerConfig (endpoint : Endpoint) : LeanKohaku.Network.Provider.Config :=
 
 def requestAllowed (policy : Policy) (endpoint : Endpoint)
     (method : RpcMethod) : Bool :=
-  permitted policy (providerConfig endpoint) { method := method }
+  permitted policy (providerConfig endpoint) { method := method } endpoint.chainId
 
 private def verboseLevel : IO Nat := do
   match ← IO.getEnv "LEANKOHAKU_VERBOSE" with

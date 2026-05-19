@@ -267,7 +267,7 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
           | .str url =>
               let trimmed := url.trim
               if trimmed.isEmpty then none
-              else some (name, endpointFromUrl trimmed none)
+              else some (name, endpointFromUrl trimmed none (LeanKohaku.RPC.Outbound.chainNameToId name))
           | .obj sub =>
               match sub.findSome? (fun (k, v) =>
                   if k = "url" then asString v else none) with
@@ -277,7 +277,7 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
                   else
                     let t? := sub.findSome? (fun (k, v) =>
                       if k = "transport" then asString v >>= parseTransport? else none)
-                    some (name, endpointFromUrl trimmed t?)
+                    some (name, endpointFromUrl trimmed t? (LeanKohaku.RPC.Outbound.chainNameToId name))
               | none => none
           | _ => none
     | _ => #[]
@@ -291,7 +291,7 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
     if chainEndpoints.any (fun (k, _) => k = chain) then
       continue
     match ← envChainUrl? chain with
-    | some (url, _src) => chainEndpoints := chainEndpoints.push (chain, endpointFromUrl url none)
+    | some (url, _src) => chainEndpoints := chainEndpoints.push (chain, endpointFromUrl url none (LeanKohaku.RPC.Outbound.chainNameToId chain))
     | none => pure ()
   -- Why: SPHINCS- verifier address map. Per-(chain × paramSet); each entry's
   -- address is optional (null in JSON = "schema known, address pending").

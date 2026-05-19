@@ -86,11 +86,11 @@ def peerFor (cfg : Config) : Peer :=
   | .lightClient => .localNode
   | .configuredNode => .configuredNode
 
-def requestFor (cfg : Config) (op : Operation) : NetworkRequest :=
-  { peer := peerFor cfg, purpose := op.method.purpose, transport := cfg.transport }
+def requestFor (cfg : Config) (op : Operation) (chainId : Option Nat := none) : NetworkRequest :=
+  { peer := peerFor cfg, purpose := op.method.purpose, transport := cfg.transport, chainId := chainId }
 
-def permitted (policy : Policy) (cfg : Config) (op : Operation) : Bool :=
-  policy (requestFor cfg op)
+def permitted (policy : Policy) (cfg : Config) (op : Operation) (chainId : Option Nat := none) : Bool :=
+  policy (requestFor cfg op chainId)
 
 def parseBackend : String → Option Backend
   | "local" => some .localNode

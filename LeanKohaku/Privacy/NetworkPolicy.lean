@@ -44,6 +44,13 @@ structure NetworkRequest where
   peer      : Peer
   purpose   : Purpose
   transport : Transport
+  /-- The chain the request is for, when known. Optional for backward
+  compatibility with callers that haven't been threaded through yet —
+  policies treat `none` as "unknown chain, apply the strictest rule".
+  Concretely: a policy that's permissive on testnets should require
+  `chainId.isSome` AND the value is a known-testnet chainId; an
+  unknown chain stays strict. -/
+  chainId   : Option Nat := none
   deriving Repr, DecidableEq
 
 def Policy := NetworkRequest → Bool
@@ -59,11 +66,62 @@ Default daemon policy:
 * transaction broadcast is allowed to a local node over loopback;
 * configured-node traffic is denied unless Tor mode is explicitly selected;
 * all third-party APIs and metadata-style services are denied.
+
+NOTE: this is the **loopback-strict** policy — never allows
+configured-node traffic. The default policy users now get via
+`parsePolicy "strict"` is the chain-aware `mainnetSafeDaemonPolicy`
+below, which preserves these guarantees on mainnet but relaxes them
+on known testnets. The bare `strictDaemonPolicy` here is kept under
+its old name because the formalized invariants in
+`Invariants/Network.lean` reference it directly.
 -/
 def strictDaemonPolicy : Policy
-  | { peer := .localNode, purpose := .nodeRead, transport := .loopback } => true
-  | { peer := .localNode, purpose := .broadcastTx, transport := .loopback } => true
+  | { peer := .localNode, purpose := .nodeRead, transport := .loopback, .. } => true
+  | { peer := .localNode, purpose := .broadcastTx, transport := .loopback, .. } => true
   | _ => false
+
+/-- Known testnet chain IDs. Requests on these chains get a relaxed
+default policy (configured-node reads and broadcasts allowed). Update
+this list when adding new testnets the wallet supports. -/
+def knownTestnetChainIds : List Nat :=
+  [ 11155111  -- Sepolia
+  , 17000     -- Holesky
+  , 84532     -- Base Sepolia
+  , 421614    -- Arbitrum Sepolia
+  , 11155420  -- OP Sepolia
+  ]
+
+/-- `true` when the request's chainId is a known testnet. `none` →
+treated as unknown → not a testnet → falls into the strict branch. -/
+def isTestnet (req : NetworkRequest) : Bool :=
+  match req.chainId with
+  | none    => false
+  | some id => knownTestnetChainIds.contains id
+
+/--
+Chain-aware default daemon policy. The policy `parsePolicy "strict"`
+resolves to. Behavior:
+
+* **Mainnet (chainId = 1) or unknown chain**: same as
+  `strictDaemonPolicy` — local-node + loopback only. Configured-node
+  and third-party APIs denied.
+* **Known testnet**: configured-node reads and broadcasts allowed over
+  any transport. Mistakes here don't cost real money; refusing to
+  broadcast on Sepolia turns testing into yak-shaving. Third-party
+  APIs (indexers, analytics) still denied because the address leak is
+  real on testnets too.
+-/
+def mainnetSafeDaemonPolicy : Policy := fun req =>
+  -- Loopback / local-node rules always pass (same on every chain).
+  if strictDaemonPolicy req then true
+  else if isTestnet req then
+    match req with
+    | { peer := .configuredNode, purpose := .nodeRead, .. } => true
+    | { peer := .configuredNode, purpose := .broadcastTx, .. } => true
+    | { peer := .configuredNode, purpose := .shieldedRead, .. } => true
+    | { peer := .configuredNode, purpose := .shieldedBroadcast, .. } => true
+    | _ => false
+  else false
 
 /--
 Tor daemon policy:
@@ -174,14 +232,19 @@ def parseTransport : String → Option Transport
 
 def parsePolicy : String → Option Policy
   | "cli" => some strictCliPolicy
-  | "strict" => some strictDaemonPolicy
+  -- `strict` is now the chain-aware default: mainnet-strict + testnet-permissive.
+  -- The old loopback-only policy is exposed under `loopback-strict` for users
+  -- who want the original guarantee unconditionally.
+  | "strict" => some mainnetSafeDaemonPolicy
+  | "loopback-strict" => some strictDaemonPolicy
   | "tor" => some torDaemonPolicy
   | "dev" => some devDaemonPolicy
   | "indexer" => some indexerEnabledPolicy
   | "deny" => some denyByDefault
   | _ => none
 
-def policyNames : List String := ["cli", "strict", "tor", "dev", "indexer", "deny"]
+def policyNames : List String :=
+  ["cli", "strict", "loopback-strict", "tor", "dev", "indexer", "deny"]
 def peerNames : List String := ["local-daemon", "local-node", "configured-node", "third-party-api"]
 def purposeNames : List String :=
   ["daemon-control", "node-read", "broadcast-tx", "peer-discovery", "analytics",
