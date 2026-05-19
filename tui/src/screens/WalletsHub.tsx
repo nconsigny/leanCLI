@@ -93,12 +93,27 @@ export default function WalletsHub({
   // dedicated review surface lives under More commands → Archived
   // accounts (`ArchivedAccountsScreen`).
   const [archived, setArchived] = useState<Set<string>>(() => readArchive());
-  // Why: EOA-side chain override. Defaults to mainnet to match the daemon's
-  // typical config; `n` toggles to sepolia and back so the user can flip
-  // the wallet list between live and testnet balances without a daemon
-  // reconfigure. TPM rows stay pinned to sepolia (their only supported
-  // network today), so this state only affects EOA balance fetches.
+  // Why: EOA-side chain override. The initial value is fetched from the
+  // daemon's network.show (cfg.chainId) on mount so the hub matches the
+  // user's actual daemon config — not a hardcoded "mainnet" that
+  // silently misroutes balance reads + sends on a testnet daemon. `n`
+  // toggles to the other chain and back. TPM rows stay pinned to
+  // sepolia (their only supported network today).
   const [eoaChain, setEoaChain] = useState<"mainnet" | "sepolia">("mainnet");
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const r = await call<{ chainId: number }>("network.show", {});
+      if (cancelled || !r.ok) return;
+      const cid = r.result?.chainId;
+      if (cid === 1) setEoaChain("mainnet");
+      else if (cid === 11155111) setEoaChain("sepolia");
+      // other chain ids: leave the toggle alone (user can flip with n)
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;

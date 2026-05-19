@@ -2740,9 +2740,37 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       -- configured, spawns llama-server and waits for /v1/models to go
       -- 200 OK. Reports outcome verbatim for UX surfacing.
       let outcome ← LeanKohaku.Daemon.LlmServer.ensureUp
-      pure <| .ok <| .obj #[
-        ("outcome", .str outcome.toString)
-      ]
+      -- Best-effort probe of the served model name. The chat UI shows
+      -- this so users know what's running (and how to swap by changing
+      -- LOCAL_LLM_MODEL or restarting llama-server with a different
+      -- model file).
+      let baseUrl := ((← IO.getEnv "LLM_BASE_URL").getD "http://127.0.0.1:8080/v1")
+      let modelName ← try
+        let out ← IO.Process.output {
+          cmd := "/usr/bin/env",
+          args := #["curl", "-fsS", "-m", "2", s!"{baseUrl}/models"]
+        }
+        if out.exitCode == 0 then
+          match LeanKohaku.Encoding.Json.parse out.stdout with
+          | .ok j =>
+              -- Try OpenAI shape `data[0].id` first, then llama.cpp's `models[0].model`.
+              let viaData : Option String :=
+                ((getField "data" j >>= asArray).bind (·[0]?))
+                  >>= (getField "id" ·) >>= asString
+              let viaModels : Option String :=
+                ((getField "models" j >>= asArray).bind (·[0]?))
+                  >>= (getField "model" ·) >>= asString
+              pure (viaData <|> viaModels)
+          | _ => pure none
+        else pure none
+      catch _ => pure none
+      let modelField : Array (String × Json) := match modelName with
+        | some s => #[("model", .str s)]
+        | none   => #[]
+      pure <| .ok <| .obj <| #[
+        ("outcome", .str outcome.toString),
+        ("baseUrl", .str baseUrl)
+      ] ++ modelField
   | "chat.draft" =>
       -- Unified entry point for the opt-in local-LLM chat path.
       --

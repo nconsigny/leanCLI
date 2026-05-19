@@ -93,8 +93,8 @@ function chainNameForBalance(chainName: string): string | undefined {
 
 type Phase =
   | { kind: "boot" } // initial ensureUp + chains fetch
-  | { kind: "needChain"; chains: ConfiguredChain[] }
-  | { kind: "chat"; chainId: number; chainName: string; turns: Turn[]; input: string; busy: boolean }
+  | { kind: "needChain"; chains: ConfiguredChain[]; modelName?: string }
+  | { kind: "chat"; chainId: number; chainName: string; modelName?: string; turns: Turn[]; input: string; busy: boolean }
   | { kind: "fatal"; message: string };
 
 export default function LlmChatFlow({ onDone, onApprove }: Props) {
@@ -108,7 +108,7 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
     if (phase.kind !== "boot") return;
     (async () => {
       // 1. ensure llama-server.
-      const r = await call<{ outcome: string }>("llm.ensureUp", {});
+      const r = await call<{ outcome: string; model?: string; baseUrl?: string }>("llm.ensureUp", {});
       if (!r.ok) {
         setPhase({ kind: "fatal", message: `llm.ensureUp failed: ${r.error.message}` });
         return;
@@ -140,7 +140,7 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
         });
         return;
       }
-      setPhase({ kind: "needChain", chains });
+      setPhase({ kind: "needChain", chains, modelName: r.result?.model });
     })();
   }, [phase.kind]);
 
@@ -224,11 +224,13 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
     return (
       <ChainPicker
         chains={phase.chains}
+        modelName={phase.modelName}
         onPick={(c) =>
           setPhase({
             kind: "chat",
             chainId: c.chainId,
             chainName: c.name,
+            modelName: phase.modelName,
             turns: [],
             input: "",
             busy: false,
@@ -242,6 +244,7 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
     <ChatBody
       chainId={phase.chainId}
       chainName={phase.chainName}
+      modelName={phase.modelName}
       wallets={wallets}
       turns={phase.turns}
       input={phase.input}
@@ -295,10 +298,12 @@ function Container({
   children,
   chainTag,
   wallets,
+  modelName,
 }: {
   children: React.ReactNode;
   chainTag: string;
   wallets?: WalletBalance[];
+  modelName?: string;
 }) {
   return (
     <Box flexDirection="column" paddingX={1}>
@@ -318,6 +323,11 @@ function Container({
             {" le chat · local LLM "}
             {chainTag !== "…" ? `· ${chainTag}` : ""}
           </Text>
+          {modelName && (
+            <Text color={theme.dim}>
+              model: <Text color={theme.primary}>{modelName}</Text>
+            </Text>
+          )}
           <Text color={theme.dim}>
             untrusted model · regex+ENS+wallet seed · Lean validator · canonical text in confirm
           </Text>
@@ -358,9 +368,11 @@ function WalletRow({ w }: { w: WalletBalance }) {
  *  has to re-set an RPC URL to start a chat on a different chain. */
 function ChainPicker({
   chains,
+  modelName,
   onPick,
 }: {
   chains: ConfiguredChain[];
+  modelName?: string;
   onPick: (c: ConfiguredChain) => void;
 }) {
   const items: SelectItem<ConfiguredChain>[] = chains.map((c) => ({
@@ -371,6 +383,12 @@ function ChainPicker({
   return (
     <Container chainTag="…">
       <Box flexDirection="column">
+        {modelName && (
+          <Text color={theme.dim}>
+            Model: <Text color={theme.primary}>{modelName}</Text>{" "}
+            <Text color={theme.dim}>· swap by restarting llama-server with another -hf flag or setting LOCAL_LLM_MODEL</Text>
+          </Text>
+        )}
         <Text>Pick a chain. These are the per-chain RPCs your daemon already has configured:</Text>
         <Box marginTop={1}>
           <Select
@@ -387,6 +405,7 @@ function ChainPicker({
 function ChatBody({
   chainId,
   chainName,
+  modelName,
   wallets,
   turns,
   input,
@@ -397,6 +416,7 @@ function ChatBody({
 }: {
   chainId: number;
   chainName: string;
+  modelName?: string;
   wallets: WalletBalance[];
   turns: Turn[];
   input: string;
@@ -419,7 +439,7 @@ function ChatBody({
   });
 
   return (
-    <Container chainTag={`${chainName} (${chainId})`} wallets={wallets}>
+    <Container chainTag={`${chainName} (${chainId})`} wallets={wallets} modelName={modelName}>
       {/* Conversation block — every turn renders as a row inside the
         framed rectangle. Single border so it visually nests under the
         koi-red header. */}
