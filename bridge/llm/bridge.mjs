@@ -65,6 +65,7 @@ async function dispatch(method, params, id) {
           chainId: params.chainId,
           skillContext: params.skillContext ?? null,
           chainContext: params.chainContext ?? null,
+          walletContext: params.walletContext ?? null,
         });
         return ok(id, result);
       } catch (e) {

@@ -2765,7 +2765,49 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                             pure (d.note s!"failed to resolve {s}: {m}")
           let regex1 ← resolveEnsField "to" regex0
           let regex2 ← resolveEnsField "spender" regex1
-          let regex := regex2
+          -- 1a-bis. Wallet-name + address-book-label resolution. The
+          -- CLI knows the user's wallets ("leanWallet", "fresh1") and
+          -- the address book labels ("alice", "niard"). When the regex
+          -- extracted those, swap in the resolved address before the
+          -- LLM ever sees the prompt — saves an entire ask-loop. Same
+          -- pattern as ENS resolution above.
+          let eoaNames ← LeanKohaku.Wallet.EoaStore.list
+          let mut walletEntries : List (String × String) := []
+          for name in eoaNames do
+            match ← LeanKohaku.Wallet.EoaStore.load name with
+            | .ok rec => walletEntries := walletEntries ++ [(rec.name, rec.address)]
+            | .error _ => pure ()
+          let tpmNames ← listSepoliaKeys
+          let tpmStateDir : System.FilePath := ".leankohaku/keystore/tpm2"
+          for name in tpmNames do
+            let addrFile := tpmStateDir / name / "r1-account-address.txt"
+            if ← addrFile.pathExists then
+              let raw ← IO.FS.readFile addrFile
+              let addr := raw.trimAscii.toString
+              if !addr.isEmpty then
+                walletEntries := walletEntries ++ [(name, addr)]
+          let bookEntries ← LeanKohaku.Daemon.AddressBook.loadIO
+          let book := match bookEntries with
+            | .ok xs => xs
+            | .error _ => []
+          let resolveLocal (key : String) (d : LeanKohaku.Ethereum.Intent.RegexDraft) :
+              LeanKohaku.Ethereum.Intent.RegexDraft :=
+            match d.field? key with
+            | none => d
+            | some s =>
+                let lower := s.toLower
+                match walletEntries.find? (fun kv => kv.fst.toLower = lower) with
+                | some (_, addr) =>
+                    (d.setField key addr).note s!"resolved wallet '{s}' → {addr}"
+                | none =>
+                    match book.find? (fun e => e.label.toLower = lower) with
+                    | some e =>
+                        (d.setField key e.address).note s!"resolved book label '{s}' → {e.address}"
+                    | none => d
+          let regex3 := resolveLocal "to" regex2
+          let regex4 := resolveLocal "spender" regex3
+          let regex5 := resolveLocal "from" regex4
+          let regex := regex5
           let regexJson : Json :=
             .obj #[
               ("action",     .str (LeanKohaku.Ethereum.Intent.Action.toString regex.action)),
@@ -2825,14 +2867,44 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
             ("chainId",     .num (Int.ofNat chainId)),
             ("knownTokens", knownTokensJson)
           ]
+          -- 1d. Build walletContext: what the daemon knows about the
+          -- user's local wallets + their address-book. Putting this in
+          -- the LLM context removes the "which wallet do you mean?"
+          -- ask-loop entirely. We already gathered walletEntries +
+          -- bookEntries above for the regex-side substitution; reuse.
+          let defaultPath ← defaultAccountPathIO
+          let defaultWallet? : Option String ←
+            if ← defaultPath.pathExists then do
+              let raw ← try IO.FS.readFile defaultPath catch _ => pure ""
+              let trimmed := raw.trimAscii.toString
+              pure (if trimmed.isEmpty then none else some trimmed)
+            else pure none
+          let walletsJson : Json :=
+            .arr (walletEntries.map (fun kv => Json.obj #[
+              ("name",    .str kv.fst),
+              ("address", .str kv.snd)
+            ])).toArray
+          let bookJson : Json :=
+            .arr (book.map (fun e => Json.obj #[
+              ("label",   .str e.label),
+              ("address", .str e.address),
+              ("source",  .str e.source)
+            ])).toArray
+          let walletContextJson : Json := .obj <| #[
+            ("wallets",     walletsJson),
+            ("addressBook", bookJson)
+          ] ++ (match defaultWallet? with
+                | some n => #[("defaultWallet", .str n)]
+                | none   => #[])
           -- 2. Call LLM sidecar with the regex as a seed + the matching
           -- skill body + the chain's token registry.
           let llmReq : Json :=
             .obj <| #[
-              ("prompt",       .str prompt),
-              ("seed",         regexJson),
-              ("chainId",      .num (Int.ofNat chainId)),
-              ("chainContext", chainContextJson)
+              ("prompt",        .str prompt),
+              ("seed",          regexJson),
+              ("chainId",       .num (Int.ofNat chainId)),
+              ("chainContext",  chainContextJson),
+              ("walletContext", walletContextJson)
             ] ++ (match skillBody? with
                   | some body => #[("skillContext", .obj #[
                       ("name", .str skillName),

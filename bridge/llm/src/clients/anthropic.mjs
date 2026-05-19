@@ -30,7 +30,7 @@ const SYSTEM_PROMPT =
   "Do NOT invent contract addresses; if a token symbol can't be " +
   "resolved, ask the user. Output ONLY the JSON object, nothing else.";
 
-export async function parseIntent({ prompt, seed, chainId, skillContext, chainContext }, opts = {}) {
+export async function parseIntent({ prompt, seed, chainId, skillContext, chainContext, walletContext }, opts = {}) {
   const apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     throw new Error("ANTHROPIC_API_KEY not set");
@@ -45,6 +45,24 @@ export async function parseIntent({ prompt, seed, chainId, skillContext, chainCo
   });
 
   let fullSystem = SYSTEM_PROMPT;
+  if (walletContext) {
+    const walletLines = (walletContext.wallets ?? [])
+      .map((w) => `  ${w.name.padEnd(16)} ${w.address}`)
+      .join("\n");
+    const bookLines = (walletContext.addressBook ?? [])
+      .map((e) => `  ${e.label.padEnd(16)} ${e.address}  [${e.source}]`)
+      .join("\n");
+    const defLine = walletContext.defaultWallet
+      ? `Default wallet (use when the user says \"my wallet\" or omits the sender): ${walletContext.defaultWallet}\n`
+      : "";
+    fullSystem +=
+      "\n\n--- WALLET CONTEXT ---\n" +
+      defLine +
+      "The user's local wallets (use the address when they refer to a wallet by name):\n" +
+      (walletLines || "  (no wallets registered)") +
+      "\n\nAddress book (use these labels as aliases for the address):\n" +
+      (bookLines || "  (empty)");
+  }
   if (chainContext) {
     const tokenLines = (chainContext.knownTokens ?? [])
       .map((t) => `  ${t.symbol.padEnd(8)} ${t.address}  decimals=${t.decimals}  (${t.name})`)

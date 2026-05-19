@@ -105,7 +105,7 @@ export async function ping(baseUrl = process.env.LOCAL_LLM_BASE_URL ?? DEFAULT_B
  *  regex-seed JSON. Returns an OpenAI-compatible messages array.
  *  Crucially, every value we interpolate is JSON-stringified — no
  *  unescaped chain-derived strings ever land in the prompt body. */
-function buildMessages({ prompt, seed, chainId, skillContext, chainContext }) {
+function buildMessages({ prompt, seed, chainId, skillContext, chainContext, walletContext }) {
   // Field-by-field schema. The prompt is intentionally verbose: gpt-oss
   // is documented unreliable on Ethereum-specific factual details, so we
   // overspecify the wire shape and let the Lean validator hard-reject
@@ -142,6 +142,24 @@ function buildMessages({ prompt, seed, chainId, skillContext, chainContext }) {
   // resolve "USDC" → contract address without inventing it; the skill
   // body specifies the exact Intent shape for the current action.
   let fullSystem = system;
+  if (walletContext) {
+    const walletLines = (walletContext.wallets ?? [])
+      .map((w) => `  ${w.name.padEnd(16)} ${w.address}`)
+      .join("\n");
+    const bookLines = (walletContext.addressBook ?? [])
+      .map((e) => `  ${e.label.padEnd(16)} ${e.address}  [${e.source}]`)
+      .join("\n");
+    const defLine = walletContext.defaultWallet
+      ? `Default wallet (use when the user says \"my wallet\" or omits the sender): ${walletContext.defaultWallet}\n`
+      : "";
+    fullSystem +=
+      "\n\n--- WALLET CONTEXT ---\n" +
+      defLine +
+      "The user's local wallets (use the address when they refer to a wallet by name):\n" +
+      (walletLines || "  (no wallets registered)") +
+      "\n\nAddress book (use these labels as aliases for the address):\n" +
+      (bookLines || "  (empty)");
+  }
   if (chainContext) {
     const tokenLines = (chainContext.knownTokens ?? [])
       .map((t) => `  ${t.symbol.padEnd(8)} ${t.address}  decimals=${t.decimals}  (${t.name})`)
@@ -174,7 +192,7 @@ function buildMessages({ prompt, seed, chainId, skillContext, chainContext }) {
 
 /** Call llama-server's chat-completions endpoint, return raw model
  *  text. Retries once on ECONNREFUSED to ride out a server restart. */
-export async function parseIntent({ prompt, seed, chainId, skillContext, chainContext }, opts = {}) {
+export async function parseIntent({ prompt, seed, chainId, skillContext, chainContext, walletContext }, opts = {}) {
   const baseUrl = opts.baseUrl ?? process.env.LOCAL_LLM_BASE_URL ?? DEFAULT_BASE_URL;
   await assertLoopbackOnly(baseUrl);
   // Resolution order: explicit opts → env override → first model the server advertises.
@@ -184,7 +202,7 @@ export async function parseIntent({ prompt, seed, chainId, skillContext, chainCo
   }
   const reasoning = opts.reasoning ?? process.env.LOCAL_LLM_REASONING ?? DEFAULT_REASONING;
 
-  const messages = buildMessages({ prompt, seed, chainId, skillContext, chainContext });
+  const messages = buildMessages({ prompt, seed, chainId, skillContext, chainContext, walletContext });
   const body = {
     model,
     messages,
