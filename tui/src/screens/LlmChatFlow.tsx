@@ -240,6 +240,24 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
     );
   }
 
+  // Shared between the explicit signing affordance and the
+  // "enter on empty input" shortcut so a single source of truth
+  // governs what "confirm" means.
+  const proceedWith = (turn: Extract<Turn, { kind: "assistant" }>) => {
+    if (!turn.result?.encoded || !onApprove) return;
+    const enc = turn.result.encoded;
+    onApprove(
+      {
+        to: enc.to,
+        value: "0x" + BigInt(enc.value).toString(16),
+        data: enc.data,
+        rationale: "from local-LLM chat (experimental)",
+        canonical: turn.result.canonical,
+      },
+      phase.chainId,
+    );
+  };
+
   return (
     <ChatBody
       chainId={phase.chainId}
@@ -251,8 +269,21 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
       busy={phase.busy}
       onInputChange={(v) => setPhase({ ...phase, input: v })}
       onSubmit={async () => {
+        if (phase.busy) return;
         const text = phase.input.trim();
-        if (!text || phase.busy) return;
+        // Enter on EMPTY input → sign the latest signable draft.
+        // Enter on non-empty input → send the message as a new prompt.
+        // Matches "enter confirms" — there's no other useful meaning
+        // for enter on an empty box, so it doubles as the confirm key
+        // when a draft is waiting. Replaces the older "p — sign" hotkey.
+        if (text.length === 0) {
+          const latest = [...phase.turns].reverse().find(
+            (t): t is Extract<Turn, { kind: "assistant" }> =>
+              t.kind === "assistant" && t.status === "done" && !!t.result?.encoded,
+          );
+          if (latest) proceedWith(latest);
+          return;
+        }
         const turnsAfterUser: Turn[] = [
           ...phase.turns,
           { kind: "user", text },
@@ -268,20 +299,7 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
         updated[updated.length - 1] = finished;
         setPhase((p) => (p.kind === "chat" ? { ...p, turns: updated, busy: false } : p));
       }}
-      onProceed={(turn) => {
-        if (!turn.result?.encoded || !onApprove) return;
-        const enc = turn.result.encoded;
-        onApprove(
-          {
-            to: enc.to,
-            value: "0x" + BigInt(enc.value).toString(16),
-            data: enc.data,
-            rationale: "from local-LLM chat (experimental)",
-            canonical: turn.result.canonical,
-          },
-          phase.chainId,
-        );
-      }}
+      onProceed={proceedWith}
     />
   );
 }
@@ -425,18 +443,12 @@ function ChatBody({
   onSubmit: () => void;
   onProceed: (turn: Extract<Turn, { kind: "assistant" }>) => void;
 }) {
-  // Find the most recent encoded assistant turn for the proceed hotkey.
+  // Find the most recent encoded assistant turn — the next "enter on
+  // empty input" event signs this one.
   const latestSignable = [...turns].reverse().find(
     (t): t is Extract<Turn, { kind: "assistant" }> =>
       t.kind === "assistant" && t.status === "done" && !!t.result?.encoded,
   );
-
-  useInput((ch, key) => {
-    // 'p' = proceed to sign the latest signable assistant turn.
-    if (!busy && ch?.toLowerCase() === "p" && latestSignable) {
-      onProceed(latestSignable);
-    }
-  });
 
   return (
     <Container chainTag={`${chainName} (${chainId})`} wallets={wallets} modelName={modelName}>
@@ -497,7 +509,9 @@ function ChatBody({
       </Box>
       <Box marginTop={0}>
         <Text color={theme.dim}>
-          enter — send{latestSignable ? " · p — sign latest draft" : ""} · esc — leave chat
+          {latestSignable
+            ? "enter on EMPTY input — sign latest draft · type then enter — new prompt · esc — leave"
+            : "enter — send · esc — leave chat"}
         </Text>
       </Box>
     </Container>
@@ -583,7 +597,7 @@ function TurnRow({
       {r.canonical && <CanonicalLines canonical={r.canonical} />}
       {r.encoded && isLatestSignable && (
         <Box marginTop={1} paddingLeft={5}>
-          <Text color={theme.primary} bold>↳ press p to confirm + sign </Text>
+          <Text color={theme.primary} bold>↳ press enter on the empty input box to confirm + sign </Text>
           <Text color={theme.dim}>(simulate + ConfirmGate)</Text>
         </Box>
       )}
