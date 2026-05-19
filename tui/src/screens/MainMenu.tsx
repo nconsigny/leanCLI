@@ -12,6 +12,7 @@ export type MainAction =
   | "private"
   | "network"
   | "toggle-colibri"
+  | "master-unlock"
   | "more"
   | "quit";
 
@@ -36,6 +37,7 @@ export default function MainMenu({
 
   const items: { label: string; value: MainAction }[] = [
     { label: "Wallets",                                                  value: "wallets" },
+    { label: "Unlock everything (master passphrase / TPM)",              value: "master-unlock" },
     { label: "le chat (local-LLM, experimental)",                        value: "le-chat" },
     { label: "Privacy Plugins",                                          value: "private" },
     { label: "Create wallet / Add account / Import",                     value: "create-wallet" },

@@ -14,6 +14,7 @@ import ImportEoaFlow from "./screens/ImportEoaFlow.js";
 import CreateWalletPicker, { CreateKind } from "./screens/CreateWalletPicker.js";
 import DecodeIntentFlow from "./screens/DecodeIntentFlow.js";
 import LlmChatFlow from "./screens/LlmChatFlow.js";
+import MasterUnlockGate from "./screens/MasterUnlockGate.js";
 import SendRawFlow from "./screens/SendRawFlow.js";
 import DecodeTypedDataFlow from "./screens/DecodeTypedDataFlow.js";
 import RevealMnemonicFlow from "./screens/RevealMnemonicFlow.js";
@@ -62,6 +63,7 @@ type Screen =
   | { kind: "llm-chat" }
   | { kind: "decode-typed-data" }
   | { kind: "archived-accounts" }
+  | { kind: "master-unlock" }
   | {
       kind: "send-raw";
       tx: { to: string; value: string; data: string; rationale?: string; canonical?: string };
@@ -120,6 +122,7 @@ export default function App() {
   const handleMain = (a: MainAction) => {
     switch (a) {
       case "wallets":         return push({ kind: "wallets" });
+      case "master-unlock":   return push({ kind: "master-unlock" });
       case "le-chat":         return push({ kind: "llm-chat" });
       case "create-wallet":   return push({ kind: "create-wallet" });
       case "private":         return push({ kind: "private" });
@@ -304,5 +307,7 @@ export default function App() {
       return <DecodeTypedDataFlow onDone={pop} />;
     case "archived-accounts":
       return <ArchivedAccountsScreen onDone={finishAction} />;
+    case "master-unlock":
+      return <MasterUnlockGate onDone={pop} />;
   }
 }
