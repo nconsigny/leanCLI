@@ -118,6 +118,7 @@ function buildMessages({ prompt, seed, chainId, skillContext, chainContext, wall
     "",
     "Common: every shape has \"action\" (string tag) and \"chainId\" (integer).",
     "Amounts are INTEGERS in the smallest unit of the asset (wei for ETH, base units for tokens).",
+    "**NEVER COMPUTE UNIT CONVERSION YOURSELF.** The seed contains `amountBase` — a string-form integer the daemon already computed via parseUnits(decimal, token.decimals). COPY IT VERBATIM into the Intent's amount field. Recomputing causes off-by-zeros bugs and is the worst-case failure mode for this system.",
     "Addresses are 0x-prefixed 42-character checksummed strings. NEVER invent addresses.",
     "",
     "nativeTransfer: {\"action\":\"nativeTransfer\",\"chainId\":<int>,\"to\":<addr>,\"amountWei\":<int>}",

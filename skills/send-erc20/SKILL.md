@@ -52,10 +52,14 @@ WETH is an ERC-20 and routes through this skill; "ETH" alone does not.
 }
 ```
 
-**Amount conversion examples** (with `decimals = 6` for USDC):
-* `5 USDC`   → `amount: 5000000`
-* `0.5 USDC` → `amount: 500000`
-* `100 USDC` → `amount: 100000000`
+**Amount conversion — DO NOT compute this yourself.** Copy `seed.fields.amountBase` into the `amount` field of the Intent. The
+daemon ran a deterministic `parseUnits(decimal_string, token.decimals)`
+before this prompt reached you, looking up decimals from the known-tokens
+registry. Recomputing in the model is the #1 failure mode for
+quantitative correctness.
+
+If `amountBase` is missing, the daemon couldn't determine decimals.
+Return `{error, ask}` rather than guessing.
 
 ## Safety
 

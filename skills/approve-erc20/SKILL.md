@@ -54,10 +54,15 @@ Do **not** use this skill when the user wants to REVOKE (set to 0) — that's
 }
 ```
 
-**Amount examples (USDC, decimals=6):**
-* `100 USDC` → `{ "exact": 100000000 }`
-* `0.5 USDC` → `{ "exact": 500000 }`
-* `unlimited USDC` → `"unlimited"` (warn loudly)
+**Amount conversion — DO NOT compute this yourself.** If the user said
+"unlimited" / "infinite" / "max", emit `"unlimited"`. Otherwise copy
+`seed.fields.amountBase` verbatim into `{ "exact": <amountBase> }`.
+The daemon ran a deterministic `parseUnits` against the token's
+decimals before this prompt reached you. Recomputing in the model is
+the #1 failure mode for quantitative correctness.
+
+If `amountBase` is missing from the seed, the daemon couldn't determine
+decimals. Return `{error, ask}` rather than guessing.
 
 ## Safety
 

@@ -54,15 +54,15 @@ the system prompt — do not guess.
 }
 ```
 
-**Amount conversion examples:**
-* `0.01 ETH` → `amountWei: 10000000000000000` (1×10^16)
-* `1 ETH`    → `amountWei: 1000000000000000000`
-* `0.5 ETH`  → `amountWei: 500000000000000000`
+**Amount conversion — DO NOT compute this yourself.** The daemon has
+already done it for you. Look at `seed.fields` for an entry with key
+`amountBase` — that's the integer wei amount you should copy verbatim
+into `amountWei`. The daemon ran a deterministic `parseUnits` against
+the token's decimals before this prompt reached you.
 
-Note: the model is documented unreliable on unit conversion. The canonical
-text in ConfirmGate displays `valueWei` for the user to verify; getting
-the count of zeros wrong is the most likely failure mode and the user
-will catch it.
+If `amountBase` is missing from the seed, that means the daemon couldn't
+determine the decimals (unknown asset). Do not guess; return
+`{error: "amountBase not provided by daemon — asset may be unknown", ask: "..."}`.
 
 ## Safety
 

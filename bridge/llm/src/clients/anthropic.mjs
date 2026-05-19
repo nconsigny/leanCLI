@@ -26,6 +26,9 @@ const SYSTEM_PROMPT =
   "bytes. Output schema: " +
   `{"action":"nativeTransfer"|"erc20Transfer"|"erc20Approve"|"uniswapV3SwapSingle"|"aaveV3Supply"|"aaveV3Withdraw"|"rawCall",` +
   `"chainId":<int>,...action-specific fields...}` +
+  " **NEVER COMPUTE UNIT CONVERSION.** The seed contains `amountBase` " +
+  "— a string-form integer the daemon already computed via parseUnits. " +
+  "COPY IT VERBATIM into the Intent's amount field. " +
   ' If unsure, return {"error":"...","ask":"..."}. ' +
   "Do NOT invent contract addresses; if a token symbol can't be " +
   "resolved, ask the user. Output ONLY the JSON object, nothing else.";

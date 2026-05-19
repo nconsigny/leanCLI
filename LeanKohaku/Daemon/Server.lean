@@ -40,6 +40,7 @@ import LeanKohaku.Wallet.Mnemonic
 import LeanKohaku.Wallet.PpSecretStore
 import LeanKohaku.Swap.Tokens
 import LeanKohaku.Swap.UniV3
+import LeanKohaku.Util.Units
 import LeanKohaku.Invariants.Swap
 
 /-!
@@ -2807,7 +2808,34 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           let regex3 := resolveLocal "to" regex2
           let regex4 := resolveLocal "spender" regex3
           let regex5 := resolveLocal "from" regex4
-          let regex := regex5
+          -- 1a-ter. Deterministic amount conversion. Models are
+          -- documented unreliable at unit conversion (we caught gpt-oss
+          -- emit `1e15` for "0.01 ETH" instead of `1e16`). The daemon
+          -- already has the decimals via Swap.Tokens; parse here and
+          -- inject `amountBase` so the model only has to copy.
+          let chainEnumOpt0 : Option LeanKohaku.Swap.Tokens.ChainId :=
+            match chainId with
+            | 1 => some .mainnet
+            | 11155111 => some .sepolia
+            | _ => none
+          let decimalsForAsset (asset : String) : Option Nat :=
+            let a := asset.toLower
+            if a = "eth" || a = "wei" || a = "ether" then some 18
+            else match LeanKohaku.Swap.Tokens.findBySymbol asset with
+                 | some t => some t.decimals
+                 | none => none
+          let regex := match regex5.field? "amount", regex5.field? "asset" with
+            | some amt, some asset =>
+                match decimalsForAsset asset with
+                | none => regex5
+                | some d =>
+                    match LeanKohaku.Util.Units.parseUnits amt d with
+                    | some n =>
+                        (regex5.setField "amountBase" (toString n)).note
+                          s!"parseUnits {amt} {d} = {n} ({asset})"
+                    | none => regex5.note s!"could not parseUnits {amt} with decimals {d}"
+            | _, _ => regex5
+          let _ := chainEnumOpt0  -- chainEnumOpt rebuilt below; this binding keeps the helper alive while we widen the scope of the chain enum after the upcoming chainContext step
           let regexJson : Json :=
             .obj #[
               ("action",     .str (LeanKohaku.Ethereum.Intent.Action.toString regex.action)),
