@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
+import Select, { SelectItem } from "../widgets/Select.js";
 import { call } from "../daemon.js";
 import { theme } from "../theme.js";
 
@@ -59,19 +60,30 @@ type Turn =
   | { kind: "assistant"; status: "pending" | "done"; result?: DraftResponse; error?: string }
   | { kind: "system"; text: string; tone?: "info" | "warn" | "err" };
 
+/** A configured per-chain endpoint, as returned by network.show. We
+ *  display every chain the user already has an RPC for so they can
+ *  pick one without ever needing to set an RPC URL in the flow. */
+type ConfiguredChain = {
+  name: string;
+  chainId: number;
+  url: string;
+  isCurrent: boolean;
+};
+
 type Phase =
-  | { kind: "boot" } // initial ensureUp + chainId form
-  | { kind: "needChain" }
-  | { kind: "chat"; chainId: number; turns: Turn[]; input: string; busy: boolean }
+  | { kind: "boot" } // initial ensureUp + chains fetch
+  | { kind: "needChain"; chains: ConfiguredChain[] }
+  | { kind: "chat"; chainId: number; chainName: string; turns: Turn[]; input: string; busy: boolean }
   | { kind: "fatal"; message: string };
 
 export default function LlmChatFlow({ onDone, onApprove }: Props) {
   const [phase, setPhase] = useState<Phase>({ kind: "boot" });
 
-  // Boot: ensureUp once.
+  // Boot: ensureUp + fetch configured chains from the daemon.
   useEffect(() => {
     if (phase.kind !== "boot") return;
     (async () => {
+      // 1. ensure llama-server.
       const r = await call<{ outcome: string }>("llm.ensureUp", {});
       if (!r.ok) {
         setPhase({ kind: "fatal", message: `llm.ensureUp failed: ${r.error.message}` });
@@ -86,7 +98,25 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
         });
         return;
       }
-      setPhase({ kind: "needChain" });
+      // 2. fetch configured chains. The daemon's network.show enumerates
+      //    every per-chain endpoint the user already configured — that's
+      //    the menu we show in the toggle. No need to "set an RPC again".
+      const n = await call<{
+        perChain: { name: string; chainId: number; url: string; isCurrent: boolean }[];
+      }>("network.show", {});
+      if (!n.ok) {
+        setPhase({ kind: "fatal", message: `network.show failed: ${n.error.message}` });
+        return;
+      }
+      const chains = (n.result.perChain ?? []).filter((c) => c.chainId > 0);
+      if (chains.length === 0) {
+        setPhase({
+          kind: "fatal",
+          message: "No per-chain RPCs configured. Run `kohaku network set-rpc-chain <name> <url>` first.",
+        });
+        return;
+      }
+      setPhase({ kind: "needChain", chains });
     })();
   }, [phase.kind]);
 
@@ -116,12 +146,27 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
   }
 
   if (phase.kind === "needChain") {
-    return <ChainPicker onPick={(cid) => setPhase({ kind: "chat", chainId: cid, turns: [], input: "", busy: false })} />;
+    return (
+      <ChainPicker
+        chains={phase.chains}
+        onPick={(c) =>
+          setPhase({
+            kind: "chat",
+            chainId: c.chainId,
+            chainName: c.name,
+            turns: [],
+            input: "",
+            busy: false,
+          })
+        }
+      />
+    );
   }
 
   return (
     <ChatBody
       chainId={phase.chainId}
+      chainName={phase.chainName}
       turns={phase.turns}
       input={phase.input}
       busy={phase.busy}
@@ -180,24 +225,33 @@ function Container({ children, chainTag }: { children: React.ReactNode; chainTag
   );
 }
 
-function ChainPicker({ onPick }: { onPick: (chainId: number) => void }) {
-  const [val, setVal] = useState("11155111");
+/** Lists the daemon's already-configured chains and lets the user pick
+ *  one with arrow keys. No free-text chainId input — the daemon's own
+ *  per-chain endpoint map is the source of truth, so the user never
+ *  has to re-set an RPC URL to start a chat on a different chain. */
+function ChainPicker({
+  chains,
+  onPick,
+}: {
+  chains: ConfiguredChain[];
+  onPick: (c: ConfiguredChain) => void;
+}) {
+  const items: SelectItem<ConfiguredChain>[] = chains.map((c) => ({
+    label: `${c.name.padEnd(10)}  chainId=${c.chainId}${c.isCurrent ? "  [daemon's default]" : ""}`,
+    value: c,
+    key: c.name,
+  }));
   return (
     <Container chainTag="…">
       <Box flexDirection="column">
-        <Text color={theme.dim}>Pick a chain to chat against. Common: 1 (mainnet), 11155111 (sepolia).</Text>
+        <Text>Pick a chain. These are the per-chain RPCs your daemon already has configured:</Text>
         <Box marginTop={1}>
-          <Text color={theme.primary}>chain ▸ </Text>
-          <TextInput
-            value={val}
-            onChange={setVal}
-            onSubmit={() => {
-              const n = Number(val.trim());
-              if (Number.isFinite(n) && n > 0) onPick(n);
-            }}
+          <Select
+            items={items}
+            onSelect={(it) => onPick(it.value)}
           />
         </Box>
-        <Text color={theme.dim}>enter — start · esc — back</Text>
+        <Text color={theme.dim}>↑/↓ move · enter pick · esc leave</Text>
       </Box>
     </Container>
   );
@@ -205,6 +259,7 @@ function ChainPicker({ onPick }: { onPick: (chainId: number) => void }) {
 
 function ChatBody({
   chainId,
+  chainName,
   turns,
   input,
   busy,
@@ -213,6 +268,7 @@ function ChatBody({
   onProceed,
 }: {
   chainId: number;
+  chainName: string;
   turns: Turn[];
   input: string;
   busy: boolean;
@@ -234,7 +290,7 @@ function ChatBody({
   });
 
   return (
-    <Container chainTag={String(chainId)}>
+    <Container chainTag={`${chainName} (${chainId})`}>
       <Box flexDirection="column">
         {turns.length === 0 && (
           <Text color={theme.dim}>
