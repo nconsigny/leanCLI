@@ -2569,6 +2569,72 @@ def run (args : List String) : IO UInt32 := do
             else ""
           IO.println s!"{name} = {addr}  (chainId={chainId}{chainTag})"
           return 0
+  | .bookList =>
+      match ← DaemonClient.call "book.list" (.obj #[]) with
+      | .error err => IO.eprintln s!"daemon error {err.code}: {err.message}"; return 2
+      | .ok result =>
+          let entries :=
+            (LeanKohaku.Encoding.Json.getField "entries" result
+             >>= LeanKohaku.Encoding.Json.asArray).getD #[]
+          if entries.isEmpty then
+            IO.println "(address book is empty — `book add <label> <addr-or-ens>` to start)"
+            return 0
+          for e in entries do
+            let label := (LeanKohaku.Encoding.Json.getField "label" e
+                          >>= LeanKohaku.Encoding.Json.asString).getD ""
+            let addr := (LeanKohaku.Encoding.Json.getField "address" e
+                         >>= LeanKohaku.Encoding.Json.asString).getD ""
+            let src := (LeanKohaku.Encoding.Json.getField "source" e
+                        >>= LeanKohaku.Encoding.Json.asString).getD ""
+            let ens? := LeanKohaku.Encoding.Json.getField "ensName" e
+                        >>= LeanKohaku.Encoding.Json.asString
+            let ensSuffix := match ens? with
+              | some n => s!"  ({n})"
+              | none => ""
+            let pad := if label.length < 16 then String.mk (List.replicate (16 - label.length) ' ') else ""
+            IO.println s!"{label}{pad} {addr}  [{src}]{ensSuffix}"
+          return 0
+  | .bookAdd label addr tag? =>
+      let params : LeanKohaku.Encoding.Json.Json :=
+        match tag? with
+        | some t => .obj #[("label", .str label), ("address", .str addr), ("tag", .str t)]
+        | none   => .obj #[("label", .str label), ("address", .str addr)]
+      match ← DaemonClient.call "book.add" params with
+      | .error err => IO.eprintln s!"daemon error {err.code}: {err.message}"; return 2
+      | .ok result =>
+          let storedAddr :=
+            (LeanKohaku.Encoding.Json.getField "address" result
+             >>= LeanKohaku.Encoding.Json.asString).getD addr
+          let src :=
+            (LeanKohaku.Encoding.Json.getField "source" result
+             >>= LeanKohaku.Encoding.Json.asString).getD "manual"
+          IO.println s!"added: {label} = {storedAddr}  [{src}]"
+          return 0
+  | .bookRemove label =>
+      match ← DaemonClient.call "book.remove" (.obj #[("label", .str label)]) with
+      | .error err => IO.eprintln s!"daemon error {err.code}: {err.message}"; return 2
+      | .ok result =>
+          let removed :=
+            (LeanKohaku.Encoding.Json.getField "removed" result
+             >>= LeanKohaku.Encoding.Json.asBool).getD false
+          if removed then
+            IO.println s!"removed: {label}"
+          else
+            IO.eprintln s!"no entry: {label}"
+          return (if removed then 0 else 1)
+  | .bookShow needle =>
+      match ← DaemonClient.call "book.lookup" (.obj #[("needle", .str needle)]) with
+      | .error err => IO.eprintln s!"daemon error {err.code}: {err.message}"; return 2
+      | .ok result =>
+          match LeanKohaku.Encoding.Json.getField "entry" result with
+          | some (.obj _) =>
+              let e := result
+              let entry := (LeanKohaku.Encoding.Json.getField "entry" e).getD .null
+              IO.println (LeanKohaku.Encoding.Json.pretty entry)
+              return 0
+          | _ =>
+              IO.eprintln s!"no entry matching {needle}"
+              return 1
   | .swapQuote fromTok toTok amount chain? =>
       runSwapQuote fromTok toTok amount chain?
   | .swapExec fromTok toTok amount receiver? slippage? chain? =>

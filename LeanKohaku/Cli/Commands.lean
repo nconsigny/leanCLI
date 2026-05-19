@@ -287,6 +287,10 @@ inductive Command where
   | update
   | uninstall
   | resolve (name : String)
+  | bookList
+  | bookAdd (label : String) (addrOrEns : String) (tag? : Option String)
+  | bookRemove (label : String)
+  | bookShow (labelOrAddr : String)
   | swapQuote (fromTok toTok amount : String) (chain? : Option String)
   | swapExec (fromTok toTok amount : String) (receiver? : Option String)
       (slippage? : Option String) (chain? : Option String)
@@ -575,6 +579,13 @@ def parse : List String → Command
   | ["update"]             => .update
   | ["uninstall"]          => .uninstall
   | ["resolve", name]      => .resolve name
+  | ["book"]                       => .bookList
+  | ["book", "list"]               => .bookList
+  | ["book", "add", label, addr]   => .bookAdd label addr none
+  | ["book", "add", label, addr, "--tag", tag] => .bookAdd label addr (some tag)
+  | ["book", "remove", label]      => .bookRemove label
+  | ["book", "rm", label]          => .bookRemove label
+  | ["book", "show", needle]       => .bookShow needle
   | args                  => .invalid args
 
 /-- Parse argv, also returning an optional `--account <n>` index that got
@@ -862,6 +873,10 @@ def helpText : String :=
      wallet use <wallet>                 Set default wallet for `send`.\n\
      wallet current                      Print current default wallet.\n\
      resolve <name>                      Resolve an ENS name to an address.\n\
+     book                                List address-book entries.\n\
+     book add <label> <addr|name.eth>    Add or replace an entry; .eth names are resolved first.\n\
+     book remove <label>                 Remove an entry by label.\n\
+     book show <label-or-0x>             Look up by label or address.\n\
      tui | ui                            Open the interactive Ink-based UI\n\
                                          (arrow-key navigation, requires Node ≥20).\n\
      install                             Rebuild + relink ~/.kohaku/bin/{kohaku,kohaku-daemon}\n\
