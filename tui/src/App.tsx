@@ -15,6 +15,7 @@ import CreateWalletPicker, { CreateKind } from "./screens/CreateWalletPicker.js"
 import ImportWalletPicker, { ImportKind } from "./screens/ImportWalletPicker.js";
 import DecodeIntentFlow from "./screens/DecodeIntentFlow.js";
 import LlmDraftFlow from "./screens/LlmDraftFlow.js";
+import LlmChatFlow from "./screens/LlmChatFlow.js";
 import SendRawFlow from "./screens/SendRawFlow.js";
 import DecodeTypedDataFlow from "./screens/DecodeTypedDataFlow.js";
 import RevealMnemonicFlow from "./screens/RevealMnemonicFlow.js";
@@ -62,11 +63,12 @@ type Screen =
   | { kind: "more" }
   | { kind: "decode-intent" }
   | { kind: "llm-draft" }
+  | { kind: "llm-chat" }
   | { kind: "decode-typed-data" }
   | { kind: "archived-accounts" }
   | {
       kind: "send-raw";
-      tx: { to: string; value: string; data: string; rationale?: string };
+      tx: { to: string; value: string; data: string; rationale?: string; canonical?: string };
       chainId: number;
     };
 
@@ -282,6 +284,7 @@ export default function App() {
             if (a === "resolve") push({ kind: "resolve" });
             else if (a === "decode-intent") push({ kind: "decode-intent" });
             else if (a === "llm-draft") push({ kind: "llm-draft" });
+            else if (a === "llm-chat") push({ kind: "llm-chat" });
             else if (a === "decode-typed-data") push({ kind: "decode-typed-data" });
             else if (a === "archived-accounts") push({ kind: "archived-accounts" });
             else if (a === "daemon") push({ kind: "daemon" });
@@ -293,6 +296,13 @@ export default function App() {
     case "llm-draft":
       return (
         <LlmDraftFlow
+          onDone={pop}
+          onApprove={(tx, chainId) => push({ kind: "send-raw", tx, chainId })}
+        />
+      );
+    case "llm-chat":
+      return (
+        <LlmChatFlow
           onDone={pop}
           onApprove={(tx, chainId) => push({ kind: "send-raw", tx, chainId })}
         />

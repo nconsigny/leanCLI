@@ -212,4 +212,27 @@ def RegexDraft.setField (d : RegexDraft) (key value : String) : RegexDraft :=
 def RegexDraft.note (d : RegexDraft) (reason : String) : RegexDraft :=
   { d with unresolved := reason :: d.unresolved }
 
+/-- Render `Action` as its canonical tag string. -/
+def Action.toString : Action → String
+  | .nativeTransfer => "nativeTransfer"
+  | .erc20Transfer  => "erc20Transfer"
+  | .erc20Approve   => "erc20Approve"
+  | .swap           => "swap"
+  | .aaveSupply     => "aaveSupply"
+  | .aaveWithdraw   => "aaveWithdraw"
+  | .aaveBorrow     => "aaveBorrow"
+  | .aaveRepay      => "aaveRepay"
+  | .wrap           => "wrap"
+  | .unwrap         => "unwrap"
+  | .bridge         => "bridge"
+  | .rawCall        => "rawCall"
+  | .unknown        => "unknown"
+
+/-- Render `Confidence` as a tag string. -/
+def Confidence.toString : Confidence → String
+  | .high     => "high"
+  | .medium   => "medium"
+  | .low      => "low"
+  | .rejected => "rejected"
+
 end LeanKohaku.Ethereum.Intent

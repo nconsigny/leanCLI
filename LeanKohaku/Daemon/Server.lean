@@ -12,6 +12,8 @@ import LeanKohaku.Colibri.Bridge
 import LeanKohaku.Colibri.Persistent
 import LeanKohaku.Daemon.TokenMeta
 import LeanKohaku.LlmAgent.Bridge
+import LeanKohaku.LlmAgent.IntentParser
+import LeanKohaku.LlmAgent.RuleParser
 import LeanKohaku.Cli.Commands
 import LeanKohaku.Cli.NetworkConfig
 import LeanKohaku.RPC.Outbound
@@ -2602,6 +2604,100 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       pure <| .ok <| .obj #[
         ("outcome", .str outcome.toString)
       ]
+  | "chat.draft" =>
+      -- Unified entry point for the opt-in local-LLM chat path.
+      --
+      -- Composes (regex parse → llm.parseIntent → IntentParser validate
+      -- → IntentEncode) into one round-trip. Returns ALL intermediate
+      -- state so the TUI can show the user what the regex saw, what
+      -- the model said, and what was rejected (if anything). The TUI
+      -- still has the final say: it shows the encoded tx + canonical
+      -- text in ConfirmGate, then signs.
+      --
+      -- params: { prompt : String, chainId : Nat }
+      match paramString req.params "prompt",
+            getField "chainId" req.params >>= asNat with
+      | .ok prompt, some chainId =>
+          -- 1. Regex pass (pure Lean). Always runs.
+          let regex := LeanKohaku.LlmAgent.RuleParser.parse prompt
+          let regexJson : Json :=
+            .obj #[
+              ("action",     .str (LeanKohaku.Ethereum.Intent.Action.toString regex.action)),
+              ("fields",     .arr (regex.fields.map (fun kv =>
+                                Json.obj #[("k", .str kv.fst), ("v", .str kv.snd)])
+                              |>.toArray)),
+              ("unresolved", .arr (regex.unresolved.map Json.str |>.toArray)),
+              ("confidence", .str (LeanKohaku.Ethereum.Intent.Confidence.toString regex.confidence))
+            ]
+          -- 2. Call LLM sidecar with the regex as a seed.
+          let llmReq : Json :=
+            .obj #[
+              ("prompt",  .str prompt),
+              ("seed",    regexJson),
+              ("chainId", .num (Int.ofNat chainId))
+            ]
+          let llmResp ← LeanKohaku.LlmAgent.Bridge.call
+            { method := "llm.parseIntent", params := llmReq, id := 0 }
+          match llmResp with
+          | .err code msg _ =>
+              pure <| .ok <| .obj #[
+                ("regex", regexJson),
+                ("llmError", .str s!"[{code}] {msg}")
+              ]
+          | .crash stderr _ =>
+              pure <| .ok <| .obj #[
+                ("regex", regexJson),
+                ("llmError", .str s!"sidecar crash: {stderr}")
+              ]
+          | .ok llmResult =>
+              -- Sidecar returned { raw, backend, model }. Extract raw.
+              let rawStr :=
+                (getField "raw" llmResult >>= asString).getD ""
+              if rawStr.isEmpty then
+                pure <| .ok <| .obj #[
+                  ("regex", regexJson),
+                  ("llmRaw", llmResult),
+                  ("validateError", .str "llm.parseIntent returned no `raw` field")
+                ]
+              else
+                -- 3. Parse + validate via Lean's IntentParser (hard-rejects).
+                match LeanKohaku.LlmAgent.IntentParser.parseIntent rawStr chainId with
+                | .error msg =>
+                    pure <| .ok <| .obj #[
+                      ("regex", regexJson),
+                      ("llmRaw", .str rawStr),
+                      ("validateError", .str msg)
+                    ]
+                | .ok intent =>
+                    -- 4. Encode via the leaf encoder.
+                    match LeanKohaku.Ethereum.IntentEncode.encode intent with
+                    | .error msg =>
+                        pure <| .ok <| .obj #[
+                          ("regex", regexJson),
+                          ("llmRaw", .str rawStr),
+                          ("intentActionTag",
+                            .str (LeanKohaku.Ethereum.IntentCanonical.actionTag intent)),
+                          ("encodeError", .str msg)
+                        ]
+                    | .ok enc =>
+                        pure <| .ok <| .obj #[
+                          ("regex", regexJson),
+                          ("llmRaw", .str rawStr),
+                          ("intentActionTag",
+                            .str (LeanKohaku.Ethereum.IntentCanonical.actionTag intent)),
+                          ("canonical",
+                            .str (LeanKohaku.Ethereum.IntentCanonical.toCanonicalString intent)),
+                          ("encoded", .obj #[
+                            ("to",      .str enc.to),
+                            ("value",   .num (Int.ofNat enc.valueWei)),
+                            ("data",    .str enc.data),
+                            ("chainId", .num (Int.ofNat chainId))
+                          ])
+                        ]
+      | .error msg, _ =>
+          pure (.error msg)
+      | _, none =>
+          pure <| .error { code := -32602, message := "chat.draft: chainId (Nat) required", data := none }
   | "llm.parseIntent" =>
       -- Forward the prompt + regex seed + chainId to the LLM sidecar,
       -- which returns the raw model output (a JSON string) unchanged.
