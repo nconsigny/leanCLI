@@ -12,7 +12,6 @@ import CreateEoaFlow from "./screens/CreateEoaFlow.js";
 import CreateR1Flow from "./screens/CreateR1Flow.js";
 import ImportEoaFlow from "./screens/ImportEoaFlow.js";
 import CreateWalletPicker, { CreateKind } from "./screens/CreateWalletPicker.js";
-import ImportWalletPicker, { ImportKind } from "./screens/ImportWalletPicker.js";
 import DecodeIntentFlow from "./screens/DecodeIntentFlow.js";
 import LlmChatFlow from "./screens/LlmChatFlow.js";
 import SendRawFlow from "./screens/SendRawFlow.js";
@@ -51,7 +50,6 @@ type Screen =
   | { kind: "create-eoa" }
   | { kind: "create-r1" }
   | { kind: "add-account" }
-  | { kind: "import-wallet" }
   | { kind: "import-eoa" }
   | { kind: "private" }
   | { kind: "privacy" }
@@ -124,7 +122,6 @@ export default function App() {
       case "wallets":         return push({ kind: "wallets" });
       case "le-chat":         return push({ kind: "llm-chat" });
       case "create-wallet":   return push({ kind: "create-wallet" });
-      case "import-wallet":   return push({ kind: "import-wallet" });
       case "private":         return push({ kind: "private" });
       case "network":         return push({ kind: "network" });
       case "toggle-colibri":  return void toggleColibri();
@@ -139,17 +136,15 @@ export default function App() {
     // form returns to MainMenu rather than back to the picker. The
     // `add-account` branch reuses the same convention because it shares
     // the entry-point semantics of "create something" — landing back on
-    // the picker after a successful derivation would be redundant.
+    // the picker after a successful derivation would be redundant. Same
+    // applies to `import-bip39`, which used to be its own main-menu
+    // entry but is now folded in here.
     const next: Screen =
       k === "eoa" ? { kind: "create-eoa" }
       : k === "r1" ? { kind: "create-r1" }
+      : k === "import-bip39" ? { kind: "import-eoa" }
       : { kind: "add-account" };
     setStack((prev) => [...prev.slice(0, -1), next]);
-  };
-
-  const handleImportPick = (k: ImportKind) => {
-    if (k === "back") return pop();
-    setStack((prev) => [...prev.slice(0, -1), { kind: "import-eoa" }]);
   };
 
   const handleWalletAction = (w: Wallet, a: WalletAction) => {
@@ -244,8 +239,6 @@ export default function App() {
       return <CreateR1Flow onDone={finishAction} />;
     case "add-account":
       return <AddAccountFlow onDone={finishAction} />;
-    case "import-wallet":
-      return <ImportWalletPicker onPick={handleImportPick} />;
     case "import-eoa":
       return <ImportEoaFlow onDone={finishAction} />;
     case "private":

@@ -9,7 +9,6 @@ export type MainAction =
   | "wallets"
   | "le-chat"
   | "create-wallet"
-  | "import-wallet"
   | "private"
   | "network"
   | "toggle-colibri"
@@ -39,8 +38,7 @@ export default function MainMenu({
     { label: "Wallets",                                                  value: "wallets" },
     { label: "le chat (local-LLM, experimental)",                        value: "le-chat" },
     { label: "Privacy Plugins",                                          value: "private" },
-    { label: "Create wallet / Add account",                              value: "create-wallet" },
-    { label: "Import wallet",                                            value: "import-wallet" },
+    { label: "Create wallet / Add account / Import",                     value: "create-wallet" },
     { label: "Network",                                                  value: "network" },
     {
       label: `Colibri RPC verification: ${
