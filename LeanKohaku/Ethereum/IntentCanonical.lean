@@ -1,0 +1,134 @@
+import LeanKohaku.Crypto.Hex
+import LeanKohaku.Ethereum.Address
+import LeanKohaku.Ethereum.Intent
+
+/-!
+# Canonical string rendering of an `Intent`
+
+A pure, deterministic, version-stable `Intent → String` rendering that
+gets shown to the user in the ConfirmGate **alongside** the simulated
+effects. Vitalik's "deterministic representation" principle: the user
+sees, in one form they can verify, exactly what is about to be signed.
+
+## Why a separate rendering layer
+
+The simulation block shows token movements (transfers in / out) which
+is the most useful display 99% of the time. But the simulation can be
+misleading in edge cases the user cannot spot — a malicious dApp could
+construct calldata whose simulated effect on this block hides a future
+effect (e.g. setting a hook). The canonical string is **structural**,
+not behavioral: it describes the encoded *action*, not its outcome.
+The two together close the gap.
+
+## Format
+
+One line per field, `key: value` shape, lowercase keys. Hex strings
+lowercase `0x`-prefixed. No locale-sensitive formatting; the rendering
+is identical on every machine.
+
+```
+action:    approve
+chain:     1
+token:     0x...
+spender:   0x...
+amount:    UNLIMITED
+```
+
+## Stability guarantee
+
+Adding a new `Intent` constructor requires updating this function. The
+existing renderings MUST NOT change — a user's mental fingerprint of
+"what an approve text looks like" should be the same across releases.
+Renaming a field key is a breaking change to the canonical form.
+-/
+
+namespace LeanKohaku.Ethereum.IntentCanonical
+
+open LeanKohaku.Ethereum.Intent
+open LeanKohaku.Ethereum.Address (Address)
+
+private def addrHex (a : Address) : String :=
+  LeanKohaku.Crypto.Hex.encode a.bytes
+
+/-- Render `ApproveAmount` as the sentinel `UNLIMITED` for the
+unlimited case (loud + unmissable) or the decimal Nat for an exact
+amount. -/
+private def renderApprove : ApproveAmount → String
+  | .exact n   => toString n
+  | .unlimited => "UNLIMITED"
+
+/-- The canonical multi-line string rendering. -/
+def toCanonicalString : Intent → String
+  | .nativeTransfer chainId to amountWei =>
+      String.intercalate "\n" [
+        "action:     nativeTransfer",
+        s!"chain:      {chainId}",
+        s!"to:         {addrHex to}",
+        s!"valueWei:   {amountWei}"
+      ]
+  | .erc20Transfer chainId token decimals to amount =>
+      String.intercalate "\n" [
+        "action:     erc20Transfer",
+        s!"chain:      {chainId}",
+        s!"token:      {addrHex token}",
+        s!"decimals:   {decimals}",
+        s!"to:         {addrHex to}",
+        s!"amount:     {amount}"
+      ]
+  | .erc20Approve chainId token spender amount =>
+      String.intercalate "\n" [
+        "action:     erc20Approve",
+        s!"chain:      {chainId}",
+        s!"token:      {addrHex token}",
+        s!"spender:    {addrHex spender}",
+        s!"amount:     {renderApprove amount}"
+      ]
+  | .uniswapV3SwapSingle chainId tokenIn tokenOut amountIn fee minAmountOut recipient deadline =>
+      String.intercalate "\n" [
+        "action:     uniswapV3SwapSingle",
+        s!"chain:      {chainId}",
+        s!"tokenIn:    {addrHex tokenIn}",
+        s!"tokenOut:   {addrHex tokenOut}",
+        s!"amountIn:   {amountIn}",
+        s!"fee:        {fee}",
+        s!"minOut:     {minAmountOut}",
+        s!"recipient:  {addrHex recipient}",
+        s!"deadline:   {deadline}"
+      ]
+  | .aaveV3Supply chainId asset amount onBehalfOf =>
+      String.intercalate "\n" [
+        "action:     aaveV3Supply",
+        s!"chain:      {chainId}",
+        s!"asset:      {addrHex asset}",
+        s!"amount:     {amount}",
+        s!"onBehalfOf: {addrHex onBehalfOf}"
+      ]
+  | .aaveV3Withdraw chainId asset amount recipient =>
+      String.intercalate "\n" [
+        "action:     aaveV3Withdraw",
+        s!"chain:      {chainId}",
+        s!"asset:      {addrHex asset}",
+        s!"amount:     {amount}",
+        s!"recipient:  {addrHex recipient}"
+      ]
+  | .rawCall chainId to valueWei data rationale =>
+      String.intercalate "\n" [
+        "action:     rawCall",
+        s!"chain:      {chainId}",
+        s!"to:         {addrHex to}",
+        s!"valueWei:   {valueWei}",
+        s!"data:       {LeanKohaku.Crypto.Hex.encode data}",
+        s!"rationale:  {rationale}"
+      ]
+
+/-- The action tag alone, useful for one-liner badges. -/
+def actionTag : Intent → String
+  | .nativeTransfer _ _ _              => "nativeTransfer"
+  | .erc20Transfer  _ _ _ _ _          => "erc20Transfer"
+  | .erc20Approve   _ _ _ _            => "erc20Approve"
+  | .uniswapV3SwapSingle _ _ _ _ _ _ _ _ => "uniswapV3SwapSingle"
+  | .aaveV3Supply   _ _ _ _            => "aaveV3Supply"
+  | .aaveV3Withdraw _ _ _ _            => "aaveV3Withdraw"
+  | .rawCall        _ _ _ _ _          => "rawCall"
+
+end LeanKohaku.Ethereum.IntentCanonical

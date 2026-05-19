@@ -21,6 +21,7 @@ import LeanKohaku.Ethereum.Eip712
 import LeanKohaku.Ethereum.Ens
 import LeanKohaku.Ethereum.Erc20
 import LeanKohaku.Ethereum.Intent
+import LeanKohaku.Ethereum.IntentCanonical
 import LeanKohaku.Ethereum.IntentEncode
 import LeanKohaku.Ethereum.IntentJson
 import LeanKohaku.Ethereum.P256Precompile

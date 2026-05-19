@@ -19,6 +19,7 @@ import LeanKohaku.Ethereum.Address
 import LeanKohaku.Ethereum.Eip712
 import LeanKohaku.Ethereum.Ens
 import LeanKohaku.Ethereum.Intent
+import LeanKohaku.Ethereum.IntentCanonical
 import LeanKohaku.Ethereum.IntentEncode
 import LeanKohaku.Ethereum.IntentJson
 import LeanKohaku.Ethereum.Tx
@@ -2623,7 +2624,9 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                 ("to",       .str enc.to),
                 ("value",    .num (Int.ofNat enc.valueWei)),
                 ("data",     .str enc.data),
-                ("chainId",  .num (Int.ofNat (LeanKohaku.Ethereum.Intent.Intent.chainId intent)))
+                ("chainId",  .num (Int.ofNat (LeanKohaku.Ethereum.Intent.Intent.chainId intent))),
+                ("canonical", .str (LeanKohaku.Ethereum.IntentCanonical.toCanonicalString intent)),
+                ("actionTag", .str (LeanKohaku.Ethereum.IntentCanonical.actionTag intent))
               ]
   | "tx.simulate" =>
       -- Why: dry-run a transaction against the RPC node before signing.

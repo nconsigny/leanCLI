@@ -20,8 +20,13 @@ export type SendRawWallet = {
 };
 
 type Props = {
-  /** The unsigned tx the caller (e.g. LlmDraftFlow) wants signed. */
-  tx: { to: string; value: string; data: string; rationale?: string };
+  /** The unsigned tx the caller (e.g. LlmDraftFlow) wants signed.
+   *  `canonical` is the Lean-rendered structural description of the
+   *  underlying Intent (from tx.encodeIntent's response); when present
+   *  it is shown in ConfirmGate alongside the ERC-7730 decode and the
+   *  simulation. Trusted-path callers (SendFlow, SwapFlow's approve
+   *  step) currently omit it; the LLM chat flow always supplies it. */
+  tx: { to: string; value: string; data: string; rationale?: string; canonical?: string };
   /** Optional chain id; defaults to whatever the daemon is configured for. */
   chainId?: number;
   /** Optional pre-selected wallet. When omitted, the historic behaviour
@@ -248,6 +253,7 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
         decoded={phase.decoded}
         sim={phase.sim}
         tpm={phase.tpm}
+        canonical={tx.canonical}
         onConfirm={() =>
           setPhase({
             kind: "send",
@@ -375,6 +381,7 @@ function ConfirmGate({
   decoded,
   sim,
   tpm,
+  canonical,
   onConfirm,
   onCancel,
 }: {
@@ -383,6 +390,7 @@ function ConfirmGate({
   decoded: any;
   sim: any;
   tpm: boolean;
+  canonical?: string;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -404,6 +412,14 @@ function ConfirmGate({
       {tx.rationale && (
         <Box marginBottom={1}>
           <Text color={theme.dim}>agent: {tx.rationale}</Text>
+        </Box>
+      )}
+      {canonical && (
+        <Box flexDirection="column" marginBottom={1} borderStyle="single" borderColor={theme.dim} paddingX={1}>
+          <Text color={theme.dim} bold>canonical intent (Lean-rendered)</Text>
+          {canonical.split("\n").map((line, i) => (
+            <Text key={i}>{line}</Text>
+          ))}
         </Box>
       )}
       <Box flexDirection="column" marginBottom={1}>
