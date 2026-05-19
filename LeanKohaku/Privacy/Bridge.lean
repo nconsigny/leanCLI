@@ -144,24 +144,45 @@ def callWithEnv (req : Request) (env : Array (String × Option String)) : IO Res
     -- traffic. PID/UTS/IPC isolation still applies regardless.
     let (cmd, args) ← LeanKohaku.Util.Sandbox.wrap
       { cmd := exe, args := #["--rpc", encoded], needsTcpLoopback := true }
+    -- Pipe stderr too so a crash inside the sidecar (snarkjs proving
+    -- key not found, libp2p stack trace, env-validation failure, …)
+    -- gets surfaced to the TUI's error block instead of vanishing into
+    -- the daemon's terminal. Was `.inherit` before — that hid the
+    -- actual root cause behind a generic "exited with code N".
     let child ← IO.Process.spawn {
       cmd := cmd,
       args := args,
       env := env,
       stdin := .null,
       stdout := .piped,
-      stderr := .inherit
+      stderr := .piped
     }
     let stdout ← child.stdout.readToEnd
+    let stderr ← child.stderr.readToEnd
     let exitCode ← child.wait
+    -- Tee the captured stderr to the daemon's stderr too, so the daemon
+    -- log retains everything when sandboxing or systemd capture is in
+    -- effect.
+    let stderrClean := stderr.trimAscii.toString
+    if !stderrClean.isEmpty then IO.eprintln stderr
     if exitCode == 0 then
       pure (parseResponse stdout)
-    else if !stdout.trim.isEmpty then
+    else if !stdout.trimAscii.toString.isEmpty then
       -- Bridge wrote a JSON-RPC error then exited non-zero. Surface the
       -- error rather than dropping the payload.
       pure (parseResponse stdout)
     else
-      pure (Response.crash s!"bridge exited with code {exitCode}" exitCode)
+      -- Include the captured stderr in the crash message so the user
+      -- sees the actual root cause (e.g. "Error: missing snarkjs witness
+      -- file"), not just "bridge exited with code 255".
+      let limited :=
+        if stderrClean.length > 1500
+          then (stderrClean.take 1500).toString ++ "\n…[truncated]"
+          else stderrClean
+      let msg :=
+        if limited.isEmpty then s!"bridge exited with code {exitCode}"
+        else s!"bridge exited with code {exitCode}; stderr:\n{limited}"
+      pure (Response.crash msg exitCode)
   catch e =>
     pure (Response.crash (toString e) 0)
 
