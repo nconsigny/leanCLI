@@ -2592,6 +2592,16 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       let resp ← LeanKohaku.LlmAgent.Bridge.call
         { method := "ping", params := .obj #[], id := 0 }
       pure <| .ok <| LeanKohaku.LlmAgent.Bridge.responseToJson resp
+  | "llm.parseIntent" =>
+      -- Forward the prompt + regex seed + chainId to the LLM sidecar,
+      -- which returns the raw model output (a JSON string) unchanged.
+      -- The Lean daemon — not this RPC — parses + validates via
+      -- LlmAgent.IntentParser before anything reaches tx.encodeIntent
+      -- and the simulate/ConfirmGate gate. This handler is intentionally
+      -- a transparent proxy; the trust boundary is the Lean parser.
+      let resp ← LeanKohaku.LlmAgent.Bridge.call
+        { method := "llm.parseIntent", params := req.params, id := 0 }
+      pure <| .ok <| LeanKohaku.LlmAgent.Bridge.responseToJson resp
   | "tx.draftFromIntent" =>
       -- Why: the LLM sidecar emits transaction-draft candidates from a
       -- natural-language prompt. The candidates are NOT signed here — the

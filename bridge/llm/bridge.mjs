@@ -8,6 +8,7 @@
 // decode + simulate + user-confirm.
 
 import { draftFromIntent, validateDraft } from "./src/draft.mjs";
+import { parseIntent as parseIntentBackend } from "./src/parseIntent.mjs";
 
 const PROTOCOL_VERSION = "0.0.1";
 
@@ -36,11 +37,43 @@ async function dispatch(method, params, id) {
       return ok(id, {
         protocol: PROTOCOL_VERSION,
         backend: "rule-based-v0",
-        // The agent fallback fires only when ANTHROPIC_API_KEY is set; until
-        // then this stays the rule-based-only path.
+        // Legacy fields (kept for compatibility with the old draftFromIntent
+        // flow). The new path is llm.parseIntent, which selects between
+        // local-openai and anthropic per LLM_BACKEND.
         modelConfigured: Boolean(process.env.ANTHROPIC_API_KEY),
         modelId: process.env.ANTHROPIC_API_KEY ? "claude-opus-4-7" : null,
+        parseIntent: {
+          selector: (process.env.LLM_BACKEND ?? "auto").toLowerCase(),
+          localBaseUrl: process.env.LOCAL_LLM_BASE_URL ?? "http://127.0.0.1:8080/v1",
+          anthropicConfigured: Boolean(process.env.ANTHROPIC_API_KEY),
+        },
       });
+
+    case "llm.parseIntent": {
+      // Thin transport: ask the selected backend for a JSON intent,
+      // return its raw output to the Lean daemon unchanged. NO parsing
+      // here — IntentParser.lean is the trust boundary. Params:
+      //   { prompt: string, seed?: <RegexDraft JSON>, chainId: number }
+      if (!params || typeof params !== "object") {
+        return err(id, -32602, "params must be an object");
+      }
+      if (typeof params.prompt !== "string") {
+        return err(id, -32602, "params.prompt (string) required");
+      }
+      if (typeof params.chainId !== "number") {
+        return err(id, -32602, "params.chainId (number) required");
+      }
+      try {
+        const result = await parseIntentBackend({
+          prompt: params.prompt,
+          seed: params.seed ?? null,
+          chainId: params.chainId,
+        });
+        return ok(id, result);
+      } catch (e) {
+        return err(id, -32603, `parseIntent failed: ${e?.message ?? e}`);
+      }
+    }
 
     case "tx.draftFromIntent": {
       if (!params || typeof params !== "object") {

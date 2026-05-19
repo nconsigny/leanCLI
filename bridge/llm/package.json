@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.92.0",
+    "openai": "^4.79.0",
     "viem": "^2.21.0"
   },
   "scripts": {
