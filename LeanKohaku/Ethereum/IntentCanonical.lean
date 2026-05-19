@@ -50,10 +50,14 @@ open LeanKohaku.Ethereum.Address (Address)
 private def addrHex (a : Address) : String :=
   LeanKohaku.Crypto.Hex.encode a.bytes
 
-/-- Render `ApproveAmount` as the sentinel `UNLIMITED` for the
-unlimited case (loud + unmissable) or the decimal Nat for an exact
-amount. -/
+/-- Render `ApproveAmount` so the three meaningfully-different cases
+are visually distinct in the confirm screen:
+* `0` is rendered as `0 (REVOKE — sets allowance to zero)` — what
+  looks like a small number is actually a destruction of permission.
+* `UNLIMITED` is loud-and-unmissable.
+* Any other exact amount renders as the bare decimal Nat. -/
 private def renderApprove : ApproveAmount → String
+  | .exact 0   => "0 (REVOKE — sets allowance to zero)"
   | .exact n   => toString n
   | .unlimited => "UNLIMITED"
 

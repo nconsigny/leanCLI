@@ -207,11 +207,10 @@ def matchApprove (toks : List String) : Option RegexDraft := do
   }
 
 /-- `revoke|cancel|remove [<AMOUNT>] <ASSET> approval[s] for <spender>` —
-the user wants amount = 0 by definition. The skill enforces that;
-the regex just classifies the verb and extracts asset + spender. If
-the user wrote a number ("revoke 10 USDC for X"), it's meaningless for
-a revoke (revoke = set to zero) and we skip it; the asset is the next
-non-filler / non-numeric token. -/
+revoke means "set allowance to 0" by definition; any number the user
+includes is meaningless and we discard it. The skill enforces
+`amount = 0`. **Loudly warns** when a number was discarded so the
+user can spot the discrepancy in the regex block before confirming. -/
 def matchRevoke (toks : List String) : Option RegexDraft := do
   let verb ← toks.head?
   if verb ≠ "revoke" ∧ verb ≠ "cancel" ∧ verb ≠ "remove" then none
@@ -233,6 +232,18 @@ def matchRevoke (toks : List String) : Option RegexDraft := do
                        -- Skip pure numbers: "revoke 10 USDC" means
                        -- "revoke USDC" — the 10 is a leftover word.
                        && !(isAmount t))
+  -- Detect a discarded numeric amount (e.g. "revoke 10 USDC ..."). We
+  -- don't try to parse a value out of it because revoke zeros the
+  -- allowance unconditionally — but we MUST surface to the user that
+  -- the number they typed was ignored, otherwise the regex display
+  -- shows "amount=0" silently and looks like a parse bug.
+  let discardedAmount : Option String :=
+    (List.range toks.length).findSome? (fun i =>
+      if i > 0 && i < forIdx then
+        match at? toks i with
+        | some t => if isAmount t then some t else none
+        | none => none
+      else none)
   match assetIdx with
   | none => none
   | some i =>
@@ -240,8 +251,13 @@ def matchRevoke (toks : List String) : Option RegexDraft := do
       let spender ← at? toks (forIdx + 1)
       let assetOk := isKnownSymbol asset ∨ isAddress asset
       let spOk := isAddress spender ∨ isEnsName spender
+      let amountNote : List String :=
+        match discardedAmount with
+        | some n => [s!"⚠ ignored '{n}' — revoke ALWAYS sets allowance to 0 regardless of the number you typed. If you meant 'set allowance to {n} {asset}', use 'approve {n} {asset} for {spender}' instead."]
+        | none => []
       let unresolved : List String :=
-        (if assetOk then [] else [s!"asset '{asset}' not in known-tokens registry"])
+        amountNote
+        ++ (if assetOk then [] else [s!"asset '{asset}' not in known-tokens registry"])
         ++ (if spOk then [] else [s!"spender '{spender}' not parseable as address or ENS"])
       some {
         action     := .erc20Approve
@@ -250,7 +266,13 @@ def matchRevoke (toks : List String) : Option RegexDraft := do
           ("revoke", "true")
         ]
         unresolved := unresolved
-        confidence := if unresolved.isEmpty then .high else .medium
+        -- A revoke prompt with a number is ambiguous (did they want
+        -- to revoke or to approve a non-zero amount?). Lower confidence
+        -- to .medium so the LLM is more likely to ask clarification
+        -- instead of rubber-stamping.
+        confidence :=
+          if discardedAmount.isSome then .medium
+          else if unresolved.isEmpty then .high else .medium
       }
 
 /-- `swap <amount> <asset> (for|to|into) <asset> [with <N>% slippage]`. -/
@@ -341,11 +363,28 @@ def matchWrap (toks : List String) : Option RegexDraft := do
 
 /-! ## Top-level entry -/
 
+/-- Politeness/filler tokens that may prefix a real intent. We strip
+them from the head of the token list before template matching so that
+"can you supply 0.1 ETH on Aave" parses the same as "supply 0.1 ETH on
+Aave". Order doesn't matter here; we just keep dropping while the head
+is a filler. Lowercase is already applied by `tokenize`. -/
+private def isLeadingFiller (s : String) : Bool :=
+  s = "can" || s = "could" || s = "would" || s = "will" || s = "please"
+    || s = "you" || s = "i" || s = "i'd" || s = "id"
+    || s = "like" || s = "want" || s = "wanna" || s = "let's" || s = "lets"
+    || s = "to"     -- only at head; bridge-words inside the template are positional
+    || s = "hey"   || s = "ok" || s = "okay"
+
+private partial def stripLeadingFillers : List String → List String
+  | []        => []
+  | t :: rest => if isLeadingFiller t then stripLeadingFillers rest else t :: rest
+
 /-- Try every template; return the first hit. Falls back to a
 `.rejected` draft when nothing matches (the LLM still runs in the chat
-flow). -/
+flow). Leading politeness words ("can you", "please", "I'd like to") are
+stripped before matching so the user can ask conversationally. -/
 def parse (input : String) : RegexDraft :=
-  let toks := tokenize input
+  let toks := stripLeadingFillers (tokenize input)
   match toks with
   | [] => RegexDraft.empty
   | _ =>
