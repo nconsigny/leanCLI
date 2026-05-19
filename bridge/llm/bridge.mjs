@@ -64,6 +64,7 @@ async function dispatch(method, params, id) {
           seed: params.seed ?? null,
           chainId: params.chainId,
           skillContext: params.skillContext ?? null,
+          chainContext: params.chainContext ?? null,
         });
         return ok(id, result);
       } catch (e) {

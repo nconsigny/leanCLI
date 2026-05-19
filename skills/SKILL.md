@@ -46,6 +46,7 @@ keeps prompts small and the model focused.
 |---|---|---|---|
 | [send-native](send-native/SKILL.md)        | transfer | low    | Move native ETH from a wallet you control. The baseline transaction. |
 | [send-erc20](send-erc20/SKILL.md)          | transfer | low    | Move an ERC-20 token. Always emits a `transfer(address,uint256)`. |
+| [approve-erc20](approve-erc20/SKILL.md)    | transfer | medium | Grant an ERC-20 allowance to a spender (any non-zero amount, or unlimited). |
 | [revoke-approval](revoke-approval/SKILL.md)| hygiene  | low    | Revoke an existing ERC-20 allowance by setting it to exactly 0. |
 | [audit-approvals](audit-approvals/SKILL.md)| hygiene  | none   | Read-only: list current outgoing allowances for a wallet. |
 | [shield-eth](shield-eth/SKILL.md)          | privacy  | medium | Deposit native ETH into Privacy Pools so it can be withdrawn later to a fresh address. |

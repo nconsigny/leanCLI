@@ -2775,28 +2775,64 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
               ("unresolved", .arr (regex.unresolved.map Json.str |>.toArray)),
               ("confidence", .str (LeanKohaku.Ethereum.Intent.Confidence.toString regex.confidence))
             ]
-          -- 1b. Look up the skill that matches this action category and
-          -- attach its body to the LLM request. Lets the model see the
-          -- exact Intent JSON shape it should emit + the safety rules
-          -- the skill specifies. We pass only the matching skill, not
-          -- the whole pack, to keep the context small.
+          -- 1b. Skill picker. For erc20Approve, we pick between the
+          -- two sibling skills based on what the regex saw: a revoke
+          -- verb or amount=0 → revoke-approval; otherwise the general
+          -- approve-erc20. This stops the old picker from forcing
+          -- legitimate "approve 100 USDC" prompts through the revoke
+          -- gate (which by design rejects any amount but zero).
           let actionTag := LeanKohaku.Ethereum.Intent.Action.toString regex.action
+          let regexSawRevoke : Bool :=
+            (regex.field? "revoke").isSome
+              || (regex.field? "amount" = some "0")
+              || (regex.field? "verb" = some "revoke")
+              || (regex.field? "verb" = some "cancel")
+              || (regex.field? "verb" = some "remove")
           let skillName : String :=
             match actionTag with
             | "nativeTransfer" => "send-native"
             | "erc20Transfer"  => "send-erc20"
-            | "erc20Approve"   => "revoke-approval"
+            | "erc20Approve"   =>
+                if regexSawRevoke then "revoke-approval" else "approve-erc20"
             | _                => ""
           let skillBody? : Option String ←
             if skillName.isEmpty then pure none
             else LeanKohaku.Daemon.SkillsStore.readBody skillName
+          -- 1c. Build a small chainContext object the model can read
+          -- to resolve token symbols. The daemon already knows the
+          -- addresses for chains we support; passing them removes the
+          -- "I don't know the USDC contract" ask-loop. We only include
+          -- tokens for the request's chain to keep context small.
+          let chainEnumOpt : Option LeanKohaku.Swap.Tokens.ChainId :=
+            match chainId with
+            | 1 => some .mainnet
+            | 11155111 => some .sepolia
+            | _ => none
+          let knownTokensJson : Json := match chainEnumOpt with
+            | none => .arr #[]
+            | some ce =>
+                let tokens := LeanKohaku.Swap.Tokens.registry.filterMap (fun t =>
+                  match LeanKohaku.Swap.Tokens.addressOn t ce with
+                  | none => none
+                  | some addr => some (Json.obj #[
+                      ("symbol",   .str t.symbol),
+                      ("address",  .str addr),
+                      ("decimals", .num (Int.ofNat t.decimals)),
+                      ("name",     .str t.name)
+                    ]))
+                .arr tokens.toArray
+          let chainContextJson : Json := .obj #[
+            ("chainId",     .num (Int.ofNat chainId)),
+            ("knownTokens", knownTokensJson)
+          ]
           -- 2. Call LLM sidecar with the regex as a seed + the matching
-          -- skill body (when one matched).
+          -- skill body + the chain's token registry.
           let llmReq : Json :=
             .obj <| #[
-              ("prompt",  .str prompt),
-              ("seed",    regexJson),
-              ("chainId", .num (Int.ofNat chainId))
+              ("prompt",       .str prompt),
+              ("seed",         regexJson),
+              ("chainId",      .num (Int.ofNat chainId)),
+              ("chainContext", chainContextJson)
             ] ++ (match skillBody? with
                   | some body => #[("skillContext", .obj #[
                       ("name", .str skillName),
