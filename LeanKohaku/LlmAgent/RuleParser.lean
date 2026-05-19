@@ -206,15 +206,19 @@ def matchApprove (toks : List String) : Option RegexDraft := do
     confidence := confidence
   }
 
-/-- `revoke|cancel|remove <ASSET> approval[s] for <spender>` —
+/-- `revoke|cancel|remove [<AMOUNT>] <ASSET> approval[s] for <spender>` —
 the user wants amount = 0 by definition. The skill enforces that;
-the regex just classifies the verb and extracts asset + spender. -/
+the regex just classifies the verb and extracts asset + spender. If
+the user wrote a number ("revoke 10 USDC for X"), it's meaningless for
+a revoke (revoke = set to zero) and we skip it; the asset is the next
+non-filler / non-numeric token. -/
 def matchRevoke (toks : List String) : Option RegexDraft := do
   let verb ← toks.head?
   if verb ≠ "revoke" ∧ verb ≠ "cancel" ∧ verb ≠ "remove" then none
   let forIdx ← indexOfKeyword toks "for"
   -- Asset is the first token after the verb that isn't a filler word
-  -- ("the", "my", "all", an article).
+  -- ("the", "my", "all"), a noise keyword ("approval", "allowance"),
+  -- or a pure number (revoke amount is ignored — always zero).
   let isFiller := fun (s : String) =>
     s = "the" || s = "my" || s = "all" || s = "an" || s = "a"
   let assetIdx :=
@@ -225,7 +229,10 @@ def matchRevoke (toks : List String) : Option RegexDraft := do
            | some t => !(isFiller t)
                        && t ≠ "approval"
                        && t ≠ "approvals"
-                       && t ≠ "allowance")
+                       && t ≠ "allowance"
+                       -- Skip pure numbers: "revoke 10 USDC" means
+                       -- "revoke USDC" — the 10 is a leftover word.
+                       && !(isAmount t))
   match assetIdx with
   | none => none
   | some i =>

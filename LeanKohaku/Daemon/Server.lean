@@ -834,8 +834,10 @@ private def shieldedBridgeCall (cfg : Config) (method : String) (params : Json)
     { method := method, params := params, id := 0 }
   -- Why: gate egress through the same policy that classifies all outbound
   -- network requests; the bridge is treated as configured-node access.
+  -- Pass cfg.chainId so the chain-aware policy's testnet branch can
+  -- permit shielded ops on sepolia (refused on mainnet by design).
   let allowed := LeanKohaku.Privacy.Bridge.policyAllows cfg.policy
-    .configuredNode .direct bridgeReq
+    .configuredNode .direct bridgeReq (some cfg.chainId)
   if !allowed then
     pure <| .error
       { code := -32030

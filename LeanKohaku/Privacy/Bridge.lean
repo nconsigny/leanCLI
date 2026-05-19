@@ -83,9 +83,17 @@ def methodPurpose (method : String) : Purpose :=
   else
     Purpose.shieldedRead
 
+/-- Run the network policy over a shielded bridge request. `chainId` is
+plumbed through so the chain-aware default policy
+(`mainnetSafeDaemonPolicy`) can permit configured-node shielded
+operations on testnets and keep them strict on mainnet. Omitting the
+chainId leaves the request opaque to the policy's testnet branch and
+the strict path denies it — that was the source of the
+"shielded surface denied by policy" failure on sepolia. -/
 def policyAllows
-    (policy : Policy) (peer : Peer) (transport : Transport) (req : Request) : Bool :=
-  policy { peer := peer, purpose := methodPurpose req.method, transport := transport }
+    (policy : Policy) (peer : Peer) (transport : Transport) (req : Request)
+    (chainId : Option Nat := none) : Bool :=
+  policy { peer := peer, purpose := methodPurpose req.method, transport := transport, chainId := chainId }
 
 private def parseResponse (raw : String) : Response :=
   match parse raw.trimAscii.toString with
