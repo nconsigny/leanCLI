@@ -1,13 +1,14 @@
 #!/usr/bin/env node
-// leankohaku-llm-bridge — untrusted JSON-RPC sidecar that turns natural-
-// language intents into transaction-draft candidates. Mirrors the one-shot
-// stdio pattern from bridge/clearsign/.
+// leankohaku-llm-bridge — untrusted JSON-RPC sidecar. Thin transport:
+// dispatches llm.parseIntent to the selected backend (local llama-server
+// or Anthropic SDK) and returns the raw model output unchanged. The
+// Lean daemon's IntentParser does the trust-boundary validation.
 //
-// Trust model: this process is treated as malicious. The Lean daemon never
-// signs based on its output directly — every emitted draft flows through
-// decode + simulate + user-confirm.
+// Trust model: this process is treated as malicious. The Lean daemon
+// never signs based on its output directly — every emitted intent flows
+// through Lean's IntentParser hard-rejects, tx.encodeIntent's
+// deterministic encoder, tx.simulate, and the TUI ConfirmGate.
 
-import { draftFromIntent, validateDraft } from "./src/draft.mjs";
 import { parseIntent as parseIntentBackend } from "./src/parseIntent.mjs";
 
 const PROTOCOL_VERSION = "0.0.1";
@@ -36,12 +37,6 @@ async function dispatch(method, params, id) {
     case "version":
       return ok(id, {
         protocol: PROTOCOL_VERSION,
-        backend: "rule-based-v0",
-        // Legacy fields (kept for compatibility with the old draftFromIntent
-        // flow). The new path is llm.parseIntent, which selects between
-        // local-openai and anthropic per LLM_BACKEND.
-        modelConfigured: Boolean(process.env.ANTHROPIC_API_KEY),
-        modelId: process.env.ANTHROPIC_API_KEY ? "claude-opus-4-7" : null,
         parseIntent: {
           selector: (process.env.LLM_BACKEND ?? "auto").toLowerCase(),
           localBaseUrl: process.env.LOCAL_LLM_BASE_URL ?? "http://127.0.0.1:8080/v1",
@@ -72,34 +67,6 @@ async function dispatch(method, params, id) {
         return ok(id, result);
       } catch (e) {
         return err(id, -32603, `parseIntent failed: ${e?.message ?? e}`);
-      }
-    }
-
-    case "tx.draftFromIntent": {
-      if (!params || typeof params !== "object") {
-        return err(id, -32602, "params must be an object");
-      }
-      if (typeof params.prompt !== "string") {
-        return err(id, -32602, "params.prompt (string) required");
-      }
-      if (typeof params.chainId !== "number") {
-        return err(id, -32602, "params.chainId (number) required");
-      }
-      try {
-        const result = await draftFromIntent(params);
-        // Defensive validation — the daemon also re-decodes, but cheap to
-        // catch malformed drafts here.
-        result.candidates = (result.candidates ?? []).map((c) => {
-          if (c.confidence === "rejected") return c;
-          return validateDraft(c)
-            ? c
-            : { ...c, confidence: "rejected", rationale: `${c.rationale ?? ""} [draft failed validation]` };
-        });
-        return ok(id, result);
-      } catch (e) {
-        return err(id, -32603, `draft failed: ${e?.message ?? e}`, {
-          stack: String(e?.stack ?? ""),
-        });
       }
     }
 

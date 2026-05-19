@@ -360,11 +360,12 @@ Every signing flow goes through the same gate before reaching `eoa.send`,
   eoa.send / r1.send* / sphincs.*  ──→ daemon signs and broadcasts
 ```
 
-`SendFlow` and `SendRawFlow` (TUI) implement this pipeline. The LLM agent
-in `bridge/llm/` produces drafted candidates that flow through the same
-gate via `LlmDraftFlow → SendRawFlow`. Pasted calldata flows through
-`DecodeIntentFlow` (read-only) and the same `ConfirmGate` when the user
-chooses to sign.
+`SendFlow` and `SendRawFlow` (TUI) implement this pipeline. The LLM
+agent in `bridge/llm/` produces a structured `Intent` (validated by
+`LeanKohaku/LlmAgent/IntentParser.lean` with hard-rejects) that flows
+through the same gate via `LlmChatFlow → SendRawFlow`. Pasted calldata
+flows through `DecodeIntentFlow` (read-only) and the same `ConfirmGate`
+when the user chooses to sign.
 
 If you're adding a new "produces calldata" surface, wire it through this
 gate — never call `eoa.send` directly. The `SendRawFlow` component is the

@@ -2708,17 +2708,6 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       let resp ← LeanKohaku.LlmAgent.Bridge.call
         { method := "llm.parseIntent", params := req.params, id := 0 }
       pure <| .ok <| LeanKohaku.LlmAgent.Bridge.responseToJson resp
-  | "tx.draftFromIntent" =>
-      -- Why: the LLM sidecar emits transaction-draft candidates from a
-      -- natural-language prompt. The candidates are NOT signed here — the
-      -- TUI surfaces each one through the existing decode + simulate +
-      -- user-confirm gate (SendFlow's ConfirmGate). This handler is
-      -- effectively a transparent proxy; the policy boundary is at signing
-      -- time, not at draft time. The sidecar is treated as malicious;
-      -- draft validity is re-checked when the user picks one.
-      let resp ← LeanKohaku.LlmAgent.Bridge.call
-        { method := "tx.draftFromIntent", params := req.params, id := 0 }
-      pure <| .ok <| LeanKohaku.LlmAgent.Bridge.responseToJson resp
   | "tx.encodeIntent" =>
       -- Pure Lean encoder for the leaf intent variants
       -- (nativeTransfer / erc20Transfer / erc20Approve / rawCall). The
