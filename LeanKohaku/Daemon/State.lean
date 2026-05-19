@@ -16,6 +16,16 @@ structure UnlockedSlot where
   unlockedAtMs   : Nat
   ttlMs          : Nat
 
+/-- The wallet-level master KEK, when currently loaded.
+
+The KEK never persists in clear text on disk; it lives only here while
+loaded. Same TTL semantics as `UnlockedSlot` — purged on every access
+once expired. Cleared explicitly by `lockMaster` / `wallet.lock`. -/
+structure MasterKekSlot where
+  kek          : ByteArray
+  unlockedAtMs : Nat
+  ttlMs        : Nat
+
 /-- Cached ERC-20 metadata. The actual struct lives in
 `LeanKohaku.Daemon.TokenMeta`; we store `(decimals, symbol)` raw to avoid
 a circular import. -/
@@ -40,6 +50,10 @@ structure DaemonState where
   lifetime, which is why we keep it persistent rather than spawning
   per-call. -/
   colibri : Option LeanKohaku.Colibri.Persistent.Client := none
+  /-- Wallet-level master KEK, when currently loaded. `none` means the
+  wallet is locked at the master level — slot unlocks must come through
+  the per-slot `eoa.unlock` path. Populated by `wallet.unlock`. -/
+  masterKek : Option MasterKekSlot := none
 
 abbrev Shared := IO.Ref DaemonState
 
@@ -90,6 +104,42 @@ def lock (state : Shared) (name : String) : IO Unit := do
 def getUnlocked? (state : Shared) (name : String) : IO (Option UnlockedSlot) := do
   purgeExpired state
   pure ((← state.get).unlocked.find? (fun slot => slot.name == name))
+
+/-! ## Master-KEK helpers
+
+  Symmetrical to `unlock` / `lock` / `getUnlocked?` for the wallet-level
+  master KEK. TTL handling mirrors per-slot semantics: a slot with
+  `ttlMs == 0` is permanent until `lockMaster`. Expiry is checked
+  defensively on each read so a forgotten timer cannot leave a stale KEK
+  in memory.
+-/
+
+private def masterAlive (nowMs : Nat) (slot : MasterKekSlot) : Bool :=
+  slot.ttlMs == 0 || nowMs <= slot.unlockedAtMs + slot.ttlMs
+
+def purgeMasterIfExpired (state : Shared) : IO Unit := do
+  let nowMs ← IO.monoMsNow
+  state.modify fun s =>
+    { s with masterKek := s.masterKek.filter (masterAlive nowMs) }
+
+def getMasterKek? (state : Shared) : IO (Option MasterKekSlot) := do
+  purgeMasterIfExpired state
+  pure (← state.get).masterKek
+
+/-- Idempotent installation of a fresh master-KEK slot. Replaces any
+    existing entry (e.g. on re-unlock after TTL expiry). -/
+def unlockMaster (state : Shared) (slot : MasterKekSlot) : IO Unit := do
+  state.modify fun s => { s with masterKek := some slot }
+
+/-- Idempotent: clear the in-memory master KEK. Does NOT lock per-slot
+    unlocks; callers that want "everything locked" iterate the unlocked
+    list and call `lock` per slot. -/
+def lockMaster (state : Shared) : IO Unit := do
+  state.modify fun s => { s with masterKek := none }
+
+/-- Lock every per-slot unlock AND the master KEK in one shot. -/
+def lockAll (state : Shared) : IO Unit := do
+  state.modify fun s => { s with unlocked := [], masterKek := none }
 
 /-- Spawn the persistent Colibri client and store it in shared state.
     Idempotent: if a client is already running, returns it. Throws on

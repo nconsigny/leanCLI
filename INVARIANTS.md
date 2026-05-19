@@ -412,6 +412,39 @@ key.
 **Prop:** `policyAccepts { op := signDigest, policy := appleEthereumR1Policy } = true`
 **Status:** ✅ proved — `LeanKohaku/Invariants/Keystore.lean::appleSecureEnclaveAcceptsEthereumR1Signing`
 
+### 8.6 Wallet master KEK never leaves the daemon process
+The wallet-level master KEK (see `LeanKohaku/Keystore/MasterPassphrase.lean`)
+is a freshly-generated 32-byte secret stored on disk only as ciphertext —
+wrapped under a PBKDF2-HMAC-SHA-512 passphrase-derived key in
+`master.json:passphraseWrap`, and optionally also under the TPM-sealed
+master attestation key in `master.json:tpmWrap`. The KEK lives in
+`DaemonState.masterKek` only while a session is active; the JSON-RPC
+surface exposes no `wallet.master.export`-style method that would emit
+it, and the same prohibition that applies to seed material applies
+here (see 8.1).
+
+**Status:** 🔒 axiomatized — the property is "no daemon RPC handler
+returns the KEK in its response", which is a per-handler audit
+obligation enforced by code review. The set of handlers that touch
+`MasterKekSlot.kek` is intentionally small: `wallet.master.init`,
+`wallet.unlock`, `wallet.lock`, the auto-rewrap branch in `eoa.unlock`,
+and `unlockPpSecretSmart` — none emit the bytes outside the daemon
+process.
+
+### 8.7 PP secret and EOA seeds remain cryptographically split
+Even after a slot is enrolled into the wallet master, the PP mnemonic
+remains a distinct BIP-39 phrase (generated independently per the
+kohaku SDK convention) from every EOA seed. The shared unlock surface
+(one master passphrase) is purely UX; the underlying secret material
+is still split, so a compromise of the PP mnemonic does not yield any
+EOA private key and vice versa.
+
+**Prop (informal):** `PpSecretStore.entropy ⊥ EoaStore.entropy` —
+the two stores read from independent invocations of
+`Crypto.Random.getRandomBytes`, never the same buffer.
+**Status:** 🔒 axiomatized — relies on the `getRandomBytes` IO
+primitive being a fresh-randomness source on each call.
+
 ### 8.5 Linux HP/Lenovo profiles prefer TPM2 signing
 Common HP business notebook/workstation and Lenovo ThinkPad/ThinkCentre
 profiles select TPM2 as the first hardware-backed local P-256/R1 signing

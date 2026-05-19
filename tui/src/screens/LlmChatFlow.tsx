@@ -157,14 +157,37 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
         {},
       );
       if (cancelled || !a.ok) return;
-      const top5 = (a.result.accounts ?? [])
-        .filter((x) => x && x.address && (x.type === "eoa" || x.type === "tpm"))
-        .slice(0, 5)
-        .map<WalletBalance>((x) => ({
-          kind: x.type as "eoa" | "tpm",
-          name: x.name,
-          address: x.address,
-        }));
+      // Expand each EOA into its BIP-32 sub-accounts so a slot with
+      // "leanWallet/ops" + "leanWallet/0" both show up — the user
+      // expects to see (and address) any address they've created.
+      // TPM wallets have no sub-accounts; they pass through as-is.
+      const expanded: WalletBalance[] = [];
+      for (const x of a.result.accounts ?? []) {
+        if (!x || !x.address) continue;
+        if (x.type === "tpm") {
+          expanded.push({ kind: "tpm", name: x.name, address: x.address });
+          continue;
+        }
+        if (x.type !== "eoa") continue;
+        const sub = await call<{
+          accounts: { index: number; path: string; address: string; label?: string }[];
+        }>("eoa.account.list", { name: x.name });
+        if (cancelled) return;
+        if (sub.ok && Array.isArray(sub.result?.accounts) && sub.result.accounts.length > 0) {
+          for (const acct of sub.result.accounts) {
+            if (!acct?.address) continue;
+            const subLabel = acct.label ?? String(acct.index);
+            expanded.push({
+              kind: "eoa",
+              name: `${x.name}/${subLabel}`,
+              address: acct.address,
+            });
+          }
+        } else {
+          expanded.push({ kind: "eoa", name: x.name, address: x.address });
+        }
+      }
+      const top5 = expanded.slice(0, 5);
       setWallets(top5);
       const chainName = phase.kind === "chat" ? chainNameForBalance(phase.chainName) : undefined;
       for (let i = 0; i < top5.length; i++) {
@@ -356,16 +379,19 @@ function Container({
 }
 
 function WalletRow({ w }: { w: WalletBalance }) {
-  const short = `${w.address.slice(0, 6)}…${w.address.slice(-4)}`;
+  // Full plain-text address — never truncated. Project rule: every
+  // surface that shows an address shows all 42 chars so the user can
+  // copy + verify character-by-character without extra clicks.
   let amount: React.ReactNode;
   if (w.err) amount = <Text color={theme.err}>error</Text>;
   else if (w.wei === undefined) amount = <Text color={theme.dim}>…</Text>;
-  else amount = <Text>{formatEth(w.wei)} ETH</Text>;
+  // formatEth already includes " ETH" in its return — don't double it.
+  else amount = <Text>{formatEth(w.wei)}</Text>;
   return (
     <Text>
       <Text color={theme.dim}>{`  ${(w.kind === "tpm" ? "[tpm] " : "[eoa] ").padEnd(7)}`}</Text>
-      <Text>{w.name.padEnd(14)}</Text>
-      <Text color={theme.dim}>{short}{"  "}</Text>
+      <Text>{w.name.padEnd(22)}</Text>
+      <Text color={theme.dim}>{w.address}{"  "}</Text>
       {amount}
     </Text>
   );

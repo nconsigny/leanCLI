@@ -1,5 +1,6 @@
 import LeanKohaku.Encoding.Json
 import LeanKohaku.Wallet.EoaStore
+import LeanKohaku.Keystore.MasterPassphrase
 
 /-!
 # Encrypted Privacy-Pools spending-secret store
@@ -86,6 +87,48 @@ def unlock (passphrase : String) : IO (Except String String) := do
           match String.fromUTF8? bytes with
           | some s => pure (.ok s)
           | none => pure (.error "stored PP secret was not valid UTF-8")
+
+/-- Master-KEK path: open the PP record's `masterWrap` field with the
+    wallet KEK. Returns `.error` when this record has no master-wrap
+    (e.g. created before enrolment, or PP set up with its own passphrase
+    and never enrolled). Why this is here: the PP mnemonic is generated
+    as a distinct BIP-39 phrase (security split from any EOA seed), but
+    once enrolled it can be unlocked by the same master passphrase that
+    unlocks the EOAs (single UX surface). -/
+def unlockWithMaster (kek : LeanKohaku.Keystore.MasterPassphrase.Kek) :
+    IO (Except String String) := do
+  match ← loadRecord with
+  | .error err => pure (.error err)
+  | .ok record =>
+      match record.masterWrap with
+      | none => pure (.error "PP secret not enrolled in wallet master")
+      | some w =>
+          match ← LeanKohaku.Keystore.MasterPassphrase.unwrapSlot
+              kek record.name record.derivationPath record.address w with
+          | .error err => pure (.error err)
+          | .ok bytes =>
+              match String.fromUTF8? bytes with
+              | some s => pure (.ok s)
+              | none => pure (.error "stored PP secret was not valid UTF-8")
+
+/-- Add a `masterWrap` field to the on-disk PP record so future unlocks
+    can come through the wallet KEK. Requires the caller to have already
+    decrypted the mnemonic via the per-PP passphrase (passed as
+    `mnemonic`) so we re-encrypt the exact plaintext under the KEK. -/
+def attachMasterWrap (kek : LeanKohaku.Keystore.MasterPassphrase.Kek)
+    (mnemonic : String) : IO (Except String Unit) := do
+  match ← loadRecord with
+  | .error err => pure (.error err)
+  | .ok record =>
+      match ← LeanKohaku.Keystore.MasterPassphrase.wrapSlot
+          kek record.name record.derivationPath record.address mnemonic.toByteArray with
+      | .error err => pure (.error err)
+      | .ok wrap =>
+          let updated := { record with masterWrap := some wrap }
+          let path ← secretPath
+          IO.FS.writeFile path (compact updated.toJson ++ "\n")
+          IO.setAccessRights path fileMode
+          pure (.ok ())
 
 /-- Remove the PP secret record. Idempotent: succeeds if the file is
     already gone. The caller is expected to authenticate the passphrase

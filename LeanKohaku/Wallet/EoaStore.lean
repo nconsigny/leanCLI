@@ -45,6 +45,20 @@ structure Record where
   -- nonce(12) || ciphertext+tag. Slots created before this field landed have
   -- `none` here and cannot be revealed (BIP-39 seed → words is one-way).
   mnemonicWrap : Option ByteArray := none
+  -- Why: optional ChaCha20-Poly1305 ciphertext of the seed under the
+  -- wallet-level master KEK (see `LeanKohaku.Keystore.MasterPassphrase`).
+  -- Same layout as `attestationWrap` (nonce(12) || ciphertext+tag) but
+  -- different AAD prefix. When present, a single `wallet.unlock` covers
+  -- this slot. When absent, the slot still works through `eoa.unlock`
+  -- with its per-slot passphrase; the daemon auto-rewraps it on first
+  -- unlock if a master KEK is loaded and `customPassphrase` is false.
+  masterWrap : Option ByteArray := none
+  -- Why: opt-out from wallet-master enrolment. Default `false` means
+  -- the daemon will lazy-enroll this slot the next time `eoa.unlock`
+  -- succeeds while the master KEK is loaded. Set to `true` to keep this
+  -- slot tied exclusively to its per-slot passphrase (e.g. cold high-value
+  -- accounts that must not share an unlock blast radius with the master).
+  customPassphrase : Bool := false
 
 def defaultKdfIters : Nat := 100000
 
@@ -103,9 +117,21 @@ def Record.toJson (r : Record) : Json :=
     match r.attestationWrap with
     | none => base
     | some w => base.push ("attestationWrap", hex w)
-  match r.mnemonicWrap with
-  | none => .obj withAttest
-  | some w => .obj (withAttest.push ("mnemonicWrap", hex w))
+  let withMnemonic :=
+    match r.mnemonicWrap with
+    | none => withAttest
+    | some w => withAttest.push ("mnemonicWrap", hex w)
+  let withMaster :=
+    match r.masterWrap with
+    | none => withMnemonic
+    | some w => withMnemonic.push ("masterWrap", hex w)
+  -- Why: emit `customPassphrase` only when true. Keeping the JSON empty
+  -- for default values means old tools/diff readers don't see noise on
+  -- slots that have never opted out.
+  if r.customPassphrase then
+    .obj (withMaster.push ("customPassphrase", .bool true))
+  else
+    .obj withMaster
 
 private def fieldString (obj : Json) (key : String) : Except String String :=
   match getField key obj >>= asString with
@@ -156,6 +182,13 @@ def Record.fromJson (json : Json) : Except String Record := do
   -- Why: same lazy migration story as attestationWrap. Slots written before
   -- mnemonic retention have `none` here.
   let mnemonicWrap : Option ByteArray := getField "mnemonicWrap" json >>= asBytes
+  -- Why: same lazy migration story. Slots written before the wallet-master
+  -- feature have `none` and unlock only through their per-slot passphrase.
+  let masterWrap : Option ByteArray := getField "masterWrap" json >>= asBytes
+  let customPassphrase : Bool :=
+    match getField "customPassphrase" json with
+    | some (.bool b) => b
+    | _ => false
   if version != 1 then
     .error s!"unsupported EOA store version: {version}"
   else if kdfSalt.size = 0 then
@@ -175,7 +208,9 @@ def Record.fromJson (json : Json) : Except String Record := do
       createdAt := createdAt,
       accounts := accounts,
       attestationWrap := attestationWrap,
-      mnemonicWrap := mnemonicWrap
+      mnemonicWrap := mnemonicWrap,
+      masterWrap := masterWrap,
+      customPassphrase := customPassphrase
     }
 
 private def deriveKey (passphrase : String) (salt : ByteArray) (iters : Nat) :

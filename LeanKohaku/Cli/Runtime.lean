@@ -1545,6 +1545,43 @@ def run (args : List String) : IO UInt32 := do
         | .tpm => IO.println s!"  -  {n}  (skipped: r1)"
       IO.println s!"Locked {locked} EOA wallet(s)."
       pure 0
+  | .walletMasterInit withTpm =>
+      -- Why: bootstrap the wallet KEK. We confirm the passphrase locally
+      -- (two prompts must match) before calling the daemon, since the
+      -- manifest write is irreversible — losing this passphrase orphans
+      -- every future `masterWrap`.
+      let p1 ← Passphrase.read "New master passphrase: "
+      let p2 ← Passphrase.read "Confirm master passphrase: "
+      if p1 != p2 then
+        IO.eprintln "error: passphrases did not match"
+        return 2
+      if p1.length < 8 then
+        IO.eprintln "error: master passphrase must be at least 8 characters"
+        return 2
+      let baseFields : Array (String × LeanKohaku.Encoding.Json.Json) :=
+        #[("passphrase", .str p1)]
+      let fields ←
+        if withTpm then
+          let pin ← Pin.read "TPM PIN (for TPM-bound unlock): "
+          pure (baseFields.push ("withTpm", .bool true)
+                    |>.push ("masterPin", .str pin))
+        else
+          pure baseFields
+      DaemonClient.printCall "wallet.master.init" (.obj fields)
+  | .walletMasterStatus =>
+      DaemonClient.printCall "wallet.master.status" (.obj #[])
+  | .walletMasterUnlock withTpm =>
+      let fields ←
+        if withTpm then
+          let pin ← Pin.read "TPM PIN: "
+          pure (#[("masterPin", .str pin)] :
+            Array (String × LeanKohaku.Encoding.Json.Json))
+        else
+          let p ← Passphrase.read "Master passphrase: "
+          pure #[("passphrase", .str p)]
+      DaemonClient.printCall "wallet.unlock" (.obj fields)
+  | .walletMasterLock =>
+      DaemonClient.printCall "wallet.lock" (.obj #[])
   | .walletHistoryAll scanLogs limit? chain? =>
       let mut first := true
       let mut anyShown := false

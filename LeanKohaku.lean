@@ -48,6 +48,7 @@ import LeanKohaku.Keystore.Enclave
 import LeanKohaku.Keystore.Linux
 import LeanKohaku.Keystore.Tpm2Runtime
 import LeanKohaku.Keystore.MasterKey
+import LeanKohaku.Keystore.MasterPassphrase
 
 import LeanKohaku.Contract.R1Account
 import LeanKohaku.Contract.SphincsAccount

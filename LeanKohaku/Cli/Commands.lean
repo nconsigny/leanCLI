@@ -222,6 +222,13 @@ inductive Command where
   | walletUnlockAll
   | walletLock (name : String)
   | walletLockAll
+  -- Wallet-level master passphrase commands. The master KEK encrypts each
+  -- EOA's `masterWrap` (and the PP secret's), so one unlock covers
+  -- everything not explicitly opted out via `customPassphrase`.
+  | walletMasterInit (withTpm : Bool)
+  | walletMasterStatus
+  | walletMasterUnlock (withTpm : Bool)
+  | walletMasterLock
   | walletDelete (name : String)
   | walletReveal (name : String)
   | walletDerive (name path : String)
@@ -442,10 +449,19 @@ def parse : List String → Command
   | ["wallet", "address", name] => .walletAddress name
   | ["wallet", "unlock", "--all"] => .walletUnlockAll
   | ["wallet", "unlock", "-a"] => .walletUnlockAll
+  -- `wallet unlock` (no name, no --all): master-passphrase path.
+  -- `wallet unlock --tpm`: master path via TPM PIN.
+  | ["wallet", "unlock"] => .walletMasterUnlock false
+  | ["wallet", "unlock", "--tpm"] => .walletMasterUnlock true
   | ["wallet", "unlock", name] => .walletUnlock name
+  -- `wallet lock` (no name): clears master KEK + every per-slot unlock.
+  | ["wallet", "lock"] => .walletMasterLock
   | ["wallet", "lock", "--all"] => .walletLockAll
   | ["wallet", "lock", "-a"] => .walletLockAll
   | ["wallet", "lock", name] => .walletLock name
+  | ["wallet", "master", "init"] => .walletMasterInit false
+  | ["wallet", "master", "init", "--with-tpm"] => .walletMasterInit true
+  | ["wallet", "master", "status"] => .walletMasterStatus
   | ["wallet", "delete", name] => .walletDelete name
   | ["wallet", "reveal", name] => .walletReveal name
   | ["wallet", "derive", name, path] => .walletDerive name path
@@ -892,7 +908,13 @@ def helpText : String :=
      wallet show <name>                  Type-aware metadata.\n\
      wallet address <name>               Primary address.\n\
      wallet unlock <name>                EOA: passphrase prompt; R1: no-op.\n\
-     wallet lock <name>                  Lock a wallet.\n\
+     wallet unlock                       Master-passphrase unlock (covers every enrolled EOA + the PP secret).\n\
+     wallet unlock --tpm                 Master unlock via TPM PIN (requires `wallet master init --with-tpm`).\n\
+     wallet lock <name>                  Lock one wallet.\n\
+     wallet lock                         Clear the master KEK and every per-slot unlock in one shot.\n\
+     wallet master init [--with-tpm]     Bootstrap the wallet KEK manifest. Add --with-tpm to also wrap the KEK\n\
+                                         under the TPM-sealed master key (PIN-gated future unlocks).\n\
+     wallet master status                Show master-init state, enrolled vs. unenrolled EOAs, TPM availability.\n\
      wallet delete <name>                Delete a wallet (passphrase required for EOA).\n\
      wallet reveal <name>                Print the BIP-39 mnemonic of an EOA (DANGER).\n\
                                          Requires passphrase + name confirmation.\n\
