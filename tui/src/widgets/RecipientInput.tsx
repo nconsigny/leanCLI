@@ -10,6 +10,11 @@ type OwnAccount = {
   name: string;
   /** lowercased address — comparisons elsewhere are case-insensitive. */
   address: string;
+  /** BIP-32 account index for EOA sub-accounts (0 = primary). TPM
+   *  wallets have no sub-accounts so this stays `undefined`. */
+  accountIndex?: number;
+  /** Derivation path, when known (e.g. "m/44'/60'/0'/0/0"). */
+  path?: string;
 };
 
 type Props = {
@@ -46,10 +51,35 @@ export default function RecipientInput({
       const tpm = await call<TpmListEntry[]>("tpm.listSepoliaAddresses");
       if (cancelled) return;
       const out: OwnAccount[] = [];
+      // Expand each EOA slot into one OwnAccount per BIP-32 sub-account
+      // by calling eoa.account.list. A slot with no extra accounts
+      // returns a single primary; one with sub-accounts returns every
+      // derived address. Lets the user cycle through "leanWallet/0",
+      // "leanWallet/1", … as recipients, not just the primary.
       if (eoa.ok && Array.isArray(eoa.result)) {
         for (const e of eoa.result) {
-          if (!e?.name || !e?.address) continue;
-          out.push({ kind: "eoa", name: e.name, address: e.address.toLowerCase() });
+          if (!e?.name) continue;
+          const sub = await call<{ accounts: { index: number; path: string; address: string }[] }>(
+            "eoa.account.list",
+            { name: e.name },
+          );
+          if (cancelled) return;
+          if (sub.ok && Array.isArray(sub.result?.accounts) && sub.result.accounts.length > 0) {
+            for (const a of sub.result.accounts) {
+              if (!a?.address) continue;
+              out.push({
+                kind: "eoa",
+                name: e.name,
+                address: a.address.toLowerCase(),
+                accountIndex: a.index,
+                path: a.path,
+              });
+            }
+          } else if (e.address) {
+            // Fallback: slot exists but eoa.account.list returned
+            // nothing (older record format) — surface the primary.
+            out.push({ kind: "eoa", name: e.name, address: e.address.toLowerCase() });
+          }
         }
       }
       if (tpm.ok && Array.isArray(tpm.result)) {
@@ -114,6 +144,9 @@ export default function RecipientInput({
             {"  ← "}
             {matched.kind === "eoa" ? "[eoa] " : "[tpm] "}
             {matched.name}
+            {matched.kind === "eoa" && matched.accountIndex !== undefined
+              ? `/${matched.accountIndex}`
+              : ""}
             {isSelf ? " (self)" : ""}
           </Text>
         )}

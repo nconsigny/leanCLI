@@ -3,8 +3,10 @@ import { Box, Text, useInput } from "ink";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import Select, { SelectItem } from "../widgets/Select.js";
+import AnimatedKoi from "../widgets/AnimatedKoi.js";
 import { call } from "../daemon.js";
 import { theme } from "../theme.js";
+import { formatEth, hexToBigInt } from "../format.js";
 
 /**
  * Opt-in local-LLM chat flow — redesigned as a proper multi-turn chat.
@@ -70,6 +72,25 @@ type ConfiguredChain = {
   isCurrent: boolean;
 };
 
+/** Compact wallet+balance card shown in the chat header so the user
+ *  has running context (top 5 wallets) without leaving the screen. */
+type WalletBalance = {
+  kind: "eoa" | "tpm";
+  name: string;
+  address: string;
+  wei?: bigint;     // undefined while pending
+  err?: string;
+};
+
+/** The daemon's chain.balance expects the chain *name* matching the
+ *  per-chain endpoint keys in cfg.chainEndpoints. The chat's chainName
+ *  state already holds that string; this helper just normalises and
+ *  defends against accidental casing. */
+function chainNameForBalance(chainName: string): string | undefined {
+  if (!chainName) return undefined;
+  return chainName.toLowerCase();
+}
+
 type Phase =
   | { kind: "boot" } // initial ensureUp + chains fetch
   | { kind: "needChain"; chains: ConfiguredChain[] }
@@ -78,6 +99,9 @@ type Phase =
 
 export default function LlmChatFlow({ onDone, onApprove }: Props) {
   const [phase, setPhase] = useState<Phase>({ kind: "boot" });
+  // Top-5 wallet balances shown in the header. Fetched lazily — chat
+  // is usable before this returns. Empty list = "we haven't tried yet".
+  const [wallets, setWallets] = useState<WalletBalance[]>([]);
 
   // Boot: ensureUp + fetch configured chains from the daemon.
   useEffect(() => {
@@ -119,6 +143,57 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
       setPhase({ kind: "needChain", chains });
     })();
   }, [phase.kind]);
+
+  // Fetch top-5 wallets + their balances once the user has entered the
+  // chat phase (i.e. picked a chain). Sequential because public RPCs
+  // throttle bursts; each balance lands as it arrives so the header
+  // fills in progressively.
+  useEffect(() => {
+    if (phase.kind !== "chat") return;
+    let cancelled = false;
+    (async () => {
+      const a = await call<{ accounts: { type: string; name: string; address: string }[] }>(
+        "account.list",
+        {},
+      );
+      if (cancelled || !a.ok) return;
+      const top5 = (a.result.accounts ?? [])
+        .filter((x) => x && x.address && (x.type === "eoa" || x.type === "tpm"))
+        .slice(0, 5)
+        .map<WalletBalance>((x) => ({
+          kind: x.type as "eoa" | "tpm",
+          name: x.name,
+          address: x.address,
+        }));
+      setWallets(top5);
+      const chainName = phase.kind === "chat" ? chainNameForBalance(phase.chainName) : undefined;
+      for (let i = 0; i < top5.length; i++) {
+        if (cancelled) return;
+        const w = top5[i];
+        if (!w) continue;
+        // TPM wallets only support Sepolia today; everyone else uses
+        // the chat's chain selection. The daemon does the same gate.
+        const chain = w.kind === "tpm" ? "sepolia" : chainName;
+        const r = await call<{ balance: string }>("chain.balance", {
+          address: w.address,
+          chain,
+        });
+        if (cancelled) return;
+        setWallets((prev) => {
+          const next = [...prev];
+          const slot = next[i];
+          if (!slot) return prev;
+          next[i] = r.ok
+            ? { ...slot, wei: hexToBigInt(r.result?.balance) }
+            : { ...slot, err: r.error.message };
+          return next;
+        });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [phase.kind, phase.kind === "chat" ? phase.chainName : null]);
 
   // Global keys: esc leaves the chat from any phase.
   useInput((_input, key) => {
@@ -167,6 +242,7 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
     <ChatBody
       chainId={phase.chainId}
       chainName={phase.chainName}
+      wallets={wallets}
       turns={phase.turns}
       input={phase.input}
       busy={phase.busy}
@@ -209,33 +285,70 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
 
 /* ---------- Sub-components ---------- */
 
-/** Outer chrome for the chat screen. Two distinct boxes:
- *  - Top: header rectangle showing what this screen is + active chain.
- *  - Below: whatever the phase wants to render (chain picker, chat body,
- *    error). The body lives in its own flexed column so input bar can be
- *    pinned at the bottom of the chat phase. */
-function Container({ children, chainTag }: { children: React.ReactNode; chainTag: string }) {
+/** Outer chrome for the chat screen. Three regions:
+ *  - Left rail: the koi (Claude-Code-logo-equivalent for this screen).
+ *  - Header rectangle (right of koi): title + chain + optional wallet list.
+ *  - Body: whatever the phase renders (chain picker / chat / error).
+ *  The koi reuses the same AnimatedKoi widget the main menu shows so
+ *  the chat is visually anchored to the wallet's identity. */
+function Container({
+  children,
+  chainTag,
+  wallets,
+}: {
+  children: React.ReactNode;
+  chainTag: string;
+  wallets?: WalletBalance[];
+}) {
   return (
     <Box flexDirection="column" paddingX={1}>
-      {/* Header rectangle — the koi-red double border identifies this as
-        a top-level hub screen, same convention as the main menu. */}
-      <Box
-        borderStyle="double"
-        borderColor={theme.koiRed}
-        paddingX={2}
-        paddingY={0}
-        flexDirection="column"
-      >
-        <Text color={theme.koiCream} backgroundColor={theme.koiInk} bold>
-          {" le chat · local LLM "}
-          {chainTag !== "…" ? `· ${chainTag}` : ""}
-        </Text>
-        <Text color={theme.dim}>
-          untrusted model · regex+ENS+wallet seed · Lean validator · canonical text in confirm
-        </Text>
+      <Box flexDirection="row">
+        <Box marginRight={2}>
+          <AnimatedKoi size="tiny" />
+        </Box>
+        <Box
+          borderStyle="double"
+          borderColor={theme.koiRed}
+          paddingX={2}
+          paddingY={0}
+          flexDirection="column"
+          flexGrow={1}
+        >
+          <Text color={theme.koiCream} backgroundColor={theme.koiInk} bold>
+            {" le chat · local LLM "}
+            {chainTag !== "…" ? `· ${chainTag}` : ""}
+          </Text>
+          <Text color={theme.dim}>
+            untrusted model · regex+ENS+wallet seed · Lean validator · canonical text in confirm
+          </Text>
+          {wallets && wallets.length > 0 && (
+            <Box marginTop={1} flexDirection="column">
+              <Text color={theme.dim}>Top wallets ({wallets.length}):</Text>
+              {wallets.map((w) => (
+                <WalletRow key={`${w.kind}-${w.name}-${w.address}`} w={w} />
+              ))}
+            </Box>
+          )}
+        </Box>
       </Box>
       <Box marginTop={1} flexDirection="column">{children}</Box>
     </Box>
+  );
+}
+
+function WalletRow({ w }: { w: WalletBalance }) {
+  const short = `${w.address.slice(0, 6)}…${w.address.slice(-4)}`;
+  let amount: React.ReactNode;
+  if (w.err) amount = <Text color={theme.err}>error</Text>;
+  else if (w.wei === undefined) amount = <Text color={theme.dim}>…</Text>;
+  else amount = <Text>{formatEth(w.wei)} ETH</Text>;
+  return (
+    <Text>
+      <Text color={theme.dim}>{`  ${(w.kind === "tpm" ? "[tpm] " : "[eoa] ").padEnd(7)}`}</Text>
+      <Text>{w.name.padEnd(14)}</Text>
+      <Text color={theme.dim}>{short}{"  "}</Text>
+      {amount}
+    </Text>
   );
 }
 
@@ -274,6 +387,7 @@ function ChainPicker({
 function ChatBody({
   chainId,
   chainName,
+  wallets,
   turns,
   input,
   busy,
@@ -283,6 +397,7 @@ function ChatBody({
 }: {
   chainId: number;
   chainName: string;
+  wallets: WalletBalance[];
   turns: Turn[];
   input: string;
   busy: boolean;
@@ -304,7 +419,7 @@ function ChatBody({
   });
 
   return (
-    <Container chainTag={`${chainName} (${chainId})`}>
+    <Container chainTag={`${chainName} (${chainId})`} wallets={wallets}>
       {/* Conversation block — every turn renders as a row inside the
         framed rectangle. Single border so it visually nests under the
         koi-red header. */}
