@@ -242,6 +242,7 @@ export default function SendFlow({ wallet, chain, colibriEnabled, onDone }: Prop
         from={wallet.address}
         to={phase.to}
         amountEth={phase.amountEth}
+        chain={chain}
         useColibri={useColibri}
         onResult={(decoded, sim, colibri) =>
           setPhase({
@@ -381,12 +382,19 @@ function SimulateStep({
   from,
   to,
   amountEth,
+  chain,
   useColibri,
   onResult,
 }: {
   from: string;
   to: string;
   amountEth: string;
+  /** Chain name ("sepolia" / "mainnet" / …). Drives BOTH `chainId`
+   *  (the integer the decoder + tx-meta consumer expects) and `chain`
+   *  (the name string the daemon looks up in cfg.chainEndpoints).
+   *  Passing only chainId leaves endpoint.chainId=none on the daemon
+   *  side → policy denies as "chainId=unknown". */
+  chain?: string;
   useColibri: boolean;
   onResult: (decoded: any, sim: any, colibri: any) => void;
 }) {
@@ -394,8 +402,17 @@ function SimulateStep({
     let cancelled = false;
     const wei = ethToWei(amountEth);
     const valueHex = "0x" + wei.toString(16);
+    // Supported chains: mainnet + sepolia only. Anything else
+    // historically defaulted to sepolia (the previous hardcode).
+    const chainIdNum =
+      chain === "mainnet" ? 1 :
+      chain === "sepolia" ? 11155111 :
+      11155111;
     const tx = {
-      chainId: 11155111,
+      chainId: chainIdNum,
+      // Pass `chain` too so the daemon picks the right per-chain
+      // endpoint instead of cfg.rpcEndpoint (which has chainId=none).
+      ...(chain ? { chain } : {}),
       to,
       value: valueHex,
       data: "0x",

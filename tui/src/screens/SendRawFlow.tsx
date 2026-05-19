@@ -314,7 +314,9 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
 }
 
 /** Human-readable chain identifier — "sepolia (11155111)" beats raw ints
- *  in any failure mode where the wrong-chain hypothesis matters. */
+ *  in any failure mode where the wrong-chain hypothesis matters. The
+ *  wallet's supported chain set is intentionally narrow: mainnet +
+ *  sepolia only. Unknown chainIds render as the bare integer. */
 function chainTag(chainId?: number): string {
   if (chainId === undefined || chainId === null) return "chain (unset)";
   const n = chainIdToName(chainId);
@@ -323,20 +325,14 @@ function chainTag(chainId?: number): string {
 
 /** chainId (numeric) → canonical name expected by daemon RPCs that gate
  *  on `chain`. The daemon's `endpointForChain` matches on the key in
- *  `cfg.chainEndpoints` — typically the chain's English name. */
+ *  `cfg.chainEndpoints` — typically the chain's English name. We only
+ *  recognise mainnet (1) and sepolia (11155111); other chainIds fall
+ *  through and the daemon uses cfg.rpcEndpoint as the default. */
 function chainIdToName(chainId?: number): string | undefined {
   if (chainId === undefined || chainId === null) return undefined;
   switch (chainId) {
     case 1:        return "mainnet";
     case 11155111: return "sepolia";
-    case 17000:    return "holesky";
-    case 10:       return "optimism";
-    case 8453:     return "base";
-    case 84532:    return "base-sepolia";
-    case 42161:    return "arbitrum";
-    case 421614:   return "arbitrum-sepolia";
-    case 11155420: return "op-sepolia";
-    case 137:      return "polygon";
     default:       return undefined;
   }
 }

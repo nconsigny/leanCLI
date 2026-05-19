@@ -81,15 +81,13 @@ def strictDaemonPolicy : Policy
   | _ => false
 
 /-- Known testnet chain IDs. Requests on these chains get a relaxed
-default policy (configured-node reads and broadcasts allowed). Update
-this list when adding new testnets the wallet supports. -/
+default policy (configured-node reads and broadcasts allowed). The
+wallet's supported chain set is intentionally narrow — only **sepolia**
+is testnet, only **mainnet** is its production counterpart. Adding new
+chains requires extending both this list and
+`LeanKohaku.RPC.Outbound.chainNameToId` together. -/
 def knownTestnetChainIds : List Nat :=
-  [ 11155111  -- Sepolia
-  , 17000     -- Holesky
-  , 84532     -- Base Sepolia
-  , 421614    -- Arbitrum Sepolia
-  , 11155420  -- OP Sepolia
-  ]
+  [ 11155111 ]  -- Sepolia
 
 /-- `true` when the request's chainId is a known testnet. `none` →
 treated as unknown → not a testnet → falls into the strict branch. -/

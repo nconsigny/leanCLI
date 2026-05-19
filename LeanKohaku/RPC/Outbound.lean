@@ -73,27 +73,16 @@ def endpointFromUrl (url : String) (transport? : Option Transport := none)
   else
     { url := url, backend := .configuredNode, transport := transport?.getD .direct, chainId := chainId? }
 
-/-- Map a configured chain *name* to its canonical chain ID. Used at
-endpoint-construction time so the policy layer can branch on testnet vs
-mainnet without re-parsing the name. Returns `none` for chains we
-haven't mapped yet — the policy treats unknown chains as strict, which
-is the safe default. -/
+/-- Map a configured chain *name* to its canonical chain ID. The
+supported set is intentionally narrow — **mainnet and sepolia only**.
+Anything else returns `none`, and the policy layer treats unknown
+chains as strict. Numeric strings are also accepted as a literal
+chainId so a future "add the chain you want" override stays open. -/
 def chainNameToId : String → Option Nat
   | "mainnet"          => some 1
   | "ethereum"         => some 1
-  | "homestead"        => some 1
   | "sepolia"          => some 11155111
-  | "holesky"          => some 17000
-  | "base"             => some 8453
-  | "base-sepolia"     => some 84532
-  | "optimism"         => some 10
-  | "op-sepolia"       => some 11155420
-  | "arbitrum"         => some 42161
-  | "arbitrum-sepolia" => some 421614
-  | "polygon"          => some 137
-  | name               =>
-      -- Accept a numeric string as the literal chain id.
-      name.toNat?
+  | name               => name.toNat?
 
 /-- Resolve an endpoint from environment only. Fails closed with a clear
 error if `LEANKOHAKU_RPC_URL` is unset/empty. The daemon proper uses
