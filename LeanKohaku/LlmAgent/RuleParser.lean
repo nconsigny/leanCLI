@@ -56,13 +56,16 @@ open LeanKohaku.Ethereum.Intent
 
 /-! ## Tokenization -/
 
-/-- Split on whitespace and strip surrounding punctuation. Lowercases
-each token so downstream matching is case-insensitive. -/
+/-- Split on whitespace and strip sentence-ending punctuation.
+**Does not** strip `.` — that would shatter decimal amounts (`0.01`
+becomes `0 01`). Comma is stripped because users write "1,000.5" but
+the regex doesn't currently support thousand-grouped numerals anyway.
+Lowercases each token so downstream matching is case-insensitive. -/
 def tokenize (s : String) : List String :=
   let cleaned : String :=
     s.toList.foldr
       (fun c acc =>
-        if c == ',' || c == '.' || c == ';' || c == '!' || c == '?' then
+        if c == ',' || c == ';' || c == '!' || c == '?' then
           " " ++ acc
         else
           c.toString ++ acc)

@@ -29,8 +29,27 @@ import net from "node:net";
 import dns from "node:dns/promises";
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:8080/v1";
-const DEFAULT_MODEL = "gpt-oss-120b";
 const DEFAULT_REASONING = "medium"; // low | medium | high — medium is the project default
+
+/** Auto-detect the served model id when LOCAL_LLM_MODEL is unset.
+ *  llama.cpp tags by HF repo ("ggml-org/gpt-oss-120b-GGUF"); other
+ *  servers use shorter ids. Picking the first one the server
+ *  advertises is the most robust default. Returns null if the model
+ *  list is empty or the probe fails. */
+async function detectModelId(baseUrl) {
+  try {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 2_000);
+    const r = await fetch(`${baseUrl}/models`, { signal: ctl.signal });
+    clearTimeout(t);
+    if (!r.ok) return null;
+    const body = await r.json();
+    const first = body?.data?.[0]?.id ?? body?.models?.[0]?.model;
+    return typeof first === "string" ? first : null;
+  } catch {
+    return null;
+  }
+}
 
 /** Throw unless the URL points at a loopback address. Defense in depth
  *  for misconfiguration: even if someone sets LOCAL_LLM_BASE_URL to
@@ -87,14 +106,37 @@ export async function ping(baseUrl = process.env.LOCAL_LLM_BASE_URL ?? DEFAULT_B
  *  Crucially, every value we interpolate is JSON-stringified — no
  *  unescaped chain-derived strings ever land in the prompt body. */
 function buildMessages({ prompt, seed, chainId }) {
-  const system =
-    "You convert natural-language Ethereum transaction intents into structured JSON. " +
-    "You DO NOT compute calldata, signatures, or hex bytes. " +
-    "Output schema: " +
-    `{"action":"nativeTransfer"|"erc20Transfer"|"erc20Approve"|"uniswapV3SwapSingle"|"aaveV3Supply"|"aaveV3Withdraw"|"rawCall",` +
-    `"chainId":<int>,...action-specific fields...}` +
-    " If unsure, return {\"error\":\"...\",\"ask\":\"...\"}. " +
-    "Do NOT invent contract addresses; if a token symbol can't be resolved, ask the user.";
+  // Field-by-field schema. The prompt is intentionally verbose: gpt-oss
+  // is documented unreliable on Ethereum-specific factual details, so we
+  // overspecify the wire shape and let the Lean validator hard-reject
+  // anything off-spec.
+  const system = [
+    "You convert natural-language Ethereum transaction intents into structured JSON.",
+    "You DO NOT compute calldata, signatures, RLP bytes, or v/r/s. You ONLY produce the structured intent.",
+    "",
+    "OUTPUT: exactly one JSON object matching one of these shapes. NO prose, NO code fences.",
+    "",
+    "Common: every shape has \"action\" (string tag) and \"chainId\" (integer).",
+    "Amounts are INTEGERS in the smallest unit of the asset (wei for ETH, base units for tokens).",
+    "Addresses are 0x-prefixed 42-character checksummed strings. NEVER invent addresses.",
+    "",
+    "nativeTransfer: {\"action\":\"nativeTransfer\",\"chainId\":<int>,\"to\":<addr>,\"amountWei\":<int>}",
+    "  Example: \"send 0.01 ETH to 0xAbC...\" on sepolia →",
+    "  {\"action\":\"nativeTransfer\",\"chainId\":11155111,\"to\":\"0xAbC...\",\"amountWei\":10000000000000000}",
+    "",
+    "erc20Transfer: {\"action\":\"erc20Transfer\",\"chainId\":<int>,\"token\":<addr>,\"decimals\":<int>,\"to\":<addr>,\"amount\":<int>}",
+    "  amount is in base units (e.g. 100 USDC with 6 decimals = 100000000).",
+    "",
+    "erc20Approve: {\"action\":\"erc20Approve\",\"chainId\":<int>,\"token\":<addr>,\"spender\":<addr>,\"amount\":{\"exact\":<int>}|\"unlimited\"}",
+    "",
+    "rawCall: {\"action\":\"rawCall\",\"chainId\":<int>,\"to\":<addr>,\"valueWei\":<int>,\"data\":\"0x...\",\"rationale\":<string>}",
+    "",
+    "If the request is ambiguous, missing addresses, or you cannot fill every required field WITHOUT INVENTING,",
+    "respond with {\"error\":\"<reason>\",\"ask\":\"<question for the user>\"}.",
+    "",
+    "DO NOT include any fields not listed above. DO NOT include v/r/s/signature/RLP — those are at the wrong layer.",
+    "DO NOT name dead testnets (goerli/ropsten/rinkeby/kovan). The Lean validator will reject them anyway.",
+  ].join("\n");
   const userMsg = {
     prompt,
     regex_seed: seed ?? null,
@@ -110,9 +152,13 @@ function buildMessages({ prompt, seed, chainId }) {
  *  text. Retries once on ECONNREFUSED to ride out a server restart. */
 export async function parseIntent({ prompt, seed, chainId }, opts = {}) {
   const baseUrl = opts.baseUrl ?? process.env.LOCAL_LLM_BASE_URL ?? DEFAULT_BASE_URL;
-  const model = opts.model ?? process.env.LOCAL_LLM_MODEL ?? DEFAULT_MODEL;
-  const reasoning = opts.reasoning ?? process.env.LOCAL_LLM_REASONING ?? DEFAULT_REASONING;
   await assertLoopbackOnly(baseUrl);
+  // Resolution order: explicit opts → env override → first model the server advertises.
+  let model = opts.model ?? process.env.LOCAL_LLM_MODEL;
+  if (!model) {
+    model = (await detectModelId(baseUrl)) ?? "gpt-oss-120b";
+  }
+  const reasoning = opts.reasoning ?? process.env.LOCAL_LLM_REASONING ?? DEFAULT_REASONING;
 
   const messages = buildMessages({ prompt, seed, chainId });
   const body = {
