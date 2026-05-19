@@ -18,6 +18,9 @@ import LeanKohaku.RPC.Server
 import LeanKohaku.Ethereum.Address
 import LeanKohaku.Ethereum.Eip712
 import LeanKohaku.Ethereum.Ens
+import LeanKohaku.Ethereum.Intent
+import LeanKohaku.Ethereum.IntentEncode
+import LeanKohaku.Ethereum.IntentJson
 import LeanKohaku.Ethereum.Tx
 import LeanKohaku.Keystore.Tpm2Runtime
 import LeanKohaku.Keystore.MasterKey
@@ -2599,6 +2602,29 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       let resp ← LeanKohaku.LlmAgent.Bridge.call
         { method := "tx.draftFromIntent", params := req.params, id := 0 }
       pure <| .ok <| LeanKohaku.LlmAgent.Bridge.responseToJson resp
+  | "tx.encodeIntent" =>
+      -- Pure Lean encoder for the leaf intent variants
+      -- (nativeTransfer / erc20Transfer / erc20Approve / rawCall). The
+      -- multi-step actions (swap, aave*) stay on their per-action RPCs
+      -- because they need chain-aware preflight reads. Both UX surfaces
+      -- (trusted hard-wired path + future LLM chat path) converge here:
+      -- one encoder, one place to audit, deterministic on inputs. No
+      -- IO, no signing — encoder output still has to traverse simulate
+      -- + ConfirmGate before any key touches it.
+      match LeanKohaku.Ethereum.IntentJson.parseIntent req.params with
+      | .error msg =>
+          pure <| .error { code := -32602, message := s!"invalid intent: {msg}", data := none }
+      | .ok intent =>
+          match LeanKohaku.Ethereum.IntentEncode.encode intent with
+          | .error msg =>
+              pure <| .error { code := -32602, message := msg, data := none }
+          | .ok enc =>
+              pure <| .ok <| .obj #[
+                ("to",       .str enc.to),
+                ("value",    .num (Int.ofNat enc.valueWei)),
+                ("data",     .str enc.data),
+                ("chainId",  .num (Int.ofNat (LeanKohaku.Ethereum.Intent.Intent.chainId intent)))
+              ]
   | "tx.simulate" =>
       -- Why: dry-run a transaction against the RPC node before signing.
       -- Combines eth_call (catches revert + returns return-data) and
