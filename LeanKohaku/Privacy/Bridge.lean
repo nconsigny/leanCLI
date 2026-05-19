@@ -31,16 +31,30 @@ namespace LeanKohaku.Privacy.Bridge
 open LeanKohaku.Encoding.Json
 open LeanKohaku.Privacy.NetworkPolicy
 
-/-- Default executable name for the kohaku-bridge sidecar. Mirrors the
-    naming convention of the HACL helpers. -/
+/-- Default executable name for the kohaku-bridge sidecar. Used as the
+    PATH-resolved fallback when nothing more specific is configured. -/
 def defaultExecutable : String := "leankohaku-kohaku-bridge"
 
-/-- Resolve the bridge executable. The `LEAN_KOHAKU_BRIDGE` environment
-    variable overrides the default for local development. -/
+/-- Resolve the bridge executable. Three sources, checked in order:
+
+1. `LEAN_KOHAKU_BRIDGE` env var (explicit absolute path or
+   PATH-relative name). Operator-level override.
+2. `<cwd>/bridge/bridge.mjs` if it exists. Lets `dev` workflows run
+   the daemon directly out of the source tree without needing
+   `npm link` or `kohakuspawn` to set up a symlink first.
+3. `leankohaku-kohaku-bridge` looked up on PATH. The
+   production / `kohakuspawn`-installed path.
+
+Refusing to find the binary used to surface as a sidecar exit-255
+with the unhelpful "could not execute external process …" stderr;
+the in-repo fallback removes a common dev-time foot-gun. -/
 def resolveExecutable : IO String := do
   match (← IO.getEnv "LEAN_KOHAKU_BRIDGE") with
   | some s => pure s
-  | none => pure defaultExecutable
+  | none =>
+      let candidate : System.FilePath := (← IO.currentDir) / "bridge" / "bridge.mjs"
+      if ← candidate.pathExists then pure candidate.toString
+      else pure defaultExecutable
 
 /-- A bridge JSON-RPC request. `params` is an arbitrary JSON object built by
     the caller; the bridge interprets it per `method`. -/
