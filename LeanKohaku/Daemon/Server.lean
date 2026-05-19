@@ -12,6 +12,7 @@ import LeanKohaku.Clearsign.Bridge
 import LeanKohaku.Sphincs.Bridge
 import LeanKohaku.Colibri.Bridge
 import LeanKohaku.Colibri.Persistent
+import LeanKohaku.Daemon.Preflight
 import LeanKohaku.Daemon.TokenMeta
 import LeanKohaku.LlmAgent.Bridge
 import LeanKohaku.LlmAgent.DirectSynth
@@ -2456,15 +2457,21 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                         unlockedAtMs := ← IO.monoMsNow,
                         ttlMs := 300000
                       }
-                      -- Lazy enrolment: when the wallet master is currently
-                      -- loaded and this slot is not opted out, take the
-                      -- successful per-slot unlock as proof of ownership and
-                      -- rewrap the seed under the master KEK. Subsequent
-                      -- `wallet.unlock` calls then cover this slot without
-                      -- the per-slot prompt. Best-effort: any error here is
-                      -- swallowed so we don't fail an otherwise-successful
-                      -- unlock just because rewrap couldn't persist.
-                      if !record.customPassphrase && record.masterWrap.isNone then
+                      -- Lazy enrolment / self-heal: whenever the wallet
+                      -- master is currently loaded and this slot is not
+                      -- opted out, rewrap the seed under the current KEK.
+                      -- Idempotent — covers three cases in one pass:
+                      --   (a) first enrolment (`masterWrap.isNone`),
+                      --   (b) stale wrap from a rotated/re-init'd master
+                      --       (still `some _`, but ciphertext opens under
+                      --       a KEK we no longer hold — surfaces as
+                      --       `stale-wrap` from `wallet.unlock`),
+                      --   (c) routine re-unlock under the same KEK
+                      --       (semantically a no-op, costs one AEAD seal
+                      --       + write — negligible).
+                      -- Best-effort: rewrap errors are swallowed so the
+                      -- per-slot unlock still succeeds.
+                      if !record.customPassphrase then
                         match ← LeanKohaku.Daemon.State.getMasterKek? state with
                         | none => pure ()
                         | some slot =>
@@ -3073,6 +3080,19 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           -- approve-erc20. This stops the old picker from forcing
           -- legitimate "approve 100 USDC" prompts through the revoke
           -- gate (which by design rejects any amount but zero).
+          --
+          -- When the regex can't classify the action, fall through to
+          -- a phrase scan for the four privacy/hygiene skills the
+          -- RuleParser has no action tag for yet (shield-eth /
+          -- unshield-eth / audit-approvals / fresh-address). The LLM
+          -- becomes ADVICE-ONLY for these: IntentParser does not
+          -- accept `shielded.*` / `approvals.*` / `address.fresh`
+          -- output shapes, so the model's emitted intent is rejected
+          -- by the validator and the user still has to act via the
+          -- CLI commands listed in the skill body. The win is the
+          -- model gets the skill context (anonymity-set caveats,
+          -- denomination constraints, dust thresholds) instead of
+          -- silently guessing.
           let actionTag := LeanKohaku.Ethereum.Intent.Action.toString regex.action
           let regexSawRevoke : Bool :=
             (regex.field? "revoke").isSome
@@ -3080,13 +3100,38 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
               || (regex.field? "verb" = some "revoke")
               || (regex.field? "verb" = some "cancel")
               || (regex.field? "verb" = some "remove")
+          let promptLower := prompt.toLower
+          let containsAny (needles : List String) : Bool :=
+            needles.any (fun n => (promptLower.splitOn n).length > 1)
           let skillName : String :=
             match actionTag with
             | "nativeTransfer" => "send-native"
             | "erc20Transfer"  => "send-erc20"
             | "erc20Approve"   =>
                 if regexSawRevoke then "revoke-approval" else "approve-erc20"
-            | _                => ""
+            | _                =>
+                -- Order tightest-first: "unshield" before "shield " to
+                -- keep the prefix collision off; rotate/fresh phrases
+                -- are kept specific so generic "send to a new address"
+                -- doesn't get hijacked into fresh-address.
+                if containsAny ["unshield", "withdraw from privacy",
+                                "exit privacy pool", "exit the privacy pool"] then
+                  "unshield-eth"
+                else if containsAny ["shield ", "privacy pool", "privacy-pool",
+                                     "make this private", "make it private",
+                                     "make this anonymous", "deposit privately"] then
+                  "shield-eth"
+                else if containsAny ["audit approvals", "list approvals",
+                                     "show approvals", "show my approvals",
+                                     "what have i approved", "list allowances",
+                                     "current allowances", "outgoing approvals"] then
+                  "audit-approvals"
+                else if containsAny ["fresh address", "fresh wallet",
+                                     "rotate identity", "rotate to a new",
+                                     "new identity", "generate a new wallet",
+                                     "generate a fresh"] then
+                  "fresh-address"
+                else ""
           let skillBody? : Option String ←
             if skillName.isEmpty then pure none
             else LeanKohaku.Daemon.SkillsStore.readBody skillName
@@ -3458,6 +3503,43 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                 ("block", .str block),
                 ("tx", txObj)
               ] ++ returnField ++ revertField ++ gasField ++ traceField
+  | "tx.preflightContext" =>
+      -- Why: surface "what does the chain currently say?" alongside the
+      -- deterministic simulate output. For approves we read the current
+      -- allowance(owner, spender); for transfers we read balanceOf /
+      -- eth_getBalance and flag insufficient funds; for both, we count
+      -- prior Transfer/Approval events between the parties within a
+      -- bounded recent window. Display-only — the signer never sees this
+      -- data; tx.simulate + canonical render + decode still guard the
+      -- signature. See LeanKohaku/Daemon/Preflight.lean for the per-kind
+      -- logic and lookback window.
+      match paramString req.params "to" with
+      | .error err => pure (.error err)
+      | .ok to =>
+          let data := paramStringD req.params "data" "0x"
+          let valueHex := paramStringD req.params "value" "0x0"
+          let fromAddr := (getField "from" req.params >>= asString).getD ""
+          let chain? := getField "chain" req.params >>= asString
+          match endpointForChain cfg chain? with
+          | .error err =>
+              pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
+          | .ok endpoint =>
+              let chainIdForProbe :=
+                ((getField "chainId" req.params) >>= asNat).getD cfg.chainId
+              let lookback :=
+                ((getField "lookback" req.params) >>= asNat).getD
+                  LeanKohaku.Daemon.Preflight.defaultLookback
+              if fromAddr.isEmpty then
+                pure <| .error {
+                  code := -32602
+                  message := "tx.preflightContext: `from` (string) required"
+                  data := none
+                }
+              else
+                let result ← LeanKohaku.Daemon.Preflight.run
+                  state cfg.policy endpoint chainIdForProbe
+                  fromAddr to valueHex data lookback
+                pure (.ok result)
   | "tx.simulateColibri" =>
       -- Why: same role as `tx.simulate` (pre-sign dry run) but executed
       -- inside the Colibri stateless light client. EVM runs locally in
@@ -4104,7 +4186,8 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       -- unlock. Reads the manifest if present; lists EOAs by enrolment
       -- bucket so the front-end can surface "X slots not yet enrolled".
       let initialized ← LeanKohaku.Keystore.MasterPassphrase.existsOnDisk
-      let tpmAvailable ← LeanKohaku.Keystore.MasterKey.existsOnDisk
+      let tpmEnrolled ← LeanKohaku.Keystore.MasterKey.existsOnDisk
+      let tpmHardwareReady ← LeanKohaku.Keystore.MasterKey.hardwareReady
       let manifest? ←
         if initialized then
           (do
@@ -4130,65 +4213,87 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
               enrolled := enrolled.push (.str name)
             else
               unenrolled := unenrolled.push (.str name)
+      let ttlMs : Nat := match manifest? with
+        | some m => m.ttlMs
+        | none => 0
       pure <| .ok <| .obj #[
         ("initialized", .bool initialized),
         ("withTpm", .bool withTpm),
-        ("tpmAvailable", .bool tpmAvailable),
+        -- Why: split TPM state into "hardware reachable" vs "master key
+        -- already bootstrapped". The CLI cares about hardware-ready at
+        -- init time (offer PIN prompt) and enrolment at unlock time
+        -- (route through the TPM path). `tpmAvailable` keeps the old
+        -- name for back-compat with clients written against the
+        -- previous schema.
+        ("tpmHardwareReady", .bool tpmHardwareReady),
+        ("tpmAvailable", .bool tpmEnrolled),
         ("masterUnlocked", .bool masterUnlocked),
+        ("ttlMs", .num (Int.ofNat ttlMs)),
         ("enrolledEoas", .arr enrolled),
         ("unenrolledEoas", .arr unenrolled),
         ("customEoas", .arr custom)
       ]
   | "wallet.master.init" =>
-      -- Why: bootstrap the master KEK manifest. `withTpm` is an opt-in flag
-      -- that wraps the same KEK under the TPM-sealed master key so future
-      -- unlocks can come through the PIN path. Errors out if a manifest
-      -- already exists — overwriting it would orphan every existing
-      -- `masterWrap` field on disk.
+      -- Why: bootstrap the master KEK manifest. Single-credential UX —
+      -- callers always supply `passphrase` (the recovery / no-TPM fallback)
+      -- and OPTIONALLY supply `masterPin`. Presence of a non-empty
+      -- `masterPin` plus a usable TPM triggers a TPM envelope on the same
+      -- KEK; absence is fine and yields a passphrase-only manifest. TPM
+      -- failures during init are logged and reported but DO NOT fail the
+      -- init — the passphrase wrap is always written.
       match paramString req.params "passphrase" with
       | .error err => pure (.error err)
       | .ok passphrase =>
           if (← LeanKohaku.Keystore.MasterPassphrase.existsOnDisk) then
             pure <| .error { code := -32030, message := "wallet master already initialized", data := none }
           else
-            let withTpm : Bool := ((getField "withTpm" req.params) >>= asBool).getD false
-            let tpmKey? ←
-              if withTpm then
-                match paramString req.params "masterPin" with
-                | .error _ => pure (Except.error (s!"withTpm requested but no masterPin supplied"))
-                | .ok pin =>
-                    if ← LeanKohaku.Keystore.MasterKey.existsOnDisk then
-                      match ← LeanKohaku.Keystore.MasterKey.unsealMaster pin notify with
-                      | .ok k => pure (Except.ok (some k))
-                      | .error e => pure (Except.error e)
-                    else
-                      match ← LeanKohaku.Keystore.MasterKey.bootstrap pin notify with
-                      | .error e => pure (Except.error e)
-                      | .ok _ =>
-                          match ← LeanKohaku.Keystore.MasterKey.unsealMaster pin notify with
-                          | .ok k => pure (Except.ok (some k))
-                          | .error e => pure (Except.error e)
+            let timeoutMins : Nat := (getField "timeoutMins" req.params >>= asNat).getD 5
+            let ttlMs : Nat := if timeoutMins == 0 then 0 else timeoutMins * 60000
+            let masterPin? : Option String := getField "masterPin" req.params >>= asString
+            let pinPresent : Bool := match masterPin? with
+              | some p => !p.isEmpty
+              | none => false
+            -- Resolve a TPM key only when (a) caller supplied a PIN, AND
+            -- (b) hardware looks usable. Both gates avoid running tpm2
+            -- tools on hosts without /dev/tpm or tpm2-tools installed.
+            let mut tpmKey? : Option ByteArray := none
+            let mut tpmNote : Option String := none
+            if pinPresent then
+              if !(← LeanKohaku.Keystore.MasterKey.hardwareReady) then
+                tpmNote := some "TPM hardware not available; falling back to passphrase-only"
               else
-                pure (Except.ok none)
-            match tpmKey? with
+                let pin := masterPin?.getD ""
+                let res ←
+                  if ← LeanKohaku.Keystore.MasterKey.existsOnDisk then
+                    LeanKohaku.Keystore.MasterKey.unsealMaster pin notify
+                  else
+                    match ← LeanKohaku.Keystore.MasterKey.bootstrap pin notify with
+                    | .error e => pure (.error e)
+                    | .ok _ => LeanKohaku.Keystore.MasterKey.unsealMaster pin notify
+                match res with
+                | .ok k => tpmKey? := some k
+                | .error e => tpmNote := some s!"TPM bind failed: {e}"
+            match ← LeanKohaku.Keystore.MasterPassphrase.buildManifest passphrase tpmKey? ttlMs (← IO.monoMsNow) with
             | .error err =>
-                pure <| .error { code := -32020, message := "TPM unavailable for withTpm", data := some (.str err) }
-            | .ok tpmKey? =>
-                match ← LeanKohaku.Keystore.MasterPassphrase.buildManifest passphrase tpmKey? (← IO.monoMsNow) with
-                | .error err =>
-                    pure <| .error { code := -32031, message := "failed to build master manifest", data := some (.str err) }
-                | .ok (manifest, kek) =>
-                    LeanKohaku.Keystore.MasterPassphrase.saveManifest manifest
-                    LeanKohaku.Daemon.State.unlockMaster state {
-                      kek := kek,
-                      unlockedAtMs := ← IO.monoMsNow,
-                      ttlMs := 300000
-                    }
-                    pure <| .ok <| .obj #[
-                      ("initialized", .bool true),
-                      ("withTpm", .bool manifest.tpmWrap.isSome),
-                      ("masterUnlocked", .bool true)
-                    ]
+                pure <| .error { code := -32031, message := "failed to build master manifest", data := some (.str err) }
+            | .ok (manifest, kek) =>
+                LeanKohaku.Keystore.MasterPassphrase.saveManifest manifest
+                LeanKohaku.Daemon.State.unlockMaster state {
+                  kek := kek,
+                  unlockedAtMs := ← IO.monoMsNow,
+                  ttlMs := manifest.ttlMs
+                }
+                let base : Array (String × Json) := #[
+                  ("initialized", .bool true),
+                  ("withTpm", .bool manifest.tpmWrap.isSome),
+                  ("masterUnlocked", .bool true),
+                  ("ttlMs", .num (Int.ofNat manifest.ttlMs))
+                ]
+                let fields : Array (String × Json) :=
+                  match tpmNote with
+                  | none => base
+                  | some n => base.push ("note", .str n)
+                pure <| .ok <| .obj fields
   | "wallet.unlock" =>
       -- Why: master-passphrase or TPM-PIN path. Either credential decrypts
       -- the wallet KEK; the KEK then unwraps every enrolled EOA slot in
@@ -4221,10 +4326,11 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
             | .error err =>
                 pure <| .error { code := -32034, message := "wallet unlock failed", data := some (.str err) }
             | .ok kek =>
+                let ttlMs := manifest.ttlMs
                 LeanKohaku.Daemon.State.unlockMaster state {
                   kek := kek,
                   unlockedAtMs := ← IO.monoMsNow,
-                  ttlMs := 300000
+                  ttlMs := ttlMs
                 }
                 -- Iterate enrolled EOA slots; populate per-slot unlock state.
                 let names ← LeanKohaku.Wallet.EoaStore.list
@@ -4247,9 +4353,21 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                         | some w =>
                             match ← LeanKohaku.Keystore.MasterPassphrase.unwrapSlot
                                 kek rec.name rec.derivationPath rec.address w with
-                            | .error e =>
+                            | .error _ =>
+                                -- Why: the verifier above already proved
+                                -- the typed credential matches the manifest.
+                                -- If `unwrapSlot` still fails, the slot's
+                                -- `masterWrap` was made under a different
+                                -- (now-discarded) KEK — usually because the
+                                -- user wiped `wallet/master.json` and
+                                -- re-init'd. Surface as `stale-wrap` with
+                                -- a clear next-step hint; one
+                                -- `kohaku wallet enroll <name>` rewrites
+                                -- the wrap under the current KEK.
                                 skipped := skipped.push <| .obj #[
-                                  ("name", .str name), ("reason", .str e)]
+                                  ("name", .str name),
+                                  ("reason", .str "stale-wrap"),
+                                  ("hint", .str s!"run `kohaku wallet enroll {name}` to re-enrol this slot under the current master KEK")]
                             | .ok seed =>
                                 LeanKohaku.Daemon.State.unlock state {
                                   name := rec.name,
@@ -4257,13 +4375,14 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                                   address := rec.address,
                                   derivationPath := rec.derivationPath,
                                   unlockedAtMs := ← IO.monoMsNow,
-                                  ttlMs := 300000
+                                  ttlMs := ttlMs
                                 }
                                 enrolled := enrolled.push (.str name)
                 pure <| .ok <| .obj #[
                   ("masterUnlocked", .bool true),
                   ("enrolled", .arr enrolled),
-                  ("skipped", .arr skipped)
+                  ("skipped", .arr skipped),
+                  ("ttlMs", .num (Int.ofNat ttlMs))
                 ]
   | "wallet.lock" =>
       -- Why: one-shot clear of every credential held in memory. Tears down
@@ -4271,6 +4390,82 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       -- there is no instant where the master is gone but slot seeds linger.
       LeanKohaku.Daemon.State.lockAll state
       pure <| .ok <| .obj #[("locked", .bool true)]
+  | "wallet.master.bindTpm" =>
+      -- Why: post-init TPM binding. Wraps the existing wallet KEK under
+      -- the TPM-sealed master key so future unlocks can come through the
+      -- TPM PIN path. Two ways to obtain the KEK:
+      --   (a) the daemon already has it loaded (caller previously ran
+      --       `wallet.unlock`) — preferred, no passphrase prompt.
+      --   (b) the caller supplies `passphrase` and we re-derive it from
+      --       the manifest's `passphraseWrap`.
+      -- TPM master key is bootstrapped if absent. PIN events flow through
+      -- the standard `notify` channel (`pin-required`, `pin-success`,
+      -- `pin-auth-failed`, `pin-locked-out`).
+      if !(← LeanKohaku.Keystore.MasterPassphrase.existsOnDisk) then
+        pure <| .error { code := -32032, message := "wallet master not initialized", data := none }
+      else
+        match ← LeanKohaku.Keystore.MasterPassphrase.loadManifest with
+        | .error err =>
+            pure <| .error { code := -32033, message := "master manifest is corrupt", data := some (.str err) }
+        | .ok manifest =>
+            match paramString req.params "masterPin" with
+            | .error err => pure (.error err)
+            | .ok pin =>
+                -- Resolve the KEK: in-memory first, else derive from passphrase.
+                let kekRes ← do
+                  match ← LeanKohaku.Daemon.State.getMasterKek? state with
+                  | some slot => pure (.ok slot.kek)
+                  | none =>
+                      match getField "passphrase" req.params >>= asString with
+                      | none =>
+                          pure (.error "wallet locked — provide `passphrase` or run `wallet.unlock` first")
+                      | some p =>
+                          LeanKohaku.Keystore.MasterPassphrase.unlockWithPassphrase manifest p
+                match kekRes with
+                | .error err =>
+                    pure <| .error { code := -32034, message := "wallet KEK unavailable", data := some (.str err) }
+                | .ok kek =>
+                    -- Get the TPM master key (bootstrap if missing).
+                    let tpmRes ←
+                      if ← LeanKohaku.Keystore.MasterKey.existsOnDisk then
+                        LeanKohaku.Keystore.MasterKey.unsealMaster pin notify
+                      else
+                        match ← LeanKohaku.Keystore.MasterKey.bootstrap pin notify with
+                        | .error e => pure (.error e)
+                        | .ok _ => LeanKohaku.Keystore.MasterKey.unsealMaster pin notify
+                    match tpmRes with
+                    | .error err =>
+                        pure <| .error { code := -32020, message := "TPM master key unavailable", data := some (.str err) }
+                    | .ok tpmKey =>
+                        match ← LeanKohaku.Keystore.MasterPassphrase.addTpmWrap manifest kek tpmKey with
+                        | .error err =>
+                            pure <| .error { code := -32031, message := "failed to bind TPM wrap", data := some (.str err) }
+                        | .ok updated =>
+                            LeanKohaku.Keystore.MasterPassphrase.saveManifest updated
+                            pure <| .ok <| .obj #[
+                              ("withTpm", .bool true),
+                              ("tpmAvailable", .bool true)
+                            ]
+  | "wallet.master.setTimeout" =>
+      -- Why: update the persisted auto-lock TTL without re-typing the
+      -- master passphrase. Rewrites `master.json` in place; the next
+      -- `wallet.unlock` will pick up the new TTL. `timeoutMins == 0`
+      -- disables auto-lock (slot lives until explicit `wallet.lock`).
+      match getField "timeoutMins" req.params >>= asNat with
+      | none =>
+          pure <| .error { code := -32602, message := "timeoutMins required", data := none }
+      | some mins =>
+          if !(← LeanKohaku.Keystore.MasterPassphrase.existsOnDisk) then
+            pure <| .error { code := -32032, message := "wallet master not initialized", data := none }
+          else
+            match ← LeanKohaku.Keystore.MasterPassphrase.loadManifest with
+            | .error err =>
+                pure <| .error { code := -32033, message := "master manifest is corrupt", data := some (.str err) }
+            | .ok m =>
+                let newTtl : Nat := if mins == 0 then 0 else mins * 60000
+                let updated := { m with ttlMs := newTtl }
+                LeanKohaku.Keystore.MasterPassphrase.saveManifest updated
+                pure <| .ok <| .obj #[("ttlMs", .num (Int.ofNat newTtl))]
   | _ =>
       pure (.error methodNotFound)
 

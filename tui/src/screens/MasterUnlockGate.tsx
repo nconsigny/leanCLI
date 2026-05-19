@@ -2,17 +2,21 @@ import React, { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
-import Select from "../widgets/Select.js";
 import { Layout, Banner } from "../widgets/Layout.js";
 import { call } from "../daemon.js";
 import { theme } from "../theme.js";
 
 /** Status returned by `wallet.master.status`. Keep this in sync with the
- *  daemon handler in `Server.lean::"wallet.master.status"`. */
+ *  daemon handler in `Server.lean::"wallet.master.status"`.
+ *
+ *  `withTpm` = the manifest has a TPM envelope.
+ *  `tpmHardwareReady` = `/dev/tpm*` is present and tpm2-tools are callable.
+ *  Both must be true to route through the PIN path. */
 type Status = {
   initialized: boolean;
   withTpm: boolean;
   tpmAvailable: boolean;
+  tpmHardwareReady: boolean;
   masterUnlocked: boolean;
   enrolledEoas: string[];
   unenrolledEoas: string[];
@@ -29,7 +33,6 @@ type Phase =
   | { kind: "loading" }
   | { kind: "error"; msg: string }
   | { kind: "not-initialized" }
-  | { kind: "choose-mode"; status: Status }
   | {
       kind: "enter-credential";
       mode: "passphrase" | "pin";
@@ -71,19 +74,17 @@ export default function MasterUnlockGate({ onDone }: { onDone: () => void }) {
       if (!r.ok) return setPhase({ kind: "error", msg: r.error.message });
       const s = r.result!;
       if (!s.initialized) return setPhase({ kind: "not-initialized" });
-      // Surface the TPM path when both are wired up; the user can still
-      // switch to passphrase. When only one path exists, skip the chooser.
-      if (s.withTpm && s.tpmAvailable) {
-        setPhase({ kind: "choose-mode", status: s });
-      } else {
-        setPhase({
-          kind: "enter-credential",
-          mode: "passphrase",
-          status: s,
-          draft: "",
-          err: null,
-        });
-      }
+      // Auto-route: TPM PIN when the manifest carries a TPM envelope AND
+      // the hardware is reachable; passphrase otherwise. No chooser — the
+      // user only sees the prompt that matches their actual setup.
+      const useTpm = s.withTpm && s.tpmHardwareReady;
+      setPhase({
+        kind: "enter-credential",
+        mode: useTpm ? "pin" : "passphrase",
+        status: s,
+        draft: "",
+        err: null,
+      });
     })();
     return () => {
       cancelled = true;
@@ -158,38 +159,19 @@ export default function MasterUnlockGate({ onDone }: { onDone: () => void }) {
     );
   }
 
-  if (phase.kind === "choose-mode") {
-    return (
-      <Layout
-        title="Wallet master — pick unlock method"
-        subtitle={`enrolled: ${phase.status.enrolledEoas.length} · unenrolled: ${phase.status.unenrolledEoas.length} · custom: ${phase.status.customEoas.length}`}
-        hint="↑/↓ move · enter pick · esc back"
-      >
-        <Select
-          items={[
-            { label: "TPM PIN (recommended on this box)", value: "pin" },
-            { label: "Master passphrase",                  value: "pass" },
-          ]}
-          onSelect={(it) => {
-            const mode = it.value === "pin" ? "pin" : "passphrase";
-            setPhase({
-              kind: "enter-credential",
-              mode,
-              status: phase.status,
-              draft: "",
-              err: null,
-            });
-          }}
-        />
-      </Layout>
-    );
-  }
-
   if (phase.kind === "enter-credential") {
     const isPin = phase.mode === "pin";
+    // Hint at the protection level so users don't have to think about
+    // which credential the daemon is asking for.
+    const subtitle = isPin
+      ? "TPM-backed (hardware lockout enforces rate-limit)"
+      : phase.status.withTpm
+        ? "TPM unavailable on this host — falling back to passphrase"
+        : "Encryption-at-rest (no TPM detected)";
     return (
       <Layout
-        title={isPin ? "Master TPM PIN" : "Master passphrase"}
+        title={isPin ? "Unlock — TPM PIN" : "Unlock — master passphrase"}
+        subtitle={subtitle}
         hint="enter — unlock · esc — back"
       >
         <Box>

@@ -9,7 +9,8 @@ license=('custom:TBD')
 depends=('lean4')
 makedepends=('git' 'cmake' 'ninja' 'clang' 'nodejs' 'npm')
 optdepends=(
-  'tpm2-tools: optional Linux TPM2 provisioning and inspection outside Lean'
+  'tpm2-tools: required for `wallet master init` TPM PIN + `wallet master bind-tpm` (TPM-bound wallet KEK)'
+  'tpm2-tss: TPM2 software stack (pulled in transitively by tpm2-tools; listed for visibility)'
   'libfido2: optional FIDO2 security-key provisioning and inspection outside Lean'
   'fprintd: optional Linux biometric enrollment outside Lean'
   'nodejs: required only for the interactive TUI (`kohaku tui`)'

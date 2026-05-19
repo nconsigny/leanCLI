@@ -48,9 +48,26 @@ def helperPbkdf2 : String := "leankohaku-hacl-pbkdf2"
 def helperHmacDrbg : String := "leankohaku-hacl-hmac-drbg"
 def helperChacha20Poly1305 : String := "leankohaku-hacl-chacha20poly1305"
 
+/-- Resolve a `leankohaku-hacl-*` helper binary.
+
+Why this exists: `kohakuspawn` only symlinks `kohaku` and `kohaku-daemon`
+into `~/.kohaku/bin/`. The helper binaries sit alongside the daemon at
+`.lake/build/bin/`, and the kernel resolves `/proc/self/exe` through the
+symlink — so `IO.appDir` is the directory that actually holds them, even
+though that directory is not on the shell's `$PATH`. Try the absolute
+path next to the running binary first; fall back to a bare-name lookup
+through `$PATH` (so system-installed builds — Arch, Nix — that drop the
+helpers in `/usr/bin` keep working). -/
+private def resolveHelper (cmd : String) : IO String := do
+  try
+    let next := (← IO.appDir) / cmd
+    if ← next.pathExists then pure next.toString else pure cmd
+  catch _ => pure cmd
+
 def runHexHelper (cmd : String) (args : Array String) : IO (Except String ByteArray) := do
   try
-    let out ← IO.Process.output { cmd := cmd, args := args }
+    let resolved ← resolveHelper cmd
+    let out ← IO.Process.output { cmd := resolved, args := args }
     if out.exitCode == 0 then
       match LeanKohaku.Crypto.Hex.decode out.stdout.trimAscii.toString with
       | some bytes => pure (.ok bytes)

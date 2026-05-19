@@ -97,6 +97,12 @@ structure Manifest where
       `tpmWrap`. -/
   tpmWrap        : Option Wrap
   verifier       : Wrap
+  /-- Auto-lock TTL in milliseconds. After this many ms of being loaded,
+      `getMasterKek?` returns `none` and per-slot unlocks acquired through
+      `wallet.unlock` likewise expire. Persisted so the lifetime survives
+      daemon restarts. `0` disables auto-lock (slot lives until explicit
+      `wallet.lock`). Default at init: 300_000 (5 minutes). -/
+  ttlMs          : Nat
   createdAt      : Nat
 
 /-! ## AAD helpers
@@ -149,6 +155,7 @@ def Manifest.toJson (m : Manifest) : Json :=
     ("kdfIters", .num (Int.ofNat m.kdfIters)),
     ("passphraseWrap", m.passphraseWrap.toJson),
     ("verifier", m.verifier.toJson),
+    ("ttlMs", .num (Int.ofNat m.ttlMs)),
     ("createdAt", .num (Int.ofNat m.createdAt))
   ]
   match m.tpmWrap with
@@ -175,6 +182,9 @@ def Manifest.fromJson (json : Json) : Except String Manifest := do
           match Wrap.fromJson j with
           | .error e => .error e
           | .ok w => .ok (some w)
+    -- Why: legacy manifests written before the TTL field landed default to
+    -- 300_000 ms (5 min). Reading None here keeps them working.
+    let ttlMs : Nat := (getField "ttlMs" json >>= asNat).getD 300000
     if kdfSalt.size = 0 then .error "empty KDF salt"
     else .ok {
       version := version,
@@ -183,6 +193,7 @@ def Manifest.fromJson (json : Json) : Except String Manifest := do
       passphraseWrap := passWrap,
       tpmWrap := tpmWrap,
       verifier := verifier,
+      ttlMs := ttlMs,
       createdAt := createdAt
     }
 
@@ -225,7 +236,7 @@ private def openWrap (key : ByteArray) (aad : ByteArray) (w : Wrap) :
     verifier. The KEK is returned in memory so the caller can populate the
     daemon state with it for the rest of the session. -/
 def buildManifest (passphrase : String) (tpmMasterKey? : Option ByteArray)
-    (now : Nat) : IO (Except String (Manifest × Kek)) := do
+    (ttlMs : Nat) (now : Nat) : IO (Except String (Manifest × Kek)) := do
   let salt ← LeanKohaku.Crypto.Random.getRandomBytes 16
   let kek ← LeanKohaku.Crypto.Random.getRandomBytes kekLength
   match ← deriveFromPassphrase passphrase salt defaultKdfIters with
@@ -255,6 +266,7 @@ def buildManifest (passphrase : String) (tpmMasterKey? : Option ByteArray)
                 passphraseWrap := passWrap,
                 tpmWrap := tpmWrap?,
                 verifier := verifier,
+                ttlMs := ttlMs,
                 createdAt := now
               }, kek)
 
@@ -318,6 +330,21 @@ def unlockWithTpmKey (m : Manifest) (tpmMasterKey : ByteArray) :
           match ← verifyKek m kek with
           | .error err => pure (.error err)
           | .ok _ => pure (.ok kek)
+
+/-- Add a `tpmWrap` envelope to an existing manifest. The KEK plaintext is
+    re-encrypted under the supplied TPM-sealed master key with the same
+    AAD as `buildManifest` uses for the TPM path, so subsequent
+    `unlockWithTpmKey` calls open it identically. Use this when the user
+    initially ran `wallet master init` without `--with-tpm` and later
+    wants TPM-tier protection without rotating the passphrase. -/
+def addTpmWrap (m : Manifest) (kek : Kek) (tpmMasterKey : ByteArray) :
+    IO (Except String Manifest) := do
+  if kek.size != kekLength then
+    pure (.error s!"master KEK has unexpected size: {kek.size}")
+  else
+    match ← sealWrap tpmMasterKey tpmAad kek with
+    | .error err => pure (.error err)
+    | .ok w => pure (.ok { m with tpmWrap := some w })
 
 /-! ## Wrap helpers for slots
 

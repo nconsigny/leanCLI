@@ -36,6 +36,12 @@ import {
 import { Wallet } from "./types.js";
 
 type Screen =
+  // Startup probe — calls `wallet.master.status`. Resolves to either
+  // `master-unlock` (when the wallet is initialized but not unlocked) or
+  // `main`. Renders a tiny spinner while in flight; users entering during
+  // a slow daemon start see "checking master…" instead of a flash of an
+  // empty MainMenu.
+  | { kind: "boot" }
   | { kind: "main" }
   | { kind: "wallets" }
   | { kind: "actions"; wallet: Wallet }
@@ -63,7 +69,6 @@ type Screen =
   | { kind: "llm-chat" }
   | { kind: "decode-typed-data" }
   | { kind: "archived-accounts" }
-  | { kind: "master-unlock" }
   | {
       kind: "send-raw";
       tx: { to: string; value: string; data: string; rationale?: string; canonical?: string };
@@ -74,7 +79,11 @@ type Screen =
  *  bottom of the stack is the main menu so Quit always exits the app. */
 export default function App() {
   const { exit } = useApp();
-  const [stack, setStack] = useState<Screen[]>([{ kind: "main" }]);
+  // Start at the boot probe rather than MainMenu — we render the master
+  // unlock gate (if needed) before showing anything else. The gate's
+  // `onDone` callback unrolls the stack onto MainMenu, so navigating Back
+  // from MainMenu never lands the user on the gate again.
+  const [stack, setStack] = useState<Screen[]>([{ kind: "boot" }]);
   const [walletsRefreshKey, setWalletsRefreshKey] = useState(0);
   // Colibri stateless simulation runs the EVM locally inside a WASM light
   // client with committee-verified state proofs. Toggling here sends
@@ -122,7 +131,6 @@ export default function App() {
   const handleMain = (a: MainAction) => {
     switch (a) {
       case "wallets":         return push({ kind: "wallets" });
-      case "master-unlock":   return push({ kind: "master-unlock" });
       case "le-chat":         return push({ kind: "llm-chat" });
       case "create-wallet":   return push({ kind: "create-wallet" });
       case "private":         return push({ kind: "private" });
@@ -307,7 +315,70 @@ export default function App() {
       return <DecodeTypedDataFlow onDone={pop} />;
     case "archived-accounts":
       return <ArchivedAccountsScreen onDone={finishAction} />;
-    case "master-unlock":
-      return <MasterUnlockGate onDone={pop} />;
+    case "boot":
+      // Master unlock gate or pass-through. `onDone` replaces the boot
+      // screen with MainMenu (not push) so back-out from MainMenu cannot
+      // return here.
+      return (
+        <BootGate
+          onDone={() => setStack([{ kind: "main" }])}
+        />
+      );
   }
+}
+
+/** Startup probe → master-unlock-gate-or-pass-through.
+ *
+ *  Always prompts when a manifest exists (`initialized === true`), even
+ *  if the daemon already holds a live KEK from a prior CLI session.
+ *  Rationale: a TUI session is a long-running interactive surface, and
+ *  users expect every session to begin with explicit auth — the daemon's
+ *  in-memory unlock state is a CLI convenience, not a TUI bypass.
+ *  Successful unlock just re-issues `wallet.unlock`, which the daemon
+ *  treats idempotently (replaces the slot, restarts the TTL).
+ *
+ *  Skip only when there is no manifest (legacy install, never ran
+ *  `wallet master init`) or when the status probe fails (daemon down,
+ *  parser error — per-slot prompts still work as fallback). */
+function BootGate({ onDone }: { onDone: () => void }) {
+  const [status, setStatus] = React.useState<
+    | { kind: "probing" }
+    | { kind: "show-gate" }
+    | { kind: "pass-through" }
+  >({ kind: "probing" });
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const r = await call<{
+        initialized: boolean;
+        masterUnlocked: boolean;
+      }>("wallet.master.status");
+      if (cancelled) return;
+      if (r.ok && r.result?.initialized) {
+        setStatus({ kind: "show-gate" });
+      } else {
+        // No manifest, or status probe failed. Per-slot unlock remains
+        // available for individual EOAs; skip the prompt.
+        setStatus({ kind: "pass-through" });
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  React.useEffect(() => {
+    if (status.kind === "pass-through") onDone();
+  }, [status.kind]);
+
+  if (status.kind === "show-gate") {
+    // Esc inside the gate falls through to MainMenu in locked mode; the
+    // per-slot prompts are still available.
+    return <MasterUnlockGate onDone={onDone} />;
+  }
+  // Probing / pass-through: don't paint MainMenu yet (its data fetches
+  // would race with our probe). The pass-through case dispatches onDone
+  // in the effect above; the next render is the parent MainMenu.
+  return null;
 }

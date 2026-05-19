@@ -225,10 +225,14 @@ inductive Command where
   -- Wallet-level master passphrase commands. The master KEK encrypts each
   -- EOA's `masterWrap` (and the PP secret's), so one unlock covers
   -- everything not explicitly opted out via `customPassphrase`.
-  | walletMasterInit (withTpm : Bool)
+  | walletMasterInit (timeoutMins : Option Nat)
   | walletMasterStatus
-  | walletMasterUnlock (withTpm : Bool)
+  | walletMasterUnlock
   | walletMasterLock
+  | walletMasterSetTimeout (timeoutMins : Nat)
+  | walletMasterBindTpm
+  | walletEnroll (name : String)
+  | walletEnrollAll
   | walletDelete (name : String)
   | walletReveal (name : String)
   | walletDerive (name path : String)
@@ -449,19 +453,29 @@ def parse : List String → Command
   | ["wallet", "address", name] => .walletAddress name
   | ["wallet", "unlock", "--all"] => .walletUnlockAll
   | ["wallet", "unlock", "-a"] => .walletUnlockAll
-  -- `wallet unlock` (no name, no --all): master-passphrase path.
-  -- `wallet unlock --tpm`: master path via TPM PIN.
-  | ["wallet", "unlock"] => .walletMasterUnlock false
-  | ["wallet", "unlock", "--tpm"] => .walletMasterUnlock true
+  -- `wallet unlock` (no name, no --all): master path. The CLI probes the
+  -- daemon for `tpmHardwareReady`+`withTpm` and prompts for the PIN when
+  -- the TPM path is available, otherwise for the passphrase — single,
+  -- universal command, no mode toggle.
+  | ["wallet", "unlock"] => .walletMasterUnlock
   | ["wallet", "unlock", name] => .walletUnlock name
   -- `wallet lock` (no name): clears master KEK + every per-slot unlock.
   | ["wallet", "lock"] => .walletMasterLock
   | ["wallet", "lock", "--all"] => .walletLockAll
   | ["wallet", "lock", "-a"] => .walletLockAll
   | ["wallet", "lock", name] => .walletLock name
-  | ["wallet", "master", "init"] => .walletMasterInit false
-  | ["wallet", "master", "init", "--with-tpm"] => .walletMasterInit true
+  | ["wallet", "master", "init"] => .walletMasterInit none
+  | ["wallet", "master", "init", "--timeout-mins", n] =>
+      .walletMasterInit n.toNat?
   | ["wallet", "master", "status"] => .walletMasterStatus
+  | ["wallet", "master", "set-timeout", n] =>
+      match n.toNat? with
+      | some m => .walletMasterSetTimeout m
+      | none => .invalid ["wallet", "master", "set-timeout", n]
+  | ["wallet", "master", "bind-tpm"] => .walletMasterBindTpm
+  | ["wallet", "enroll", "--all"] => .walletEnrollAll
+  | ["wallet", "enroll", "-a"] => .walletEnrollAll
+  | ["wallet", "enroll", name] => .walletEnroll name
   | ["wallet", "delete", name] => .walletDelete name
   | ["wallet", "reveal", name] => .walletReveal name
   | ["wallet", "derive", name, path] => .walletDerive name path
@@ -907,14 +921,23 @@ def helpText : String :=
      wallet list                         Tabular list of every wallet (eoa + r1).\n\
      wallet show <name>                  Type-aware metadata.\n\
      wallet address <name>               Primary address.\n\
-     wallet unlock <name>                EOA: passphrase prompt; R1: no-op.\n\
-     wallet unlock                       Master-passphrase unlock (covers every enrolled EOA + the PP secret).\n\
-     wallet unlock --tpm                 Master unlock via TPM PIN (requires `wallet master init --with-tpm`).\n\
+     wallet unlock <name>                Per-slot EOA passphrase prompt; R1 is a no-op.\n\
+     wallet unlock                       Master unlock — single prompt; TPM-PIN if hardware present,\n\
+                                         master passphrase otherwise. Covers every enrolled EOA + PP secret.\n\
      wallet lock <name>                  Lock one wallet.\n\
      wallet lock                         Clear the master KEK and every per-slot unlock in one shot.\n\
-     wallet master init [--with-tpm]     Bootstrap the wallet KEK manifest. Add --with-tpm to also wrap the KEK\n\
-                                         under the TPM-sealed master key (PIN-gated future unlocks).\n\
+     wallet master init [--timeout-mins N]\n\
+                                         Bootstrap the wallet KEK manifest. Prompts for a master passphrase;\n\
+                                         if a TPM is detected, also offers an optional PIN to seal the KEK\n\
+                                         under the TPM (skip with Enter). --timeout-mins N sets auto-lock\n\
+                                         (0 disables; default 5).\n\
      wallet master status                Show master-init state, enrolled vs. unenrolled EOAs, TPM availability.\n\
+     wallet master set-timeout N         Update auto-lock minutes (0 = never).\n\
+     wallet master bind-tpm              Add TPM-PIN unlock to an existing wallet master (post-init).\n\
+                                         BIP-39 EOA seeds enrolled via `wallet enroll` then inherit TPM-tier\n\
+                                         lockout protection (PIN attempts rate-limited by TPM firmware).\n\
+     wallet enroll <name>                Enrol one EOA into the master KEK (lazy rewrap on next unlock).\n\
+     wallet enroll --all                 Walk every unenrolled EOA and enrol each.\n\
      wallet delete <name>                Delete a wallet (passphrase required for EOA).\n\
      wallet reveal <name>                Print the BIP-39 mnemonic of an EOA (DANGER).\n\
                                          Requires passphrase + name confirmation.\n\

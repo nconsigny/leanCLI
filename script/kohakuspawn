@@ -457,6 +457,76 @@ if [[ $MODIFY_PATH -eq 1 ]]; then
   esac
 fi
 
+# ---- TPM2 readiness probe (informational) -----------------------------------
+#
+# `kohaku wallet master init` / `bind-tpm` can optionally seal the wallet
+# KEK under a TPM-bound PIN, giving BIP-39 EOA seeds hardware-tier
+# protection (dictionary-attack lockout enforced by TPM firmware). This
+# probe surfaces what's missing so the user knows exactly which package
+# / group / BIOS toggle to fix — without it, `kohaku wallet master
+# status` just reports `tpmHardwareReady: false` and the user is on
+# their own.
+#
+# All three checks are soft (warn-only) — a working passphrase-only
+# install is still a fully functional kohaku. We exit 0 either way.
+echo
+echo "==> TPM2 hardware probe (optional, enables `wallet master bind-tpm`):"
+
+tpm_device_present=0
+if [[ -e /dev/tpm0 || -e /dev/tpmrm0 ]]; then
+  tpm_device_present=1
+  echo "  ✓ kernel TPM device present"
+else
+  echo "  - no /dev/tpm* device — enable fTPM/PTT in BIOS to use TPM-bound unlock"
+fi
+
+tpm_tools_missing=()
+for tool in tpm2_createprimary tpm2_create tpm2_load tpm2_unseal; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    tpm_tools_missing+=("$tool")
+  fi
+done
+if [[ ${#tpm_tools_missing[@]} -eq 0 ]]; then
+  echo "  ✓ tpm2-tools installed"
+else
+  echo "  - tpm2-tools missing (${tpm_tools_missing[*]}); install with:"
+  if command -v pacman >/dev/null 2>&1; then
+    echo "      sudo pacman -S tpm2-tools tpm2-tss"
+  elif command -v apt-get >/dev/null 2>&1; then
+    echo "      sudo apt install tpm2-tools libtss2-tcti-device0"
+  elif command -v dnf >/dev/null 2>&1; then
+    echo "      sudo dnf install tpm2-tools tpm2-tss"
+  else
+    echo "      (consult your distro's package manager for the tpm2-tools package)"
+  fi
+fi
+
+# Group check: the TPM device files are typically group `tss` mode 660,
+# so an unprivileged user can't open them without group membership. We
+# probe by checking both whether the user is in `tss` and whether they
+# can actually read /dev/tpmrm0 — the latter accounts for distros that
+# use a different group name. Surface the simpler "add to tss" hint
+# when that's the most likely fix.
+if [[ $tpm_device_present -eq 1 ]]; then
+  if [[ -r /dev/tpmrm0 ]] || [[ -r /dev/tpm0 ]]; then
+    echo "  ✓ user can access TPM device"
+  else
+    tss_group=""
+    if getent group tss >/dev/null 2>&1; then
+      tss_group="tss"
+    fi
+    if [[ -n "$tss_group" ]] && ! id -nG "$USER" 2>/dev/null | tr ' ' '\n' | grep -qx "$tss_group"; then
+      echo "  - TPM device unreadable; add yourself to the '$tss_group' group:"
+      echo "      sudo usermod -aG $tss_group \$USER"
+      echo "      newgrp $tss_group       # picks up the group in this shell"
+      echo "      kohaku daemon stop && kohaku daemon ping   # daemon respawns with new group"
+    else
+      echo "  - TPM device exists but is unreadable (check udev rules / device perms)"
+    fi
+  fi
+fi
+echo "  After fixing any of the above, verify with: kohaku wallet master status"
+
 echo
 case ":${PATH:-}:" in
   *":$KOHAKU_BIN:"*)

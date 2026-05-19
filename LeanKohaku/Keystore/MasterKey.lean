@@ -60,6 +60,17 @@ def sealTools : List String :=
 def existsOnDisk : IO Bool :=
   sealed.pathExists
 
+/-- True when the host can actually use the TPM: kernel device node is
+    present AND every tool in `sealTools` is callable. Used at init time
+    so the CLI can decide whether to prompt for a TPM PIN, and at status
+    probe time so the front-end can label slots as "TPM-backed". -/
+def hardwareReady : IO Bool := do
+  if !(← deviceAvailable) then pure false
+  else
+    match ← firstMissingTool sealTools with
+    | some _ => pure false
+    | none => pure true
+
 def reset : IO Unit := do
   let _ ← runChecked "rm" #["-rf", masterDir.toString]
   pure ()

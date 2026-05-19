@@ -591,6 +591,15 @@ Nix and Arch packaging list `tpm2-tools`, `libfido2`, and `fprintd` only
 as optional host-integration tools. The Lean wallet does not link to
 those libraries or trust them as crypto implementations.
 
+`script/kohakuspawn` ends each install with a TPM2 readiness probe and
+prints the exact distro-specific install line (`pacman` / `apt` /
+`dnf`) when `tpm2-tools` is missing, plus the `usermod -aG tss $USER`
+hint when device permissions block access — so users who want
+`wallet master init` → TPM-bound PIN don't have to assemble the
+prerequisites themselves. `kohaku wallet master status` is the
+post-install verification: `tpmHardwareReady: true` means
+`wallet master bind-tpm` will succeed.
+
 ## Accounts
 
 `LeanKohaku.Wallet.Account` defines:

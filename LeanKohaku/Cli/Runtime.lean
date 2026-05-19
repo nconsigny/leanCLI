@@ -1545,11 +1545,12 @@ def run (args : List String) : IO UInt32 := do
         | .tpm => IO.println s!"  -  {n}  (skipped: r1)"
       IO.println s!"Locked {locked} EOA wallet(s)."
       pure 0
-  | .walletMasterInit withTpm =>
-      -- Why: bootstrap the wallet KEK. We confirm the passphrase locally
-      -- (two prompts must match) before calling the daemon, since the
-      -- manifest write is irreversible — losing this passphrase orphans
-      -- every future `masterWrap`.
+  | .walletMasterInit timeoutMins? =>
+      -- Why: single-credential UX. Always confirm the master passphrase
+      -- (the recovery / no-TPM fallback) twice. Then probe daemon status
+      -- for TPM hardware readiness; if available, offer to ALSO seal the
+      -- KEK under a TPM PIN. Hitting Enter at the PIN prompt skips TPM
+      -- and yields passphrase-only — no flag required.
       let p1 ← Passphrase.read "New master passphrase: "
       let p2 ← Passphrase.read "Confirm master passphrase: "
       if p1 != p2 then
@@ -1560,24 +1561,150 @@ def run (args : List String) : IO UInt32 := do
         return 2
       let baseFields : Array (String × LeanKohaku.Encoding.Json.Json) :=
         #[("passphrase", .str p1)]
+      let withTimeout : Array (String × LeanKohaku.Encoding.Json.Json) :=
+        match timeoutMins? with
+        | some n => baseFields.push ("timeoutMins", .num (Int.ofNat n))
+        | none => baseFields
+      let tpmReady ← do
+        match ← DaemonClient.call "wallet.master.status" (.obj #[]) with
+        | .ok statusJson =>
+            match LeanKohaku.Encoding.Json.getField "tpmHardwareReady" statusJson with
+            | some (.bool b) => pure b
+            | _ => pure false
+        | .error _ => pure false
       let fields ←
-        if withTpm then
-          let pin ← Pin.read "TPM PIN (for TPM-bound unlock): "
-          pure (baseFields.push ("withTpm", .bool true)
-                    |>.push ("masterPin", .str pin))
+        if tpmReady then
+          IO.println "  TPM2 hardware detected. You can additionally seal the KEK under a TPM PIN."
+          IO.println "  Press Enter at the first prompt to skip — passphrase-only is fine."
+          -- First prompt also serves as the skip handle (empty = skip).
+          -- Only if the user typed something do we re-prompt to confirm,
+          -- so the no-TPM case stays one keystroke.
+          let first ← Pin.read "  TPM PIN (Enter to skip): "
+          if first.isEmpty then pure withTimeout
+          else
+            if first.length < LeanKohaku.Keystore.Tpm2Runtime.minPinLength then
+              IO.eprintln s!"error: TPM PIN must be at least {LeanKohaku.Keystore.Tpm2Runtime.minPinLength} characters"
+              return 2
+            let again ← Pin.read "  Confirm TPM PIN: "
+            if first != again then
+              IO.eprintln "error: PINs did not match"
+              return 2
+            pure (withTimeout.push ("masterPin", .str first))
         else
-          pure baseFields
+          IO.println "  (No TPM detected — wallet uses encryption-at-rest with your passphrase.)"
+          pure withTimeout
       DaemonClient.printCall "wallet.master.init" (.obj fields)
   | .walletMasterStatus =>
       DaemonClient.printCall "wallet.master.status" (.obj #[])
-  | .walletMasterUnlock withTpm =>
+  | .walletMasterSetTimeout mins =>
+      DaemonClient.printCall "wallet.master.setTimeout"
+        (.obj #[("timeoutMins", .num (Int.ofNat mins))])
+  | .walletMasterBindTpm =>
+      -- Bind TPM after the fact. Daemon prefers in-memory KEK (unlocked
+      -- via `wallet unlock`); if locked, ask the user to type the master
+      -- passphrase so we can re-derive it.
+      -- Why: this is a NEW PIN (first time it's being sealed under the
+      -- TPM, even though we're post-init). Confirm twice to catch typos
+      -- — TPM dictionary-attack lockout means a forgotten/mistyped PIN
+      -- can permanently brick the TPM envelope until reset.
+      let pin ← match ← Pin.readConfirmed
+          LeanKohaku.Keystore.Tpm2Runtime.minPinLength with
+        | .ok p => pure p
+        | .error e =>
+            IO.eprintln s!"error: {e}"
+            return 2
+      let mut fields : Array (String × LeanKohaku.Encoding.Json.Json) :=
+        #[("masterPin", .str pin)]
+      -- Probe status: if not unlocked, prompt for passphrase here so the
+      -- daemon doesn't have to send it back as an error.
+      match ← DaemonClient.call "wallet.master.status" (.obj #[]) with
+      | .ok (.obj kv) =>
+          let unlocked := match kv.find? (fun (k, _) => k = "masterUnlocked") with
+            | some (_, .bool b) => b
+            | _ => false
+          if !unlocked then
+            let pass ← Passphrase.read "Master passphrase: "
+            fields := fields.push ("passphrase", .str pass)
+        | _ => pure ()
+      DaemonClient.printCall "wallet.master.bindTpm" (.obj fields)
+  | .walletEnroll name =>
+      -- Enrolment is exactly `eoa.unlock` (which auto-rewraps when the
+      -- master KEK is loaded); we surface it under a distinct verb so the
+      -- "skipped: not-enrolled" output of `wallet unlock` has an obvious
+      -- next step the user can grep for in `--help`.
+      let passphrase ← Passphrase.read s!"Per-slot passphrase for {name}: "
+      DaemonClient.printCall "eoa.unlock"
+        (.obj #[("name", .str name), ("passphrase", .str passphrase)])
+  | .walletEnrollAll =>
+      -- Walk every `unenrolledEoas` entry from the daemon, prompt once per
+      -- slot, fire `eoa.unlock` which auto-rewraps under the loaded
+      -- master KEK. Bails out early with a clear message if the master is
+      -- not currently loaded — without it, auto-rewrap is a no-op.
+      match ← DaemonClient.call "wallet.master.status" (.obj #[]) with
+      | .error err =>
+          IO.eprintln s!"error: wallet.master.status failed: {err.message}"
+          return 2
+      | .ok statusJson =>
+          let getBool (k : String) : Bool :=
+            match LeanKohaku.Encoding.Json.getField k statusJson with
+            | some (.bool b) => b
+            | _ => false
+          if !(getBool "initialized") then
+            IO.eprintln "error: wallet master is not initialized — run `kohaku wallet master init` first"
+            return 2
+          if !(getBool "masterUnlocked") then
+            IO.eprintln "error: wallet master is locked — run `kohaku wallet unlock` first"
+            return 2
+          let unenrolled : Array String :=
+            match LeanKohaku.Encoding.Json.getField "unenrolledEoas" statusJson
+                  >>= LeanKohaku.Encoding.Json.asArray with
+            | some arr =>
+                arr.filterMap (fun j => LeanKohaku.Encoding.Json.asString j)
+            | none => #[]
+          if unenrolled.isEmpty then
+            IO.println "All EOAs already enrolled (or marked customPassphrase)."
+            return 0
+          IO.println s!"Enrolling {unenrolled.size} EOA slot(s) into the wallet master."
+          IO.println "You'll be prompted once per slot for its current per-slot passphrase."
+          let mut succeeded : Nat := 0
+          let mut failed : Array String := #[]
+          for n in unenrolled do
+            let p ← Passphrase.read s!"  passphrase for {n}: "
+            match ← DaemonClient.call "eoa.unlock"
+                (.obj #[("name", .str n), ("passphrase", .str p)]) with
+            | .ok _ =>
+                IO.println s!"  ✓ {n}  enrolled"
+                succeeded := succeeded + 1
+            | .error err =>
+                IO.println s!"  ✗ {n}  ({err.message})"
+                failed := failed.push n
+          IO.println s!"Enrolled {succeeded} / {unenrolled.size}. {failed.size} failed."
+          pure 0
+  | .walletMasterUnlock =>
+      -- Single-credential UX. Probe the daemon first — the manifest
+      -- itself decides whether to ask for the PIN (TPM envelope present
+      -- and hardware usable) or the passphrase. The user only sees one
+      -- prompt; the label communicates which credential the daemon is
+      -- waiting on.
+      let (tpmPath, withTpm) ← do
+        match ← DaemonClient.call "wallet.master.status" (.obj #[]) with
+        | .ok statusJson =>
+            let getBool k :=
+              match LeanKohaku.Encoding.Json.getField k statusJson with
+              | some (.bool b) => b
+              | _ => false
+            pure (getBool "withTpm" && getBool "tpmHardwareReady", getBool "withTpm")
+        | .error _ => pure (false, false)
       let fields ←
-        if withTpm then
-          let pin ← Pin.read "TPM PIN: "
+        if tpmPath then
+          let pin ← Pin.read "Unlock — TPM PIN: "
           pure (#[("masterPin", .str pin)] :
             Array (String × LeanKohaku.Encoding.Json.Json))
         else
-          let p ← Passphrase.read "Master passphrase: "
+          let label :=
+            if withTpm then "Unlock — master passphrase (TPM unavailable, falling back): "
+            else "Unlock — master passphrase: "
+          let p ← Passphrase.read label
           pure #[("passphrase", .str p)]
       DaemonClient.printCall "wallet.unlock" (.obj fields)
   | .walletMasterLock =>
