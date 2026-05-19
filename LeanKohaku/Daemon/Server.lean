@@ -2660,7 +2660,10 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                   ("validateError", .str "llm.parseIntent returned no `raw` field")
                 ]
               else
-                -- 3. Parse + validate via Lean's IntentParser (hard-rejects).
+                -- 3. Parse + validate via Lean's IntentParser. Three outcomes:
+                --    .error msg          — malformed JSON / hard-reject
+                --    .ok (.ask err q)    — model legitimately asked for clarification
+                --    .ok (.intent i)     — ready to encode
                 match LeanKohaku.LlmAgent.IntentParser.parseIntent rawStr chainId with
                 | .error msg =>
                     pure <| .ok <| .obj #[
@@ -2668,7 +2671,16 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                       ("llmRaw", .str rawStr),
                       ("validateError", .str msg)
                     ]
-                | .ok intent =>
+                | .ok (.ask err q) =>
+                    pure <| .ok <| .obj #[
+                      ("regex", regexJson),
+                      ("llmRaw", .str rawStr),
+                      ("modelAsk", .obj #[
+                        ("error",    .str err),
+                        ("question", .str q)
+                      ])
+                    ]
+                | .ok (.intent intent) =>
                     -- 4. Encode via the leaf encoder.
                     match LeanKohaku.Ethereum.IntentEncode.encode intent with
                     | .error msg =>

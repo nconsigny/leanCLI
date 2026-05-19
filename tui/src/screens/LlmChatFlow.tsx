@@ -46,6 +46,11 @@ type DraftResponse = {
   validateError?: string;
   encoded?: { to: string; value: number; data: string; chainId: number };
   encodeError?: string;
+  /** Set when the model legitimately returned the {error, ask} shape
+   *  (i.e., couldn't fill the intent without inventing). This is NOT a
+   *  Lean rejection — the model behaved correctly and is asking for
+   *  more info. UX-wise we surface it as a clarification, not a fail. */
+  modelAsk?: { error: string; question: string };
 };
 
 type Phase =
@@ -192,6 +197,7 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
     >
       <RegexBlock regex={result.regex} />
       <LlmRawBlock raw={result.llmRaw} err={result.llmError} />
+      {result.modelAsk && <ModelAskBlock ask={result.modelAsk} />}
       <ValidateBlock err={result.validateError} encodeErr={result.encodeError} />
       {result.canonical && <CanonicalBlock canonical={result.canonical} />}
       {canSign && (
@@ -260,6 +266,27 @@ function LlmRawBlock({ raw, err }: { raw?: string; err?: string }) {
         llm raw output (untrusted — validated below)
       </Text>
       <Text>{raw.slice(0, 400)}</Text>
+    </Box>
+  );
+}
+
+function ModelAskBlock({ ask }: { ask: { error: string; question: string } }) {
+  return (
+    <Box flexDirection="column" marginBottom={1} borderStyle="single" borderColor={theme.warn} paddingX={1}>
+      <Text bold color={theme.warn}>
+        model asks for clarification (this is fine — not a rejection)
+      </Text>
+      <Text>
+        <Text color={theme.dim}>reason: </Text>
+        {ask.error}
+      </Text>
+      <Text>
+        <Text color={theme.dim}>asks:   </Text>
+        {ask.question}
+      </Text>
+      <Text color={theme.dim}>
+        Press esc, then re-enter the prompt with the missing info (e.g. paste a 0x address).
+      </Text>
     </Box>
   );
 }

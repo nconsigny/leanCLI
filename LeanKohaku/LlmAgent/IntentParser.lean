@@ -148,14 +148,43 @@ def securityChecks (raw : Json) (expectedChainId : Nat) (intent : Intent) :
       | none => throw s!"Aave V3 not supported on chainId {chainId} in this build"
   | _ => .ok ()
 
-/-- The full chat-path parse: structural decode + security hard-rejects.
-Returns the validated `Intent` ready for `tx.encodeIntent`, or a
-human-readable rejection message. -/
+/-- The two legitimate shapes the model can emit per the system prompt:
+
+* `intent` — a populated Intent ADT, ready for `tx.encodeIntent` once
+  the security checks pass.
+* `ask` — the model couldn't fill the intent without inventing
+  (typically an unresolved ENS or symbol). The `error` is the model's
+  diagnosis; the `ask` is the question it wants the user to answer.
+
+This is not the same as a Lean-side rejection. A model `ask` is the
+model behaving correctly; a `.error` from `parseIntent` is the model
+emitting garbage or tripping a hard-reject.
+-/
+inductive ParseResult where
+  | intent (i : Intent)
+  | ask    (errorMsg : String) (question : String)
+
+/-- The full chat-path parse: structural decode + security hard-rejects,
+or a recognized clarification ask. Returns `.ok (.intent ...)` for a
+ready-to-encode Intent, `.ok (.ask ...)` for a legitimate model
+clarification, and `.error msg` for anything malformed or
+hard-rejected. -/
 def parseIntent (rawJsonText : String) (expectedChainId : Nat) :
-    Except String Intent := do
+    Except String ParseResult := do
   let j ← LeanKohaku.Encoding.Json.parse rawJsonText
+  -- Recognize the documented {error, ask} clarification shape BEFORE
+  -- attempting a structural Intent parse. The model emits this when it
+  -- can't fill required fields without inventing (e.g. unresolved ENS,
+  -- unknown token symbol, missing chain id). That's not a failure of
+  -- ours — it's the model doing what we asked it to.
+  match getField "error" j, getField "ask" j with
+  | some errJ, some askJ =>
+      match asString errJ, asString askJ with
+      | some err, some ask => return .ask err ask
+      | _, _ => pure ()
+  | _, _ => pure ()
   let intent ← LeanKohaku.Ethereum.IntentJson.parseIntent j
   securityChecks j expectedChainId intent
-  .ok intent
+  .ok (.intent intent)
 
 end LeanKohaku.LlmAgent.IntentParser
