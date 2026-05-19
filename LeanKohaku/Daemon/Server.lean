@@ -822,35 +822,51 @@ private def ppSecretMissing : RpcError :=
     message := "no Privacy Pools secret stored — run 'kohaku shield <wallet> <eth>' to create one or 'kohaku shield import <mnemonic>' to restore"
     data := none }
 
-/-- Forward a shielded RPC to the kohaku-bridge sidecar. The Lean side
-    classifies the bridge method through `Privacy.Bridge.policyAllows` against
-    the daemon's network policy, then injects the rpc URL, chain id, and the
-    privacy-pools spending mnemonic via env vars (never argv). The mnemonic
-    is supplied by the caller (after decrypting the on-disk secret slot);
-    the env var fallback that used to live here has been removed. -/
+/-- Forward a shielded RPC to the kohaku-bridge sidecar.
+
+Privacy Pools v1 is **Sepolia-only** at the contract layer. Regardless
+of the daemon's default chain (cfg.chainId), every shielded operation
+targets the Sepolia deployment. This function:
+
+* pins the policy check + sidecar env to Sepolia (chainId=11155111,
+  cfg.chainEndpoints["sepolia"] for the RPC URL);
+* falls back to cfg.rpcEndpoint when Sepolia isn't configured — the
+  call will fail downstream with a chain-mismatch error, which is
+  clearer than the policy-denial path it used to take.
+
+The mnemonic is supplied by the caller (after decrypting the on-disk
+secret slot); the env var fallback that used to live here is removed.
+-/
 private def shieldedBridgeCall (cfg : Config) (method : String) (params : Json)
     (mnemonic : String) (_req : Request) : IO (Except RpcError Json) := do
   let bridgeReq : LeanKohaku.Privacy.Bridge.Request :=
     { method := method, params := params, id := 0 }
-  -- Why: gate egress through the same policy that classifies all outbound
-  -- network requests; the bridge is treated as configured-node access.
-  -- Pass cfg.chainId so the chain-aware policy's testnet branch can
-  -- permit shielded ops on sepolia (refused on mainnet by design).
+  -- Privacy Pools v1 is Sepolia-only. Pin the policy chainId so the
+  -- chain-aware policy's testnet branch fires regardless of what the
+  -- daemon's default chain happens to be.
+  let ppChainId : Nat := 11155111
   let allowed := LeanKohaku.Privacy.Bridge.policyAllows cfg.policy
-    .configuredNode .direct bridgeReq (some cfg.chainId)
+    .configuredNode .direct bridgeReq (some ppChainId)
   if !allowed then
     pure <| .error
       { code := -32030
         message := "shielded surface denied by policy"
         data := some (.str ("policy denies " ++ method)) }
   else
+    -- Pick the Sepolia endpoint, not cfg.rpcEndpoint. Without this the
+    -- sidecar gets handed the mainnet URL when the daemon's default is
+    -- mainnet, then the on-chain calls fail or hit the wrong contract.
+    let ppEndpoint : LeanKohaku.RPC.Outbound.Endpoint :=
+      match endpointForChain cfg (some "sepolia") with
+      | .ok ep => ep
+      | .error _ => cfg.rpcEndpoint
     let ppDir ← LeanKohaku.Wallet.PpSecretStore.storeDir
     try IO.FS.createDirAll ppDir catch _ => pure ()
     let statePath := (ppDir / "state.json").toString
     let storagePath := (ppDir / "storage.json").toString
     let env : Array (String × Option String) := #[
-      ("LEANKOHAKU_RPC_URL", some cfg.rpcEndpoint.url),
-      ("LEANKOHAKU_CHAIN_ID", some (toString cfg.chainId)),
+      ("LEANKOHAKU_RPC_URL", some ppEndpoint.url),
+      ("LEANKOHAKU_CHAIN_ID", some (toString ppChainId)),
       ("LEANKOHAKU_PP_MNEMONIC", some mnemonic),
       ("LEANKOHAKU_PP_STATE_PATH", some statePath),
       ("LEANKOHAKU_PP_STORAGE_PATH", some storagePath)
