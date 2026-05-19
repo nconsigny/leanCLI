@@ -2,6 +2,7 @@ import LeanKohaku.Basic
 import LeanKohaku.Daemon.AddressBook
 import LeanKohaku.Daemon.LlmServer
 import LeanKohaku.Daemon.Log
+import LeanKohaku.Daemon.SkillsStore
 import LeanKohaku.Daemon.State
 import LeanKohaku.Daemon.TxJournal
 import LeanKohaku.Daemon.Uds
@@ -2690,6 +2691,30 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                 ] ++ (match e.ensName with | some n => #[("ensName", .str n)] | none => #[])
                   ++ (match e.tag     with | some t => #[("tag",     .str t)] | none => #[]))
               ]
+  | "skills.list" =>
+      let metas ← LeanKohaku.Daemon.SkillsStore.listAll
+      let arr : Array Json := (metas.map (fun m =>
+        Json.obj #[
+          ("name",        .str m.name),
+          ("description", .str m.description),
+          ("category",    .str m.category),
+          ("risk",        .str m.risk),
+          ("path",        .str m.path)
+        ]
+      )).toArray
+      pure <| .ok <| .obj #[("skills", .arr arr)]
+  | "skills.get" =>
+      match paramString req.params "name" with
+      | .error err => pure (.error err)
+      | .ok name =>
+          if name = "" || name = "_root" then
+            match ← LeanKohaku.Daemon.SkillsStore.readRootManifest with
+            | some body => pure <| .ok <| .obj #[("name", .str "_root"), ("body", .str body)]
+            | none      => pure <| .error { code := -32024, message := "no root manifest at skills/SKILL.md", data := none }
+          else
+            match ← LeanKohaku.Daemon.SkillsStore.readBody name with
+            | some body => pure <| .ok <| .obj #[("name", .str name), ("body", .str body)]
+            | none      => pure <| .error { code := -32024, message := s!"no skill named {name}", data := none }
   | "llm.ensureUp" =>
       -- TUI's chat flow calls this on entry. Idempotent: probes
       -- LLM_BASE_URL; if down and LLM_AUTO_SPAWN/LLM_SERVER_BINARY are
@@ -2750,13 +2775,34 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
               ("unresolved", .arr (regex.unresolved.map Json.str |>.toArray)),
               ("confidence", .str (LeanKohaku.Ethereum.Intent.Confidence.toString regex.confidence))
             ]
-          -- 2. Call LLM sidecar with the regex as a seed.
+          -- 1b. Look up the skill that matches this action category and
+          -- attach its body to the LLM request. Lets the model see the
+          -- exact Intent JSON shape it should emit + the safety rules
+          -- the skill specifies. We pass only the matching skill, not
+          -- the whole pack, to keep the context small.
+          let actionTag := LeanKohaku.Ethereum.Intent.Action.toString regex.action
+          let skillName : String :=
+            match actionTag with
+            | "nativeTransfer" => "send-native"
+            | "erc20Transfer"  => "send-erc20"
+            | "erc20Approve"   => "revoke-approval"
+            | _                => ""
+          let skillBody? : Option String ←
+            if skillName.isEmpty then pure none
+            else LeanKohaku.Daemon.SkillsStore.readBody skillName
+          -- 2. Call LLM sidecar with the regex as a seed + the matching
+          -- skill body (when one matched).
           let llmReq : Json :=
-            .obj #[
+            .obj <| #[
               ("prompt",  .str prompt),
               ("seed",    regexJson),
               ("chainId", .num (Int.ofNat chainId))
-            ]
+            ] ++ (match skillBody? with
+                  | some body => #[("skillContext", .obj #[
+                      ("name", .str skillName),
+                      ("body", .str body)
+                    ])]
+                  | none => #[])
           let llmResp ← LeanKohaku.LlmAgent.Bridge.call
             { method := "llm.parseIntent", params := llmReq, id := 0 }
           match llmResp with

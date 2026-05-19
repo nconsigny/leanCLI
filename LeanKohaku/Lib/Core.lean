@@ -52,6 +52,7 @@ import LeanKohaku.RPC.Server
 import LeanKohaku.Daemon.AddressBook
 import LeanKohaku.Daemon.Config
 import LeanKohaku.Daemon.LlmServer
+import LeanKohaku.Daemon.SkillsStore
 import LeanKohaku.Daemon.Log
 import LeanKohaku.Daemon.Server
 import LeanKohaku.Daemon.State

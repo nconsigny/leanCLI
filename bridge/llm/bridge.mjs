@@ -63,6 +63,7 @@ async function dispatch(method, params, id) {
           prompt: params.prompt,
           seed: params.seed ?? null,
           chainId: params.chainId,
+          skillContext: params.skillContext ?? null,
         });
         return ok(id, result);
       } catch (e) {

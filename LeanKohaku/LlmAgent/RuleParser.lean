@@ -83,6 +83,11 @@ def verbToAction : String → Option Action
   | "send"      => some .nativeTransfer  -- refined if asset ≠ ETH
   | "transfer"  => some .nativeTransfer
   | "approve"   => some .erc20Approve
+  -- revoke / cancel / remove are routed to erc20Approve so the
+  -- revoke-approval skill gets attached. The skill enforces amount = 0.
+  | "revoke"    => some .erc20Approve
+  | "cancel"    => some .erc20Approve
+  | "remove"    => some .erc20Approve
   | "swap"      => some .swap
   | "supply"    => some .aaveSupply
   | "deposit"   => some .aaveSupply
@@ -201,6 +206,46 @@ def matchApprove (toks : List String) : Option RegexDraft := do
     confidence := confidence
   }
 
+/-- `revoke|cancel|remove <ASSET> approval[s] for <spender>` —
+the user wants amount = 0 by definition. The skill enforces that;
+the regex just classifies the verb and extracts asset + spender. -/
+def matchRevoke (toks : List String) : Option RegexDraft := do
+  let verb ← toks.head?
+  if verb ≠ "revoke" ∧ verb ≠ "cancel" ∧ verb ≠ "remove" then none
+  let forIdx ← indexOfKeyword toks "for"
+  -- Asset is the first token after the verb that isn't a filler word
+  -- ("the", "my", "all", an article).
+  let isFiller := fun (s : String) =>
+    s = "the" || s = "my" || s = "all" || s = "an" || s = "a"
+  let assetIdx :=
+    (List.range toks.length).find? (fun i =>
+      i > 0 && i < forIdx
+        && match at? toks i with
+           | none => false
+           | some t => !(isFiller t)
+                       && t ≠ "approval"
+                       && t ≠ "approvals"
+                       && t ≠ "allowance")
+  match assetIdx with
+  | none => none
+  | some i =>
+      let asset ← at? toks i
+      let spender ← at? toks (forIdx + 1)
+      let assetOk := isKnownSymbol asset ∨ isAddress asset
+      let spOk := isAddress spender ∨ isEnsName spender
+      let unresolved : List String :=
+        (if assetOk then [] else [s!"asset '{asset}' not in known-tokens registry"])
+        ++ (if spOk then [] else [s!"spender '{spender}' not parseable as address or ENS"])
+      some {
+        action     := .erc20Approve
+        fields     := [
+          ("verb", verb), ("amount", "0"), ("asset", asset), ("spender", spender),
+          ("revoke", "true")
+        ]
+        unresolved := unresolved
+        confidence := if unresolved.isEmpty then .high else .medium
+      }
+
 /-- `swap <amount> <asset> (for|to|into) <asset> [with <N>% slippage]`. -/
 def matchSwap (toks : List String) : Option RegexDraft := do
   let verb ← toks.head?
@@ -300,6 +345,7 @@ def parse (input : String) : RegexDraft :=
       let candidates : List (Option RegexDraft) := [
         matchSendOrTransfer toks
         , matchApprove toks
+        , matchRevoke toks
         , matchSwap toks
         , matchSupply toks
         , matchWithdrawBorrowRepay toks

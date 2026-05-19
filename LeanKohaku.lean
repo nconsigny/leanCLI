@@ -68,6 +68,7 @@ import LeanKohaku.Daemon.AddressBook
 import LeanKohaku.Daemon.LlmServer
 import LeanKohaku.Daemon.Log
 import LeanKohaku.Daemon.Server
+import LeanKohaku.Daemon.SkillsStore
 import LeanKohaku.Daemon.State
 import LeanKohaku.Daemon.TokenMeta
 import LeanKohaku.Daemon.TxJournal

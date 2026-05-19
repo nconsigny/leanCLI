@@ -105,7 +105,7 @@ export async function ping(baseUrl = process.env.LOCAL_LLM_BASE_URL ?? DEFAULT_B
  *  regex-seed JSON. Returns an OpenAI-compatible messages array.
  *  Crucially, every value we interpolate is JSON-stringified — no
  *  unescaped chain-derived strings ever land in the prompt body. */
-function buildMessages({ prompt, seed, chainId }) {
+function buildMessages({ prompt, seed, chainId, skillContext }) {
   // Field-by-field schema. The prompt is intentionally verbose: gpt-oss
   // is documented unreliable on Ethereum-specific factual details, so we
   // overspecify the wire shape and let the Lean validator hard-reject
@@ -137,20 +137,32 @@ function buildMessages({ prompt, seed, chainId }) {
     "DO NOT include any fields not listed above. DO NOT include v/r/s/signature/RLP — those are at the wrong layer.",
     "DO NOT name dead testnets (goerli/ropsten/rinkeby/kovan). The Lean validator will reject them anyway.",
   ].join("\n");
+  // Append the skill body when present. The skill is treated as
+  // additional authoritative instructions for this specific action
+  // class. It overrides the generic system prompt where they conflict
+  // (the skill is more specific).
+  const fullSystem = skillContext
+    ? system +
+      "\n\n--- SKILL: " +
+      (skillContext.name ?? "(unnamed)") +
+      " ---\n" +
+      "The following skill scopes the action class for this request. Follow its 'Intent shape' section EXACTLY.\n\n" +
+      skillContext.body
+    : system;
   const userMsg = {
     prompt,
     regex_seed: seed ?? null,
     chain_id: chainId,
   };
   return [
-    { role: "system", content: system },
+    { role: "system", content: fullSystem },
     { role: "user", content: JSON.stringify(userMsg) },
   ];
 }
 
 /** Call llama-server's chat-completions endpoint, return raw model
  *  text. Retries once on ECONNREFUSED to ride out a server restart. */
-export async function parseIntent({ prompt, seed, chainId }, opts = {}) {
+export async function parseIntent({ prompt, seed, chainId, skillContext }, opts = {}) {
   const baseUrl = opts.baseUrl ?? process.env.LOCAL_LLM_BASE_URL ?? DEFAULT_BASE_URL;
   await assertLoopbackOnly(baseUrl);
   // Resolution order: explicit opts → env override → first model the server advertises.
@@ -160,7 +172,7 @@ export async function parseIntent({ prompt, seed, chainId }, opts = {}) {
   }
   const reasoning = opts.reasoning ?? process.env.LOCAL_LLM_REASONING ?? DEFAULT_REASONING;
 
-  const messages = buildMessages({ prompt, seed, chainId });
+  const messages = buildMessages({ prompt, seed, chainId, skillContext });
   const body = {
     model,
     messages,

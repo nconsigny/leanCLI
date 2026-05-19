@@ -30,7 +30,7 @@ const SYSTEM_PROMPT =
   "Do NOT invent contract addresses; if a token symbol can't be " +
   "resolved, ask the user. Output ONLY the JSON object, nothing else.";
 
-export async function parseIntent({ prompt, seed, chainId }, opts = {}) {
+export async function parseIntent({ prompt, seed, chainId, skillContext }, opts = {}) {
   const apiKey = opts.apiKey ?? process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     throw new Error("ANTHROPIC_API_KEY not set");
@@ -44,10 +44,18 @@ export async function parseIntent({ prompt, seed, chainId }, opts = {}) {
     chain_id: chainId,
   });
 
+  const fullSystem = skillContext
+    ? SYSTEM_PROMPT +
+      "\n\n--- SKILL: " +
+      (skillContext.name ?? "(unnamed)") +
+      " ---\n" +
+      "The following skill scopes the action class for this request. Follow its 'Intent shape' section EXACTLY.\n\n" +
+      skillContext.body
+    : SYSTEM_PROMPT;
   const resp = await client.messages.create({
     model,
     max_tokens: 1024,
-    system: SYSTEM_PROMPT,
+    system: fullSystem,
     messages: [{ role: "user", content: userPayload }],
   });
 
