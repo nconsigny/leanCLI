@@ -2619,7 +2619,33 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
             getField "chainId" req.params >>= asNat with
       | .ok prompt, some chainId =>
           -- 1. Regex pass (pure Lean). Always runs.
-          let regex := LeanKohaku.LlmAgent.RuleParser.parse prompt
+          let regex0 := LeanKohaku.LlmAgent.RuleParser.parse prompt
+          -- 1a. ENS pre-resolution. The model has no network egress; the
+          -- daemon does. Resolving `.eth` names here removes the most
+          -- common ask-loop ("can't resolve ENS, please paste 0x..."),
+          -- and the model's prompt context gets the canonical 0x in the
+          -- seed. Walks the conventionally-named recipient fields the
+          -- RuleParser produces.
+          let resolveEnsField : String → LeanKohaku.Ethereum.Intent.RegexDraft → IO LeanKohaku.Ethereum.Intent.RegexDraft :=
+            fun key d => do
+              match d.field? key with
+              | none => pure d
+              | some s =>
+                  if !s.endsWith ".eth" then pure d
+                  else
+                    match cfg.ensRpcEndpoint with
+                    | none =>
+                        pure (d.note s!"ENS resolution unavailable: set ens_rpc_url to auto-resolve {s}")
+                    | some ensEp =>
+                        let viaEns? ← colibriVia state 1
+                        match ← LeanKohaku.Ethereum.Ens.resolveIO cfg.policy ensEp 1 s viaEns? with
+                        | .ok r =>
+                            pure ((d.setField key r.address).note s!"resolved {s} → {r.address}")
+                        | .error (_, m) =>
+                            pure (d.note s!"failed to resolve {s}: {m}")
+          let regex1 ← resolveEnsField "to" regex0
+          let regex2 ← resolveEnsField "spender" regex1
+          let regex := regex2
           let regexJson : Json :=
             .obj #[
               ("action",     .str (LeanKohaku.Ethereum.Intent.Action.toString regex.action)),
