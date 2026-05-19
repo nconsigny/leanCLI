@@ -271,19 +271,10 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
       onSubmit={async () => {
         if (phase.busy) return;
         const text = phase.input.trim();
-        // Enter on EMPTY input → sign the latest signable draft.
-        // Enter on non-empty input → send the message as a new prompt.
-        // Matches "enter confirms" — there's no other useful meaning
-        // for enter on an empty box, so it doubles as the confirm key
-        // when a draft is waiting. Replaces the older "p — sign" hotkey.
-        if (text.length === 0) {
-          const latest = [...phase.turns].reverse().find(
-            (t): t is Extract<Turn, { kind: "assistant" }> =>
-              t.kind === "assistant" && t.status === "done" && !!t.result?.encoded,
-          );
-          if (latest) proceedWith(latest);
-          return;
-        }
+        // Enter inside the input box always means "send" — the sign
+        // affordance has moved to a separate Tab-focusable button
+        // above this bar (see ChatBody). Empty enter is a no-op.
+        if (text.length === 0) return;
         const turnsAfterUser: Turn[] = [
           ...phase.turns,
           { kind: "user", text },
@@ -443,12 +434,42 @@ function ChatBody({
   onSubmit: () => void;
   onProceed: (turn: Extract<Turn, { kind: "assistant" }>) => void;
 }) {
-  // Find the most recent encoded assistant turn — the next "enter on
-  // empty input" event signs this one.
+  // Find the most recent encoded assistant turn — the [Sign + broadcast]
+  // button (when focused) acts on this one.
   const latestSignable = [...turns].reverse().find(
     (t): t is Extract<Turn, { kind: "assistant" }> =>
       t.kind === "assistant" && t.status === "done" && !!t.result?.encoded,
   );
+
+  // Tab cycles focus between the text input and the sign button. The
+  // text input gets focus by default; the button only becomes
+  // focusable when there's actually a draft to sign. Holding the
+  // distinction explicitly in state lets us tell ink-text-input to
+  // STOP capturing keystrokes when focus is on the button — otherwise
+  // Tab would just insert a "\t" into the prompt.
+  const [focus, setFocus] = useState<"input" | "sign">("input");
+  // If the draft goes away (e.g. user retried and got an ask) and we
+  // were on the sign button, drop focus back to input.
+  useEffect(() => {
+    if (!latestSignable && focus === "sign") setFocus("input");
+  }, [latestSignable, focus]);
+
+  useInput((_ch, key) => {
+    if (busy) return;
+    if (key.tab && latestSignable) {
+      setFocus((f) => (f === "input" ? "sign" : "input"));
+      return;
+    }
+    // Enter while the button has focus → sign. (Enter inside the
+    // text input is handled by ink-text-input's onSubmit.)
+    if (key.return && focus === "sign" && latestSignable) {
+      onProceed(latestSignable);
+      // Stay on the button for the next draft, or drop back to input
+      // — handing back to input is more useful since the next thing
+      // the user does is usually type a refinement.
+      setFocus("input");
+    }
+  });
 
   return (
     <Container chainTag={`${chainName} (${chainId})`} wallets={wallets} modelName={modelName}>
@@ -484,33 +505,61 @@ function ChatBody({
         )}
       </Box>
 
+      {/* Sign button (only when a draft is pending). Sits above the
+        input box; gets focus via Tab. Border changes color and label
+        gets a ✓ glyph when focused so the user can see "I'm about to
+        sign on enter" before they press it. */}
+      {latestSignable && (
+        <Box
+          marginTop={1}
+          borderStyle={focus === "sign" ? "double" : "single"}
+          borderColor={focus === "sign" ? theme.ok : theme.dim}
+          paddingX={1}
+        >
+          <Text color={focus === "sign" ? theme.ok : theme.dim} bold>
+            {focus === "sign" ? "▶  ✓ Sign + broadcast (enter)" : "   ✓ Sign + broadcast (tab to focus)"}
+          </Text>
+          <Text color={theme.dim}>
+            {"   "}
+            ↳ {latestSignable.result?.intentActionTag ?? "encoded draft"} ·{" "}
+            simulate + ConfirmGate runs after this
+          </Text>
+        </Box>
+      )}
+
       {/* Input bar — double-border rectangle pinned below the conversation,
-        evoking Claude Code's prompt bar. The `> ` glyph + cursor inside
-        the box makes it obvious where to type. */}
+        evoking Claude Code's prompt bar. ink-text-input only captures
+        keystrokes while focus is on the input; tabbing to the sign
+        button frees up Enter for the sign action. */}
       <Box
         marginTop={1}
         flexDirection="column"
         borderStyle="double"
-        borderColor={busy ? theme.dim : theme.primary}
+        borderColor={busy ? theme.dim : focus === "input" ? theme.primary : theme.dim}
         paddingX={1}
       >
         <Box>
-          <Text color={busy ? theme.dim : theme.primary} bold>
-            {">  "}
+          <Text color={busy ? theme.dim : focus === "input" ? theme.primary : theme.dim} bold>
+            {focus === "input" ? ">  " : "·  "}
           </Text>
           {busy ? (
             <Text color={theme.dim}>
               <Spinner type="dots" /> thinking…
             </Text>
           ) : (
-            <TextInput value={input} onChange={onInputChange} onSubmit={onSubmit} />
+            <TextInput
+              value={input}
+              onChange={onInputChange}
+              onSubmit={onSubmit}
+              focus={focus === "input"}
+            />
           )}
         </Box>
       </Box>
       <Box marginTop={0}>
         <Text color={theme.dim}>
           {latestSignable
-            ? "enter on EMPTY input — sign latest draft · type then enter — new prompt · esc — leave"
+            ? "tab — toggle focus · enter — act on focused element · esc — leave chat"
             : "enter — send · esc — leave chat"}
         </Text>
       </Box>
@@ -597,7 +646,7 @@ function TurnRow({
       {r.canonical && <CanonicalLines canonical={r.canonical} />}
       {r.encoded && isLatestSignable && (
         <Box marginTop={1} paddingLeft={5}>
-          <Text color={theme.primary} bold>↳ press enter on the empty input box to confirm + sign </Text>
+          <Text color={theme.primary} bold>↳ tab to the [Sign + broadcast] button below, then enter to confirm </Text>
           <Text color={theme.dim}>(simulate + ConfirmGate)</Text>
         </Box>
       )}
