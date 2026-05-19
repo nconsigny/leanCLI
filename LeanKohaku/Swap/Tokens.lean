@@ -70,12 +70,23 @@ def registry : List Token := [
     decimals := 18, name := "Ethena USDe" },
   { symbol := "fxUSD",
     addressMainnet := "0x085780639cc2cacd35e474e71f4d000e2405d8f6",
+    -- f(x) Protocol's `fx-protocol-contracts` broadcast/ directory only
+    -- carries chainId 1 (mainnet); the gitbook contracts page lists
+    -- mainnet chains exclusively. No canonical Sepolia deployment found
+    -- — leave `none` rather than guess.
     addressSepolia := none,
     decimals := 18, name := "f(x) Protocol fxUSD" },
-  -- BOLD (Liquity v2): mainnet address could not be verified with high
-  -- confidence at the time of writing; intentionally OMITTED rather than
-  -- shipping a wrong address. Add it when a canonical deployment is
-  -- confirmed against the Liquity v2 docs.
+  { symbol := "BOLD",
+    -- Current Liquity v2 BOLD on mainnet. Etherscan labels the older
+    -- 0xb01dd87B…F3D9aB98 as "Old Bold Token"; the deployer-2 deployment
+    -- below is the canonical one in production.
+    addressMainnet := "0x6440f144b7e50d6a8439336510312d2f54beb01d",
+    -- Sepolia BOLD as listed in Liquity's docs "technical-resources"
+    -- page; source-verified on Sepolia Etherscan as
+    -- "Bold Stablecoin" (18 decimals). Refresh if Liquity rotates the
+    -- testnet deployment.
+    addressSepolia := some "0x620ce1130f7c63457784cdfa31cfccbfb6be5029",
+    decimals := 18, name := "Liquity BOLD" },
   { symbol := "AAVE",
     addressMainnet := "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
     addressSepolia := none,

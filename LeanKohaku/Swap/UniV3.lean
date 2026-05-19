@@ -44,6 +44,7 @@ def routerFor : LeanKohaku.Swap.Tokens.ChainId → String
       = 0x04e45aaf   [SwapRouter02 — no deadline]
   - multicall(bytes[])                = 0xac9650d8
   - refundETH()                       = 0x12210e8a
+  - unwrapWETH9(uint256,address)      = 0x49404b7c   [PeripheryPayments]
   - allowance(address,address)        = 0xdd62ed3e
   - approve(address,uint256)          = 0x095ea7b3
 -/
@@ -52,8 +53,17 @@ def selQuoteExactInputSingle : String := "c6a5026a"
 def selExactInputSingle      : String := "04e45aaf"
 def selMulticall             : String := "ac9650d8"
 def selRefundETH             : String := "12210e8a"
+def selUnwrapWETH9           : String := "49404b7c"
 def selAllowance             : String := "dd62ed3e"
 def selApprove               : String := "095ea7b3"
+
+/-- Router-side sentinel for `recipient`. SwapRouter02 rewrites
+    `recipient == address(2)` to `address(this)` inside `exactInputInternal`
+    (see `Constants.ADDRESS_THIS`), keeping the output token in the router
+    so a chained `unwrapWETH9` can convert it to native ETH. Plain
+    `address(0)` is NOT a substitute — it would forward to the pool's
+    callback recipient and revert. -/
+def addressThis : String := "0x0000000000000000000000000000000000000002"
 
 /-! ## Hex string helpers (work on the body, no `0x` prefix). -/
 
@@ -163,6 +173,15 @@ def encodeExactInputSingle (p : ExactInputSingleParams) : String :=
 
 /-- `refundETH()` — selector with no args. -/
 def encodeRefundETH : String := "0x" ++ selRefundETH
+
+/-- `unwrapWETH9(uint256 amountMinimum, address recipient)`. Called as the
+    second leg of an ERC20→ETH multicall: the first leg leaves WETH in
+    the router (recipient = `addressThis`), and this call unwraps and
+    forwards the resulting ETH to `recipient`. The router reverts if its
+    WETH balance is below `amountMinimum`, which is how the slippage
+    floor is enforced on the unwrap path. -/
+def encodeUnwrapWETH9 (amountMinimum : Nat) (recipient : String) : String :=
+  "0x" ++ selUnwrapWETH9 ++ encodeUint256 amountMinimum ++ encodeAddress recipient
 
 /-- `multicall(bytes[])` wrapping the provided `0x`-prefixed call payloads.
 

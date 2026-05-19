@@ -1,7 +1,10 @@
+import LeanKohaku.Aave.V3Pool
 import LeanKohaku.Crypto.Hex
 import LeanKohaku.Ethereum.Address
 import LeanKohaku.Ethereum.Erc20
 import LeanKohaku.Ethereum.Intent
+import LeanKohaku.Swap.Tokens
+import LeanKohaku.Swap.UniV3
 
 /-!
 # Intent → encoded transaction
@@ -17,22 +20,28 @@ on the supported intents).
 
 ## What this module covers (pure leaf actions)
 
-* `nativeTransfer`  — no calldata
-* `erc20Transfer`   — `transfer(address,uint256)`
-* `erc20Approve`    — `approve(address,uint256)`; `.unlimited` resolves
-  to `2^256 - 1`
-* `rawCall`         — pass-through, hex-encoded data
+* `nativeTransfer`       — no calldata
+* `erc20Transfer`        — `transfer(address,uint256)`
+* `erc20Approve`         — `approve(address,uint256)`; `.unlimited`
+  resolves to `2^256 - 1`
+* `uniswapV3SwapSingle`  — `SwapRouter02.exactInputSingle` (token→token
+  only; the Router address is resolved from the chain registry)
+* `aaveV3Supply`         — Pool.`supply(asset, amount, onBehalfOf, 0)`
+* `aaveV3Withdraw`       — Pool.`withdraw(asset, amount, recipient)`
+* `rawCall`              — pass-through, hex-encoded data
 
 ## What it deliberately does NOT cover
 
-`uniswapV3SwapSingle`, `aaveV3Supply`, `aaveV3Withdraw` are deferred to
-their per-action daemon RPCs (`swap.uniV3.build`, future
-`aave.*.build`). Those RPCs do chain-aware work (router address per
-chain, pre-flight allowance probe, market parameter lookup) that this
-pure encoder cannot. `encode` rejects them with a clear error pointing
-to the right RPC; the chat path produces them as separate Intents
-anyway (approve → wait-for-confirm → swap), so the leaf-only encoder is
-the right shape.
+* ETH-leg Uniswap V3 swaps (`tokenIn = WETH(eth-mode)` or
+  `tokenOut = WETH(eth-mode)`): those need the `multicall` wrapper
+  (refundETH / unwrapWETH9). Those still go through `swap.uniV3.build`,
+  which co-locates the multicall logic. Token→token swaps are encoded
+  here; the encoder is paramterized on the chain to pick the right
+  Router.
+* The approval pre-step for `aaveV3Supply`: the chat path emits an
+  `erc20Approve` Intent separately, and the user confirms each leg via
+  the same ConfirmGate. This encoder produces the bare `supply`
+  calldata; chaining is the caller's job.
 -/
 
 namespace LeanKohaku.Ethereum.IntentEncode
@@ -59,8 +68,18 @@ def approveAmountToNat : ApproveAmount → Nat
   | .exact n    => n
   | .unlimited  => LeanKohaku.Ethereum.Erc20.maxUint256
 
-/-- Pure encoder. `.ok` for the leaf actions; `.error` with a pointer to
-the right per-action RPC for the multi-step actions. -/
+/-- Map a numeric chain id to the registry's `ChainId` enum. Used by
+    the swap encoder to look up the SwapRouter02 address. -/
+private def chainEnum (cid : Nat) : Option LeanKohaku.Swap.Tokens.ChainId :=
+  match cid with
+  | 1        => some .mainnet
+  | 11155111 => some .sepolia
+  | _        => none
+
+/-- Pure encoder. `.ok` for every Intent variant the wallet has decided
+    is a leaf-encodable shape; `.error` when an Intent needs work that
+    this pure module cannot do (e.g. ETH-leg swaps, which need the
+    multicall wrapper from `swap.uniV3.build`). -/
 def encode : Intent → Except String EncodedTx
   | .nativeTransfer _ to amountWei =>
       .ok { to := addrHex to, valueWei := amountWei, data := "0x" }
@@ -73,12 +92,46 @@ def encode : Intent → Except String EncodedTx
             valueWei := 0
             data     := LeanKohaku.Ethereum.Erc20.encodeApprove
                           (addrHex spender) (approveAmountToNat amount) }
-  | .uniswapV3SwapSingle _ _ _ _ _ _ _ _ =>
-      .error "uniswapV3SwapSingle: use the swap.uniV3.build RPC (chain-aware router resolution + approval probe)"
-  | .aaveV3Supply _ _ _ _ =>
-      .error "aaveV3Supply: emit erc20Approve first, then aaveV3Supply via the dedicated per-action RPC"
-  | .aaveV3Withdraw _ _ _ _ =>
-      .error "aaveV3Withdraw: use the dedicated per-action RPC"
+  | .uniswapV3SwapSingle cid tokenIn tokenOut amountIn fee minAmountOut recipient _deadline =>
+      -- Slippage floor is structural: refuse minAmountOut = 0 BEFORE the
+      -- chain check. The IntentTrusted invariant
+      -- `encode_swap_refuses_zero_minOut` proves this branch is taken
+      -- by-rfl when minAmountOut = 0; reordering would break that proof.
+      if minAmountOut = 0 then
+        .error "uniswapV3SwapSingle: minAmountOut = 0 refused (would accept any slippage)"
+      else
+        match chainEnum cid with
+        | none =>
+            .error s!"uniswapV3SwapSingle: chain {cid} not in Lean registry — no Router address"
+        | some ce =>
+            let router := LeanKohaku.Swap.UniV3.routerFor ce
+            .ok { to       := router
+                  valueWei := 0
+                  data     := LeanKohaku.Swap.UniV3.encodeExactInputSingle
+                    { tokenIn := addrHex tokenIn
+                      tokenOut := addrHex tokenOut
+                      fee := fee
+                      recipient := addrHex recipient
+                      amountIn := amountIn
+                      amountOutMinimum := minAmountOut } }
+  | .aaveV3Supply cid asset amount onBehalfOf =>
+      match LeanKohaku.Aave.V3Pool.poolForChainId cid with
+      | none =>
+          .error s!"aaveV3Supply: Aave V3 Pool address unknown on chain {cid}"
+      | some pool =>
+          .ok { to       := pool
+                valueWei := 0
+                data     := LeanKohaku.Aave.V3Pool.encodeSupply
+                              (addrHex asset) amount (addrHex onBehalfOf) 0 }
+  | .aaveV3Withdraw cid asset amount recipient =>
+      match LeanKohaku.Aave.V3Pool.poolForChainId cid with
+      | none =>
+          .error s!"aaveV3Withdraw: Aave V3 Pool address unknown on chain {cid}"
+      | some pool =>
+          .ok { to       := pool
+                valueWei := 0
+                data     := LeanKohaku.Aave.V3Pool.encodeWithdraw
+                              (addrHex asset) amount (addrHex recipient) }
   | .rawCall _ to valueWei data _rationale =>
       .ok { to := addrHex to
             valueWei := valueWei

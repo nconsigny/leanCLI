@@ -70,12 +70,17 @@ export async function parseIntent({ prompt, seed, chainId, skillContext, chainCo
     const tokenLines = (chainContext.knownTokens ?? [])
       .map((t) => `  ${t.symbol.padEnd(8)} ${t.address}  decimals=${t.decimals}  (${t.name})`)
       .join("\n");
+    const protocolLines = (chainContext.knownProtocols ?? [])
+      .map((p) => `  ${p.alias.padEnd(10)} ${p.address}  (${p.name})`)
+      .join("\n");
     fullSystem +=
       "\n\n--- CHAIN CONTEXT: chain " +
       chainContext.chainId +
       " ---\n" +
       "Known token contracts (use these — DO NOT invent addresses):\n" +
-      (tokenLines || "  (none registered for this chain)");
+      (tokenLines || "  (none registered for this chain)") +
+      "\n\nKnown protocol contracts on this chain (Pool/router entry points; use these by alias — DO NOT ask the user for them, DO NOT invent):\n" +
+      (protocolLines || "  (none registered for this chain)");
   }
   if (skillContext) {
     fullSystem +=

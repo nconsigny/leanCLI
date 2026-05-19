@@ -536,24 +536,6 @@ export default function SwapFlow({ wallet, onDone }: Props) {
           onSelect={(it) => {
             const to = choices.find((t) => t.symbol === it.value);
             if (!to) return;
-            // Token → ETH: daemon explicitly rejects in this slice.
-            // Surface a clear hint right here rather than waiting for
-            // swap.uniV3.build to fail.
-            if (to.kind === "eth" && phase.from.kind !== "eth") {
-              return setPhase({
-                kind: "build-error",
-                ctx: stubCtx(
-                  phase.chain,
-                  phase.chains,
-                  fromAddress,
-                  phase.from,
-                  to,
-                  phase.tokens,
-                ),
-                message:
-                  "token → ETH unwrap is not yet supported in this slice. Pick WETH as the destination instead.",
-              });
-            }
             setPhase({
               kind: "enter-amount",
               tokens: phase.tokens,
@@ -1073,27 +1055,6 @@ function bigintToHex(v: unknown): string {
     }
   }
   return "0x0";
-}
-
-function stubCtx(
-  chain: ChainEntry,
-  chains: ChainEntry[],
-  fromAddress: string,
-  from: TokenItem,
-  to: TokenItem,
-  tokens: TokenItem[],
-): SwapCtx {
-  return {
-    chain,
-    chains,
-    fromAddress,
-    from,
-    to,
-    amountIn: 0n,
-    recipient: fromAddress,
-    slippageBps: 50,
-    tokens,
-  };
 }
 
 /** Render the chain header line shown in subtitles. Always communicates

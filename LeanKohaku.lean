@@ -15,6 +15,8 @@ import LeanKohaku.Transport.Uds
 import LeanKohaku.Util.Sandbox
 import LeanKohaku.Util.Units
 
+import LeanKohaku.Aave.V3Pool
+
 import LeanKohaku.Ethereum.Abi
 import LeanKohaku.Ethereum.Address
 import LeanKohaku.Ethereum.Chain
@@ -32,6 +34,7 @@ import LeanKohaku.Privacy.NetworkPolicy
 import LeanKohaku.Privacy.Bridge
 import LeanKohaku.Clearsign.Bridge
 import LeanKohaku.LlmAgent.Bridge
+import LeanKohaku.LlmAgent.DirectSynth
 import LeanKohaku.LlmAgent.IntentParser
 import LeanKohaku.LlmAgent.RuleParser
 import LeanKohaku.Sphincs.Bridge

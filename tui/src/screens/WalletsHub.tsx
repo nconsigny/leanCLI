@@ -13,6 +13,7 @@ import { theme } from "../theme.js";
 import { Layout } from "../widgets/Layout.js";
 import TabStrip from "../widgets/TabStrip.js";
 import Select from "../widgets/Select.js";
+import AnimatedKoi from "../widgets/AnimatedKoi.js";
 import { archiveKey, readArchive } from "../archiveStore.js";
 
 export type WalletsAction = "send" | "swap" | "shield" | "custom";
@@ -290,13 +291,18 @@ export default function WalletsHub({
       subtitle={`${tab.label} — ${tab.help}`}
       hint="←/→ action · ↑/↓ wallet · enter run · n chain · esc back"
     >
-      <Box
-        flexDirection="column"
-        borderStyle="double"
-        borderColor={theme.koiRed}
-        paddingX={2}
-        paddingY={0}
-      >
+      <Box flexDirection="row">
+        <Box marginRight={2}>
+          <AnimatedKoi size="tiny" />
+        </Box>
+        <Box
+          flexDirection="column"
+          borderStyle="double"
+          borderColor={theme.koiRed}
+          paddingX={2}
+          paddingY={0}
+          flexGrow={1}
+        >
         <Text color={theme.koiCream} backgroundColor={theme.koiInk} bold>
           {" leanKohaku · wallets "}
         </Text>
@@ -339,6 +345,7 @@ export default function WalletsHub({
             />
           </Box>
         )}
+        </Box>
       </Box>
     </Layout>
   );

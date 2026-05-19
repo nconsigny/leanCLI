@@ -13,8 +13,9 @@ UX produces.
 These theorems make precise the contract the TUI relies on:
 
 * The encoder is **total** on the four leaf variants.
-  (Swap is partial — `minAmountOut = 0` is rejected. Aave is reserved
-  for the per-action RPC.)
+  (Swap is partial — `minAmountOut = 0` is rejected. Aave is partial
+  on chain id: chains the registry doesn't know fall through to
+  `.error`. Both are deliberate.)
 * What goes in is what comes out: native value, recipient slot, and
   approve sentinel are preserved.
 * `rawCall` doesn't accidentally lose the caller's `valueWei`.
