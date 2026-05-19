@@ -88,6 +88,7 @@ import LeanKohaku.Invariants.Encoding
 import LeanKohaku.Invariants.Ens
 import LeanKohaku.Invariants.Eip712
 import LeanKohaku.Invariants.EthAmount
+import LeanKohaku.Invariants.IntentTrusted
 import LeanKohaku.Invariants.Keystore
 import LeanKohaku.Invariants.Mainnet
 import LeanKohaku.Invariants.Nonce
