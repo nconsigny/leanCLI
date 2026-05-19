@@ -254,6 +254,7 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
         sim={phase.sim}
         tpm={phase.tpm}
         canonical={tx.canonical}
+        chainId={chainId}
         onConfirm={() =>
           setPhase({
             kind: "send",
@@ -271,11 +272,15 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
   // Phase 6: actually sign + broadcast. EOA → eoa.send (already accepts
   // `data`). TPM/R1 → r1.sendRawSepolia with the captured PIN forwarded
   // so the daemon can pass it to the TPM auth check.
+  // The chain badge in the subtitle keeps the destination network
+  // visible on the broadcast screen — otherwise users can mis-identify
+  // which chain a failure refers to.
+  const chainBadge = chainTag(chainId);
   if (phase.tpm) {
     return (
       <RpcRunner
         title={`Sending tx as ${phase.wallet.name} (TPM/R1)`}
-        subtitle={`to ${tx.to} · TPM PIN will be checked at sign time`}
+        subtitle={`${chainBadge} · to ${tx.to} · TPM PIN will be checked at sign time`}
         method="r1.sendRawSepolia"
         params={{
           name: phase.wallet.name,
@@ -292,7 +297,7 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
   return (
     <RpcRunner
       title={`Sending tx as ${phase.wallet.name}`}
-      subtitle={`to ${tx.to} · value ${tx.value}`}
+      subtitle={`${chainBadge} · to ${tx.to} · value ${tx.value}`}
       method="eoa.send"
       params={{
         name: phase.wallet.name,
@@ -304,6 +309,22 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
       onDone={onDone}
     />
   );
+}
+
+/** Human-readable chain identifier — "sepolia (11155111)" beats raw ints
+ *  in any failure mode where the wrong-chain hypothesis matters. */
+function chainTag(chainId?: number): string {
+  if (chainId === undefined || chainId === null) return "chain (unset)";
+  const name =
+    chainId === 1 ? "mainnet" :
+    chainId === 11155111 ? "sepolia" :
+    chainId === 17000 ? "holesky" :
+    chainId === 10 ? "optimism" :
+    chainId === 8453 ? "base" :
+    chainId === 42161 ? "arbitrum" :
+    chainId === 137 ? "polygon" :
+    "chain";
+  return `${name} (${chainId})`;
 }
 
 function UnlockAndSimulate({
@@ -382,6 +403,7 @@ function ConfirmGate({
   sim,
   tpm,
   canonical,
+  chainId,
   onConfirm,
   onCancel,
 }: {
@@ -391,6 +413,7 @@ function ConfirmGate({
   sim: any;
   tpm: boolean;
   canonical?: string;
+  chainId?: number;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -401,7 +424,7 @@ function ConfirmGate({
   const okSim = sim?.ok === true;
   return (
     <Layout
-      title={`Confirm: sign as ${wallet.name}${tpm ? " (TPM/R1)" : ""}`}
+      title={`Confirm: sign as ${wallet.name}${tpm ? " (TPM/R1)" : ""} — ${chainTag(chainId)}`}
       subtitle={
         tpm
           ? `address ${shortAddr(wallet.address)} · TPM PIN will be checked at sign time`
