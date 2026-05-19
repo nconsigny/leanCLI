@@ -1,31 +1,36 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import Spinner from "ink-spinner";
-import { Layout, Banner } from "../widgets/Layout.js";
-import Form, { Field } from "../widgets/Form.js";
+import TextInput from "ink-text-input";
 import { call } from "../daemon.js";
 import { theme } from "../theme.js";
 
 /**
- * Opt-in local-LLM chat flow.
+ * Opt-in local-LLM chat flow — redesigned as a proper multi-turn chat.
  *
  * SECURITY GRADIENT (Vitalik "secure LLMs" framing):
  *   • Default Send / Swap = verified path: typed form fields → Lean
  *     Intent ADT → deterministic encoder → simulate → ConfirmGate.
- *     No NLP. No model. Suitable for high-value operations.
+ *     No NLP. No model.
  *   • THIS screen = experimental path: free-text prompt → regex (Lean)
  *     → llama-server (untrusted) → IntentParser hard-rejects (Lean)
  *     → deterministic encoder → simulate → ConfirmGate.
- *     The model is treated as malicious throughout; the user sees the
- *     canonical Intent text alongside the simulation in confirm.
  *
- * The "experimental" banner is intentional: users should understand
- * they are taking a different trust path than Send/Swap. Same wallet,
- * same key, weaker trust on what's being signed.
+ * UX shape: ChatGPT-like. Top is a scrollable conversation; bottom is a
+ * persistent text input. Each user prompt fires a chat.draft call; the
+ * response is rendered as an assistant turn. When the assistant turn
+ * carries an encoded tx, pressing `p` (proceed) hands off to
+ * SendRawFlow's confirm + sign gate. Esc leaves the chat.
+ *
+ * Each prompt is independent — there's no conversation context sent to
+ * the model yet. The chat is multi-turn from the user's perspective;
+ * the model sees each turn fresh. Carrying history into the LLM call
+ * is a follow-up; the wire shape is ready (chat.draft can grow a
+ * history field) but not yet wired.
  */
+
 type Props = {
   onDone: (s: boolean) => void;
-  /** Caller hooks the "Sign & broadcast" affordance to SendRawFlow. */
   onApprove?: (
     tx: { to: string; value: string; data: string; rationale?: string; canonical?: string },
     chainId: number,
@@ -46,286 +51,357 @@ type DraftResponse = {
   validateError?: string;
   encoded?: { to: string; value: number; data: string; chainId: number };
   encodeError?: string;
-  /** Set when the model legitimately returned the {error, ask} shape
-   *  (i.e., couldn't fill the intent without inventing). This is NOT a
-   *  Lean rejection — the model behaved correctly and is asking for
-   *  more info. UX-wise we surface it as a clarification, not a fail. */
   modelAsk?: { error: string; question: string };
 };
 
+type Turn =
+  | { kind: "user"; text: string }
+  | { kind: "assistant"; status: "pending" | "done"; result?: DraftResponse; error?: string }
+  | { kind: "system"; text: string; tone?: "info" | "warn" | "err" };
+
 type Phase =
-  | { kind: "form" }
-  | { kind: "ensuring"; prompt: string; chainId: number }
-  | { kind: "drafting"; prompt: string; chainId: number }
-  | { kind: "review"; chainId: number; result: DraftResponse }
-  | { kind: "err"; message: string };
+  | { kind: "boot" } // initial ensureUp + chainId form
+  | { kind: "needChain" }
+  | { kind: "chat"; chainId: number; turns: Turn[]; input: string; busy: boolean }
+  | { kind: "fatal"; message: string };
 
 export default function LlmChatFlow({ onDone, onApprove }: Props) {
-  const [phase, setPhase] = useState<Phase>({ kind: "form" });
+  const [phase, setPhase] = useState<Phase>({ kind: "boot" });
 
+  // Boot: ensureUp once.
   useEffect(() => {
-    if (phase.kind === "ensuring") {
-      let cancelled = false;
-      (async () => {
-        const r = await call<{ outcome: string }>("llm.ensureUp", {});
-        if (cancelled) return;
-        if (!r.ok) {
-          setPhase({ kind: "err", message: `llm.ensureUp failed: ${r.error.message}` });
-          return;
-        }
-        const out = r.result.outcome ?? "(unknown)";
-        if (out.startsWith("spawnFailed") || out === "spawnDisabled") {
-          setPhase({
-            kind: "err",
-            message:
-              `local model not available (${out}). Configure LLM_SERVER_BINARY + LLM_MODEL_PATH, or set LLM_BACKEND=anthropic with ANTHROPIC_API_KEY.`,
-          });
-          return;
-        }
-        setPhase({ kind: "drafting", prompt: phase.prompt, chainId: phase.chainId });
-      })();
-      return () => {
-        cancelled = true;
-      };
-    }
-    if (phase.kind === "drafting") {
-      let cancelled = false;
-      (async () => {
-        const r = await call<DraftResponse>("chat.draft", {
-          prompt: phase.prompt,
-          chainId: phase.chainId,
+    if (phase.kind !== "boot") return;
+    (async () => {
+      const r = await call<{ outcome: string }>("llm.ensureUp", {});
+      if (!r.ok) {
+        setPhase({ kind: "fatal", message: `llm.ensureUp failed: ${r.error.message}` });
+        return;
+      }
+      const out = r.result.outcome ?? "(unknown)";
+      if (out.startsWith("spawnFailed") || out === "spawnDisabled") {
+        setPhase({
+          kind: "fatal",
+          message:
+            `local model not available (${out}). Configure LLM_SERVER_BINARY + LLM_MODEL_PATH, or set LLM_BACKEND=anthropic with ANTHROPIC_API_KEY.`,
         });
-        if (cancelled) return;
-        if (!r.ok) {
-          setPhase({ kind: "err", message: `chat.draft failed: ${r.error.message}` });
-          return;
-        }
-        setPhase({ kind: "review", chainId: phase.chainId, result: r.result });
-      })();
-      return () => {
-        cancelled = true;
-      };
-    }
-  }, [phase]);
+        return;
+      }
+      setPhase({ kind: "needChain" });
+    })();
+  }, [phase.kind]);
 
-  useInput((_, key) => {
+  // Global keys: esc leaves the chat from any phase.
+  useInput((_input, key) => {
     if (key.escape) onDone(false);
   });
 
-  if (phase.kind === "form") {
-    const fields: Field[] = [
-      {
-        name: "chainId",
-        label: "Chain ID",
-        placeholder: "1 (mainnet) · 11155111 (sepolia)",
-        validate: (v) => (/^\d+$/.test(v) ? null : "expected a positive integer"),
-      },
-      {
-        name: "prompt",
-        label: "What do you want to do?",
-        placeholder: 'e.g. "send 0.01 ETH to 0x..."',
-        validate: (v) => (v.trim().length > 0 ? null : "required"),
-      },
-    ];
+  if (phase.kind === "boot") {
     return (
-      <Layout
-        title="Local-LLM chat (experimental)"
-        subtitle="untrusted model · regex seeds the LLM · Lean hard-rejects · simulate + confirm before signing"
-        hint="enter — submit · esc — cancel"
-      >
-        <Banner
-          kind="warn"
-          text="EXPERIMENTAL. This path runs your prompt through a local language model. For high-value transactions prefer the standard Send / Swap screens — those are constructed entirely from your typed fields and do not invoke any model."
-        />
-        <Form
-          fields={fields}
-          onSubmit={(v) =>
-            setPhase({
-              kind: "ensuring",
-              prompt: v.prompt ?? "",
-              chainId: Number(v.chainId ?? "0"),
-            })
-          }
-          onCancel={() => onDone(false)}
-        />
-      </Layout>
-    );
-  }
-
-  if (phase.kind === "ensuring") {
-    return (
-      <Layout title="Local-LLM chat" subtitle="checking llama-server" hint="esc — cancel">
+      <Container chainTag="…" >
         <Text>
-          <Text color={theme.primary}>
-            <Spinner type="dots" />
-          </Text>{" "}
+          <Text color={theme.primary}><Spinner type="dots" /></Text>{" "}
           probing local model · spawning if absent
         </Text>
-      </Layout>
+      </Container>
     );
   }
 
-  if (phase.kind === "drafting") {
+  if (phase.kind === "fatal") {
     return (
-      <Layout title="Local-LLM chat" subtitle="model + regex + Lean validator" hint="esc — cancel">
-        <Text>
-          <Text color={theme.primary}>
-            <Spinner type="dots" />
-          </Text>{" "}
-          regex → llama-server → IntentParser → encode
-        </Text>
-      </Layout>
-    );
-  }
-
-  if (phase.kind === "err") {
-    return (
-      <Layout title="Local-LLM chat" subtitle="error" hint="esc — back">
+      <Container chainTag="error">
         <Text color={theme.err}>{phase.message}</Text>
-      </Layout>
+        <Text color={theme.dim}>esc — back</Text>
+      </Container>
     );
   }
 
-  // review
-  const { result } = phase;
-  const canSign = !!(result.encoded && onApprove);
+  if (phase.kind === "needChain") {
+    return <ChainPicker onPick={(cid) => setPhase({ kind: "chat", chainId: cid, turns: [], input: "", busy: false })} />;
+  }
+
   return (
-    <Layout
-      title="Local-LLM chat — review"
-      subtitle={`chain ${phase.chainId} · ${result.intentActionTag ?? "n/a"}`}
-      hint={canSign ? "enter — sign · esc — back" : "esc — back"}
-    >
-      <RegexBlock regex={result.regex} />
-      <LlmRawBlock raw={result.llmRaw} err={result.llmError} />
-      {result.modelAsk && <ModelAskBlock ask={result.modelAsk} />}
-      <ValidateBlock err={result.validateError} encodeErr={result.encodeError} />
-      {result.canonical && <CanonicalBlock canonical={result.canonical} />}
-      {canSign && (
-        <SignAffordance
-          onApprove={() => {
-            onApprove!(
-              {
-                to: result.encoded!.to,
-                value: "0x" + BigInt(result.encoded!.value).toString(16),
-                data: result.encoded!.data,
-                rationale: "from local-LLM chat (experimental)",
-                canonical: result.canonical,
-              },
-              phase.chainId,
-            );
-          }}
-        />
-      )}
-    </Layout>
+    <ChatBody
+      chainId={phase.chainId}
+      turns={phase.turns}
+      input={phase.input}
+      busy={phase.busy}
+      onInputChange={(v) => setPhase({ ...phase, input: v })}
+      onSubmit={async () => {
+        const text = phase.input.trim();
+        if (!text || phase.busy) return;
+        const turnsAfterUser: Turn[] = [
+          ...phase.turns,
+          { kind: "user", text },
+          { kind: "assistant", status: "pending" },
+        ];
+        setPhase({ ...phase, turns: turnsAfterUser, input: "", busy: true });
+        const r = await call<DraftResponse>("chat.draft", { prompt: text, chainId: phase.chainId });
+        const finished: Turn = r.ok
+          ? { kind: "assistant", status: "done", result: r.result }
+          : { kind: "assistant", status: "done", error: r.error.message };
+        // Replace the pending assistant turn with the finished one.
+        const updated = [...turnsAfterUser];
+        updated[updated.length - 1] = finished;
+        setPhase((p) => (p.kind === "chat" ? { ...p, turns: updated, busy: false } : p));
+      }}
+      onProceed={(turn) => {
+        if (!turn.result?.encoded || !onApprove) return;
+        const enc = turn.result.encoded;
+        onApprove(
+          {
+            to: enc.to,
+            value: "0x" + BigInt(enc.value).toString(16),
+            data: enc.data,
+            rationale: "from local-LLM chat (experimental)",
+            canonical: turn.result.canonical,
+          },
+          phase.chainId,
+        );
+      }}
+    />
   );
 }
 
-function RegexBlock({ regex }: { regex?: DraftResponse["regex"] }) {
-  if (!regex) return null;
+/* ---------- Sub-components ---------- */
+
+function Container({ children, chainTag }: { children: React.ReactNode; chainTag: string }) {
   return (
-    <Box flexDirection="column" marginBottom={1} borderStyle="single" borderColor={theme.dim} paddingX={1}>
-      <Text bold color={theme.dim}>
-        regex (Lean, seed for the model)
-      </Text>
-      <Text>
-        <Text color={theme.dim}>action: </Text>
-        {regex.action}{" "}
-        <Text color={theme.dim}>· confidence: </Text>
-        {regex.confidence}
-      </Text>
-      {regex.fields.map((kv, i) => (
-        <Text key={i}>
-          <Text color={theme.dim}>{kv.k.padEnd(12)}</Text> {kv.v}
+    <Box flexDirection="column" paddingX={1}>
+      <Box borderStyle="single" borderColor={theme.dim} paddingX={1} flexDirection="column">
+        <Text color={theme.primary} bold>
+          Local-LLM chat (experimental){chainTag !== "…" ? ` — chain ${chainTag}` : ""}
         </Text>
-      ))}
-      {regex.unresolved.length > 0 &&
-        regex.unresolved.map((u, i) => (
-          <Text key={`u${i}`} color={theme.warn}>
-            ! {u}
-          </Text>
-        ))}
+        <Text color={theme.dim}>
+          untrusted model · regex+ENS seed · Lean validator · canonical text in confirm
+        </Text>
+      </Box>
+      <Box marginTop={1} flexDirection="column">{children}</Box>
     </Box>
   );
 }
 
-function LlmRawBlock({ raw, err }: { raw?: string; err?: string }) {
-  if (err) {
-    return (
-      <Box flexDirection="column" marginBottom={1} borderStyle="single" borderColor={theme.err} paddingX={1}>
-        <Text bold color={theme.err}>
-          llm sidecar error
+function ChainPicker({ onPick }: { onPick: (chainId: number) => void }) {
+  const [val, setVal] = useState("11155111");
+  return (
+    <Container chainTag="…">
+      <Box flexDirection="column">
+        <Text color={theme.dim}>Pick a chain to chat against. Common: 1 (mainnet), 11155111 (sepolia).</Text>
+        <Box marginTop={1}>
+          <Text color={theme.primary}>chain ▸ </Text>
+          <TextInput
+            value={val}
+            onChange={setVal}
+            onSubmit={() => {
+              const n = Number(val.trim());
+              if (Number.isFinite(n) && n > 0) onPick(n);
+            }}
+          />
+        </Box>
+        <Text color={theme.dim}>enter — start · esc — back</Text>
+      </Box>
+    </Container>
+  );
+}
+
+function ChatBody({
+  chainId,
+  turns,
+  input,
+  busy,
+  onInputChange,
+  onSubmit,
+  onProceed,
+}: {
+  chainId: number;
+  turns: Turn[];
+  input: string;
+  busy: boolean;
+  onInputChange: (v: string) => void;
+  onSubmit: () => void;
+  onProceed: (turn: Extract<Turn, { kind: "assistant" }>) => void;
+}) {
+  // Find the most recent encoded assistant turn for the proceed hotkey.
+  const latestSignable = [...turns].reverse().find(
+    (t): t is Extract<Turn, { kind: "assistant" }> =>
+      t.kind === "assistant" && t.status === "done" && !!t.result?.encoded,
+  );
+
+  useInput((ch, key) => {
+    // 'p' = proceed to sign the latest signable assistant turn.
+    if (!busy && ch?.toLowerCase() === "p" && latestSignable) {
+      onProceed(latestSignable);
+    }
+  });
+
+  return (
+    <Container chainTag={String(chainId)}>
+      <Box flexDirection="column">
+        {turns.length === 0 && (
+          <Text color={theme.dim}>
+            Try: <Text color={theme.primary}>send 0.001 ETH to niard.eth</Text> · {" "}
+            <Text color={theme.primary}>approve 100 USDC for 0x...</Text>
+          </Text>
+        )}
+        {turns.map((t, i) => (
+          <TurnRow key={i} turn={t} isLatestSignable={t === latestSignable} />
+        ))}
+      </Box>
+
+      {/* Input bar */}
+      <Box marginTop={1} flexDirection="column">
+        <Box>
+          <Text color={busy ? theme.dim : theme.primary}>
+            you ▸{" "}
+          </Text>
+          {busy ? (
+            <Text color={theme.dim}>
+              <Spinner type="dots" /> thinking…
+            </Text>
+          ) : (
+            <TextInput value={input} onChange={onInputChange} onSubmit={onSubmit} />
+          )}
+        </Box>
+        <Text color={theme.dim}>
+          enter — send {latestSignable ? "· p — proceed to sign latest draft " : ""}· esc — leave chat
         </Text>
-        <Text>{err}</Text>
+      </Box>
+    </Container>
+  );
+}
+
+function TurnRow({
+  turn,
+  isLatestSignable,
+}: {
+  turn: Turn;
+  isLatestSignable: boolean;
+}) {
+  if (turn.kind === "user") {
+    return (
+      <Box marginBottom={1}>
+        <Text color={theme.primary}>you ▸ </Text>
+        <Text>{turn.text}</Text>
       </Box>
     );
   }
-  if (!raw) return null;
+  if (turn.kind === "system") {
+    const color =
+      turn.tone === "err" ? theme.err : turn.tone === "warn" ? theme.warn : theme.dim;
+    return (
+      <Box marginBottom={1}>
+        <Text color={color}>· {turn.text}</Text>
+      </Box>
+    );
+  }
+  // assistant
+  if (turn.status === "pending") {
+    return (
+      <Box marginBottom={1}>
+        <Text color={theme.dim}>ai ▸ </Text>
+        <Text color={theme.dim}>
+          <Spinner type="dots" /> regex → llama-server → IntentParser → encode
+        </Text>
+      </Box>
+    );
+  }
+  if (turn.error) {
+    return (
+      <Box marginBottom={1} flexDirection="column">
+        <Box>
+          <Text color={theme.err}>ai ▸ </Text>
+          <Text color={theme.err}>transport error: {turn.error}</Text>
+        </Box>
+      </Box>
+    );
+  }
+  const r = turn.result!;
   return (
-    <Box flexDirection="column" marginBottom={1} borderStyle="single" borderColor={theme.dim} paddingX={1}>
-      <Text bold color={theme.dim}>
-        llm raw output (untrusted — validated below)
-      </Text>
-      <Text>{raw.slice(0, 400)}</Text>
+    <Box marginBottom={1} flexDirection="column">
+      <Box>
+        <Text color={theme.ok}>ai ▸ </Text>
+        <Text>
+          {r.intentActionTag ?? r.regex?.action ?? "(no action)"}{" "}
+          <Text color={theme.dim}>
+            · regex={r.regex?.confidence ?? "?"}
+          </Text>
+        </Text>
+      </Box>
+
+      {/* Compact body. Each block omitted when absent. */}
+      {r.regex && <RegexLine regex={r.regex} />}
+      {r.modelAsk && <AskLine ask={r.modelAsk} />}
+      {(r.validateError || r.encodeError || r.llmError) && (
+        <RejectLine
+          validateErr={r.validateError}
+          encodeErr={r.encodeError}
+          llmErr={r.llmError}
+        />
+      )}
+      {r.canonical && <CanonicalLines canonical={r.canonical} />}
+      {r.encoded && isLatestSignable && (
+        <Box marginTop={1} paddingLeft={5}>
+          <Text color={theme.primary} bold>↳ press p to confirm + sign </Text>
+          <Text color={theme.dim}>(simulate + ConfirmGate)</Text>
+        </Box>
+      )}
     </Box>
   );
 }
 
-function ModelAskBlock({ ask }: { ask: { error: string; question: string } }) {
+function RegexLine({
+  regex,
+}: {
+  regex: NonNullable<DraftResponse["regex"]>;
+}) {
   return (
-    <Box flexDirection="column" marginBottom={1} borderStyle="single" borderColor={theme.warn} paddingX={1}>
-      <Text bold color={theme.warn}>
-        model asks for clarification (this is fine — not a rejection)
-      </Text>
-      <Text>
-        <Text color={theme.dim}>reason: </Text>
-        {ask.error}
-      </Text>
-      <Text>
-        <Text color={theme.dim}>asks:   </Text>
-        {ask.question}
-      </Text>
+    <Box paddingLeft={5} flexDirection="column">
       <Text color={theme.dim}>
-        Press esc, then re-enter the prompt with the missing info (e.g. paste a 0x address).
+        regex: {regex.fields.map((kv) => `${kv.k}=${kv.v}`).join("  ")}
       </Text>
-    </Box>
-  );
-}
-
-function ValidateBlock({ err, encodeErr }: { err?: string; encodeErr?: string }) {
-  if (!err && !encodeErr) return null;
-  return (
-    <Box flexDirection="column" marginBottom={1} borderStyle="single" borderColor={theme.err} paddingX={1}>
-      <Text bold color={theme.err}>
-        rejected by Lean
-      </Text>
-      {err && <Text>validate: {err}</Text>}
-      {encodeErr && <Text>encode: {encodeErr}</Text>}
-    </Box>
-  );
-}
-
-function CanonicalBlock({ canonical }: { canonical: string }) {
-  return (
-    <Box flexDirection="column" marginBottom={1} borderStyle="single" borderColor={theme.ok} paddingX={1}>
-      <Text bold color={theme.ok}>
-        canonical intent (Lean-rendered, version-stable)
-      </Text>
-      {canonical.split("\n").map((line, i) => (
-        <Text key={i}>{line}</Text>
+      {regex.unresolved.map((u, i) => (
+        <Text key={i} color={theme.dim}>! {u}</Text>
       ))}
     </Box>
   );
 }
 
-function SignAffordance({ onApprove }: { onApprove: () => void }) {
-  useInput((_, key) => {
-    if (key.return) onApprove();
-  });
+function AskLine({ ask }: { ask: { error: string; question: string } }) {
   return (
-    <Box marginTop={1}>
-      <Text>
-        <Text color={theme.primary}>enter</Text> — proceed to confirm + sign
+    <Box paddingLeft={5} flexDirection="column">
+      <Text color={theme.warn}>
+        model asks (this is fine — not a rejection):
       </Text>
+      <Text color={theme.warn}>  reason: {ask.error}</Text>
+      <Text color={theme.warn}>  asks:   {ask.question}</Text>
+    </Box>
+  );
+}
+
+function RejectLine({
+  validateErr,
+  encodeErr,
+  llmErr,
+}: {
+  validateErr?: string;
+  encodeErr?: string;
+  llmErr?: string;
+}) {
+  return (
+    <Box paddingLeft={5} flexDirection="column">
+      {llmErr && <Text color={theme.err}>llm: {llmErr}</Text>}
+      {validateErr && <Text color={theme.err}>rejected: {validateErr}</Text>}
+      {encodeErr && <Text color={theme.err}>encode: {encodeErr}</Text>}
+    </Box>
+  );
+}
+
+function CanonicalLines({ canonical }: { canonical: string }) {
+  return (
+    <Box paddingLeft={5} flexDirection="column" marginTop={1}>
+      <Text color={theme.ok} bold>canonical (Lean):</Text>
+      {canonical.split("\n").map((line, i) => (
+        <Text key={i}>  {line}</Text>
+      ))}
     </Box>
   );
 }
