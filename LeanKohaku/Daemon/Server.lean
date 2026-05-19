@@ -1,4 +1,5 @@
 import LeanKohaku.Basic
+import LeanKohaku.Daemon.LlmServer
 import LeanKohaku.Daemon.Log
 import LeanKohaku.Daemon.State
 import LeanKohaku.Daemon.TxJournal
@@ -2592,6 +2593,15 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       let resp ← LeanKohaku.LlmAgent.Bridge.call
         { method := "ping", params := .obj #[], id := 0 }
       pure <| .ok <| LeanKohaku.LlmAgent.Bridge.responseToJson resp
+  | "llm.ensureUp" =>
+      -- TUI's chat flow calls this on entry. Idempotent: probes
+      -- LLM_BASE_URL; if down and LLM_AUTO_SPAWN/LLM_SERVER_BINARY are
+      -- configured, spawns llama-server and waits for /v1/models to go
+      -- 200 OK. Reports outcome verbatim for UX surfacing.
+      let outcome ← LeanKohaku.Daemon.LlmServer.ensureUp
+      pure <| .ok <| .obj #[
+        ("outcome", .str outcome.toString)
+      ]
   | "llm.parseIntent" =>
       -- Forward the prompt + regex seed + chainId to the LLM sidecar,
       -- which returns the raw model output (a JSON string) unchanged.

@@ -64,6 +64,7 @@ import LeanKohaku.RPC.Outbound
 import LeanKohaku.RPC.Server
 
 import LeanKohaku.Daemon.Config
+import LeanKohaku.Daemon.LlmServer
 import LeanKohaku.Daemon.Log
 import LeanKohaku.Daemon.Server
 import LeanKohaku.Daemon.State
