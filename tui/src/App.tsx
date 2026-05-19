@@ -122,6 +122,7 @@ export default function App() {
   const handleMain = (a: MainAction) => {
     switch (a) {
       case "wallets":         return push({ kind: "wallets" });
+      case "le-chat":         return push({ kind: "llm-chat" });
       case "create-wallet":   return push({ kind: "create-wallet" });
       case "import-wallet":   return push({ kind: "import-wallet" });
       case "private":         return push({ kind: "private" });
@@ -281,7 +282,6 @@ export default function App() {
           onPick={(a) => {
             if (a === "resolve") push({ kind: "resolve" });
             else if (a === "decode-intent") push({ kind: "decode-intent" });
-            else if (a === "llm-chat") push({ kind: "llm-chat" });
             else if (a === "decode-typed-data") push({ kind: "decode-typed-data" });
             else if (a === "archived-accounts") push({ kind: "archived-accounts" });
             else if (a === "daemon") push({ kind: "daemon" });

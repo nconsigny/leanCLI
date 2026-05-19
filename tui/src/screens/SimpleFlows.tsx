@@ -284,7 +284,6 @@ export type MoreAction =
   | "resolve"
   | "decode-intent"
   | "decode-typed-data"
-  | "llm-chat"
   | "archived-accounts"
   | "daemon"
   | "back";
@@ -301,7 +300,6 @@ export function MoreCommandsScreen({
   });
 
   const items: { label: string; value: MoreAction }[] = [
-    { label: "Local-LLM chat (experimental)",                 value: "llm-chat" },
     { label: "Decode transaction (ERC-7730)",                 value: "decode-intent" },
     { label: "Decode typed data (EIP-712)",                   value: "decode-typed-data" },
     { label: "Resolve ENS name",                              value: "resolve" },

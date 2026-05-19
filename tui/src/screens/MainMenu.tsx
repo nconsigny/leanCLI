@@ -7,6 +7,7 @@ import { theme } from "../theme.js";
 
 export type MainAction =
   | "wallets"
+  | "le-chat"
   | "create-wallet"
   | "import-wallet"
   | "private"
@@ -36,6 +37,7 @@ export default function MainMenu({
 
   const items: { label: string; value: MainAction }[] = [
     { label: "Wallets",                                                  value: "wallets" },
+    { label: "le chat (local-LLM, experimental)",                        value: "le-chat" },
     { label: "Privacy Plugins",                                          value: "private" },
     { label: "Create wallet / Add account",                              value: "create-wallet" },
     { label: "Import wallet",                                            value: "import-wallet" },

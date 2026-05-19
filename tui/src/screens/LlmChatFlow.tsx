@@ -209,15 +209,29 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
 
 /* ---------- Sub-components ---------- */
 
+/** Outer chrome for the chat screen. Two distinct boxes:
+ *  - Top: header rectangle showing what this screen is + active chain.
+ *  - Below: whatever the phase wants to render (chain picker, chat body,
+ *    error). The body lives in its own flexed column so input bar can be
+ *    pinned at the bottom of the chat phase. */
 function Container({ children, chainTag }: { children: React.ReactNode; chainTag: string }) {
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Box borderStyle="single" borderColor={theme.dim} paddingX={1} flexDirection="column">
-        <Text color={theme.primary} bold>
-          Local-LLM chat (experimental){chainTag !== "…" ? ` — chain ${chainTag}` : ""}
+      {/* Header rectangle — the koi-red double border identifies this as
+        a top-level hub screen, same convention as the main menu. */}
+      <Box
+        borderStyle="double"
+        borderColor={theme.koiRed}
+        paddingX={2}
+        paddingY={0}
+        flexDirection="column"
+      >
+        <Text color={theme.koiCream} backgroundColor={theme.koiInk} bold>
+          {" le chat · local LLM "}
+          {chainTag !== "…" ? `· ${chainTag}` : ""}
         </Text>
         <Text color={theme.dim}>
-          untrusted model · regex+ENS seed · Lean validator · canonical text in confirm
+          untrusted model · regex+ENS+wallet seed · Lean validator · canonical text in confirm
         </Text>
       </Box>
       <Box marginTop={1} flexDirection="column">{children}</Box>
@@ -291,23 +305,51 @@ function ChatBody({
 
   return (
     <Container chainTag={`${chainName} (${chainId})`}>
-      <Box flexDirection="column">
-        {turns.length === 0 && (
-          <Text color={theme.dim}>
-            Try: <Text color={theme.primary}>send 0.001 ETH to niard.eth</Text> · {" "}
-            <Text color={theme.primary}>approve 100 USDC for 0x...</Text>
-          </Text>
+      {/* Conversation block — every turn renders as a row inside the
+        framed rectangle. Single border so it visually nests under the
+        koi-red header. */}
+      <Box
+        flexDirection="column"
+        borderStyle="single"
+        borderColor={theme.dim}
+        paddingX={1}
+        paddingY={0}
+      >
+        {turns.length === 0 ? (
+          <Box flexDirection="column">
+            <Text color={theme.dim}>
+              Examples to try:
+            </Text>
+            <Text color={theme.dim}>
+              {"  "}<Text color={theme.primary}>send 0.001 ETH to niard.eth</Text>
+            </Text>
+            <Text color={theme.dim}>
+              {"  "}<Text color={theme.primary}>approve 100 USDC for vitalik.eth</Text>
+            </Text>
+            <Text color={theme.dim}>
+              {"  "}<Text color={theme.primary}>revoke USDC for 0xC0deDeAD...</Text>
+            </Text>
+          </Box>
+        ) : (
+          turns.map((t, i) => (
+            <TurnRow key={i} turn={t} isLatestSignable={t === latestSignable} />
+          ))
         )}
-        {turns.map((t, i) => (
-          <TurnRow key={i} turn={t} isLatestSignable={t === latestSignable} />
-        ))}
       </Box>
 
-      {/* Input bar */}
-      <Box marginTop={1} flexDirection="column">
+      {/* Input bar — double-border rectangle pinned below the conversation,
+        evoking Claude Code's prompt bar. The `> ` glyph + cursor inside
+        the box makes it obvious where to type. */}
+      <Box
+        marginTop={1}
+        flexDirection="column"
+        borderStyle="double"
+        borderColor={busy ? theme.dim : theme.primary}
+        paddingX={1}
+      >
         <Box>
-          <Text color={busy ? theme.dim : theme.primary}>
-            you ▸{" "}
+          <Text color={busy ? theme.dim : theme.primary} bold>
+            {">  "}
           </Text>
           {busy ? (
             <Text color={theme.dim}>
@@ -317,8 +359,10 @@ function ChatBody({
             <TextInput value={input} onChange={onInputChange} onSubmit={onSubmit} />
           )}
         </Box>
+      </Box>
+      <Box marginTop={0}>
         <Text color={theme.dim}>
-          enter — send {latestSignable ? "· p — proceed to sign latest draft " : ""}· esc — leave chat
+          enter — send{latestSignable ? " · p — sign latest draft" : ""} · esc — leave chat
         </Text>
       </Box>
     </Container>
@@ -334,9 +378,13 @@ function TurnRow({
 }) {
   if (turn.kind === "user") {
     return (
-      <Box marginBottom={1}>
-        <Text color={theme.primary}>you ▸ </Text>
-        <Text>{turn.text}</Text>
+      <Box marginBottom={1} flexDirection="column">
+        <Box>
+          <Text color={theme.primary} bold>{"› you  "}</Text>
+        </Box>
+        <Box paddingLeft={2}>
+          <Text>{turn.text}</Text>
+        </Box>
       </Box>
     );
   }
@@ -352,11 +400,15 @@ function TurnRow({
   // assistant
   if (turn.status === "pending") {
     return (
-      <Box marginBottom={1}>
-        <Text color={theme.dim}>ai ▸ </Text>
-        <Text color={theme.dim}>
-          <Spinner type="dots" /> regex → llama-server → IntentParser → encode
-        </Text>
+      <Box marginBottom={1} flexDirection="column">
+        <Box>
+          <Text color={theme.dim} bold>{"› le chat"}</Text>
+        </Box>
+        <Box paddingLeft={2}>
+          <Text color={theme.dim}>
+            <Spinner type="dots" /> regex → llama-server → IntentParser → encode
+          </Text>
+        </Box>
       </Box>
     );
   }
@@ -364,7 +416,9 @@ function TurnRow({
     return (
       <Box marginBottom={1} flexDirection="column">
         <Box>
-          <Text color={theme.err}>ai ▸ </Text>
+          <Text color={theme.err} bold>{"› le chat"}</Text>
+        </Box>
+        <Box paddingLeft={2}>
           <Text color={theme.err}>transport error: {turn.error}</Text>
         </Box>
       </Box>
@@ -374,13 +428,11 @@ function TurnRow({
   return (
     <Box marginBottom={1} flexDirection="column">
       <Box>
-        <Text color={theme.ok}>ai ▸ </Text>
+        <Text color={theme.ok} bold>{"› le chat  "}</Text>
         <Text>
-          {r.intentActionTag ?? r.regex?.action ?? "(no action)"}{" "}
-          <Text color={theme.dim}>
-            · regex={r.regex?.confidence ?? "?"}
-          </Text>
+          {r.intentActionTag ?? r.regex?.action ?? "(no action)"}
         </Text>
+        <Text color={theme.dim}>{" · regex="}{r.regex?.confidence ?? "?"}</Text>
       </Box>
 
       {/* Compact body. Each block omitted when absent. */}
