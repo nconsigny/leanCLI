@@ -276,6 +276,7 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
   // visible on the broadcast screen — otherwise users can mis-identify
   // which chain a failure refers to.
   const chainBadge = chainTag(chainId);
+  const chainName = chainIdToName(chainId);
   if (phase.tpm) {
     return (
       <RpcRunner
@@ -301,6 +302,7 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
       method="eoa.send"
       params={{
         name: phase.wallet.name,
+        chain: chainName,
         to: tx.to,
         value: hexToBigInt(tx.value),
         data: tx.data,
@@ -315,16 +317,28 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
  *  in any failure mode where the wrong-chain hypothesis matters. */
 function chainTag(chainId?: number): string {
   if (chainId === undefined || chainId === null) return "chain (unset)";
-  const name =
-    chainId === 1 ? "mainnet" :
-    chainId === 11155111 ? "sepolia" :
-    chainId === 17000 ? "holesky" :
-    chainId === 10 ? "optimism" :
-    chainId === 8453 ? "base" :
-    chainId === 42161 ? "arbitrum" :
-    chainId === 137 ? "polygon" :
-    "chain";
-  return `${name} (${chainId})`;
+  const n = chainIdToName(chainId);
+  return n ? `${n} (${chainId})` : `chain ${chainId}`;
+}
+
+/** chainId (numeric) → canonical name expected by daemon RPCs that gate
+ *  on `chain`. The daemon's `endpointForChain` matches on the key in
+ *  `cfg.chainEndpoints` — typically the chain's English name. */
+function chainIdToName(chainId?: number): string | undefined {
+  if (chainId === undefined || chainId === null) return undefined;
+  switch (chainId) {
+    case 1:        return "mainnet";
+    case 11155111: return "sepolia";
+    case 17000:    return "holesky";
+    case 10:       return "optimism";
+    case 8453:     return "base";
+    case 84532:    return "base-sepolia";
+    case 42161:    return "arbitrum";
+    case 421614:   return "arbitrum-sepolia";
+    case 11155420: return "op-sepolia";
+    case 137:      return "polygon";
+    default:       return undefined;
+  }
 }
 
 function UnlockAndSimulate({
@@ -357,6 +371,9 @@ function UnlockAndSimulate({
 
       // Decode + simulate in parallel, exactly like the manual decode
       // screen does.
+      // Daemon RPCs gate the endpoint on `chain` (name); chainId is kept
+      // for the decoder. Pass both so the simulate hits the right RPC.
+      const chainName = chainIdToName(chainId);
       const [d, s] = await Promise.all([
         call<any>("tx.decodeIntent", {
           chainId: chainId ?? 1,
@@ -367,6 +384,7 @@ function UnlockAndSimulate({
         }),
         call<any>("tx.simulate", {
           chainId: chainId ?? 1,
+          chain: chainName,
           to: tx.to,
           value: tx.value,
           data: tx.data,

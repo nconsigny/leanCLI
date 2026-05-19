@@ -2466,8 +2466,26 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                           | .ok privateKey =>
                               -- Why: re-target slot at the resolved account so nonce/from come from the right address.
                               let slot' := { slot with address := fromAddr, derivationPath := path }
-                              let via? ← colibriVia state cfg.chainId
-                              let r ← buildSignBroadcastTx cfg slot' privateKey to toAddress value data none (some notify) via?
+                              -- Per-call chain override. Honors `params.chain`
+                              -- when present: pick the per-chain endpoint
+                              -- from cfg.chainEndpoints + the corresponding
+                              -- chainId so the broadcast goes to the right
+                              -- network. Without this, the chat path's
+                              -- chainId=11155111 prompt broadcasted on the
+                              -- daemon's default chain (mainnet) and tripped
+                              -- the mainnet policy.
+                              let chainName? := getField "chain" req.params >>= asString
+                              let cfgEff : Config :=
+                                match chainName? with
+                                | none => cfg
+                                | some name =>
+                                    match endpointForChain cfg (some name) with
+                                    | .error _ => cfg
+                                    | .ok ep =>
+                                        let cid := (LeanKohaku.RPC.Outbound.chainNameToId name).getD cfg.chainId
+                                        { cfg with rpcEndpoint := ep, chainId := cid }
+                              let via? ← colibriVia state cfgEff.chainId
+                              let r ← buildSignBroadcastTx cfgEff slot' privateKey to toAddress value data none (some notify) via?
                               -- Why: best-effort journal write; never fails the tx.
                               match r with
                               | .ok j =>
@@ -2482,7 +2500,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                                   let gas? := if (getStr "gasUsed").isEmpty then none else some (getStr "gasUsed")
                                   if !txHash.isEmpty then
                                     journalRecord slot.name fromAddr to txHash dataHex "eoa.send"
-                                      value nonceN cfg.chainId acc? status? block? gas?
+                                      value nonceN cfgEff.chainId acc? status? block? gas?
                               | .error _ => pure ()
                               pure r
               | _, _ => pure (.error invalidParams)
