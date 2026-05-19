@@ -258,12 +258,16 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
     return .error "no rpc_url configured: refusing to dial (set LEANKOHAKU_RPC_URL or 'rpc_url' in daemon.json)"
   let host := hostOfUrl endpoint.url
   unless requestAllowed policy endpoint method do
+    let chainTag : String := match endpoint.chainId with
+      | none => "unknown"
+      | some n => toString n
     logEvent "denied" method.asString
       #[("url", .str endpoint.url),
         ("host", .str host),
         ("backend", .str endpoint.backend.asString),
-        ("transport", .str endpoint.transport.asString)]
-    return .error s!"network policy denied method={method.asString} backend={endpoint.backend.asString} transport={endpoint.transport.asString}"
+        ("transport", .str endpoint.transport.asString),
+        ("chainId", .str chainTag)]
+    return .error s!"network policy denied method={method.asString} backend={endpoint.backend.asString} transport={endpoint.transport.asString} chainId={chainTag}"
   let v ← verboseLevel
   let t0 ← IO.monoMsNow
   if v ≥ 1 then
