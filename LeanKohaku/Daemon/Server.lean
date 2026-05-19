@@ -2985,7 +2985,20 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           let mut walletEntries : List (String × String) := []
           for name in eoaNames do
             match ← LeanKohaku.Wallet.EoaStore.load name with
-            | .ok rec => walletEntries := walletEntries ++ [(rec.name, rec.address)]
+            | .ok rec =>
+                -- Primary slot address ("leanWallet" → 0x…).
+                walletEntries := walletEntries ++ [(rec.name, rec.address)]
+                -- Each BIP-32 sub-account: "leanWallet/0",
+                -- "leanWallet/ops", etc. The label wins when present;
+                -- falls back to the integer index. Lets the user
+                -- reference a sub-account by name in the chat without
+                -- having to look up the derived address.
+                for acct in recordAccounts rec do
+                  let subKey :=
+                    match acct.label with
+                    | some l => s!"{rec.name}/{l}"
+                    | none   => s!"{rec.name}/{acct.index}"
+                  walletEntries := walletEntries ++ [(subKey, acct.address)]
             | .error _ => pure ()
           let tpmNames ← listSepoliaKeys
           let tpmStateDir : System.FilePath := ".leankohaku/keystore/tpm2"
