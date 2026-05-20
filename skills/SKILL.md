@@ -49,13 +49,13 @@ keeps prompts small and the model focused.
 | [approve-erc20](approve-erc20/SKILL.md)    | transfer | medium | Grant an ERC-20 allowance to a spender (any non-zero amount, or unlimited). |
 | [revoke-approval](revoke-approval/SKILL.md)| hygiene  | low    | Revoke an existing ERC-20 allowance by setting it to exactly 0. |
 | [audit-approvals](audit-approvals/SKILL.md)| hygiene  | none   | Read-only: list current outgoing allowances for a wallet. |
-| [shield-eth](shield-eth/SKILL.md)          | privacy  | medium | Deposit native ETH into Privacy Pools so it can be withdrawn later to a fresh address. |
-| [unshield-eth](unshield-eth/SKILL.md)      | privacy  | medium | Withdraw shielded ETH to a fresh receiving address. |
-| [fresh-address](fresh-address/SKILL.md)    | hygiene  | low    | Generate a new EOA or TPM-backed R1 smart account so the user can move to a fresh identity. |
+| [shield-eth](shield-eth/SKILL.md)            | privacy  | medium | Deposit native ETH into Privacy Pools so it can be withdrawn later to a fresh address. |
+| [unshield-eth](unshield-eth/SKILL.md)        | privacy  | medium | Withdraw shielded ETH to a fresh receiving address. |
+| [fresh-address](fresh-address/SKILL.md)      | hygiene  | low    | Generate a new EOA or TPM-backed R1 smart account so the user can move to a fresh identity. |
+| [swap-uniswap-v3](swap-uniswap-v3/SKILL.md)  | swap     | medium | Single-pool `exactInputSingle` swap on Uniswap V3 (mainnet, Sepolia). ETH legs wrap to WETH at the encoder boundary. |
 
 Future entries (not yet in this pack):
 
-* `swap-uniswap-v3` — wraps the existing `swap.uniV3.build` flow.
 * `sweep-dust` — drain small token balances back to a main wallet in one
   multicall.
 * `migrate-to-r1` — bundled "create R1 + sweep EOA → R1" workflow.

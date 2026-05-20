@@ -61,6 +61,22 @@ quantitative correctness.
 If `amountBase` is missing, the daemon couldn't determine decimals.
 Return `{error, ask}` rather than guessing.
 
+## Tools available
+
+You may call these read-only daemon tools before emitting the Intent.
+
+- `balanceOf` — read the sender's balance of `token`. **Call this when
+  the user says "send all my X", "send half my X", "send the rest of
+  my X", or any phrasing that implies the amount is derived from the
+  current balance.** Use the returned `value` (base units) directly.
+- `simulateTx` — dry-run a candidate `transfer(...)` call. Optional;
+  the Lean daemon will simulate again at ConfirmGate time. Use it only
+  if the user is asking about a non-trivial token (rebasing, fee-on-
+  transfer) and you want to confirm the transfer math.
+
+Skip these for the regular case (`send 100 USDC to alice`) — copy
+`seed.fields.amountBase` and emit. Tool calls cost time.
+
 ## Safety
 
 * Refuse `amount = 0`.

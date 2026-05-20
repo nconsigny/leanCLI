@@ -64,6 +64,28 @@ the #1 failure mode for quantitative correctness.
 If `amountBase` is missing from the seed, the daemon couldn't determine
 decimals. Return `{error, ask}` rather than guessing.
 
+## Tools available
+
+You may call these read-only daemon tools before emitting the Intent. Each
+goes through `Privacy.NetworkPolicy` exactly like a CLI/TUI request, and
+the result lands in your context as a `role: "tool"` message.
+
+- `allowance` — read the current `allowance(owner, spender)`. **Call this
+  whenever the user says "double my current allowance", "add N USDC to
+  what I already approved", "make sure the spender can still pull X" —
+  any relative or comparative phrasing.** Without this, you'd have to
+  guess the current value and the Intent would be wrong.
+- `balanceOf` — read the owner's token balance. Useful when the user says
+  "approve enough to deposit my full balance" — the approve amount is
+  the balance.
+- `simulateTx` — dry-run a candidate `{to, value, data}`. Use this when
+  the spender is non-standard (not a known protocol) and you want to
+  rule out a revert before emitting the Intent. NOT a substitute for
+  the final `tx.simulate` the daemon runs at ConfirmGate time.
+
+Tool calls are bounded (max 5 rounds). Emit the final Intent JSON as
+soon as you have enough information — don't probe speculatively.
+
 ## Safety
 
 * If the user wrote `approve 100 USDC for vitalik.eth`, the spender is the named one. Refuse

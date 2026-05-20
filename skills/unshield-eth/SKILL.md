@@ -77,12 +77,16 @@ privacy sidecar (`bridge/`) — same path as shield-eth.
 
 When the user says `unshield to a fresh address`, the model should:
 
-1. Invoke `fresh-address` to generate a new EOA or R1 (the model returns
-   an `action: createWallet` intent for that step).
+1. Invoke `fresh-address` to generate a new EOA (BIP-39 default) or R1
+   (TPM-hardware opt-in) — the model emits an `action: address.fresh`
+   intent for that step.
 2. Wait for the daemon to surface the new address.
-3. Emit `shielded.withdraw` with that new address as recipient.
+3. Emit `shielded.withdraw` with that new address as `recipient`.
 
 The chat UI shows each step as a separate turn; the user confirms each.
+For EOA fresh wallets, the model MUST also remind the user to write
+down the BIP-39 mnemonic before continuing — see
+[fresh-address](../fresh-address/SKILL.md).
 
 ## Example prompts that should trigger this skill
 

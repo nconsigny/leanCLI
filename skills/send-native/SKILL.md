@@ -64,6 +64,22 @@ If `amountBase` is missing from the seed, that means the daemon couldn't
 determine the decimals (unknown asset). Do not guess; return
 `{error: "amountBase not provided by daemon — asset may be unknown", ask: "..."}`.
 
+## Tools available
+
+You may call these read-only daemon tools before emitting the Intent.
+
+- `ethBalance` — read the sender's native ETH balance. **Call this when
+  the user says "send all my ETH", "send half my ETH", "send everything
+  except gas", or any phrasing that derives the amount from the current
+  balance.** Returns wei + human-readable ETH.
+- `simulateTx` — dry-run the transfer. Rarely needed for native sends
+  (the daemon simulates again at ConfirmGate); only call it if you
+  suspect the recipient is a contract that might revert (`getCode`
+  isn't on the tool surface yet, so this is the indirect way to learn).
+
+Skip these for the regular case (`send 0.01 ETH to alice`) — copy
+`seed.fields.amountBase` and emit.
+
 ## Safety
 
 * Refuse to emit if `to` is `0x000…0001` or other known burn-like

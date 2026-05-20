@@ -37,16 +37,33 @@ structured prose to the user.
 | `chainId` | request context | Audit is per-chain. If the user wants "all chains", ask which to start with. |
 | `tokens` (optional) | user prompt | Restrict to specific tokens. Default: scan known-tokens registry. |
 
-## Output
+## Intent shape
 
-This skill does NOT emit an Intent. It is the one exception. Instead,
-return a `{action: "audit", ...}` shape that the daemon recognizes as
-a read-only request. The chat.draft handler will see `action: audit`
-and skip `tx.encodeIntent`.
+This skill emits a read-only `approvals.audit` intent. The chat.draft
+handler recognizes the action tag and routes to the daemon-side scan
+(`chain.scanTransfers` for `Approval` events over a configurable block
+window), bypassing `tx.encodeIntent` entirely. No signing path.
 
-(This skill is documented for future implementation. When the model
-sees an "audit my approvals" intent, the right answer **today** is to
-return `{error: "auditing approvals is not yet implemented in this build", ask: "Want me to revoke a specific allowance instead?"}` and offer to chain into `revoke-approval`.)
+```json
+{
+  "action": "approvals.audit",
+  "chainId": <int>,
+  "wallet": "0x..."
+}
+```
+
+`wallet` is OPTIONAL — when omitted, the daemon scopes to the user's
+default wallet. The response shape is a list of records:
+
+```json
+[
+  {"token": "0x...", "spender": "0x...", "amount": "<uint256 string>", "lastSeenBlock": <int>},
+  ...
+]
+```
+
+The model presents the results as a structured list (one row per
+allowance) and offers to chain into `revoke-approval` per row.
 
 ## Composability
 

@@ -56,6 +56,20 @@ The `amount` is **fixed at 0** by this skill — do not take it from the user.
 If the user is asking to set a *non-zero* allowance, this is the wrong
 skill — that's an approve action, not a revoke.
 
+## Tools available
+
+You may call these read-only daemon tools before emitting the Intent.
+
+- `allowance` — read the current allowance. Call this when you want to
+  confirm there *is* a non-zero allowance to revoke (the user may have
+  already revoked it; a zero → zero revoke is a wasted gas tx). If the
+  current allowance is already 0, return `{error: "the allowance for
+  this spender is already 0 — no revoke needed", ask: "..."}` instead
+  of emitting an Intent.
+
+Don't call `balanceOf` or `simulateTx` here — revokes don't move funds,
+and the Lean validator already enforces `amount = 0`.
+
 ## Safety
 
 * Hard-refuse to emit anything but `amount: { "exact": 0 }`. If the

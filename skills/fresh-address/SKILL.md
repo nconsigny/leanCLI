@@ -1,6 +1,6 @@
 ---
 name: fresh-address
-description: Generate a new wallet (EOA or TPM-backed R1 smart account) so the user can rotate to a never-used identity. Pairs with `unshield-eth` for the full privacy rotate.
+description: Generate a new wallet (BIP-39 EOA by default, or TPM-backed R1 smart account on opt-in) so the user can rotate to a never-used identity. Pairs with `unshield-eth` for the full privacy rotate.
 category: hygiene
 risk: low
 requires:
@@ -12,9 +12,10 @@ requires:
     - eoa
     - r1
 notes:
-  - "EOA is fast (no on-chain deployment); R1 is TPM-bound (key cannot leave the chip) but needs a deployment tx if the user wants to actively send from it."
-  - "For receive-only fresh addresses (e.g. unshield destination), EOA is fine and cheaper."
-  - "Do not auto-name the wallet — ask the user. A name like `fresh-2026-05-19` is a privacy leak if the user pastes it anywhere."
+  - "Default kind is EOA via BIP-39 (12-word mnemonic). The mnemonic is the user's recovery path — ALWAYS tell them to write it down before they leave the screen."
+  - "R1 is the TPM-hardware-key opt-in. Key is generated inside the TPM and never leaves the chip; signing is hardware-bound. Triggered by phrases like 'TPM', 'hardware key', 'hardware-backed', 'secure enclave', or 'smart account' (R1 is an ERC-4337 R1 smart account)."
+  - "EOA is the right default for receive-only fresh addresses (e.g. unshield destination): fast, no on-chain deployment, and the seed-at-rest is itself encrypted under the master KEK that the TPM seals."
+  - "Do not auto-name the wallet — ask the user. A name like `fresh-2026-05-19` is a privacy leak if the user pastes it anywhere. The validator caps labels at 64 chars."
 ---
 
 # fresh-address — generate a new receiving wallet
@@ -31,25 +32,40 @@ notes:
 
 | Field | Source | Notes |
 |---|---|---|
-| `walletType` | user prompt or default | `eoa` (default, cheap, key on disk) or `r1` (TPM-backed, key sealed to chip). |
-| `name` | user prompt | A local label for the wallet. ASK the user — do not auto-generate. |
-| `deployImmediately` (R1 only) | user prompt | Whether to deploy the R1 smart account now. Default: false. R1 can receive without being deployed; deployment is needed only before the first outbound tx. |
+| `kind` | user prompt or default | `eoa` (DEFAULT — BIP-39 mnemonic, software signing, seed encrypted at rest under TPM-sealed master KEK). `r1` is opt-in (TPM hardware key, ERC-4337 smart account). |
+| `label` | user prompt | A local nickname for the wallet. ASK the user — do not auto-generate. Keep it opaque (`a`, `b`, `fresh-1`), not descriptive. Validator caps at 64 chars. |
+| `deployImmediately` (R1 only) | user prompt | Whether to deploy the R1 smart account now. Default: false. R1 can receive without being deployed; deployment is needed only before the first outbound tx. Ignored for EOA. |
 
 ## Intent shape
 
-This skill produces a `createWallet` intent, not a transaction Intent.
-The chat.draft handler dispatches it to `eoa.create` or `tpm.create`:
+This skill produces an `address.fresh` intent, NOT a transaction Intent.
+The chat.draft handler dispatches it to `eoa.create` (BIP-39 path) or
+`tpm.create` (R1 path) — no `tx.encodeIntent` call.
 
 ```json
 {
-  "action": "createWallet",
-  "walletType": "eoa" | "r1",
-  "name": "<user-chosen-label>",
+  "action": "address.fresh",
+  "chainId": <int>,
+  "kind": "eoa" | "r1",
+  "label": "<user-chosen-opaque-label>",
   "deployImmediately": true | false
 }
 ```
 
-The returned daemon response will include the new wallet's primary
+All three of `kind` / `label` / `deployImmediately` are OPTIONAL. The
+daemon defaults:
+* `kind` → `"eoa"` (BIP-39 EOA, the canonical default)
+* `label` → none (TUI prompts the user for one in a follow-up step)
+* `deployImmediately` → `false`
+
+For the EOA path, the daemon will generate a 12-word BIP-39 mnemonic
+and surface it to the user via the unlock/confirm screen. **The model
+MUST tell the user, in the same turn it emits the intent, that they
+will be shown a 12-word recovery mnemonic and must write it down** —
+that mnemonic is the only recovery path if the encrypted store is ever
+lost.
+
+The returned daemon response includes the new wallet's primary
 address, which the model can then carry into the next chat turn (e.g.
 pass to `unshield-eth` as `recipient`).
 
@@ -80,7 +96,9 @@ things like "I want to start fresh", "rotate", "give me a new identity",
 
 ## Example prompts that should trigger this skill
 
-1. `give me a fresh address called fresh1`
-2. `create a new R1 smart account named work`
-3. `new EOA, please`
-4. `I need a clean address for an unshield` (chains into unshield-eth)
+1. `give me a fresh address called fresh1` → EOA / BIP-39 (default kind, label `fresh1`)
+2. `create a new R1 smart account named work` → R1 (explicit smart-account opt-in)
+3. `new EOA, please` → EOA / BIP-39
+4. `I need a clean address for an unshield` (chains into unshield-eth) → EOA / BIP-39 default; receive-only doesn't need R1
+5. `fresh address backed by the TPM` → R1 (hardware-key trigger)
+6. `give me a hardware-backed wallet` → R1
