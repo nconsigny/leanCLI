@@ -73,6 +73,39 @@ def parseUnits (s : String) (decimals : Nat) : Option Nat :=
           | _, _ => none
     | _ => none  -- more than one '.' is malformed
 
+/-! ## `formatUnits` — base-units `Nat` → decimal string
+
+Inverse of `parseUnits`. Used by the preflight context renderer to
+display allowances + balances as "5 USDC" / "1.5 ETH" instead of the
+raw uint256 the chain returns. Trailing zeros after the decimal point
+are stripped ("1.500000" → "1.5"), and a value that lands on an
+integer drops the dot entirely ("100").
+-/
+
+private def padLeftWithZeros (s : String) (len : Nat) : String :=
+  if s.length ≥ len then s
+  else String.ofList (List.replicate (len - s.length) '0') ++ s
+
+private def stripTrailingZeros (s : String) : String :=
+  let chars := s.toList.reverse.dropWhile (· = '0')
+  String.ofList chars.reverse
+
+/-- Convert base-units (e.g. `100_000_000` with `decimals = 6`) into a
+human-readable decimal string ("100"). Trailing zeros after the dot
+are removed; if no fractional part remains, the dot is dropped too. -/
+def formatUnits (n : Nat) (decimals : Nat) : String :=
+  let allDigits := toString n
+  if decimals = 0 then allDigits
+  else
+    let padded := padLeftWithZeros allDigits (decimals + 1)
+    let chars := padded.toList
+    let cut := chars.length - decimals
+    let intPart := String.ofList (chars.take cut)
+    let fracPart := String.ofList (chars.drop cut)
+    let trimmedFrac := stripTrailingZeros fracPart
+    if trimmedFrac.isEmpty then intPart
+    else intPart ++ "." ++ trimmedFrac
+
 /-! ## Smoke checks. These are `example`s — typecheck-only, no
 runtime. They serve as both regression tests and documentation. -/
 
@@ -83,5 +116,13 @@ example : parseUnits "0.5" 6   = some 500000 := by native_decide
 example : parseUnits "1.234567" 6 = some 1234567 := by native_decide
 example : parseUnits "1.2345678" 6 = none := by native_decide
 example : parseUnits "" 18     = none := by native_decide
+
+example : formatUnits 100000000 6 = "100" := by native_decide
+example : formatUnits 1500000 6   = "1.5" := by native_decide
+example : formatUnits 1234567 6   = "1.234567" := by native_decide
+example : formatUnits 0 18         = "0" := by native_decide
+example : formatUnits 1 18         = "0.000000000000000001" := by native_decide
+example : formatUnits 1000000000000000000 18 = "1" := by native_decide
+example : formatUnits 500000 6     = "0.5" := by native_decide
 
 end LeanKohaku.Util.Units

@@ -57,6 +57,7 @@ type Phase =
       pin: string;
       decoded: any;
       sim: any;
+      preflight: any;
       tpm: boolean;
     }
   | {
@@ -230,7 +231,7 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
         tx={tx}
         chainId={chainId}
         onError={(message) => setPhase({ kind: "unlock-error", message })}
-        onReady={(decoded, sim) =>
+        onReady={(decoded, sim, preflight) =>
           setPhase({
             kind: "confirm",
             wallet: phase.wallet,
@@ -238,6 +239,7 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
             pin: phase.pin,
             decoded,
             sim,
+            preflight,
             tpm: phase.tpm,
           })
         }
@@ -252,6 +254,7 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
         tx={tx}
         decoded={phase.decoded}
         sim={phase.sim}
+        preflight={phase.preflight}
         tpm={phase.tpm}
         canonical={tx.canonical}
         chainId={chainId}
@@ -352,7 +355,7 @@ function UnlockAndSimulate({
   tx: Props["tx"];
   chainId?: number;
   onError: (msg: string) => void;
-  onReady: (decoded: any, sim: any) => void;
+  onReady: (decoded: any, sim: any, preflight: any) => void;
 }) {
   useEffect(() => {
     let cancelled = false;
@@ -365,12 +368,11 @@ function UnlockAndSimulate({
         if (!u.ok) return onError(`unlock: ${u.error.message}`);
       }
 
-      // Decode + simulate in parallel, exactly like the manual decode
-      // screen does.
-      // Daemon RPCs gate the endpoint on `chain` (name); chainId is kept
-      // for the decoder. Pass both so the simulate hits the right RPC.
+      // Decode + simulate + preflight context in parallel. preflight is
+      // a separate daemon round-trip rather than baked into simulate so
+      // we can degrade gracefully (TUI renders whatever subset returns).
       const chainName = chainIdToName(chainId);
-      const [d, s] = await Promise.all([
+      const [d, s, p] = await Promise.all([
         call<any>("tx.decodeIntent", {
           chainId: chainId ?? 1,
           to: tx.to,
@@ -388,11 +390,20 @@ function UnlockAndSimulate({
           block: "latest",
           trace: true,
         }),
+        call<any>("tx.preflightContext", {
+          chainId: chainId ?? 1,
+          chain: chainName,
+          to: tx.to,
+          value: tx.value,
+          data: tx.data,
+          from: wallet.address,
+        }),
       ]);
       if (cancelled) return;
       const decoded = d.ok ? d.result?.result ?? d.result : { matched: false };
       const sim = s.ok ? s.result : { ok: false, simRpcError: s.error.message };
-      onReady(decoded, sim);
+      const preflight = p.ok ? p.result : { kind: "error", error: p.error.message };
+      onReady(decoded, sim, preflight);
     })();
     return () => {
       cancelled = true;
@@ -415,6 +426,7 @@ function ConfirmGate({
   tx,
   decoded,
   sim,
+  preflight,
   tpm,
   canonical,
   chainId,
@@ -425,6 +437,7 @@ function ConfirmGate({
   tx: Props["tx"];
   decoded: any;
   sim: any;
+  preflight: any;
   tpm: boolean;
   canonical?: string;
   chainId?: number;
@@ -481,6 +494,7 @@ function ConfirmGate({
           <Text color={theme.dim}>(no descriptor matched · raw calldata only)</Text>
         )}
       </Box>
+      <PreflightBlock preflight={preflight} />
       <Box flexDirection="column" marginBottom={1}>
         <Text>
           <Text color={theme.dim}>simulation: </Text>
@@ -519,6 +533,82 @@ function ConfirmGate({
         </Text>
       )}
     </Layout>
+  );
+}
+
+/** Render the `tx.preflightContext` block — current chain state for the
+ *  drafted intent (allowance for approves, balance for transfers, prior
+ *  interactions for both). Display-only; the signer never sees this.
+ *  Falls back to nothing when the daemon couldn't probe (no `from`,
+ *  unknown kind, RPC error). */
+function PreflightBlock({ preflight }: { preflight: any }) {
+  if (!preflight || typeof preflight !== "object") return null;
+  const kind = preflight.kind;
+  if (kind !== "approve" && kind !== "transfer" && kind !== "native") return null;
+
+  const rows: Array<{ label: string; value: string; warn?: boolean }> = [];
+
+  if (kind === "approve") {
+    const newAmt = preflight.newAmountHuman ?? "—";
+    const curr = preflight.currentAllowanceHuman ?? "(unavailable)";
+    const delta = preflight.delta ?? "";
+    rows.push({ label: "current allowance", value: curr });
+    rows.push({
+      label: "new allowance",
+      value: `${newAmt}${delta ? `  (${delta})` : ""}`,
+      warn: delta === "increase" || delta === "first grant",
+    });
+  } else if (kind === "transfer" || kind === "native") {
+    const bal = preflight.senderBalanceHuman ?? "(unavailable)";
+    const amt = preflight.amountHuman ?? "—";
+    const after = preflight.afterHuman ?? "—";
+    rows.push({ label: "sender balance", value: bal });
+    rows.push({
+      label: "sending",
+      value: amt,
+      warn: preflight.insufficient === true,
+    });
+    rows.push({
+      label: "balance after",
+      value: preflight.insufficient ? "(insufficient funds)" : after,
+      warn: preflight.insufficient === true,
+    });
+  }
+
+  // Prior interactions — soft signal. Rendered as a single line so the
+  // block stays compact when there's nothing surprising.
+  const prior = preflight.priorInteractions;
+  if (prior && prior.available === true) {
+    const count = typeof prior.count === "number" ? prior.count : 0;
+    const window = `(blocks ${prior.fromBlock}–${prior.toBlock})`;
+    rows.push({
+      label: "prior interactions",
+      value:
+        count === 0
+          ? `none ${window} — first-time interaction with this address`
+          : `${count} ${window}`,
+      warn: count === 0,
+    });
+  } else if (prior && prior.available === false && prior.reason && kind !== "native") {
+    rows.push({
+      label: "prior interactions",
+      value: `(unavailable — ${prior.reason})`,
+    });
+  }
+
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      <Text color={theme.dim} bold>chain context</Text>
+      {rows.map((r, i) => (
+        <Text key={i}>
+          <Text color={theme.dim}>{r.label.padEnd(20)}</Text>{" "}
+          <Text color={r.warn ? theme.warn : undefined}>{r.value}</Text>
+        </Text>
+      ))}
+      {preflight.probeError && (
+        <Text color={theme.dim}>(probe error: {String(preflight.probeError)})</Text>
+      )}
+    </Box>
   );
 }
 
