@@ -34,27 +34,35 @@ export function SelectItemRenderer({
   label: string;
 }) {
   // The `ink-select-input` itemComponent contract only forwards `label`,
-  // so we encode the dim hint as a leading marker `` on the label
-  // and strip it here. This keeps the widget API JSON-friendly without
-  // a second prop channel. (Lower-end terminals just see the plain label
-  // if they ignore the marker — but  is a control char so it's
-  // never visible.)
+  // so we encode optional formatting hints as a leading control byte:
+  //    → dim (archived / zero-balance)
+  //    → ok  (0-link receiving address — green)
+  // and strip the byte here. This keeps the widget API JSON-friendly
+  // without a second prop channel. Both bytes are control chars, so
+  // they never render even on lower-end terminals.
   let text = label;
   let dim = false;
+  let ok = false;
   if (label.startsWith("")) {
     text = label.slice(1);
     dim = true;
+  } else if (label.startsWith("")) {
+    text = label.slice(1);
+    ok = true;
   }
+  const color = isSelected
+    ? theme.highlight
+    : ok
+      ? theme.ok
+      : dim
+        ? theme.dim
+        : undefined;
   // `wrap="truncate-end"` keeps every row on a single terminal line —
   // long labels (full Ethereum addresses, wallet rows on a half-screen
   // tmux pane) clip with `…` instead of breaking onto a second row,
   // which would make the highlight bar look like it "jumps" by 1 line.
   return (
-    <Text
-      color={isSelected ? theme.highlight : dim ? theme.dim : undefined}
-      bold={isSelected}
-      wrap="truncate-end"
-    >
+    <Text color={color} bold={isSelected} wrap="truncate-end">
       {text}
     </Text>
   );

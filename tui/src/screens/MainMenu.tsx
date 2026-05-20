@@ -2,7 +2,6 @@ import React from "react";
 import { Box, Text, useInput } from "ink";
 import Select from "../widgets/Select.js";
 import { Layout } from "../widgets/Layout.js";
-import AnimatedKoi from "../widgets/AnimatedKoi.js";
 import { theme } from "../theme.js";
 
 export type MainAction =
@@ -56,29 +55,15 @@ export default function MainMenu({
       subtitle="formally-verified Ethereum wallet · daemon: leankohaku-daemon"
       hint="↑/↓ move · → / enter select · q quit"
     >
-      <Box flexDirection="row">
-        <Box marginRight={2}>
-          <AnimatedKoi size="tiny" />
-        </Box>
-        <Box
-          flexDirection="column"
-          justifyContent="center"
-          borderStyle="double"
-          borderColor={theme.koiRed}
-          paddingX={2}
-          paddingY={0}
-        >
-          <Text color={theme.koiCream} backgroundColor={theme.koiInk} bold>
-            {" leanKohaku · interactive wallet "}
-          </Text>
-          <Box marginTop={1}>
-            <Select
-              items={items}
-              onSelect={(it) => onPick(it.value)}
-              arrowNav
-            />
-          </Box>
-        </Box>
+      <Text color={theme.koiCream} backgroundColor={theme.koiInk} bold>
+        {" leanKohaku · interactive wallet "}
+      </Text>
+      <Box marginTop={1}>
+        <Select
+          items={items}
+          onSelect={(it) => onPick(it.value)}
+          arrowNav
+        />
       </Box>
     </Layout>
   );

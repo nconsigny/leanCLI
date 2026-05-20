@@ -3,7 +3,7 @@ import { Box, Text, useInput } from "ink";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import Select, { SelectItem } from "../widgets/Select.js";
-import AnimatedKoi from "../widgets/AnimatedKoi.js";
+import { KoiFrame } from "../widgets/KoiFrame.js";
 import { call } from "../daemon.js";
 import { theme } from "../theme.js";
 import { formatEth, hexToBigInt } from "../format.js";
@@ -37,7 +37,35 @@ type Props = {
   onApprove?: (
     tx: { to: string; value: string; data: string; rationale?: string; canonical?: string },
     chainId: number,
+    /** Optional pre-selected signing wallet derived from the regex
+     *  draft's `from` field. Set when the user wrote
+     *  "approve … from leanWallet" (or any phrasing the RuleParser
+     *  recognises). SendRawFlow's picker is skipped when present. */
+    wallet?: { kind: "eoa" | "tpm"; name: string; address: string },
   ) => void;
+  /** Routes an `address.fresh` directive to the existing wallet-creation
+   *  flow. Parent navigates to CreateEoaFlow (kind="eoa") or
+   *  CreateR1Flow (kind="r1") with the label pre-known. The chat does
+   *  NOT dispatch eoa.create / tpm.create directly because those RPCs
+   *  need a passphrase / TPM PIN prompt that the existing flow already
+   *  handles correctly (with confirm + masking). */
+  onCreateWallet?: (kind: "eoa" | "r1", label: string | undefined) => void;
+};
+
+type OwnershipStatus =
+  | "verified"
+  | "locked"
+  | "hardware"
+  | "book"
+  | "external"
+  | "mismatch";
+
+type OwnershipEntry = {
+  key: string;
+  address: string;
+  status: OwnershipStatus;
+  derivationPath?: string;
+  derived?: string;
 };
 
 type DraftResponse = {
@@ -46,20 +74,83 @@ type DraftResponse = {
     fields: { k: string; v: string }[];
     unresolved: string[];
     confidence: string;
+    ownerships?: OwnershipEntry[];
   };
   llmRaw?: string;
   llmError?: string;
   intentActionTag?: string;
   canonical?: string;
   validateError?: string;
+  // Standard leaf-encodable response — model emits a tx-shaped Intent
+  // and the daemon's encoder returns the {to, value, data} the TUI
+  // routes through tx.simulate + ConfirmGate.
   encoded?: { to: string; value: number; data: string; chainId: number };
   encodeError?: string;
   modelAsk?: { error: string; question: string };
+  // New non-tx-encoded action directives. Returned by chat.draft for
+  // the privacy / hygiene / wallet-mgmt Intent variants. The TUI is
+  // expected to dispatch the named daemon RPC (after a confirm
+  // affordance for any signing path).
+  //
+  // For `prepare` (shielded.deposit / withdraw): the result is one or
+  // more prepared txs that the TUI queues through per-tx ConfirmGate.
+  // For `audit` (approvals.audit): the result is a read-only list
+  // rendered inline.
+  // For `create` (address.fresh): the result is the new wallet's
+  // address (+ a BIP-39 mnemonic for the EOA case) handed off to the
+  // existing wallet-creation flow which prompts for a passphrase.
+  prepare?: {
+    rpc: "shielded.prepareDeposit" | "shielded.prepareWithdraw";
+    params: Record<string, unknown>;
+  };
+  audit?: {
+    rpc: "daemon.approvals.list";
+    params: Record<string, unknown>;
+  };
+  create?: {
+    rpc: "eoa.create" | "tpm.create";
+    params: {
+      kind: "eoa" | "r1";
+      deployImmediately: boolean;
+      chainId: number;
+      label?: string;
+    };
+  };
 };
+
+/** A row from `daemon.approvals.list`. The shape is the wire spec
+ *  documented in the audit-approvals SKILL.md; today the daemon returns
+ *  an empty list with implemented=false until the actual scan is wired. */
+type ApprovalRow = {
+  token: string;
+  spender: string;
+  amount: string;       // uint256 string-form
+  lastSeenBlock: number;
+};
+type AuditResult = {
+  chainId: number;
+  approvals: ApprovalRow[];
+  implemented: boolean;
+  note?: string;
+  wallet?: string;
+};
+
+type PreparedTx = { to: string; value: string; data: string };
+
+/** Per-turn dispatch state for the chat.draft directive directives
+ *  (prepare / audit / create). idle = button shown; running = RPC in
+ *  flight; done = rendered inline; error = surfaced inline. */
+type DispatchState =
+  | { kind: "idle" }
+  | { kind: "running" }
+  | { kind: "auditDone"; data: AuditResult }
+  | { kind: "prepareDone"; txs: PreparedTx[]; meta?: Record<string, unknown> }
+  | { kind: "createHandedOff"; walletKind: "eoa" | "r1"; label?: string }
+  | { kind: "error"; message: string };
 
 type Turn =
   | { kind: "user"; text: string }
-  | { kind: "assistant"; status: "pending" | "done"; result?: DraftResponse; error?: string }
+  | { kind: "assistant"; status: "pending" | "done"; result?: DraftResponse; error?: string; dispatch?: DispatchState }
   | { kind: "system"; text: string; tone?: "info" | "warn" | "err" };
 
 /** A configured per-chain endpoint, as returned by network.show. We
@@ -91,13 +182,59 @@ function chainNameForBalance(chainName: string): string | undefined {
   return chainName.toLowerCase();
 }
 
+/** Cap on history turns sent to the daemon. The sidecar caps again to
+ *  MAX_HISTORY_TURNS=6 — we send 8 so a "system" notice or two doesn't
+ *  push real user turns out the top before the sidecar gets to filter. */
+const TUI_HISTORY_CAP = 8;
+
+/** Summarise an assistant turn to a short string suitable for replay
+ *  through the LLM. We deliberately keep this lossy: full canonical
+ *  text, model trace, and tool transcripts are dropped because they
+ *  would balloon context and the sidecar re-runs tool calls per turn
+ *  anyway. The point of history is to remember *what the user already
+ *  said* and *what was offered/asked back*, not to relitigate state. */
+function summariseAssistantTurn(t: Extract<Turn, { kind: "assistant" }>): string | null {
+  if (t.status === "pending") return null;
+  if (t.error) return `[error] ${t.error}`;
+  const r = t.result;
+  if (!r) return null;
+  if (r.modelAsk?.question) {
+    return `[ask] ${r.modelAsk.question}`;
+  }
+  if (r.encoded && r.intentActionTag) {
+    const canon = r.canonical ? ` · ${r.canonical}` : "";
+    return `[drafted ${r.intentActionTag}]${canon}`;
+  }
+  if (r.validateError) return `[validateError] ${r.validateError}`;
+  if (r.encodeError) return `[encodeError] ${r.encodeError}`;
+  if (r.llmError) return `[llmError] ${r.llmError}`;
+  return null;
+}
+
+/** Build the history array forwarded to chat.draft. Filters out
+ *  ephemeral system rows and pending turns, summarises assistant
+ *  turns, and slices to the most recent TUI_HISTORY_CAP entries. */
+function buildChatHistory(turns: Turn[]): { role: "user" | "assistant"; content: string }[] {
+  const out: { role: "user" | "assistant"; content: string }[] = [];
+  for (const t of turns) {
+    if (t.kind === "user") {
+      out.push({ role: "user", content: t.text });
+    } else if (t.kind === "assistant") {
+      const s = summariseAssistantTurn(t);
+      if (s) out.push({ role: "assistant", content: s });
+    }
+    // system turns (in-chat notices) are intentionally dropped.
+  }
+  return out.slice(-TUI_HISTORY_CAP);
+}
+
 type Phase =
   | { kind: "boot" } // initial ensureUp + chains fetch
   | { kind: "needChain"; chains: ConfiguredChain[]; modelName?: string }
   | { kind: "chat"; chainId: number; chainName: string; modelName?: string; turns: Turn[]; input: string; busy: boolean }
   | { kind: "fatal"; message: string };
 
-export default function LlmChatFlow({ onDone, onApprove }: Props) {
+export default function LlmChatFlow({ onDone, onApprove, onCreateWallet }: Props) {
   const [phase, setPhase] = useState<Phase>({ kind: "boot" });
   // Top-5 wallet balances shown in the header. Fetched lazily — chat
   // is usable before this returns. Empty list = "we haven't tried yet".
@@ -126,6 +263,8 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
       //    every per-chain endpoint the user already configured — that's
       //    the menu we show in the toggle. No need to "set an RPC again".
       const n = await call<{
+        chainId: number;
+        rpc?: { url: string };
         perChain: { name: string; chainId: number; url: string; isCurrent: boolean }[];
       }>("network.show", {});
       if (!n.ok) {
@@ -134,9 +273,29 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
       }
       const chains = (n.result.perChain ?? []).filter((c) => c.chainId > 0);
       if (chains.length === 0) {
+        // Diagnostic the user can act on without leaving the TUI to grep config.
+        // We surface (a) what the daemon's default endpoint currently is and
+        // (b) the exact commands to populate per-chain entries. The daemon
+        // also auto-bootstraps `chain_endpoints[primary]` from `rpc_url` at
+        // startup (LeanKohaku/Daemon/Config.lean), so seeing this error means
+        // either chain_id resolved to something with no known name (e.g. an
+        // L2 we don't know yet) or rpc_url itself is unset.
+        const activeUrl = n.result.rpc?.url ?? "(unset)";
+        const cid = n.result.chainId ?? "?";
+        const cidName =
+          cid === 1 ? "mainnet" : cid === 11155111 ? "sepolia" : `chain ${cid}`;
         setPhase({
           kind: "fatal",
-          message: "No per-chain RPCs configured. Run `kohaku network set-rpc-chain <name> <url>` first.",
+          message:
+            `No per-chain RPCs configured.\n\n` +
+            `Daemon state:\n` +
+            `  active default rpc_url:  ${activeUrl}\n` +
+            `  daemon chainId:          ${cid} (${cidName})\n\n` +
+            `Fix one of:\n` +
+            `  kohaku network set-rpc-chain mainnet <mainnet-rpc-url>\n` +
+            `  kohaku network set-rpc-chain sepolia <sepolia-rpc-url>\n\n` +
+            `Or export MAINNET_RPC_URL / SEPOLIA_RPC_URL (e.g. in ./.env) and ` +
+            `restart the daemon.`,
         });
         return;
       }
@@ -263,12 +422,117 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
     );
   }
 
+  // Update the dispatch state of a single assistant turn (matched by
+  // reference identity in phase.turns). Centralises the "find the right
+  // index, copy the array, splice" boilerplate so the executors below
+  // don't each reinvent it.
+  const updateTurnDispatch = (
+    target: Extract<Turn, { kind: "assistant" }>,
+    next: DispatchState,
+  ) =>
+    setPhase((p) => {
+      if (p.kind !== "chat") return p;
+      const idx = p.turns.indexOf(target);
+      if (idx < 0) return p;
+      const copy = [...p.turns];
+      copy[idx] = { ...target, dispatch: next };
+      return { ...p, turns: copy };
+    });
+
+  /** Fire the directive's RPC and route the result. Audit dispatches
+   *  in-place (read-only). Prepare calls the prepare RPC and routes
+   *  the FIRST returned tx through onApprove (the existing per-tx
+   *  ConfirmGate path); the prepared-tx list is also shown so the
+   *  user sees what they're walking through. Create hands off to the
+   *  existing wallet-creation flow via onCreateWallet — that flow
+   *  already handles passphrase / TPM PIN prompts. */
+  const executeDirective = async (turn: Extract<Turn, { kind: "assistant" }>) => {
+    const r = turn.result;
+    if (!r) return;
+    if (turn.dispatch && turn.dispatch.kind !== "idle") return;
+    updateTurnDispatch(turn, { kind: "running" });
+    if (r.audit) {
+      const resp = await call<AuditResult>(r.audit.rpc, r.audit.params, { timeoutMs: 60_000 });
+      if (!resp.ok) {
+        updateTurnDispatch(turn, { kind: "error", message: resp.error.message });
+        return;
+      }
+      updateTurnDispatch(turn, { kind: "auditDone", data: resp.result });
+      return;
+    }
+    if (r.prepare) {
+      // shielded.prepareDeposit/prepareWithdraw can take 30-60s on the
+      // first call (the bridge sidecar loads the SDK + syncs PP state
+      // from chain). The 5-minute cap matches chat.draft's own cap.
+      const resp = await call<{ txs?: PreparedTx[]; transactions?: PreparedTx[] }>(
+        r.prepare.rpc,
+        r.prepare.params,
+        { timeoutMs: 300_000 },
+      );
+      if (!resp.ok) {
+        updateTurnDispatch(turn, { kind: "error", message: resp.error.message });
+        return;
+      }
+      // The bridge has used both shape names historically; accept either.
+      const txs = (resp.result.txs ?? resp.result.transactions ?? []) as PreparedTx[];
+      updateTurnDispatch(turn, { kind: "prepareDone", txs });
+      // Auto-queue the first tx through the existing per-tx ConfirmGate
+      // (SendRawFlow): users have already pressed Execute, and the
+      // canonical Intent + simulate result reach them via the next
+      // screen. Multi-tx bundles surface every prepared tx in the list
+      // above; the user re-triggers for subsequent txs.
+      if (txs.length > 0 && onApprove) {
+        const first = txs[0];
+        if (first) {
+          onApprove(
+            {
+              to: first.to,
+              value: first.value,
+              data: first.data,
+              rationale: `from local-LLM chat · ${r.intentActionTag ?? "shielded"} tx 1 of ${txs.length}`,
+              canonical: r.canonical,
+            },
+            phase.chainId,
+          );
+        }
+      }
+      return;
+    }
+    if (r.create) {
+      if (!onCreateWallet) {
+        updateTurnDispatch(turn, {
+          kind: "error",
+          message: "wallet creation flow not wired; open WalletsHub > Create EOA / R1 from the main menu",
+        });
+        return;
+      }
+      const kind = r.create.params.kind;
+      const label = r.create.params.label;
+      onCreateWallet(kind, label);
+      updateTurnDispatch(turn, { kind: "createHandedOff", walletKind: kind, label });
+      return;
+    }
+  };
+
   // Shared between the explicit signing affordance and the
   // "enter on empty input" shortcut so a single source of truth
   // governs what "confirm" means.
   const proceedWith = (turn: Extract<Turn, { kind: "assistant" }>) => {
     if (!turn.result?.encoded || !onApprove) return;
     const enc = turn.result.encoded;
+    // If the regex captured + chat.draft resolved a `from` hint (e.g.
+    // "approve … from leanWallet"), pre-select that wallet for signing
+    // so SendRawFlow skips the picker. Match by address (resolveLocal
+    // rewrote the name to the 0x form before returning). Case-insensitive
+    // because addresses round-trip through lowercased forms in places.
+    const fromField = turn.result.regex?.fields?.find((kv) => kv.k === "from")?.v;
+    const preselected = (() => {
+      if (!fromField) return undefined;
+      const want = fromField.toLowerCase();
+      const w = wallets.find((wb) => wb.address.toLowerCase() === want);
+      if (!w) return undefined;
+      return { kind: w.kind, name: w.name, address: w.address };
+    })();
     onApprove(
       {
         to: enc.to,
@@ -278,6 +542,7 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
         canonical: turn.result.canonical,
       },
       phase.chainId,
+      preselected,
     );
   };
 
@@ -298,13 +563,30 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
         // affordance has moved to a separate Tab-focusable button
         // above this bar (see ChatBody). Empty enter is a no-op.
         if (text.length === 0) return;
+        // Build history from prior turns (NOT including the user turn
+        // we're about to send — that goes in `prompt`). Each assistant
+        // turn is summarised to a short string; the sidecar caps the
+        // final list, so we pass up to 8 here and let it slice.
+        const history = buildChatHistory(phase.turns);
         const turnsAfterUser: Turn[] = [
           ...phase.turns,
           { kind: "user", text },
           { kind: "assistant", status: "pending" },
         ];
         setPhase({ ...phase, turns: turnsAfterUser, input: "", busy: true });
-        const r = await call<DraftResponse>("chat.draft", { prompt: text, chainId: phase.chainId });
+        // chat.draft can take a long time: a thinking model (Qwen3 with
+        // its <think> reasoning trace, gpt-oss with reasoning_content)
+        // routinely produces 2–4k tokens of reasoning before the final
+        // JSON, and the agentic tool-call loop multiplies this by up to
+        // MAX_TOOL_TURNS round-trips. 60s (the default) chops the
+        // sidecar mid-generation and surfaces as "sidecar crash exit 1".
+        // 5 min is generous but still finite — beyond that, the user
+        // wants to bail rather than wait.
+        const r = await call<DraftResponse>(
+          "chat.draft",
+          { prompt: text, chainId: phase.chainId, history },
+          { timeoutMs: 300_000 },
+        );
         const finished: Turn = r.ok
           ? { kind: "assistant", status: "done", result: r.result }
           : { kind: "assistant", status: "done", error: r.error.message };
@@ -314,6 +596,7 @@ export default function LlmChatFlow({ onDone, onApprove }: Props) {
         setPhase((p) => (p.kind === "chat" ? { ...p, turns: updated, busy: false } : p));
       }}
       onProceed={proceedWith}
+      onExecute={executeDirective}
     />
   );
 }
@@ -339,40 +622,28 @@ function Container({
 }) {
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Box flexDirection="row">
-        <Box marginRight={2}>
-          <AnimatedKoi size="tiny" />
-        </Box>
-        <Box
-          borderStyle="double"
-          borderColor={theme.koiRed}
-          paddingX={2}
-          paddingY={0}
-          flexDirection="column"
-          flexGrow={1}
-        >
-          <Text color={theme.koiCream} backgroundColor={theme.koiInk} bold>
-            {" le chat · local LLM "}
-            {chainTag !== "…" ? `· ${chainTag}` : ""}
-          </Text>
-          {modelName && (
-            <Text color={theme.dim}>
-              model: <Text color={theme.primary}>{modelName}</Text>
-            </Text>
-          )}
+      <KoiFrame>
+        <Text color={theme.koiCream} backgroundColor={theme.koiInk} bold>
+          {" le chat · local LLM "}
+          {chainTag !== "…" ? `· ${chainTag}` : ""}
+        </Text>
+        {modelName && (
           <Text color={theme.dim}>
-            untrusted model · regex+ENS+wallet seed · Lean validator · canonical text in confirm
+            model: <Text color={theme.primary}>{modelName}</Text>
           </Text>
-          {wallets && wallets.length > 0 && (
-            <Box marginTop={1} flexDirection="column">
-              <Text color={theme.dim}>Top wallets ({wallets.length}):</Text>
-              {wallets.map((w) => (
-                <WalletRow key={`${w.kind}-${w.name}-${w.address}`} w={w} />
-              ))}
-            </Box>
-          )}
-        </Box>
-      </Box>
+        )}
+        <Text color={theme.dim}>
+          untrusted model · regex+ENS+wallet seed · Lean validator · canonical text in confirm
+        </Text>
+        {wallets && wallets.length > 0 && (
+          <Box marginTop={1} flexDirection="column">
+            <Text color={theme.dim}>Top wallets ({wallets.length}):</Text>
+            {wallets.map((w) => (
+              <WalletRow key={`${w.kind}-${w.name}-${w.address}`} w={w} />
+            ))}
+          </Box>
+        )}
+      </KoiFrame>
       <Box marginTop={1} flexDirection="column">{children}</Box>
     </Box>
   );
@@ -448,6 +719,7 @@ function ChatBody({
   onInputChange,
   onSubmit,
   onProceed,
+  onExecute,
 }: {
   chainId: number;
   chainName: string;
@@ -459,12 +731,28 @@ function ChatBody({
   onInputChange: (v: string) => void;
   onSubmit: () => void;
   onProceed: (turn: Extract<Turn, { kind: "assistant" }>) => void;
+  onExecute: (turn: Extract<Turn, { kind: "assistant" }>) => void;
 }) {
   // Find the most recent encoded assistant turn — the [Sign + broadcast]
   // button (when focused) acts on this one.
   const latestSignable = [...turns].reverse().find(
     (t): t is Extract<Turn, { kind: "assistant" }> =>
       t.kind === "assistant" && t.status === "done" && !!t.result?.encoded,
+  );
+  // Latest assistant turn carrying a directive (prepare/audit/create)
+  // that has NOT been dispatched yet. The [Execute] button acts on it.
+  // Once dispatch has fired (state ≠ idle/undefined), the button hides;
+  // re-triggering would need a new chat turn so the user explicitly
+  // re-confirms intent.
+  const latestExecutable = [...turns].reverse().find(
+    (t): t is Extract<Turn, { kind: "assistant" }> => {
+      if (t.kind !== "assistant" || t.status !== "done") return false;
+      const r = t.result;
+      if (!r) return false;
+      if (!(r.prepare || r.audit || r.create)) return false;
+      const d = t.dispatch;
+      return !d || d.kind === "idle";
+    },
   );
 
   // Tab cycles focus between the text input and the sign button. The
@@ -473,27 +761,37 @@ function ChatBody({
   // distinction explicitly in state lets us tell ink-text-input to
   // STOP capturing keystrokes when focus is on the button — otherwise
   // Tab would just insert a "\t" into the prompt.
-  const [focus, setFocus] = useState<"input" | "sign">("input");
+  const [focus, setFocus] = useState<"input" | "sign" | "execute">("input");
   // If the draft goes away (e.g. user retried and got an ask) and we
-  // were on the sign button, drop focus back to input.
+  // were on a button, drop focus back to input.
   useEffect(() => {
     if (!latestSignable && focus === "sign") setFocus("input");
-  }, [latestSignable, focus]);
+    if (!latestExecutable && focus === "execute") setFocus("input");
+  }, [latestSignable, latestExecutable, focus]);
 
   useInput((_ch, key) => {
     if (busy) return;
-    if (key.tab && latestSignable) {
-      setFocus((f) => (f === "input" ? "sign" : "input"));
+    if (key.tab) {
+      // Tab cycles among the buttons that currently exist:
+      //   input → (sign if present) → (execute if present) → input
+      // Build the live ring on each press so removed buttons drop out.
+      const ring: ("input" | "sign" | "execute")[] = ["input"];
+      if (latestSignable) ring.push("sign");
+      if (latestExecutable) ring.push("execute");
+      if (ring.length === 1) return;
+      const idx = ring.indexOf(focus);
+      setFocus(ring[(idx + 1) % ring.length] ?? "input");
       return;
     }
-    // Enter while the button has focus → sign. (Enter inside the
-    // text input is handled by ink-text-input's onSubmit.)
     if (key.return && focus === "sign" && latestSignable) {
       onProceed(latestSignable);
-      // Stay on the button for the next draft, or drop back to input
-      // — handing back to input is more useful since the next thing
-      // the user does is usually type a refinement.
       setFocus("input");
+      return;
+    }
+    if (key.return && focus === "execute" && latestExecutable) {
+      onExecute(latestExecutable);
+      setFocus("input");
+      return;
     }
   });
 
@@ -549,6 +847,31 @@ function ChatBody({
             {"   "}
             ↳ {latestSignable.result?.intentActionTag ?? "encoded draft"} ·{" "}
             simulate + ConfirmGate runs after this
+          </Text>
+        </Box>
+      )}
+      {/* Execute button — fires the prepare/audit/create directive's
+        RPC. Distinct from [Sign + broadcast] because the underlying
+        action shape is different (no encoded tx in hand; the daemon
+        prepare RPC returns one). For prepare, the FIRST prepared tx
+        is auto-queued through ConfirmGate; for audit, results render
+        inline; for create, the user is handed off to the existing
+        wallet-creation flow. */}
+      {latestExecutable && (
+        <Box
+          marginTop={1}
+          borderStyle={focus === "execute" ? "double" : "single"}
+          borderColor={focus === "execute" ? theme.primary : theme.dim}
+          paddingX={1}
+        >
+          <Text color={focus === "execute" ? theme.primary : theme.dim} bold>
+            {focus === "execute"
+              ? `▶  ⚡ Execute ${actionableLabel(latestExecutable)} (enter)`
+              : `   ⚡ Execute ${actionableLabel(latestExecutable)} (tab to focus)`}
+          </Text>
+          <Text color={theme.dim}>
+            {"   "}
+            ↳ calls {actionableRpc(latestExecutable)}
           </Text>
         </Box>
       )}
@@ -676,8 +999,196 @@ function TurnRow({
           <Text color={theme.dim}>(simulate + ConfirmGate)</Text>
         </Box>
       )}
+      {(r.prepare || r.audit || r.create) && (
+        <DirectiveBlock prepare={r.prepare} audit={r.audit} create={r.create} />
+      )}
+      <DispatchBlock dispatch={turn.dispatch} />
     </Box>
   );
+}
+
+/** Renders the chat.draft response's `prepare` / `audit` / `create`
+ *  directive. These are NOT encoded txs — they tell the TUI which
+ *  daemon RPC to call next. Today this block is informational: it
+ *  shows the user what's about to happen and which RPC will fire.
+ *  Dispatch wiring (calling the RPC, queuing prepared txs through
+ *  per-tx ConfirmGate, handing freshAddress creation off to the
+ *  existing wallet-flow) lands in a follow-up — keeping the daemon
+ *  side of step E testable first. */
+function DirectiveBlock({
+  prepare,
+  audit,
+  create,
+}: {
+  prepare?: DraftResponse["prepare"];
+  audit?: DraftResponse["audit"];
+  create?: DraftResponse["create"];
+}) {
+  return (
+    <Box paddingLeft={5} marginTop={1} flexDirection="column">
+      {prepare && (
+        <Box flexDirection="column">
+          <Text color={theme.primary} bold>
+            ↳ next: <Text color={theme.ok}>{prepare.rpc}</Text>
+          </Text>
+          <Text color={theme.dim}>
+            {"  "}params: {compactParams(prepare.params)}
+          </Text>
+          <Text color={theme.dim}>
+            {"  "}each prepared tx runs through simulate + ConfirmGate before signing
+          </Text>
+        </Box>
+      )}
+      {audit && (
+        <Box flexDirection="column">
+          <Text color={theme.primary} bold>
+            ↳ next: <Text color={theme.ok}>{audit.rpc}</Text>{" "}
+            <Text color={theme.dim}>(read-only)</Text>
+          </Text>
+          <Text color={theme.dim}>
+            {"  "}params: {compactParams(audit.params)}
+          </Text>
+        </Box>
+      )}
+      {create && (
+        <Box flexDirection="column">
+          <Text color={theme.primary} bold>
+            ↳ next: <Text color={theme.ok}>{create.rpc}</Text>
+          </Text>
+          <Text color={theme.dim}>
+            {"  "}kind: {create.params.kind}
+            {create.params.label ? ` · label: ${create.params.label}` : ""}
+            {create.params.kind === "r1" && create.params.deployImmediately
+              ? " · deploy: yes"
+              : ""}
+          </Text>
+          {create.params.kind === "eoa" && (
+            <Text color={theme.warn}>
+              {"  "}EOA path will surface a 12-word BIP-39 mnemonic — write it down before continuing
+            </Text>
+          )}
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+/** Compact one-line JSON of params — strips quotes around values for
+ *  display readability; users see `chainId=11155111` instead of the
+ *  raw `{"chainId":11155111}`. Not a serialiser — display-only. */
+function compactParams(p: Record<string, unknown>): string {
+  return Object.entries(p)
+    .map(([k, v]) => `${k}=${typeof v === "string" ? v : JSON.stringify(v)}`)
+    .join(" · ");
+}
+
+/** Short label for the [Execute] button — distinguishes the three
+ *  directive types so the user sees "Execute audit" / "Execute prepare"
+ *  / "Execute create wallet" before pressing enter. */
+function actionableLabel(turn: Extract<Turn, { kind: "assistant" }>): string {
+  const r = turn.result;
+  if (!r) return "(no directive)";
+  if (r.audit) return "audit";
+  if (r.prepare) return r.prepare.rpc === "shielded.prepareDeposit" ? "shield prepare" : "unshield prepare";
+  if (r.create) return r.create.params.kind === "eoa" ? "create EOA" : "create R1";
+  return "directive";
+}
+
+function actionableRpc(turn: Extract<Turn, { kind: "assistant" }>): string {
+  const r = turn.result;
+  if (!r) return "—";
+  if (r.audit) return r.audit.rpc;
+  if (r.prepare) return r.prepare.rpc;
+  if (r.create) return r.create.rpc;
+  return "—";
+}
+
+/** Render the dispatch state of an assistant turn. Idle / undefined =>
+ *  null (the [Execute] button is the entire affordance). Running shows
+ *  a spinner with context. Done renders the result inline per kind.
+ *  Errors surface verbatim. */
+function DispatchBlock({ dispatch }: { dispatch?: DispatchState }) {
+  if (!dispatch || dispatch.kind === "idle") return null;
+  if (dispatch.kind === "running") {
+    return (
+      <Box paddingLeft={5} marginTop={1}>
+        <Text color={theme.primary}>
+          <Spinner type="dots" /> dispatching…
+        </Text>
+      </Box>
+    );
+  }
+  if (dispatch.kind === "error") {
+    return (
+      <Box paddingLeft={5} marginTop={1} flexDirection="column">
+        <Text color={theme.err} bold>✗ dispatch failed</Text>
+        <Text color={theme.err}>{dispatch.message}</Text>
+      </Box>
+    );
+  }
+  if (dispatch.kind === "auditDone") {
+    const d = dispatch.data;
+    return (
+      <Box paddingLeft={5} marginTop={1} flexDirection="column">
+        <Text color={theme.ok} bold>
+          ✓ audit complete · {d.approvals.length} approval(s){d.wallet ? ` for ${shortAddr(d.wallet)}` : ""}
+        </Text>
+        {!d.implemented && d.note && (
+          <Text color={theme.warn}>! {d.note}</Text>
+        )}
+        {d.approvals.map((row, i) => (
+          <Text key={i} color={theme.dim}>
+            {"  "}#{i + 1} token={shortAddr(row.token)} · spender={shortAddr(row.spender)} ·
+            {" "}amount={row.amount} · lastBlock={row.lastSeenBlock}
+          </Text>
+        ))}
+      </Box>
+    );
+  }
+  if (dispatch.kind === "prepareDone") {
+    const txs = dispatch.txs;
+    return (
+      <Box paddingLeft={5} marginTop={1} flexDirection="column">
+        <Text color={theme.ok} bold>
+          ✓ prepared {txs.length} tx{txs.length === 1 ? "" : "s"}
+        </Text>
+        {txs.length > 0 && (
+          <Text color={theme.dim}>
+            {"  "}tx 1 of {txs.length} auto-queued through simulate + ConfirmGate
+            {txs.length > 1 ? " · remaining txs re-trigger via the next chat turn" : ""}
+          </Text>
+        )}
+        {txs.map((t, i) => (
+          <Text key={i} color={theme.dim}>
+            {"  "}#{i + 1} to={shortAddr(t.to)} value={t.value} data={t.data.slice(0, 14)}…
+          </Text>
+        ))}
+      </Box>
+    );
+  }
+  if (dispatch.kind === "createHandedOff") {
+    return (
+      <Box paddingLeft={5} marginTop={1} flexDirection="column">
+        <Text color={theme.ok} bold>
+          ↳ handed off to wallet-creation flow ({dispatch.walletKind === "eoa" ? "EOA / BIP-39" : "R1 / TPM hardware key"}
+          {dispatch.label ? `, label: ${dispatch.label}` : ""})
+        </Text>
+        {dispatch.walletKind === "eoa" && (
+          <Text color={theme.warn}>
+            ! the creation screen surfaces a 12-word BIP-39 mnemonic — write it down before leaving
+          </Text>
+        )}
+      </Box>
+    );
+  }
+  return null;
+}
+
+/** Truncate a 0x address to `0xABCD…1234` for inline display. Pass-
+ *  through for short strings so we don't mangle non-address content. */
+function shortAddr(s: string): string {
+  if (s.length <= 14) return s;
+  return `${s.slice(0, 8)}…${s.slice(-4)}`;
 }
 
 function RegexLine({
@@ -685,16 +1196,98 @@ function RegexLine({
 }: {
   regex: NonNullable<DraftResponse["regex"]>;
 }) {
+  // Pull amount-related fields out so we can render them as one
+  // readable summary line; the remaining k=v pairs still print below
+  // so power users see exactly what the parser captured.
+  const fieldMap = new Map(regex.fields.map((kv) => [kv.k, kv.v]));
+  const amount = fieldMap.get("amount");
+  const asset = fieldMap.get("asset");
+  const amountBase = fieldMap.get("amountBase");
+  const summaryAmount =
+    amount && asset
+      ? amountBase
+        ? `${amount} ${asset.toUpperCase()}  (${amountBase} base units)`
+        : `${amount} ${asset.toUpperCase()}`
+      : null;
+  const restFields = regex.fields.filter(
+    (kv) => kv.k !== "amount" && kv.k !== "asset" && kv.k !== "amountBase",
+  );
+
   return (
     <Box paddingLeft={5} flexDirection="column">
-      <Text color={theme.dim}>
-        regex: {regex.fields.map((kv) => `${kv.k}=${kv.v}`).join("  ")}
-      </Text>
+      {summaryAmount && (
+        <Text color={theme.ok} bold>
+          amount: {summaryAmount}
+        </Text>
+      )}
+      {restFields.length > 0 && (
+        <Text color={theme.dim}>
+          regex: {restFields.map((kv) => `${kv.k}=${kv.v}`).join("  ")}
+        </Text>
+      )}
+      {regex.ownerships && regex.ownerships.length > 0 && (
+        <Box flexDirection="column" marginTop={0}>
+          {regex.ownerships.map((o, i) => (
+            <OwnershipBadge key={i} entry={o} />
+          ))}
+        </Box>
+      )}
       {regex.unresolved.map((u, i) => (
         <Text key={i} color={theme.dim}>! {u}</Text>
       ))}
     </Box>
   );
+}
+
+// Per-field address-ownership badge. Renders the safety claim that
+// `chat.draft` is willing to make for a regex-resolved address.
+// Backed by the proven invariant 14.1
+// (LeanKohaku/Invariants/AddressOwnership.lean): the daemon can only
+// emit `verified` after re-deriving the unlocked seed at the recorded
+// BIP-44 path and structurally comparing to the address shown here.
+function OwnershipBadge({ entry }: { entry: OwnershipEntry }) {
+  const short =
+    entry.address.length > 14
+      ? `${entry.address.slice(0, 8)}…${entry.address.slice(-4)}`
+      : entry.address;
+  switch (entry.status) {
+    case "verified":
+      return (
+        <Text color={theme.ok}>
+          ✓ {entry.key}={short} · locally re-derived ({entry.derivationPath})
+        </Text>
+      );
+    case "locked":
+      return (
+        <Text color={theme.warn}>
+          ⚠ {entry.key}={short} · ownership not re-derived (wallet locked)
+        </Text>
+      );
+    case "hardware":
+      return (
+        <Text color={theme.ok}>
+          ⛨ {entry.key}={short} · TPM-bound key (hardware-owned)
+        </Text>
+      );
+    case "book":
+      return (
+        <Text color={theme.dim}>
+          ⓘ {entry.key}={short} · address-book entry (not your wallet)
+        </Text>
+      );
+    case "external":
+      return (
+        <Text color={theme.dim}>
+          · {entry.key}={short} · external address
+        </Text>
+      );
+    case "mismatch":
+      return (
+        <Text color={theme.err}>
+          ✗ {entry.key}={short} · DERIVATION MISMATCH (record claims {short}, seed derives {entry.derived ?? "?"})
+        </Text>
+      );
+  }
 }
 
 function AskLine({ ask }: { ask: { error: string; question: string } }) {

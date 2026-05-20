@@ -6,6 +6,7 @@ import Form from "../widgets/Form.js";
 import RpcRunner from "../widgets/RpcRunner.js";
 import { theme } from "../theme.js";
 import { hexToBigInt, formatEth } from "../format.js";
+import UnshieldFlow from "./UnshieldFlow.js";
 
 type PpAction =
   | "balance"
@@ -46,6 +47,21 @@ export default function PrivacyMenu({ onDone }: Props) {
     );
   }
 
+  // Unshield is a self-contained multi-phase flow (recipient picker
+  // → amount/passphrase → dispatch). It owns its own daemon RPC so we
+  // delegate before the params/RpcRunner wrapping that the other
+  // leaves still share.
+  if (pick === "unshield") {
+    return (
+      <UnshieldFlow
+        onDone={(s) => {
+          setPick(null);
+          onDone(s);
+        }}
+      />
+    );
+  }
+
   if (!params) {
     if (pick === "import") {
       return (
@@ -57,21 +73,6 @@ export default function PrivacyMenu({ onDone }: Props) {
             ]}
             onCancel={() => setPick(null)}
             onSubmit={(v) => setParams({ mnemonic: v.mnemonic ?? "", passphrase: v.passphrase ?? "" })}
-          />
-        </Layout>
-      );
-    }
-    if (pick === "unshield") {
-      return (
-        <Layout title="Unshield via relayer">
-          <Form
-            fields={[
-              { name: "recipient", label: "Recipient address", validate: (v) => v.startsWith("0x") && v.length === 42 ? null : "expected 0x… 20-byte address" },
-              { name: "amountEth", label: "Amount (ETH)", validate: (v) => /^[0-9]+(\.[0-9]+)?$/.test(v) ? null : "decimal ETH amount" },
-              { name: "passphrase", label: "Privacy Pool passphrase", secret: true, validate: (v) => v.length === 0 ? "required" : null },
-            ]}
-            onCancel={() => setPick(null)}
-            onSubmit={(v) => setParams({ recipient: v.recipient ?? "", amountEth: v.amountEth ?? "", passphrase: v.passphrase ?? "" })}
           />
         </Layout>
       );
@@ -93,11 +94,10 @@ export default function PrivacyMenu({ onDone }: Props) {
     pick === "balance" ? "shielded.balance" :
     pick === "reveal"  ? "shielded.reveal"  :
     pick === "import"  ? "shielded.import"  :
-    pick === "delete"  ? "shielded.delete"  :
-                         "shielded.unshieldDrain";
+                         "shielded.delete";
 
-  // PP-state sync (balance/unshield) and import all trigger the same
-  // chain walk the deposit flow does — first-run can take 10+ minutes
+  // PP-state sync (balance) and import both trigger the same chain
+  // walk the deposit flow does — first-run can take 10+ minutes
   // because the bridge scans every relevant on-chain event since the
   // pool's birth. Cached runs return in seconds. 20-minute window
   // covers both. reveal and delete are local-only and finish fast;
@@ -106,7 +106,7 @@ export default function PrivacyMenu({ onDone }: Props) {
 
   return (
     <RpcRunner
-      title={pick === "unshield" ? "Unshield via relayer…" : `Privacy Pools: ${pick}`}
+      title={`Privacy Pools: ${pick}`}
       method={method}
       params={params}
       timeoutMs={ppTimeoutMs}

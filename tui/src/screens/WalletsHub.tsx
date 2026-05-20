@@ -3,6 +3,7 @@ import { Box, Text, useInput } from "ink";
 import Spinner from "ink-spinner";
 import { call } from "../daemon.js";
 import {
+  AddressFreshness,
   ChainBalance,
   EoaListEntry,
   TpmListEntry,
@@ -13,7 +14,6 @@ import { theme } from "../theme.js";
 import { Layout } from "../widgets/Layout.js";
 import TabStrip from "../widgets/TabStrip.js";
 import Select from "../widgets/Select.js";
-import AnimatedKoi from "../widgets/AnimatedKoi.js";
 import { archiveKey, readArchive } from "../archiveStore.js";
 
 export type WalletsAction = "send" | "swap" | "shield" | "custom";
@@ -34,6 +34,24 @@ type BalanceCell =
   | { state: "pending" }
   | { state: "ok"; wei: bigint; chain?: string }
   | { state: "err"; message: string };
+
+/** 0-link freshness state for one wallet row. Stored separately from
+ *  balances so balance fetch is unblocked even when the heavier
+ *  getLogs-driven freshness probe stalls or fails. */
+type FreshnessCell =
+  | { state: "pending" }
+  | {
+      state: "ok";
+      /** True iff nonce=0 AND both ERC-20 in/out counts are 0 AND the
+       *  daemon successfully ran both getLogs scans. False means the
+       *  address either has activity, or we don't have enough signal
+       *  to call it fresh. */
+      zeroLink: boolean;
+      /** Set when the daemon couldn't complete one of the getLogs scans
+       *  — the nonce alone is not enough to claim "0 link". */
+      partial?: boolean;
+    }
+  | { state: "err" };
 
 /** Balance map key — must include accountIndex so sub-accounts each get
  *  their own balance cell. The archive store uses the same shape so a
@@ -84,6 +102,7 @@ export default function WalletsHub({
 }: Props) {
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [balances, setBalances] = useState<Record<string, BalanceCell>>({});
+  const [freshness, setFreshness] = useState<Record<string, FreshnessCell>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [tabIdx, setTabIdx] = useState(0);
@@ -193,10 +212,21 @@ export default function WalletsHub({
           ]),
         ),
       );
+      setFreshness(
+        Object.fromEntries(
+          out.map((w) => [
+            balanceKey(w.kind, w.name, w.accountIndex),
+            { state: "pending" } as FreshnessCell,
+          ]),
+        ),
+      );
       setLoading(false);
 
-      // Sequential balance fetches — public RPCs throttle bursts and
-      // sometimes return `0x0` instead of an error under load.
+      // Sequential balance + freshness fetches per row. Public RPCs
+      // throttle bursts and sometimes return `0x0` instead of an error
+      // under load, so we keep the per-row probes serial. Freshness
+      // runs immediately after the row's balance so a slow getLogs
+      // doesn't delay the next row's balance from rendering.
       for (const w of out) {
         if (cancelled) return;
         const params: { address: string; chain?: string } = { address: w.address };
@@ -209,12 +239,40 @@ export default function WalletsHub({
             ...prev,
             [key]: { state: "err", message: r.error.message },
           }));
+        } else {
+          const wei = hexToBigInt(r.result?.balance);
+          setBalances((prev) => ({
+            ...prev,
+            [key]: { state: "ok", wei, chain: r.result?.chain },
+          }));
+        }
+        // Freshness probe. Soft signal — failure never falsely marks
+        // a row as "fresh"; we tag it as err and keep the row neutral.
+        const fr = await call<AddressFreshness>("chain.addressFreshness", params);
+        if (cancelled) return;
+        if (!fr.ok) {
+          setFreshness((prev) => ({ ...prev, [key]: { state: "err" } }));
           continue;
         }
-        const wei = hexToBigInt(r.result?.balance);
-        setBalances((prev) => ({
+        const d = fr.result;
+        if (!d || typeof d.nonce !== "number") {
+          setFreshness((prev) => ({ ...prev, [key]: { state: "err" } }));
+          continue;
+        }
+        if (d.available !== true) {
+          setFreshness((prev) => ({
+            ...prev,
+            [key]: { state: "ok", zeroLink: false, partial: true },
+          }));
+          continue;
+        }
+        const zeroLink =
+          d.nonce === 0 &&
+          (d.erc20OutCount ?? 0) === 0 &&
+          (d.erc20InCount ?? 0) === 0;
+        setFreshness((prev) => ({
           ...prev,
-          [key]: { state: "ok", wei, chain: r.result?.chain },
+          [key]: { state: "ok", zeroLink },
         }));
       }
     })();
@@ -249,9 +307,14 @@ export default function WalletsHub({
   // with a `↳` glyph and use the slot label "/sub" suffix so users see
   // the hierarchy at a glance. Archived rows (only shown when toggled)
   // get a leading \x01 byte so `Select`'s itemRenderer dims them.
+  // 0-link rows (nonce=0 AND no ERC-20 history in the lookback window)
+  // get a leading \x02 byte so the itemRenderer paints them green —
+  // a privacy hint for the SEND/SWAP/SHIELD picker so unshield/rotate
+  // destinations stand out.
   const items = filtered.map((w) => {
     const key = balanceKey(w.kind, w.name, w.accountIndex);
     const cell = balances[key];
+    const fresh = freshness[key];
     const balPart =
       cell?.state === "ok"
         ? formatEth(cell.wei)
@@ -269,8 +332,12 @@ export default function WalletsHub({
       cell?.state === "ok"
         ? { ...w, balanceWei: cell.wei, balanceChain: cell.chain }
         : w;
+    const linkTag =
+      fresh?.state === "ok" && fresh.zeroLink ? "  0-link" : "";
+    const isZeroLink = fresh?.state === "ok" && fresh.zeroLink;
+    const prefix = isZeroLink ? "\x02" : "";
     return {
-      label: `${tag} ${displayName.padEnd(16)} ${w.address}  ${balPart}`,
+      label: `${prefix}${tag} ${displayName.padEnd(16)} ${w.address}  ${balPart}${linkTag}`,
       value: key,
       __wallet: w2,
     };
@@ -291,62 +358,48 @@ export default function WalletsHub({
       subtitle={`${tab.label} — ${tab.help}`}
       hint="←/→ action · ↑/↓ wallet · enter run · n chain · esc back"
     >
-      <Box flexDirection="row">
-        <Box marginRight={2}>
-          <AnimatedKoi size="tiny" />
-        </Box>
-        <Box
-          flexDirection="column"
-          borderStyle="double"
-          borderColor={theme.koiRed}
-          paddingX={2}
-          paddingY={0}
-          flexGrow={1}
-        >
-        <Text color={theme.koiCream} backgroundColor={theme.koiInk} bold>
-          {" leanKohaku · wallets "}
-        </Text>
-        <Box marginTop={1}>
-          <TabStrip tabs={TABS} activeIndex={tabIdx} onChange={setTabIdx} />
-        </Box>
-        {loading && (
-          <Text>
-            <Text color={theme.primary}>
-              <Spinner type="dots" />
-            </Text>{" "}
-            <Text color={theme.dim}>loading wallets…</Text>
-          </Text>
-        )}
-        {error && <Text color={theme.err}>error: {error}</Text>}
-        {!loading && !error && filtered.length === 0 && (
-          <Banner
-            message={`no wallet supports ${tab.label} yet — try a different action or create one with the main menu`}
-          />
-        )}
-        {!loading && filtered.length > 0 && (
-          <Box flexDirection="column">
-            <Box marginBottom={1}>
-              <Text color={theme.dim}>pick the wallet to execute </Text>
-              <Text color={theme.highlight} bold>
-                {tab.label}
-              </Text>
-              <Text color={theme.dim}> with — </Text>
-              <ChainBadge eoa={eoaChainName} tpm={tpmChainName} />
-            </Box>
-            <Select
-              items={items}
-              onSelect={(it) => {
-                const cast = it as typeof items[number];
-                // TPM wallets are sepolia-only today; EOAs follow the
-                // hub's chain toggle (defaults to mainnet, `n` to flip).
-                const chain = cast.__wallet.kind === "tpm" ? "sepolia" : eoaChain;
-                onPick(tab.value, cast.__wallet, chain);
-              }}
-            />
-          </Box>
-        )}
-        </Box>
+      <Text color={theme.koiCream} backgroundColor={theme.koiInk} bold>
+        {" leanKohaku · wallets "}
+      </Text>
+      <Box marginTop={1}>
+        <TabStrip tabs={TABS} activeIndex={tabIdx} onChange={setTabIdx} />
       </Box>
+      {loading && (
+        <Text>
+          <Text color={theme.primary}>
+            <Spinner type="dots" />
+          </Text>{" "}
+          <Text color={theme.dim}>loading wallets…</Text>
+        </Text>
+      )}
+      {error && <Text color={theme.err}>error: {error}</Text>}
+      {!loading && !error && filtered.length === 0 && (
+        <Banner
+          message={`no wallet supports ${tab.label} yet — try a different action or create one with the main menu`}
+        />
+      )}
+      {!loading && filtered.length > 0 && (
+        <Box flexDirection="column">
+          <Box marginBottom={1}>
+            <Text color={theme.dim}>pick the wallet to execute </Text>
+            <Text color={theme.highlight} bold>
+              {tab.label}
+            </Text>
+            <Text color={theme.dim}> with — </Text>
+            <ChainBadge eoa={eoaChainName} tpm={tpmChainName} />
+          </Box>
+          <Select
+            items={items}
+            onSelect={(it) => {
+              const cast = it as typeof items[number];
+              // TPM wallets are sepolia-only today; EOAs follow the
+              // hub's chain toggle (defaults to mainnet, `n` to flip).
+              const chain = cast.__wallet.kind === "tpm" ? "sepolia" : eoaChain;
+              onPick(tab.value, cast.__wallet, chain);
+            }}
+          />
+        </Box>
+      )}
     </Layout>
   );
 }

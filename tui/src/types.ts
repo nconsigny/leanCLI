@@ -26,6 +26,27 @@ export type ChainBalance = {
   chain?: string;
 };
 
+/** Response of the daemon's `chain.addressFreshness` RPC. The TUI uses
+ *  this to green-mark addresses with no on-chain "link" — pending nonce
+ *  0 AND no ERC-20 Transfer events involving the address in the
+ *  bounded recent window. `available` is `false` when the underlying
+ *  `eth_getLogs` scans couldn't run (public RPCs often cap or reject
+ *  address-less getLogs queries); the TUI degrades silently in that
+ *  case rather than falsely marking the row as fresh. */
+export type AddressFreshness = {
+  address: string;
+  /** Pending-tag tx count for the address. 0 = address never sent a tx. */
+  nonce: number;
+  /** ERC-20 Transfer events with this address as `from` in the lookback window. */
+  erc20OutCount?: number;
+  /** ERC-20 Transfer events with this address as `to` in the lookback window. */
+  erc20InCount?: number;
+  fromBlock?: number;
+  toBlock?: number;
+  available: boolean;
+  reason?: string;
+};
+
 export type Wallet = {
   kind: SlotKind;
   name: string;

@@ -73,6 +73,10 @@ type Screen =
       kind: "send-raw";
       tx: { to: string; value: string; data: string; rationale?: string; canonical?: string };
       chainId: number;
+      /** Pre-selected signing wallet. Currently set by LlmChatFlow when the
+       *  user's prompt carried a `from <name>` hint that the regex
+       *  resolved to one of their EOAs/TPMs — skips the picker. */
+      wallet?: { kind: "eoa" | "tpm"; name: string; address: string };
     };
 
 /** Stack-based screen navigator. Push on navigate, pop on Esc/back; the
@@ -300,7 +304,19 @@ export default function App() {
       return (
         <LlmChatFlow
           onDone={pop}
-          onApprove={(tx, chainId) => push({ kind: "send-raw", tx, chainId })}
+          onApprove={(tx, chainId, wallet) =>
+            push({ kind: "send-raw", tx, chainId, wallet })
+          }
+          onCreateWallet={(kind, _label) => {
+            // The existing creation flows ask the user to type the
+            // label themselves (with validation + uniqueness checks),
+            // so we don't pre-fill from the chat — the model's
+            // suggestion is documented in the chat as
+            // `createHandedOff` and the user re-types if they want
+            // that exact name. This keeps the trusted creation path
+            // owning the canonical label vocabulary.
+            push({ kind: kind === "eoa" ? "create-eoa" : "create-r1" });
+          }}
         />
       );
     case "send-raw":
@@ -308,6 +324,7 @@ export default function App() {
         <SendRawFlow
           tx={top.tx}
           chainId={top.chainId}
+          wallet={top.wallet}
           onDone={finishAction}
         />
       );
