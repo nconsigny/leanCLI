@@ -5,6 +5,7 @@ import Spinner from "ink-spinner";
 import { call, Notification, RpcError } from "../daemon.js";
 import { theme } from "../theme.js";
 import { Banner } from "./Layout.js";
+import { KoiFrame } from "./KoiFrame.js";
 
 type State =
   | { kind: "running" }
@@ -79,53 +80,59 @@ export default function RpcRunner({
       </Text>
       {subtitle && <Text color={theme.dim}>{subtitle}</Text>}
       <Box marginTop={1} flexDirection="column">
-        {events.map((n, i) => (
-          <Text key={i} color={notifColor(n)}>
-            {notifLine(n)}
-          </Text>
-        ))}
-        {state.kind === "running" && (
-          <Text>
-            <Text color={theme.primary}>
-              <Spinner type="dots" />
-            </Text>{" "}
-            <Text color={theme.dim}>working…</Text>
-          </Text>
-        )}
-        {state.kind === "ok" && (
-          <Box flexDirection="column" marginTop={1}>
-            <Banner kind="ok" text="done" />
-            <Box marginTop={1}>{renderResult ? renderResult(state.result) : <DefaultJson value={state.result} />}</Box>
-          </Box>
-        )}
-        {state.kind === "err" && (
-          <Box flexDirection="column" marginTop={1}>
-            <Banner
-              kind="err"
-              text={`daemon error ${state.error.code}: ${state.error.message}`}
-            />
-          </Box>
-        )}
+        <KoiFrame>
+          {events.map((n, i) => (
+            <Text key={i} color={notifColor(n)}>
+              {notifLine(n)}
+            </Text>
+          ))}
+          {state.kind === "running" && (
+            <Text>
+              <Text color={theme.primary}>
+                <Spinner type="dots" />
+              </Text>{" "}
+              <Text color={theme.dim}>working…</Text>
+            </Text>
+          )}
+          {state.kind === "ok" && (
+            <Box flexDirection="column" marginTop={1}>
+              <Banner kind="ok" text="done" />
+              <Box marginTop={1}>{renderResult ? renderResult(state.result) : <DefaultJson value={state.result} />}</Box>
+            </Box>
+          )}
+          {state.kind === "err" && (
+            <Box flexDirection="column" marginTop={1}>
+              <Banner
+                kind="err"
+                text={`daemon error ${state.error.code}: ${state.error.message}`}
+              />
+            </Box>
+          )}
+          {state.kind !== "running" && (
+            <Box flexDirection="column" marginTop={1}>
+              {state.kind === "ok" && successActions && successActions.length > 0 ? (
+                <Select
+                  items={successActions.map((a, i) => ({
+                    label: a.label,
+                    value: String(i),
+                  }))}
+                  onSelect={(it) => {
+                    const i = Number(it.value);
+                    successActions[i]?.onSelect();
+                  }}
+                />
+              ) : (
+                <Select
+                  items={[{ label: "Continue", value: "continue" }]}
+                  onSelect={() => onDone(state.kind === "ok")}
+                />
+              )}
+            </Box>
+          )}
+        </KoiFrame>
       </Box>
       {state.kind !== "running" && (
-        <Box flexDirection="column" marginTop={1}>
-          {state.kind === "ok" && successActions && successActions.length > 0 ? (
-            <Select
-              items={successActions.map((a, i) => ({
-                label: a.label,
-                value: String(i),
-              }))}
-              onSelect={(it) => {
-                const i = Number(it.value);
-                successActions[i]?.onSelect();
-              }}
-            />
-          ) : (
-            <Select
-              items={[{ label: "Continue", value: "continue" }]}
-              onSelect={() => onDone(state.kind === "ok")}
-            />
-          )}
+        <Box marginTop={1}>
           <Text color={theme.dim}>↑/↓ pick · enter • select · esc • back</Text>
         </Box>
       )}

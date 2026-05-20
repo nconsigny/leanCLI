@@ -1,14 +1,20 @@
 import React from "react";
 import { Box, Text } from "ink";
 import { theme } from "../theme.js";
+import { KoiFrame } from "./KoiFrame.js";
 
-/** Standard frame: title bar, optional subtitle, content, footer hint row. */
+/** Standard frame: title bar, optional subtitle, koi-framed content,
+ *  footer hint row. The koi-frame is the "you are inside the wallet"
+ *  identity cue and is on by default; pass `koi={false}` only for
+ *  screens that paint their own frame (e.g. LlmChatFlow's Container). */
 export function Layout(props: {
   title: string;
   subtitle?: string;
   hint?: string;
+  koi?: boolean;
   children: React.ReactNode;
 }) {
+  const koi = props.koi ?? true;
   return (
     <Box flexDirection="column" paddingX={1}>
       <Text color={theme.primary} bold>
@@ -16,7 +22,7 @@ export function Layout(props: {
       </Text>
       {props.subtitle && <Text color={theme.dim}>{props.subtitle}</Text>}
       <Box marginTop={1} flexDirection="column">
-        {props.children}
+        {koi ? <KoiFrame>{props.children}</KoiFrame> : props.children}
       </Box>
       {props.hint && (
         <Box marginTop={1}>

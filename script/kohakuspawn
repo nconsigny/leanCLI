@@ -285,9 +285,22 @@ build_tui() {
     echo "==> tui: skipped (--no-tui)"
     return 0
   fi
+  # In "auto" mode, skip only if the bundle exists AND is newer than every
+  # source file. The previous "present means skip" rule meant `kohakuspawn
+  # --pull` would happily pull new TUI source but ship the stale bundle to
+  # users — exactly the failure mode we hit when shipping the KoiFrame
+  # fix. find -newer prints any source that's newer than the bundle; an
+  # empty result means we're up to date.
   if [[ "$BUILD_TUI" == "auto" && -f "$TUI_BUNDLE" ]]; then
-    echo "==> tui: dist/index.mjs present, skipping (use --rebuild-tui to force)"
-    return 0
+    local newer
+    newer="$(find "$CHECKOUT/tui/src" "$CHECKOUT/tui/package.json" \
+                  "$CHECKOUT/tui/esbuild.config.mjs" \
+                  -newer "$TUI_BUNDLE" -print -quit 2>/dev/null || true)"
+    if [[ -z "$newer" ]]; then
+      echo "==> tui: dist/index.mjs up to date, skipping (use --rebuild-tui to force)"
+      return 0
+    fi
+    echo "==> tui: source newer than bundle ($newer), rebuilding"
   fi
   if [[ ! -d "$CHECKOUT/tui" ]]; then
     echo "kohakuspawn: tui/ directory not found in $CHECKOUT, skipping TUI build" >&2
