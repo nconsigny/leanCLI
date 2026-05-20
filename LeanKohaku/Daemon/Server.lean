@@ -819,11 +819,44 @@ private def sendResultJson (to value raw txHash : String)
     ("signature", signatureJson sig)
   ]
 
-private def saveMnemonicSlot (params : Json) (generated : Option LeanKohaku.Wallet.Mnemonic.Mnemonic := none) :
+private def saveMnemonicSlot
+    (state : LeanKohaku.Daemon.State.Shared)
+    (params : Json) (generated : Option LeanKohaku.Wallet.Mnemonic.Mnemonic := none) :
     IO (Except RpcError (LeanKohaku.Wallet.EoaStore.Record × Option LeanKohaku.Wallet.Mnemonic.Mnemonic)) := do
   try
     let name ← expectExcept <| paramString params "name" |>.mapError (fun _ => "missing name")
-    let passphrase ← expectExcept <| paramString params "passphrase" |>.mapError (fun _ => "missing passphrase")
+    -- If the wallet master KEK is currently held in memory, a per-slot
+    -- passphrase is optional — we'll generate an ephemeral one for the
+    -- on-disk wrap and immediately enroll the slot under master so future
+    -- unlocks use the KEK. The ephemeral isn't returned to the client and
+    -- isn't a recovery factor; it exists only because EoaStore.save expects
+    -- an encrypted seed and we don't want to touch that schema yet.
+    --
+    -- When master is NOT loaded the passphrase is still required — that's
+    -- the only way to encrypt the seed at rest in this branch.
+    let masterSlot? ← LeanKohaku.Daemon.State.getMasterKek? state
+    -- Track whether the user actually picked their own per-slot passphrase
+    -- vs. us minting an ephemeral one. The flag drives the auto-enroll
+    -- decision below (and gets persisted into the record so future
+    -- master-unlock paths know to skip rewrap).
+    let userSuppliedPassphrase : Bool :=
+      match paramString params "passphrase" with
+      | .ok p => p.length > 0
+      | .error _ => false
+    let passphrase ← match paramString params "passphrase" with
+      | .ok p =>
+          if p.length > 0 then pure p
+          else if masterSlot?.isSome then
+            let bytes ← LeanKohaku.Crypto.Random.getRandomBytes 32
+            pure (LeanKohaku.Crypto.Hex.encode bytes)
+          else
+            throw <| IO.userError "missing passphrase (no master KEK loaded — set one with `wallet master init` or pick a per-slot passphrase)"
+      | .error _ =>
+          if masterSlot?.isSome then
+            let bytes ← LeanKohaku.Crypto.Random.getRandomBytes 32
+            pure (LeanKohaku.Crypto.Hex.encode bytes)
+          else
+            throw <| IO.userError "missing passphrase (no master KEK loaded — set one with `wallet master init` or pick a per-slot passphrase)"
     let derivationPath := paramStringD params "derivationPath" defaultDerivationPath
     let mnemonic ←
       match generated with
@@ -838,8 +871,44 @@ private def saveMnemonicSlot (params : Json) (generated : Option LeanKohaku.Wall
     -- with single spaces (BIP-39 canonical form).
     let phrase :=
       String.intercalate " " mnemonic.words.toArray.toList
-    let record ← expectExcept <| ← LeanKohaku.Wallet.EoaStore.saveEncryptedSeed
+    let baseRecord ← expectExcept <| ← LeanKohaku.Wallet.EoaStore.saveEncryptedSeed
       name passphrase seed derivationPath address (some phrase)
+    -- customPassphrase records the user's intent: did they explicitly
+    -- pick this passphrase, or did we generate it ephemerally? The flag
+    -- gates the lazy-enroll path in `eoa.unlock` (line ~2733) — slots
+    -- where the user picked their own pass shouldn't get rewrapped under
+    -- master automatically.
+    let record ←
+      if userSuppliedPassphrase && !baseRecord.customPassphrase then
+        let updated := { baseRecord with customPassphrase := true }
+        try LeanKohaku.Wallet.EoaStore.save updated
+        catch _ => pure ()
+        pure updated
+      else
+        pure baseRecord
+    -- Immediate enrollment under master KEK (mirrors the lazy-enroll path
+    -- in `eoa.unlock`). Without this the slot is created with a per-slot
+    -- wrap only, and the first unlock attempt via the master prompt would
+    -- fail until the user enters the per-slot passphrase — which they
+    -- don't have when we generated it ephemerally. Skipped when the user
+    -- explicitly picked their own passphrase (customPassphrase=true) —
+    -- that's a "I want to manage my own per-slot key" signal we respect.
+    -- Failures are swallowed: the slot is still functional with whatever
+    -- passphrase the caller supplied; only master-unlock convenience is
+    -- degraded.
+    let record ← match masterSlot? with
+      | none => pure record
+      | some slot =>
+          if record.customPassphrase then pure record
+          else
+            match ← LeanKohaku.Keystore.MasterPassphrase.wrapSlot
+                slot.kek record.name record.derivationPath record.address seed with
+            | .error _ => pure record
+            | .ok wrap =>
+                let updated := { record with masterWrap := some wrap }
+                try LeanKohaku.Wallet.EoaStore.save updated
+                catch _ => pure ()
+                pure updated
     pure (.ok (record, generated))
   catch e =>
     pure <| .error { invalidParams with data := some (.str e.toString) }
@@ -2643,14 +2712,14 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           | .error err =>
               pure <| .error { code := -32010, message := "EOA slot not found", data := some (.str err) }
   | "eoa.import" =>
-      match ← saveMnemonicSlot req.params none with
+      match ← saveMnemonicSlot state req.params none with
       | .error err => pure (.error err)
       | .ok (record, _) => pure (.ok (← importResultJson state record))
   | "eoa.create" =>
       try
         let wordCount := paramNatD req.params "wordCount" 12
         let mnemonic ← LeanKohaku.Wallet.Entropy.generateMnemonic wordCount
-        match ← saveMnemonicSlot req.params (some mnemonic) with
+        match ← saveMnemonicSlot state req.params (some mnemonic) with
         | .error err => pure (.error err)
         | .ok (record, mnemonic?) => pure (.ok (← importResultJson state record mnemonic?))
       catch e =>
