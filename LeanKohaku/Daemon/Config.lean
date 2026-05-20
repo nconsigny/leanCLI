@@ -198,6 +198,16 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
     | 1 => some "mainnet"
     | 11155111 => some "sepolia"
     | _ => none
+  -- Resolve the default RPC URL. We do NOT throw on missing config any
+  -- more — the daemon starts with an empty-URL sentinel and the RPC layer
+  -- (LeanKohaku/RPC/Outbound.lean#call) refuses outbound dials with the
+  -- "no rpc_url configured" message at request time. This lets local-only
+  -- operations (wallet.master.init/status/unlock, TPM ops, every key
+  -- management RPC) run before an RPC URL is set, which is how the TUI's
+  -- first-run flow now puts master setup *before* the network step.
+  --
+  -- An *explicit empty* `rpc_url` in env or file is still a hard error —
+  -- that's "user tried to unset" and we don't want a silent no-op there.
   let rpcUrl ← match firstSome [
       ← envString? "LEANKOHAKU_RPC_URL",
       configString? fileCfg "rpc_url",
@@ -215,15 +225,14 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
     | none =>
         match chainNameFromId with
         | none =>
-            throw <| IO.userError
-              s!"no rpc_url configured (chain id {chainId}): set LEANKOHAKU_RPC_URL or 'rpc_url' in daemon.json"
+            -- No URL anywhere and chain isn't one we can name-lookup.
+            -- Run anyway, sentinel empty URL → RPC calls reject at use.
+            pure ""
         | some chain =>
             let envChain? := (← envChainUrl? chain).map (·.1)
             match firstSome [configChainRpcUrl? fileCfg chain, envChain?] with
             | some url => pure url
-            | none =>
-                throw <| IO.userError
-                  s!"no rpc_url configured: run `kohaku network set-rpc-chain {chain} <url>` (or set LEANKOHAKU_RPC_URL / 'rpc_url' in daemon.json)"
+            | none => pure ""
   let transport? :=
     match ← envString? "LEANKOHAKU_RPC_TRANSPORT" with
     | some s => parseTransport? s
@@ -375,7 +384,10 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
         let t := v.trimAscii.toString
         pure (t ≠ "" && t ≠ "0")
     | none => pure false
-  if !skipProbe then
+  -- Skip the probe when no rpc_url is configured. With the empty-URL
+  -- sentinel the probe would just emit a confusing "eth_chainId probe
+  -- failed" line on every fresh-install daemon start.
+  if !skipProbe && !rpcUrl.isEmpty then
     -- Why: the probe is config validation, not arbitrary outbound traffic.
     -- We're asking the user's own explicitly-configured `rpc_url` what
     -- chain it's on, with one call, at startup. Routing through

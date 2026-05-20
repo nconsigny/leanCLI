@@ -1,6 +1,8 @@
 import net from "node:net";
 import path from "node:path";
 import os from "node:os";
+import fs from "node:fs";
+import { spawn } from "node:child_process";
 
 /**
  * Minimal JSON-RPC client over the leanKohaku daemon's UDS socket. Mirrors
@@ -52,10 +54,111 @@ export function socketPath(): string {
   return path.join(runtimeDir, "leankohaku", "leankohaku.sock");
 }
 
+/** Resolve the daemon binary the TUI should spawn when the socket is
+ *  missing. Mirrors `LeanKohaku.Cli.DaemonClient.daemonBin`: env override
+ *  first, then the standard install path under $HOME/.kohaku/bin, then
+ *  PATH lookup. The TUI runs as `node dist/index.mjs`, so unlike the
+ *  Lean CLI we can't lean on IO.appDir — the install path is the
+ *  closest equivalent. */
+function daemonBinPath(): string {
+  const env = process.env.LEANKOHAKU_DAEMON_BIN;
+  if (env && env.length > 0) return env;
+  const installed = path.join(
+    process.env.KOHAKU_HOME || path.join(os.homedir(), ".kohaku"),
+    "bin",
+    "kohaku-daemon",
+  );
+  if (fs.existsSync(installed)) return installed;
+  return "kohaku-daemon";
+}
+
+/** Match `DaemonClient.lean.noAutoSpawnMethod` — never auto-spawn for
+ *  shutdown, otherwise stop-then-start loops would resurrect the daemon
+ *  the user just asked to die. */
+function noAutoSpawnMethod(method: string): boolean {
+  return method === "daemon.shutdown";
+}
+
+function autoSpawnDisabled(): boolean {
+  const v = process.env.LEANKOHAKU_NO_AUTOSPAWN;
+  if (!v) return false;
+  const lc = v.toLowerCase();
+  return lc !== "" && lc !== "0" && lc !== "false";
+}
+
+/** Try to connect once to the UDS to confirm the daemon is accepting
+ *  connections. Used both as the post-spawn readiness check and as the
+ *  failure trigger (ENOENT → spawn). */
+function probeSocket(p: string, timeoutMs = 200): Promise<boolean> {
+  return new Promise((resolve) => {
+    const test = net.createConnection(p);
+    const done = (ok: boolean) => {
+      try { test.destroy(); } catch {}
+      resolve(ok);
+    };
+    test.once("connect", () => done(true));
+    test.once("error", () => done(false));
+    setTimeout(() => done(false), timeoutMs);
+  });
+}
+
+async function waitForSocket(p: string, attempts = 20): Promise<boolean> {
+  for (let i = 0; i < attempts; i++) {
+    if (await probeSocket(p)) return true;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  return false;
+}
+
+/** Spawn `kohaku-daemon`, wait up to ~2s for the socket to bind, and
+ *  return either ok or the daemon's stderr (the actionable failure
+ *  reason — typically "no rpc_url configured" or a build/permissions
+ *  issue). Mirrors `DaemonClient.lean.ensureDaemon`. */
+async function ensureDaemon(
+  p: string,
+): Promise<{ ok: true } | { ok: false; reason: string }> {
+  const bin = daemonBinPath();
+  const stderrChunks: Buffer[] = [];
+  let spawnErr: Error | null = null;
+  let child;
+  try {
+    child = spawn(bin, [], {
+      detached: true,
+      // ignore stdin/stdout but pipe stderr so we can surface the daemon's
+      // startup error message (e.g. "no rpc_url configured") if it dies
+      // before binding the socket.
+      stdio: ["ignore", "ignore", "pipe"],
+      env: { ...process.env, LEANKOHAKU_SOCKET: p },
+    });
+  } catch (e: any) {
+    spawnErr = e;
+  }
+  if (spawnErr || !child) {
+    return {
+      ok: false,
+      reason: `could not exec ${bin}: ${spawnErr?.message ?? "unknown error"}`,
+    };
+  }
+  child.stderr?.on("data", (c: Buffer) => stderrChunks.push(c));
+  if (await waitForSocket(p)) {
+    // Detach so the daemon outlives this Node process.
+    child.unref();
+    return { ok: true };
+  }
+  // Socket never appeared. Give the child a moment to flush stderr,
+  // then surface whatever it printed.
+  await new Promise((r) => setTimeout(r, 200));
+  const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
+  return {
+    ok: false,
+    reason: stderr || "daemon spawned but socket did not appear within 2s",
+  };
+}
+
 /** One-shot RPC call. Opens a fresh connection per request — this matches
  *  the Lean CLI's pattern (`callOnce` in DaemonClient.lean) so we never
  *  hold the socket exclusively while the user is idle in a menu. */
-export function call<T = unknown>(
+function callOnce<T = unknown>(
   method: string,
   params: unknown = [],
   opts: { onNotification?: NotificationHandler; timeoutMs?: number } = {},
@@ -151,4 +254,48 @@ export function call<T = unknown>(
       }
     });
   });
+}
+
+/** Detect the "daemon isn't running" failure mode (ENOENT on UDS connect)
+ *  so we know when to attempt auto-spawn. Other transport errors —
+ *  permission denied, framing errors, timeouts — are not retryable here. */
+function isSocketMissingError(err: RpcError): boolean {
+  return err.code === -32603 && err.message.includes("ENOENT");
+}
+
+/** Public RPC entrypoint. Tries the call once; if the failure looks like
+ *  "daemon not running" (UDS connect ENOENT) and autospawn isn't disabled
+ *  for this method, spawns `kohaku-daemon` in the background and retries
+ *  once. This makes first-run flows (RpcSetupGate writes daemon.json,
+ *  then the TUI moves on) and crash-recovery flows work without forcing
+ *  the user to drop out of the TUI to run `kohaku daemon ping`.
+ *
+ *  Mirrors LeanKohaku.Cli.DaemonClient.call: on auto-spawn failure we
+ *  surface the daemon's own stderr (e.g. "no rpc_url configured") so the
+ *  user sees what to fix instead of the bare ENOENT. */
+export async function call<T = unknown>(
+  method: string,
+  params: unknown = [],
+  opts: { onNotification?: NotificationHandler; timeoutMs?: number } = {},
+): Promise<RpcResult<T>> {
+  const first = await callOnce<T>(method, params, opts);
+  if (first.ok) return first;
+  if (
+    noAutoSpawnMethod(method) ||
+    autoSpawnDisabled() ||
+    !isSocketMissingError(first.error)
+  ) {
+    return first;
+  }
+  const spawnResult = await ensureDaemon(socketPath());
+  if (!spawnResult.ok) {
+    return {
+      ok: false,
+      error: {
+        code: -32000,
+        message: `daemon auto-spawn failed: ${spawnResult.reason}`,
+      },
+    };
+  }
+  return callOnce<T>(method, params, opts);
 }

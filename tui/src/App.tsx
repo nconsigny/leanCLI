@@ -1,6 +1,20 @@
 import React, { useEffect, useState } from "react";
 import { useApp } from "ink";
+import fs from "node:fs";
+import path from "node:path";
+import os from "node:os";
 import { call } from "./daemon.js";
+
+// BootGate's hasRpcConfigured() helper does a synchronous fs check on
+// daemon.json before letting the gate fall through to MainMenu. Aliasing
+// the node-stdlib functions keeps the helper readable down below where
+// the gate lives.
+const pathJoin = path.join;
+const homeDir = os.homedir;
+const fileExists = (p: string) => {
+  try { return fs.existsSync(p); } catch { return false; }
+};
+const readFile = (p: string) => fs.readFileSync(p, "utf8");
 import MainMenu, { MainAction } from "./screens/MainMenu.js";
 import WalletsHub, { WalletsAction } from "./screens/WalletsHub.js";
 import ActionPicker, { Action as WalletAction } from "./screens/ActionPicker.js";
@@ -363,27 +377,38 @@ export default function App() {
   }
 }
 
-/** Startup gate. On a fresh install three things might be missing, in
- *  dependency order:
+/** Startup gate. On a fresh install three things might be missing.
+ *  Until commit 25edc78 the daemon refused to start without an RPC URL,
+ *  which forced RPC-first ordering. Post commit 25edc78 the daemon
+ *  starts without one (LeanKohaku/Daemon/Config.lean — empty URL
+ *  sentinel) and refuses RPC-needing ops lazily, so we can now ask the
+ *  user for their wallet master *before* the RPC URL — security setup
+ *  before network setup, which is what a wallet UX should always do.
  *
- *   1. RPC URL — the daemon refuses to start without one
- *      (LeanKohaku/Daemon/Config.lean). If `wallet.master.status` fails
- *      with a transport error, route to `RpcSetupGate` which writes
- *      daemon.json directly from Node.
- *   2. Wallet master KEK — if status says `initialized: false`, route to
- *      `MasterInitGate` so users don't have to discover
- *      `kohaku wallet master init` on their own.
- *   3. Session unlock — initialized but locked → `MasterUnlockGate`. We
- *      re-prompt every TUI launch on purpose (in-memory unlock is a CLI
- *      convenience, not a TUI bypass).
+ *  Order:
  *
- *  Esc at any step bails out to MainMenu unblocked; per-slot unlocks still
- *  work as the fallback. */
+ *   1. Wallet master KEK. `wallet.master.status` reports `initialized:
+ *      false` on a fresh box → route to `MasterInitGate`. Master init
+ *      is pure local crypto (PBKDF2 → KEK → optional TPM seal), it
+ *      doesn't need network, so it really can run first.
+ *
+ *   2. RPC URL. We can't ask the daemon "do you have an RPC URL"
+ *      directly (no such method, and adding one for one bit of state
+ *      is overkill), so we fs-check `daemon.json` from Node — same
+ *      file RpcSetupGate writes. If missing or no rpc_urls entry,
+ *      route to `RpcSetupGate`.
+ *
+ *   3. Session unlock. Initialized + RPC set → `MasterUnlockGate`. We
+ *      re-prompt every TUI launch on purpose (in-memory unlock is a
+ *      CLI convenience, not a TUI bypass).
+ *
+ *  Esc at any step bails out to MainMenu unblocked; per-slot unlocks
+ *  still work as the fallback. */
 function BootGate({ onDone }: { onDone: () => void }) {
   type Status =
     | { kind: "probing" }
-    | { kind: "needs-rpc" }
     | { kind: "needs-init" }
+    | { kind: "needs-rpc" }
     | { kind: "needs-unlock" }
     | { kind: "pass-through" };
 
@@ -399,16 +424,19 @@ function BootGate({ onDone }: { onDone: () => void }) {
       }>("wallet.master.status");
       if (cancelled) return;
       if (!r.ok) {
-        // Most common failure on a fresh box is "daemon refuses to start
-        // because no RPC URL is configured". We can't cheaply distinguish
-        // that from a genuinely-down daemon without parsing the error
-        // string, so route to RPC setup either way — writing daemon.json
-        // is harmless when one already exists.
-        setStatus({ kind: "needs-rpc" });
+        // Daemon unreachable even with auto-spawn in daemon.ts — surface
+        // the failure rather than silently routing to RpcSetupGate, since
+        // the daemon now starts without rpc_url and `!ok` means something
+        // else is wrong (binary missing, permissions, etc).
+        setStatus({ kind: "pass-through" });
         return;
       }
       if (!r.result!.initialized) {
         setStatus({ kind: "needs-init" });
+        return;
+      }
+      if (!hasRpcConfigured()) {
+        setStatus({ kind: "needs-rpc" });
         return;
       }
       setStatus({ kind: "needs-unlock" });
@@ -422,18 +450,56 @@ function BootGate({ onDone }: { onDone: () => void }) {
     if (status.kind === "pass-through") onDone();
   }, [status.kind]);
 
-  if (status.kind === "needs-rpc") {
-    return <RpcSetupGate onDone={() => setStatus({ kind: "pass-through" })} />;
+  if (status.kind === "needs-init") {
+    // After master init, re-probe instead of jumping straight to MainMenu —
+    // a fresh install with no daemon.json should chain into RpcSetupGate
+    // next, not strand the user without an RPC endpoint.
+    return <MasterInitGate onDone={() => setStatus({ kind: "probing" })} />;
   }
 
-  if (status.kind === "needs-init") {
-    // After init, daemon already holds the KEK in memory, so head
-    // straight to MainMenu (skip the unlock prompt).
-    return <MasterInitGate onDone={() => setStatus({ kind: "pass-through" })} />;
+  if (status.kind === "needs-rpc") {
+    return <RpcSetupGate onDone={() => setStatus({ kind: "pass-through" })} />;
   }
 
   if (status.kind === "needs-unlock") {
     return <MasterUnlockGate onDone={onDone} />;
   }
   return null;
+}
+
+/** Mirror of `kohakuspawn`'s `has_rpc_configured` shell helper, scoped
+ *  to the file format the TUI writes. Checks for a non-empty
+ *  `rpc_urls.<chain>` entry or a non-empty top-level `rpc_url` in
+ *  `$LEANKOHAKU_CONFIG` / `$XDG_CONFIG_HOME/leankohaku/daemon.json`. */
+function hasRpcConfigured(): boolean {
+  try {
+    const cfg =
+      process.env.LEANKOHAKU_CONFIG ||
+      pathJoin(
+        process.env.XDG_CONFIG_HOME || pathJoin(homeDir(), ".config"),
+        "leankohaku",
+        "daemon.json",
+      );
+    if (!fileExists(cfg)) return false;
+    const json = JSON.parse(readFile(cfg));
+    if (!json || typeof json !== "object") return false;
+    if (typeof json.rpc_url === "string" && json.rpc_url.trim() !== "") {
+      return true;
+    }
+    const map = json.rpc_urls;
+    if (!map || typeof map !== "object") return false;
+    for (const k of Object.keys(map)) {
+      const v = map[k];
+      if (typeof v === "string" && v.trim() !== "") return true;
+      if (
+        v && typeof v === "object" && typeof v.url === "string" &&
+        v.url.trim() !== ""
+      ) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }

@@ -120,19 +120,28 @@ export default function RpcSetupGate({ onDone }: { onDone: () => void }) {
           </Text>
           <Box marginTop={1}>
             <Text color={theme.dim}>{isMainnet ? "mainnet: " : "sepolia: "}</Text>
-            <TextInput
-              value={current}
-              placeholder={
-                isMainnet ? "https://eth.llamarpc.com" : "https://sepolia.drpc.org"
-              }
-              onChange={(v) =>
-                setPhase({
-                  ...phase,
-                  ...(isMainnet ? { mainnet: v } : { sepolia: v }),
-                  err: null,
-                })
-              }
-              onSubmit={(v) => {
+            {/* Constrain the TextInput's footprint to the remaining row width
+                and clip overflow on the right. Without this, RPC URLs longer
+                than the koi-frame's inner width — common with provider keys
+                in the path — wrap to the next terminal line and bleed onto
+                the koi ASCII art column at the left margin. flexShrink=1 +
+                minWidth=0 + overflow="hidden" tells Ink to let this child
+                shrink to whatever room is left in the row and clip the
+                trailing chars when the value overruns it. */}
+            <Box flexGrow={1} flexShrink={1} minWidth={0} overflow="hidden">
+              <TextInput
+                value={current}
+                placeholder={
+                  isMainnet ? "https://eth.llamarpc.com" : "https://sepolia.drpc.org"
+                }
+                onChange={(v) =>
+                  setPhase({
+                    ...phase,
+                    ...(isMainnet ? { mainnet: v } : { sepolia: v }),
+                    err: null,
+                  })
+                }
+                onSubmit={(v) => {
                 if (isMainnet) {
                   setPhase({
                     kind: "sepolia",
@@ -149,7 +158,8 @@ export default function RpcSetupGate({ onDone }: { onDone: () => void }) {
                   });
                 }
               }}
-            />
+              />
+            </Box>
           </Box>
           {phase.err && (
             <Box marginTop={1}>
