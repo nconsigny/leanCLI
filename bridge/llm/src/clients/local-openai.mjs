@@ -1,4 +1,8 @@
-// Local OpenAI-compatible client for gpt-oss-120b on llama-server.
+// Local OpenAI-compatible client for any chat-completions server on
+// the loopback interface (llama.cpp, vLLM, Ollama's /v1 surface, etc.).
+// Historically targeted gpt-oss-120b; now model-agnostic — the served
+// model id is auto-detected from /v1/models so swapping the backing
+// model (e.g. Qwen3.5-35B-A3B) needs no code change.
 //
 // Per Slice 6 of the leanAI plan: this client is one of TWO selectable
 // backends (the other is Anthropic). The Lean daemon decides which to
@@ -27,9 +31,17 @@
 
 import net from "node:net";
 import dns from "node:dns/promises";
+import { toolSchemas, findTool } from "../tools/registry.mjs";
+import { parseQwenToolCalls } from "../tools/qwenParser.mjs";
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:8080/v1";
-const DEFAULT_REASONING = "medium"; // low | medium | high — medium is the project default
+
+/** Hard cap on tool-call rounds. A 3.5B-class model is much more
+ *  likely to over-call or loop on the same tool than a frontier model;
+ *  the cap is the only thing preventing a runaway sidecar from holding
+ *  the chat-completions endpoint open indefinitely. Tuned for the
+ *  current 4-tool surface — bump if the surface grows. */
+const MAX_TOOL_TURNS = 5;
 
 /** Auto-detect the served model id when LOCAL_LLM_MODEL is unset.
  *  llama.cpp tags by HF repo ("ggml-org/gpt-oss-120b-GGUF"); other
@@ -101,15 +113,30 @@ export async function ping(baseUrl = process.env.LOCAL_LLM_BASE_URL ?? DEFAULT_B
   }
 }
 
-/** Build the structured prompt: system + user with raw text and
- *  regex-seed JSON. Returns an OpenAI-compatible messages array.
- *  Crucially, every value we interpolate is JSON-stringified — no
- *  unescaped chain-derived strings ever land in the prompt body. */
-function buildMessages({ prompt, seed, chainId, skillContext, chainContext, walletContext }) {
-  // Field-by-field schema. The prompt is intentionally verbose: gpt-oss
-  // is documented unreliable on Ethereum-specific factual details, so we
-  // overspecify the wire shape and let the Lean validator hard-reject
-  // anything off-spec.
+/** Cap on the number of previous chat turns we replay into the model.
+ *  Beyond this we drop the oldest. Each turn is one user or assistant
+ *  message — six is roughly three round-trips, enough for the user to
+ *  clarify a swap ("which router?" → "uniswap v3") without ballooning
+ *  context. Tool messages from prior turns are NEVER replayed: each
+ *  tool result is ephemeral per the current intent and the model would
+ *  thrash if it saw stale balances / allowances in the transcript. */
+const MAX_HISTORY_TURNS = 6;
+
+/** Build the structured prompt: system + (optional history) + user
+ *  with raw text and regex-seed JSON. Returns an OpenAI-compatible
+ *  messages array. Crucially, every value we interpolate is
+ *  JSON-stringified — no unescaped chain-derived strings ever land in
+ *  the prompt body. History is treated as untrusted text (same trust
+ *  model as the current prompt); the Lean IntentParser still hard-
+ *  rejects whatever the model emits. */
+function buildMessages({ prompt, seed, chainId, skillContext, chainContext, walletContext, history }) {
+  // Field-by-field schema. The prompt is intentionally verbose: local
+  // open-weight models are documented unreliable on Ethereum-specific
+  // factual details (chain ids, dead-testnet names, RLP layouts, fee
+  // fields, contract addresses), so we overspecify the wire shape and
+  // let the Lean validator hard-reject anything off-spec. This isn't
+  // model-specific defensiveness — it's the cost of putting any model
+  // on the signing path.
   const system = [
     "You convert natural-language Ethereum transaction intents into structured JSON.",
     "You DO NOT compute calldata, signatures, RLP bytes, or v/r/s. You ONLY produce the structured intent.",
@@ -185,33 +212,65 @@ function buildMessages({ prompt, seed, chainId, skillContext, chainContext, wall
     regex_seed: seed ?? null,
     chain_id: chainId,
   };
+  // Normalise history: keep only user/assistant string-content turns
+  // (no tool messages), cap to MAX_HISTORY_TURNS from the tail.
+  const historyMsgs = Array.isArray(history)
+    ? history
+        .filter(
+          (m) =>
+            m &&
+            (m.role === "user" || m.role === "assistant") &&
+            typeof m.content === "string" &&
+            m.content.length > 0,
+        )
+        .slice(-MAX_HISTORY_TURNS)
+        .map((m) => ({ role: m.role, content: m.content }))
+    : [];
   return [
     { role: "system", content: fullSystem },
+    ...historyMsgs,
     { role: "user", content: JSON.stringify(userMsg) },
   ];
 }
 
 /** Call llama-server's chat-completions endpoint, return raw model
- *  text. Retries once on ECONNREFUSED to ride out a server restart. */
-export async function parseIntent({ prompt, seed, chainId, skillContext, chainContext, walletContext }, opts = {}) {
+ *  text. Retries once on ECONNREFUSED to ride out a server restart.
+ *
+ *  When `tools` (non-empty array of registry entries) is provided,
+ *  enters a bounded tool-call loop instead of a single-shot call. Each
+ *  iteration: send messages+tools, dispatch any tool_calls (structured
+ *  or qwen `<tool_call>` tags), append the results as `role: "tool"`
+ *  messages, repeat until the model emits final JSON content or
+ *  MAX_TOOL_TURNS is hit. */
+export async function parseIntent({ prompt, seed, chainId, skillContext, chainContext, walletContext, tools, history }, opts = {}) {
   const baseUrl = opts.baseUrl ?? process.env.LOCAL_LLM_BASE_URL ?? DEFAULT_BASE_URL;
   await assertLoopbackOnly(baseUrl);
-  // Resolution order: explicit opts → env override → first model the server advertises.
+  // Resolution order: explicit opts → env override → first model the
+  // server advertises. No hardcoded model-name fallback: if /v1/models
+  // returns nothing usable we'd rather error loudly than silently
+  // POST with a wrong id that a strict server (vLLM, future
+  // llama.cpp) would 404 on.
   let model = opts.model ?? process.env.LOCAL_LLM_MODEL;
   if (!model) {
-    model = (await detectModelId(baseUrl)) ?? "gpt-oss-120b";
+    model = await detectModelId(baseUrl);
+    if (!model) {
+      throw new Error(
+        "could not determine local LLM model id: /v1/models returned no usable entry. " +
+        "Set LOCAL_LLM_MODEL explicitly to override.",
+      );
+    }
   }
-  const reasoning = opts.reasoning ?? process.env.LOCAL_LLM_REASONING ?? DEFAULT_REASONING;
+  // reasoning_effort is an OpenAI / gpt-oss extension. Only send it
+  // when the caller explicitly opts in via env or opts — gating keeps
+  // the wire request minimal for models that don't speak it (most
+  // Qwen / Llama / Mistral builds) so we never have to rely on the
+  // server silently dropping unknown fields.
+  const reasoning = opts.reasoning ?? process.env.LOCAL_LLM_REASONING ?? null;
 
-  const messages = buildMessages({ prompt, seed, chainId, skillContext, chainContext, walletContext });
-  const body = {
+  const messages = buildMessages({ prompt, seed, chainId, skillContext, chainContext, walletContext, history });
+
+  const baseBody = {
     model,
-    messages,
-    // reasoning_effort is a gpt-oss extension; harmless on other models
-    // when llama.cpp tolerates unknown fields. Override via env if a
-    // server complains.
-    reasoning_effort: reasoning,
-    response_format: { type: "json_object" },
     // Bumped from 1024 — the skill body + chain context push the
     // prompt long, and some models put reasoning tokens in the
     // response too. Cap is still per-call so a runaway model can't
@@ -219,55 +278,190 @@ export async function parseIntent({ prompt, seed, chainId, skillContext, chainCo
     max_tokens: 4096,
     stream: false,
   };
+  if (reasoning) {
+    baseBody.reasoning_effort = reasoning;
+  }
 
-  const attempt = async () => {
-    const r = await fetch(`${baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    if (!r.ok) {
-      const txt = await r.text().catch(() => "");
-      throw new Error(`local LLM HTTP ${r.status}: ${txt.slice(0, 300)}`);
-    }
-    return r.json();
-  };
-
-  let resp;
-  try {
-    resp = await attempt();
-  } catch (e) {
-    if (e?.cause?.code === "ECONNREFUSED") {
-      // server may be restarting; one retry after 500ms backoff
-      await new Promise((res) => setTimeout(res, 500));
-      resp = await attempt();
-    } else {
+  const callChat = async (body) => {
+    const doFetch = async () => {
+      const r = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) {
+        const txt = await r.text().catch(() => "");
+        throw new Error(`local LLM HTTP ${r.status}: ${txt.slice(0, 300)}`);
+      }
+      return r.json();
+    };
+    try {
+      return await doFetch();
+    } catch (e) {
+      if (e?.cause?.code === "ECONNREFUSED") {
+        await new Promise((res) => setTimeout(res, 500));
+        return await doFetch();
+      }
       throw e;
     }
-  }
-  // Multi-shape extraction. OpenAI / llama.cpp default = message.content.
-  // gpt-oss sometimes puts the actual JSON in `reasoning_content` and
-  // leaves `content` empty. Legacy completions servers use `text`.
-  // Try each in order; the first non-empty string wins.
-  const choice = resp?.choices?.[0];
-  const candidates = [
-    choice?.message?.content,
-    choice?.message?.reasoning_content,
-    choice?.text,
-  ];
-  const raw = candidates.find(
-    (s) => typeof s === "string" && s.trim().length > 0,
-  );
-  if (!raw) {
-    // Surface the full response (truncated) so the daemon's error
-    // tells us which shape we got that we couldn't extract from.
-    const dump = JSON.stringify(resp ?? {}).slice(0, 400);
-    throw new Error(`local LLM returned no usable content. response was: ${dump}`);
-  }
-  return {
-    raw,
-    backend: "local-openai",
-    model,
-    reasoning_effort: reasoning,
   };
+
+  const extractContent = (resp) => {
+    const choice = resp?.choices?.[0];
+    const candidates = [
+      choice?.message?.content,
+      choice?.message?.reasoning_content,
+      choice?.text,
+    ];
+    return candidates.find((s) => typeof s === "string" && s.trim().length > 0);
+  };
+
+  // Single-shot path — preserved verbatim for callers that don't pass
+  // `tools`. This is still the default for the DirectSynth fallback
+  // and for skills that don't benefit from chain probing.
+  if (!Array.isArray(tools) || tools.length === 0) {
+    const body = {
+      ...baseBody,
+      messages,
+      response_format: { type: "json_object" },
+    };
+    const resp = await callChat(body);
+    const raw = extractContent(resp);
+    if (!raw) {
+      const dump = JSON.stringify(resp ?? {}).slice(0, 400);
+      throw new Error(`local LLM returned no usable content. response was: ${dump}`);
+    }
+    return { raw, backend: "local-openai", model, reasoning_effort: reasoning };
+  }
+
+  // Tool-call loop. Bounded by MAX_TOOL_TURNS so a model that loops on
+  // the same tool can't hold the endpoint open. The trace is included
+  // in the returned object so the daemon can surface it in errors
+  // (useful when debugging "why did the model call X with these args?").
+  const trace = [];
+  let convo = messages.slice();
+  const schemas = toolSchemas(tools);
+
+  for (let turn = 0; turn < MAX_TOOL_TURNS; turn++) {
+    const body = {
+      ...baseBody,
+      messages: convo,
+      tools: schemas,
+      tool_choice: "auto",
+      // response_format omitted when tools are active: a model emitting
+      // a tool_call must NOT also be forced to emit JSON-only content,
+      // or it gets confused about whether the call goes in `content` or
+      // `tool_calls`. The final-answer turn (no tool_calls) still
+      // emits the Intent as JSON because the system prompt demands it.
+    };
+    const resp = await callChat(body);
+    const choice = resp?.choices?.[0];
+    const assistantMsg = choice?.message ?? {};
+    const structuredCalls = Array.isArray(assistantMsg.tool_calls)
+      ? assistantMsg.tool_calls
+      : [];
+    const contentStr = extractContent(resp) ?? "";
+    const { toolCalls: qwenCalls, remainingContent } = parseQwenToolCalls(contentStr);
+
+    // Prefer structured tool_calls (what llama.cpp emits with --jinja
+    // + a model whose template supports tool use). Fall through to the
+    // Qwen text-tag parser when structured is empty.
+    const calls =
+      structuredCalls.length > 0
+        ? structuredCalls.map((c) => ({
+            id: c.id,
+            name: c?.function?.name ?? "",
+            args: (() => {
+              try {
+                return JSON.parse(c?.function?.arguments ?? "{}");
+              } catch {
+                return {};
+              }
+            })(),
+          }))
+        : qwenCalls;
+
+    if (calls.length === 0) {
+      // No tool calls → the model is emitting the final Intent JSON.
+      const final = (contentStr && contentStr.trim()) || remainingContent;
+      if (!final) {
+        const dump = JSON.stringify(resp ?? {}).slice(0, 400);
+        throw new Error(`local LLM returned no usable content on final turn. response was: ${dump}`);
+      }
+      return {
+        raw: final,
+        backend: "local-openai",
+        model,
+        reasoning_effort: reasoning,
+        toolTurns: turn,
+        toolTrace: trace,
+      };
+    }
+
+    // Echo the assistant turn back into the conversation so the model
+    // sees its own tool_calls in context (required by the OpenAI spec —
+    // we cannot just send a `role: "tool"` reply without the matching
+    // assistant turn). Some llama.cpp builds return the raw structured
+    // form; we round-trip whatever the server gave us.
+    convo.push({
+      role: "assistant",
+      content: assistantMsg.content ?? "",
+      ...(structuredCalls.length > 0 ? { tool_calls: structuredCalls } : {}),
+    });
+
+    // Dispatch each tool call, appending one role:"tool" message per.
+    let sawRepeat = false;
+    for (const call of calls) {
+      const sig = `${call.name}:${JSON.stringify(call.args)}`;
+      if (trace.some((t) => t.sig === sig)) {
+        // Same tool + same args as a prior turn — the model is thrashing.
+        // Surface this as a tool result so it can react, but mark the
+        // loop for early exit if it happens twice in a row.
+        sawRepeat = true;
+      }
+      const def = findTool(tools, call.name);
+      let result;
+      if (!def) {
+        result = { ok: false, error: `unknown tool: ${call.name}` };
+      } else {
+        try {
+          result = await def.impl(call.args ?? {});
+        } catch (e) {
+          result = { ok: false, error: e?.message ?? String(e) };
+        }
+      }
+      trace.push({ sig, name: call.name, args: call.args, result });
+      // role:"tool" message. The OpenAI spec requires `tool_call_id`
+      // matching the assistant turn's id; we synthesise one for the
+      // qwen path so the format stays consistent.
+      convo.push({
+        role: "tool",
+        tool_call_id: call.id ?? `synth_${trace.length}`,
+        name: call.name,
+        content: JSON.stringify({
+          result,
+          summary: def?.summary?.(call.args ?? {}, result) ?? null,
+        }),
+      });
+    }
+
+    // Anti-thrash: if we saw the same tool+args twice in a row, nudge
+    // the model toward a final answer.
+    if (sawRepeat) {
+      convo.push({
+        role: "system",
+        content:
+          "You called the same tool with identical arguments twice. " +
+          "You have enough information; emit the final Intent JSON now.",
+      });
+    }
+  }
+
+  // Loop budget exhausted without a final-answer turn. Per the design
+  // doc, we surface this as a structured error so the user knows the
+  // LLM was thrashing — never silently sign.
+  throw new Error(
+    `local LLM exceeded ${MAX_TOOL_TURNS} tool-call rounds without emitting a final Intent. ` +
+      `Last ${trace.length} tool calls in trace.`,
+  );
 }
