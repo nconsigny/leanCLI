@@ -301,6 +301,15 @@ if [[ "$MODE" == "uninstall" ]]; then
 
   remove_link "kohaku" "leankohaku"
   remove_link "kohaku-daemon" "leankohaku-daemon"
+  # SPHINCS- shim symlinks (installed by `install_sphincs_shims`). Same
+  # "checkout-rooted symlink" model as kohaku/kohaku-daemon, so the
+  # check-and-remove pattern is the same — `remove_link` no-ops when the
+  # symlink doesn't exist or points outside our managed checkout, so
+  # users who hand-symlinked a sphincs-* binary to their own build won't
+  # have it clobbered.
+  remove_link "sphincs-slhdsa-128-24" "sphincs-slhdsa-128-24"
+  remove_link "sphincs-jardin-keccak-128-24" "sphincs-jardin-keccak-128-24"
+  remove_link "sphincs-c9" "sphincs-c9"
 
   # kohakuspawn itself was copied (not symlinked) so we can always remove it.
   if [[ -e "$KOHAKU_BIN/kohakuspawn" ]]; then
@@ -403,6 +412,39 @@ if [[ $BUILD_LEAN -eq 1 ]]; then
     exit 1
   fi
 fi
+
+# SPHINCS- shim binaries (C + Rust). They live in `sidecars/sphincs/` and
+# are NOT produced by `lake build` — the shim Makefile is shelled out by
+# the `sphincs-shims` lake-script target. We invoke it here whenever the
+# user asked for a Lean build, and best-effort skip when missing tools
+# (gcc / cargo) so an install on a host that doesn't compile the shims
+# still finishes — the daemon's `sphincs.*` RPCs just fail closed at use
+# time with a clear "shim binary not found" message.
+SPHINCS_SHIMS=(sphincs-slhdsa-128-24 sphincs-jardin-keccak-128-24 sphincs-c9)
+build_sphincs_shims() {
+  if [[ $BUILD_LEAN -ne 1 ]]; then
+    return 0
+  fi
+  if [[ ! -d "$CHECKOUT/sidecars/sphincs" ]]; then
+    return 0
+  fi
+  local all_present=1
+  for shim in "${SPHINCS_SHIMS[@]}"; do
+    if [[ ! -x "$CHECKOUT/.lake/build/bin/$shim" ]]; then
+      all_present=0
+      break
+    fi
+  done
+  if [[ $all_present -eq 1 ]]; then
+    echo "==> sphincs shims: present, skipping (use --rebuild-helpers to force)"
+    return 0
+  fi
+  echo "==> sphincs shims: lake script run sphincs-shims"
+  if ! (cd "$CHECKOUT" && lake script run sphincs-shims) >&2; then
+    echo "kohakuspawn: sphincs-shims build failed; sphincs.* RPCs will fail closed" >&2
+  fi
+}
+build_sphincs_shims
 
 build_tui() {
   if [[ "$BUILD_TUI" == "never" ]]; then
@@ -582,6 +624,23 @@ link_one() {
 
 link_one "$LEAN_BIN" "kohaku"
 link_one "$LEAN_DAEMON" "kohaku-daemon"
+
+# SPHINCS- shim symlinks. The daemon's `Sphincs/Bridge.lean::resolveExecutable`
+# checks `LEAN_KOHAKU_SPHINCS_<PARAMSET>` env first, then walks up from cwd
+# looking for `sidecars/sphincs/bin/<basename>`, then falls through to PATH.
+# When `kohaku` is invoked from outside the checkout (the common case after
+# `kohakuspawn`), only the PATH branch hits — so we symlink each shim into
+# `$KOHAKU_BIN` (already on PATH because kohaku itself lives there).
+# Missing-binary case is non-fatal: `link_one` errors out, but the wrapper
+# above continues so the rest of the install still completes.
+for shim in "${SPHINCS_SHIMS[@]}"; do
+  shim_path="$CHECKOUT/.lake/build/bin/$shim"
+  if [[ -x "$shim_path" ]]; then
+    link_one "$shim_path" "$shim"
+  else
+    echo "kohakuspawn: sphincs shim $shim missing at $shim_path — sphincs.* RPCs will fail closed" >&2
+  fi
+done
 
 # ---- sidecar wrapper shims --------------------------------------------------
 #
