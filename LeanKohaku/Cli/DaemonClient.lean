@@ -137,6 +137,15 @@ def ensureDaemon (path method : String) : IO (Except String Unit) := do
     pure (.error s!"autospawn skipped for {method}")
   else if ← autoSpawnDisabled then
     pure (.error "autospawn disabled (LEANKOHAKU_NO_AUTOSPAWN is set)")
+  else if ← systemdManaged then
+    -- kohakuspawn dropped the marker; the daemon's lifecycle is now
+    -- owned by the systemd user unit. Returning a structured error
+    -- (rather than IO.eprintln) lets `call` wrap this in the normal
+    -- "daemon error" envelope the user sees for every other RPC
+    -- failure, so the exit code and formatting stay consistent.
+    let marker ← systemdMarkerPath
+    pure (.error
+      s!"kohaku-daemon is managed by systemd on this machine ({marker} present).\nStart it with:  kohaku daemon start\nTail logs with: kohaku daemon logs")
   else
     let child ← spawnDaemonChild path
     if ← waitForSocketConnect path 20 then

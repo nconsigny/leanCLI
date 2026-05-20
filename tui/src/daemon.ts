@@ -86,6 +86,29 @@ function autoSpawnDisabled(): boolean {
   return lc !== "" && lc !== "0" && lc !== "false";
 }
 
+/** Path of the "this machine is managed by systemd" marker dropped by
+ *  `kohakuspawn`. Mirrors `DaemonClient.lean.systemdMarkerPath`: honors
+ *  $XDG_CONFIG_HOME, falls back to $HOME/.config. Returns the path
+ *  regardless of whether the file exists — callers stat it themselves. */
+export function systemdMarkerPath(): string {
+  const cfgRoot =
+    process.env.XDG_CONFIG_HOME ||
+    path.join(process.env.HOME || os.homedir(), ".config");
+  return path.join(cfgRoot, "leankohaku", "managed-by-systemd");
+}
+
+/** True iff the systemd-handoff marker exists. Stat'd on every spawn
+ *  attempt so removing the marker takes effect without restarting the
+ *  TUI. Exported so BootGate can render an actionable notice instead
+ *  of the bare ENOENT error. */
+export function isSystemdManaged(): boolean {
+  try {
+    return fs.existsSync(systemdMarkerPath());
+  } catch {
+    return false;
+  }
+}
+
 /** Try to connect once to the UDS to confirm the daemon is accepting
  *  connections. Used both as the post-spawn readiness check and as the
  *  failure trigger (ENOENT → spawn). */
@@ -286,6 +309,23 @@ export async function call<T = unknown>(
     !isSocketMissingError(first.error)
   ) {
     return first;
+  }
+  if (isSystemdManaged()) {
+    // kohakuspawn dropped the marker — the daemon's lifecycle now lives
+    // under the systemd user unit, and racing it with an autospawn would
+    // recreate the multi-zombie state we just cleaned up. Surface a
+    // structured error with the exact start command so the user sees
+    // what to do without dropping out of the TUI.
+    return {
+      ok: false,
+      error: {
+        code: -32000,
+        message:
+          `kohaku-daemon is managed by systemd on this machine ` +
+          `(${systemdMarkerPath()} present). ` +
+          `Start it with: systemctl --user start kohaku-daemon`,
+      },
+    };
   }
   const spawnResult = await ensureDaemon(socketPath());
   if (!spawnResult.ok) {

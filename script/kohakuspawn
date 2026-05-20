@@ -197,6 +197,67 @@ require() {
   fi
 }
 
+# ---- systemd user-unit + autospawn-marker paths -----------------------------
+#
+# Honor XDG_CONFIG_HOME for both the systemd user-unit dir and the kohaku
+# config dir. Both fall back to $HOME/.config per the XDG spec. Keep this
+# group in one place so install and uninstall use the exact same paths.
+SYSTEMD_USER_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+SYSTEMD_UNIT_NAME="kohaku-daemon.service"
+SYSTEMD_UNIT_PATH="$SYSTEMD_USER_DIR/$SYSTEMD_UNIT_NAME"
+KOHAKU_CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/leankohaku"
+KOHAKU_ENV_FILE="$KOHAKU_CFG_DIR/daemon.env"
+KOHAKU_SYSTEMD_MARKER="$KOHAKU_CFG_DIR/managed-by-systemd"
+
+# One-shot cleanup of stragglers. Today's diagnosis was 5 stale kohaku-daemon
+# PIDs and 8 orphan bridge.mjs sidecars all bound to the same UDS path —
+# the result of autospawn racing without single-instance protection. Killing
+# them here gives the systemd unit (or a future autospawn) a clean slate.
+# Only run if there's actually something to kill — a clean machine should
+# print nothing.
+kill_stale_kohaku_processes() {
+  local found_daemon=0 found_bridge=0
+  if pgrep -x kohaku-daemon >/dev/null 2>&1; then found_daemon=1; fi
+  if pgrep -f 'bridge/colibri/bridge\.mjs' >/dev/null 2>&1; then found_bridge=1; fi
+  if [[ $found_daemon -eq 0 && $found_bridge -eq 0 ]]; then
+    return 0
+  fi
+  echo "==> cleaning stale kohaku-daemon / bridge.mjs processes"
+  # If the systemd unit is the manager and the daemon is part of its
+  # cgroup, ask systemd to stop it cleanly first (KillMode=control-group
+  # will sweep up the colibri sidecar via the cgroup). Best-effort —
+  # falls through to pkill below if systemctl is missing or the unit is
+  # inactive.
+  if command -v systemctl >/dev/null 2>&1 \
+     && systemctl --user is-active --quiet kohaku-daemon 2>/dev/null; then
+    systemctl --user stop kohaku-daemon 2>/dev/null || true
+  fi
+  # SIGTERM the daemon FIRST so it gets a chance to clean up its colibri
+  # sidecars itself (KillMode-equivalent for the manual case). Then mop
+  # up any bridges that survived (e.g. orphaned by a previous crash, or
+  # an autospawned daemon that's outside any cgroup we can reach).
+  pkill -x kohaku-daemon 2>/dev/null || true
+  pkill -f 'bridge/colibri/bridge\.mjs' 2>/dev/null || true
+  # Brief grace period for the processes to exit cleanly.
+  local i
+  for i in 1 2 3 4 5; do
+    if ! pgrep -x kohaku-daemon >/dev/null 2>&1 \
+       && ! pgrep -f 'bridge/colibri/bridge\.mjs' >/dev/null 2>&1; then
+      break
+    fi
+    sleep 0.2
+  done
+  # Anything still alive after 1s gets the hammer.
+  if pgrep -x kohaku-daemon >/dev/null 2>&1; then
+    echo "    SIGKILL surviving kohaku-daemon PIDs: $(pgrep -x kohaku-daemon | tr '\n' ' ')"
+    pkill -9 -x kohaku-daemon 2>/dev/null || true
+  fi
+  if pgrep -f 'bridge/colibri/bridge\.mjs' >/dev/null 2>&1; then
+    echo "    SIGKILL surviving bridge.mjs PIDs: $(pgrep -f 'bridge/colibri/bridge\.mjs' | tr '\n' ' ')"
+    pkill -9 -f 'bridge/colibri/bridge\.mjs' 2>/dev/null || true
+  fi
+}
+
 # ---- uninstall path ---------------------------------------------------------
 
 if [[ "$MODE" == "uninstall" ]]; then
@@ -247,6 +308,27 @@ if [[ "$MODE" == "uninstall" ]]; then
     echo "removed $KOHAKU_BIN/kohakuspawn"
   fi
 
+  # Stop and remove the systemd user unit (and its autospawn marker). We
+  # only ever `start`ed it manually — there's no `disable` step to mirror
+  # because the unit ships without an [Install] section. Reload after
+  # removal so `systemctl --user list-unit-files` reflects reality.
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user stop kohaku-daemon 2>/dev/null || true
+  fi
+  if [[ -f "$SYSTEMD_UNIT_PATH" ]]; then
+    rm -f "$SYSTEMD_UNIT_PATH"
+    echo "removed $SYSTEMD_UNIT_PATH"
+    if command -v systemctl >/dev/null 2>&1; then
+      systemctl --user daemon-reload 2>/dev/null || true
+    fi
+  fi
+  if [[ -e "$KOHAKU_SYSTEMD_MARKER" ]]; then
+    rm -f "$KOHAKU_SYSTEMD_MARKER"
+    echo "removed $KOHAKU_SYSTEMD_MARKER"
+  fi
+  # Also clean up any stale kohaku-daemon / bridge.mjs left running.
+  kill_stale_kohaku_processes
+
   # Drop the checkout marker but leave KOHAKU_HOME alone in case the user
   # has other state under it.
   rm -f "$CHECKOUT_FILE"
@@ -284,6 +366,14 @@ fi
 LEAN_BIN="$CHECKOUT/.lake/build/bin/leankohaku"
 LEAN_DAEMON="$CHECKOUT/.lake/build/bin/leankohaku-daemon"
 TUI_BUNDLE="$CHECKOUT/tui/dist/index.mjs"
+
+# Kill any stale daemon/bridge processes before we touch anything else.
+# Doing this *before* the build means the build can't accidentally race
+# a running daemon that has the old binary mmap'd from a previous
+# `kohakuspawn --pull` (.lake/build/bin/leankohaku-daemon is overwritten
+# in place). Doing it before the systemd install means we hand a clean
+# process table over to the unit if the user starts it next.
+kill_stale_kohaku_processes
 
 if [[ $PULL -eq 1 ]]; then
   require git
@@ -495,6 +585,99 @@ elif [[ "$SCRIPT_SOURCE" != "$INSTALLED_SELF" ]]; then
   install -m 0755 "$SCRIPT_SOURCE" "$INSTALLED_SELF"
   echo "==> $INSTALLED_SELF (self-installed from $SCRIPT_SOURCE)"
 fi
+
+# ---- systemd user unit install ---------------------------------------------
+#
+# Ship the repo's `packaging/systemd/kohaku-daemon.service` into the user's
+# systemd unit dir so they can manage the daemon with the standard
+# `systemctl --user {start,stop,status}` verbs. The unit has no [Install]
+# section on purpose — we never `enable` it and never call `loginctl
+# enable-linger`. Manual lifecycle only.
+#
+# The presence of the unit alone isn't enough to disable autospawn — some
+# users may install the unit but still want the CLI/TUI to launch the
+# daemon on demand. The `managed-by-systemd` marker is the actual switch
+# that turns autospawn off (checked by DaemonClient.lean and tui/daemon.ts).
+install_systemd_unit() {
+  local src="$CHECKOUT/packaging/systemd/$SYSTEMD_UNIT_NAME"
+  if [[ ! -f "$src" ]]; then
+    echo "kohakuspawn: $src missing — skipping systemd unit install" >&2
+    return 0
+  fi
+  mkdir -p "$SYSTEMD_USER_DIR"
+  # Copy via `install` so mode is normalized to 0644 and atomic.
+  if ! install -m 0644 "$src" "$SYSTEMD_UNIT_PATH"; then
+    echo "kohakuspawn: failed to install $SYSTEMD_UNIT_PATH" >&2
+    return 1
+  fi
+  echo "==> $SYSTEMD_UNIT_PATH (installed)"
+  if command -v systemctl >/dev/null 2>&1; then
+    # `daemon-reload` is mandatory after copying a unit file — without it
+    # `systemctl --user start kohaku-daemon` would either fail to find the
+    # unit or run an outdated cached copy. Failing the reload isn't fatal
+    # for the install (the user can reload manually), so swallow errors.
+    systemctl --user daemon-reload 2>/dev/null || \
+      echo "kohakuspawn: systemctl --user daemon-reload failed (continuing)" >&2
+  else
+    echo "kohakuspawn: systemctl not on PATH — skipped daemon-reload" >&2
+  fi
+}
+
+install_systemd_unit
+
+# The autospawn marker (`$KOHAKU_SYSTEMD_MARKER`) is intentionally NOT
+# created here. First-run onboarding (`launch_first_run_tui` /
+# `prompt_master_init`) needs the daemon up to call `wallet.master.init`,
+# and the marker would disable autospawn before the user has a chance to
+# `systemctl --user start kohaku-daemon`. Instead, we let autospawn handle
+# the wizard, then flip the marker on at the very end of the script (see
+# `finalize_systemd_handoff` below) and hand the user a clean
+# "systemctl --user start" footer.
+
+# ---- daemon.env mirror from onboarding -------------------------------------
+#
+# `daemon.json` is what the daemon actually reads for per-chain RPC; this
+# file is auxiliary, picked up by the systemd unit's EnvironmentFile= line
+# so unit-managed runs see the same LEANKOHAKU_RPC_URL the user might have
+# in their shell env. We only write it when we can supply a sensible
+# value — never overwriting an existing customized file.
+ensure_daemon_env() {
+  local rpc_url="${LEANKOHAKU_RPC_URL:-}"
+  if [[ -z "$rpc_url" ]]; then
+    # Nothing to mirror right now. The `prompt_rpc_setup` flow below will
+    # call back into this function once a URL is collected from the user.
+    return 0
+  fi
+  if [[ -s "$KOHAKU_ENV_FILE" ]]; then
+    # Existing non-empty file — respect the user's customization. Only
+    # add LEANKOHAKU_RPC_URL if it's not already present. This makes the
+    # function idempotent across re-runs.
+    if grep -qE '^LEANKOHAKU_RPC_URL=' "$KOHAKU_ENV_FILE" 2>/dev/null; then
+      return 0
+    fi
+    {
+      printf 'LEANKOHAKU_RPC_URL=%s\n' "$rpc_url"
+    } >> "$KOHAKU_ENV_FILE"
+    chmod 0600 "$KOHAKU_ENV_FILE" 2>/dev/null || true
+    echo "==> $KOHAKU_ENV_FILE: added LEANKOHAKU_RPC_URL"
+    return 0
+  fi
+  mkdir -p "$KOHAKU_CFG_DIR"
+  local tmp
+  tmp="$(mktemp "$KOHAKU_ENV_FILE.XXXXXX")"
+  {
+    printf '%s\n' "# kohaku-daemon environment file."
+    printf '%s\n' "# Read by the systemd user unit (kohaku-daemon.service) and by"
+    printf '%s\n' "# shell-launched daemons that source it. This file is auxiliary;"
+    printf '%s\n' "# per-chain RPC config lives in daemon.json next to it."
+    printf 'LEANKOHAKU_RPC_URL=%s\n' "$rpc_url"
+  } > "$tmp"
+  chmod 0600 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$KOHAKU_ENV_FILE"
+  echo "==> $KOHAKU_ENV_FILE (created)"
+}
+
+ensure_daemon_env
 
 # ---- shell-rc PATH integration (foundryup-style) ----------------------------
 #
@@ -774,6 +957,17 @@ prompt_rpc_setup() {
       && echo "  ✓ default chain set to $default_chain"
   fi
 
+  # Mirror the default chain's URL into daemon.env so the systemd unit
+  # sees the same RPC config as a shell-launched daemon. Picking the
+  # default chain keeps the env file aligned with `kohaku network show`.
+  local env_url=""
+  if [[ "$default_chain" == "mainnet" ]]; then env_url="$mainnet_url"
+  elif [[ "$default_chain" == "sepolia" ]]; then env_url="$sepolia_url"
+  fi
+  if [[ -n "$env_url" ]]; then
+    LEANKOHAKU_RPC_URL="$env_url" ensure_daemon_env
+  fi
+
   [[ $ok -eq 1 ]]
 }
 
@@ -830,6 +1024,16 @@ launch_first_run_tui() {
 #   has_rpc_configured / master_init_done  re-evaluated after the dispatcher.
 SETUP_ATTEMPTED=0
 
+# The wizard needs to talk to a live daemon (`wallet.master.status`,
+# `wallet.master.init`). If a marker from a previous install is sitting
+# at $KOHAKU_SYSTEMD_MARKER, autospawn would refuse and the wizard would
+# stall. Remove the marker for the duration of the wizard; the
+# `finalize_systemd_handoff` step at the end of the script will recreate
+# it after onboarding finishes (or is skipped).
+if [[ -e "$KOHAKU_SYSTEMD_MARKER" ]]; then
+  rm -f "$KOHAKU_SYSTEMD_MARKER"
+fi
+
 if [[ $RUN_INIT_WIZARD -eq 1 && -t 0 && -t 1 ]]; then
   if has_rpc_configured && master_init_done; then
     echo
@@ -873,6 +1077,33 @@ else
 fi
 
 echo
+
+# ---- systemd handoff -------------------------------------------------------
+#
+# Onboarding may have autospawned a daemon (and a colibri sidecar with it).
+# Now that the wizard is done, hand the daemon's lifecycle over to systemd:
+# kill anything still running, drop the marker, and let the post-install
+# footer tell the user the exact `systemctl --user start` command.
+#
+# The marker is the single source of truth for "autospawn off" — both the
+# Lean CLI and the TUI's daemon clients check for it before spawning.
+# Users who don't have systemd (uncommon on the supported targets) won't
+# have systemctl on PATH; we still drop the marker so they get a
+# consistent "the CLI no longer autospawns" experience, but we surface a
+# fallback hint instead of `systemctl --user start`.
+finalize_systemd_handoff() {
+  # Kill any autospawned daemon/bridge so systemd's first `start` doesn't
+  # race a stale process bound to the same UDS path.
+  kill_stale_kohaku_processes
+  mkdir -p "$KOHAKU_CFG_DIR"
+  if [[ ! -e "$KOHAKU_SYSTEMD_MARKER" ]]; then
+    : > "$KOHAKU_SYSTEMD_MARKER"
+    echo "==> $KOHAKU_SYSTEMD_MARKER (autospawn disabled — daemon is managed by systemd)"
+  fi
+}
+
+finalize_systemd_handoff
+
 # Footer.
 #
 # A green "Installed." should mean the wallet is actually ready to use —
@@ -886,6 +1117,23 @@ RPC_OK=0
 MASTER_OK=0
 if has_rpc_configured; then RPC_OK=1; fi
 if master_init_done; then MASTER_OK=1; fi
+
+print_systemd_hint() {
+  if command -v systemctl >/dev/null 2>&1; then
+    echo
+    echo "Daemon lifecycle (systemd user unit, manual start only):"
+    echo "  systemctl --user start kohaku-daemon       # launch the daemon"
+    echo "  systemctl --user status kohaku-daemon      # check it's healthy"
+    echo "  journalctl --user -u kohaku-daemon -f      # tail logs"
+    echo "  systemctl --user stop kohaku-daemon        # shut it down"
+  else
+    echo
+    echo "Note: systemctl was not on PATH at install time; the kohaku-daemon"
+    echo "unit was copied to $SYSTEMD_UNIT_PATH but cannot be started here."
+    echo "Either install systemd or remove $KOHAKU_SYSTEMD_MARKER to re-enable"
+    echo "the CLI/TUI's autospawn behavior."
+  fi
+}
 
 print_path_hint() {
   case ":${PATH:-}:" in
@@ -905,6 +1153,7 @@ if [[ $RPC_OK -eq 1 && $MASTER_OK -eq 1 ]]; then
   print_path_hint
   echo "  kohaku help"
   echo "  kohaku tui"
+  print_systemd_hint
   echo
   echo "To update later:  kohakuspawn --pull"
 elif [[ $SETUP_ATTEMPTED -eq 1 ]]; then
@@ -924,6 +1173,7 @@ elif [[ $SETUP_ATTEMPTED -eq 1 ]]; then
     echo "  ✓ wallet master initialized"
   fi
   print_path_hint
+  print_systemd_hint
   echo
   echo "Re-run \`kohakuspawn\` to retry the setup wizard."
 else
@@ -935,6 +1185,7 @@ else
   echo "Try:"
   echo "  kohaku help"
   echo "  kohaku tui"
+  print_systemd_hint
   echo
   echo "To update later:  kohakuspawn --pull"
 fi

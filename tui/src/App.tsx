@@ -1,9 +1,9 @@
 import React, { useEffect, useState } from "react";
-import { useApp } from "ink";
+import { Box, Text, useApp } from "ink";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { call } from "./daemon.js";
+import { call, isSystemdManaged, systemdMarkerPath } from "./daemon.js";
 
 // BootGate's hasRpcConfigured() helper does a synchronous fs check on
 // daemon.json before letting the gate fall through to MainMenu. Aliasing
@@ -426,6 +426,11 @@ function BootGate({ onDone }: { onDone: () => void }) {
     | { kind: "daemon-probe" }
     | { kind: "needs-init" }
     | { kind: "needs-unlock" }
+    // Marker file is present and the daemon is not reachable. We render
+    // an actionable "start the systemd unit" notice instead of falling
+    // through to MainMenu, where every screen would just show the
+    // raw "daemon transport error" banner.
+    | { kind: "systemd-not-running" }
     | { kind: "pass-through" };
 
   const [status, setStatus] = React.useState<Status>({ kind: "fs-probe" });
@@ -489,10 +494,17 @@ function BootGate({ onDone }: { onDone: () => void }) {
       }>("wallet.master.status");
       if (cancelled) return;
       if (!r.ok) {
-        // Phase 1 finished, daemon still unreachable — something is
-        // actually broken (binary missing, permissions). Surface to
-        // MainMenu where per-screen error banners can render the
-        // underlying message instead of papering over with a gate.
+        // Phase 1 finished, daemon still unreachable. If the systemd
+        // marker is present, the daemon is intentionally not autospawned
+        // — render the "start the unit" gate so the user sees the exact
+        // command instead of a stream of per-screen transport errors.
+        if (isSystemdManaged()) {
+          setStatus({ kind: "systemd-not-running" });
+          return;
+        }
+        // Otherwise something is actually broken (binary missing,
+        // permissions). Surface to MainMenu where per-screen error
+        // banners can render the underlying message.
         setStatus({ kind: "pass-through" });
         return;
       }
@@ -547,6 +559,36 @@ function BootGate({ onDone }: { onDone: () => void }) {
   if (status.kind === "needs-unlock") {
     return <MasterUnlockGate onDone={onDone} />;
   }
+
+  if (status.kind === "systemd-not-running") {
+    // Static notice — we deliberately don't auto-poll the socket from
+    // here. The user starts the unit in another terminal, then
+    // re-launches `kohaku tui`. Auto-polling would risk autospawn races
+    // if they removed the marker concurrently, and would also chew CPU
+    // for the typical "user wandered off to coffee" gap.
+    return (
+      <Box flexDirection="column" paddingX={1}>
+        <Text bold color="yellow">
+          kohaku-daemon is not running.
+        </Text>
+        <Text>
+          This machine is configured to manage the daemon via systemd
+          (marker present at <Text dimColor>{systemdMarkerPath()}</Text>).
+        </Text>
+        <Text> </Text>
+        <Text>Start the daemon in another terminal:</Text>
+        <Text color="cyan">  systemctl --user start kohaku-daemon</Text>
+        <Text>Tail its logs:</Text>
+        <Text color="cyan">  journalctl --user -u kohaku-daemon -f</Text>
+        <Text> </Text>
+        <Text dimColor>
+          Then re-run `kohaku tui`. To restore autospawn instead, delete
+          the marker file above.
+        </Text>
+      </Box>
+    );
+  }
+
   return null;
 }
 
