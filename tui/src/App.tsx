@@ -31,6 +31,7 @@ import LlmChatFlow from "./screens/LlmChatFlow.js";
 import MasterUnlockGate from "./screens/MasterUnlockGate.js";
 import MasterInitGate from "./screens/MasterInitGate.js";
 import RpcSetupGate from "./screens/RpcSetupGate.js";
+import NetworkPolicyGate from "./screens/NetworkPolicyGate.js";
 import SendRawFlow from "./screens/SendRawFlow.js";
 import DecodeTypedDataFlow from "./screens/DecodeTypedDataFlow.js";
 import RevealMnemonicFlow from "./screens/RevealMnemonicFlow.js";
@@ -377,45 +378,65 @@ export default function App() {
   }
 }
 
-/** Startup gate. On a fresh install three things might be missing.
- *  Until commit 25edc78 the daemon refused to start without an RPC URL,
- *  which forced RPC-first ordering. Post commit 25edc78 the daemon
- *  starts without one (LeanKohaku/Daemon/Config.lean — empty URL
- *  sentinel) and refuses RPC-needing ops lazily, so we can now ask the
- *  user for their wallet master *before* the RPC URL — security setup
- *  before network setup, which is what a wallet UX should always do.
+/** Startup gate. Four things might be missing on a fresh install:
  *
- *  Order:
+ *   1. RPC URL (daemon.json#rpc_urls). fs-probe.
+ *   2. network_policy (daemon.json#network_policy). fs-probe.
+ *   3. wallet master KEK (master.json). daemon RPC `wallet.master.status`.
+ *   4. session unlock (in-memory). daemon RPC `wallet.master.status`.
  *
- *   1. Wallet master KEK. `wallet.master.status` reports `initialized:
- *      false` on a fresh box → route to `MasterInitGate`. Master init
- *      is pure local crypto (PBKDF2 → KEK → optional TPM seal), it
- *      doesn't need network, so it really can run first.
+ *  Two-phase machine. Phase 1 is fs-only — we deliberately do NOT call
+ *  the daemon yet. That matters because daemon-side `cfg : Config` is a
+ *  value, not a ref: whatever it reads at startup is what it uses for
+ *  the lifetime of the process, with no hot reload. If we let the
+ *  daemon auto-spawn before daemon.json is fully populated, its
+ *  in-memory cfg would be stale (empty rpc, default-strict policy) and
+ *  the user would see denials/empties for the rest of the session.
  *
- *   2. RPC URL. We can't ask the daemon "do you have an RPC URL"
- *      directly (no such method, and adding one for one bit of state
- *      is overkill), so we fs-check `daemon.json` from Node — same
- *      file RpcSetupGate writes. If missing or no rpc_urls entry,
- *      route to `RpcSetupGate`.
+ *  So phase 1 writes daemon.json fully via Node, THEN phase 2 talks to
+ *  the daemon — at which point its first `wallet.master.status` call
+ *  is also the first call that triggers `ensureDaemon` in daemon.ts,
+ *  spawning a daemon that reads the completed config.
  *
- *   3. Session unlock. Initialized + RPC set → `MasterUnlockGate`. We
- *      re-prompt every TUI launch on purpose (in-memory unlock is a
- *      CLI convenience, not a TUI bypass).
+ *  Order surfaced to the user:
+ *      RPC → policy → master init → master unlock → main.
  *
- *  Esc at any step bails out to MainMenu unblocked; per-slot unlocks
- *  still work as the fallback. */
+ *  Master setup deliberately runs AFTER network config. That's the
+ *  inverse of what intuition suggests ("security first"), but a daemon
+ *  with wrong network config can't be fixed without restarting it and
+ *  losing master state, so we want the config solid before binding
+ *  identity. Esc at any gate bails to MainMenu unblocked; per-slot
+ *  unlocks still work as the fallback. */
 function BootGate({ onDone }: { onDone: () => void }) {
   type Status =
-    | { kind: "probing" }
-    | { kind: "needs-init" }
+    | { kind: "fs-probe" }
     | { kind: "needs-rpc" }
+    | { kind: "needs-policy" }
+    | { kind: "daemon-probe" }
+    | { kind: "needs-init" }
     | { kind: "needs-unlock" }
     | { kind: "pass-through" };
 
-  const [status, setStatus] = React.useState<Status>({ kind: "probing" });
+  const [status, setStatus] = React.useState<Status>({ kind: "fs-probe" });
 
+  // Phase 1: synchronous fs checks on daemon.json. No daemon call.
   React.useEffect(() => {
-    if (status.kind !== "probing") return;
+    if (status.kind !== "fs-probe") return;
+    if (!hasRpcConfigured()) {
+      setStatus({ kind: "needs-rpc" });
+      return;
+    }
+    if (!hasNetworkPolicy()) {
+      setStatus({ kind: "needs-policy" });
+      return;
+    }
+    setStatus({ kind: "daemon-probe" });
+  }, [status.kind]);
+
+  // Phase 2: daemon-side master status. Triggers auto-spawn — by now
+  // daemon.json is complete, so the spawned daemon reads good config.
+  React.useEffect(() => {
+    if (status.kind !== "daemon-probe") return;
     let cancelled = false;
     (async () => {
       const r = await call<{
@@ -424,19 +445,15 @@ function BootGate({ onDone }: { onDone: () => void }) {
       }>("wallet.master.status");
       if (cancelled) return;
       if (!r.ok) {
-        // Daemon unreachable even with auto-spawn in daemon.ts — surface
-        // the failure rather than silently routing to RpcSetupGate, since
-        // the daemon now starts without rpc_url and `!ok` means something
-        // else is wrong (binary missing, permissions, etc).
+        // Phase 1 finished, daemon still unreachable — something is
+        // actually broken (binary missing, permissions). Surface to
+        // MainMenu where per-screen error banners can render the
+        // underlying message instead of papering over with a gate.
         setStatus({ kind: "pass-through" });
         return;
       }
       if (!r.result!.initialized) {
         setStatus({ kind: "needs-init" });
-        return;
-      }
-      if (!hasRpcConfigured()) {
-        setStatus({ kind: "needs-rpc" });
         return;
       }
       setStatus({ kind: "needs-unlock" });
@@ -450,21 +467,51 @@ function BootGate({ onDone }: { onDone: () => void }) {
     if (status.kind === "pass-through") onDone();
   }, [status.kind]);
 
-  if (status.kind === "needs-init") {
-    // After master init, re-probe instead of jumping straight to MainMenu —
-    // a fresh install with no daemon.json should chain into RpcSetupGate
-    // next, not strand the user without an RPC endpoint.
-    return <MasterInitGate onDone={() => setStatus({ kind: "probing" })} />;
+  if (status.kind === "needs-rpc") {
+    // After RPC save, re-enter fs-probe so the next missing piece
+    // (likely policy) gets picked up without skipping past it.
+    return <RpcSetupGate onDone={() => setStatus({ kind: "fs-probe" })} />;
   }
 
-  if (status.kind === "needs-rpc") {
-    return <RpcSetupGate onDone={() => setStatus({ kind: "pass-through" })} />;
+  if (status.kind === "needs-policy") {
+    return (
+      <NetworkPolicyGate onDone={() => setStatus({ kind: "fs-probe" })} />
+    );
+  }
+
+  if (status.kind === "needs-init") {
+    // After init, daemon already holds the KEK in memory, so jump
+    // straight to MainMenu (skip the unlock prompt that would otherwise
+    // ask for the passphrase the user literally just set).
+    return <MasterInitGate onDone={() => setStatus({ kind: "pass-through" })} />;
   }
 
   if (status.kind === "needs-unlock") {
     return <MasterUnlockGate onDone={onDone} />;
   }
   return null;
+}
+
+/** True iff daemon.json contains a `network_policy` string. We don't
+ *  validate the value here — `parsePolicy` on the daemon side does that
+ *  and falls back to `mainnetSafeDaemonPolicy` for unknown strings. */
+function hasNetworkPolicy(): boolean {
+  try {
+    const cfg =
+      process.env.LEANKOHAKU_CONFIG ||
+      pathJoin(
+        process.env.XDG_CONFIG_HOME || pathJoin(homeDir(), ".config"),
+        "leankohaku",
+        "daemon.json",
+      );
+    if (!fileExists(cfg)) return false;
+    const json = JSON.parse(readFile(cfg));
+    if (!json || typeof json !== "object") return false;
+    const v = json.network_policy ?? json.networkPolicy;
+    return typeof v === "string" && v.length > 0;
+  } catch {
+    return false;
+  }
 }
 
 /** Mirror of `kohakuspawn`'s `has_rpc_configured` shell helper, scoped

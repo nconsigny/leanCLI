@@ -1856,6 +1856,14 @@ def run (args : List String) : IO UInt32 := do
       | some _ =>
           NetworkConfig.setPolicy policy
           IO.println s!"set network_policy={policy} in {← NetworkConfig.configPath}"
+          -- Daemon's cfg.policy is loaded once at Server.run startup
+          -- (LeanKohaku/Daemon/Config.lean#resolve) and threaded through
+          -- request handlers by value — there's no hot reload. So the
+          -- file is updated but the running daemon still uses whatever
+          -- it had at startup. Hint at the restart so users don't waste
+          -- time wondering why their permissive setting still denies.
+          IO.println "  note: restart the daemon for this to take effect:"
+          IO.println "    kohaku daemon stop && kohaku daemon ping"
           return 0
   | .networkUnsetRpc =>
       NetworkConfig.unsetRpc
