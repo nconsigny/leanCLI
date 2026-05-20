@@ -121,7 +121,18 @@ export default function App() {
   // user actually unlocked or Esc'd out); a redundant refetch is cheap.
   const [masterStatusKey, setMasterStatusKey] = useState(0);
 
+  // Defer the Colibri status probe until BootGate finishes. This used to
+  // run unconditionally at mount, which triggered daemon auto-spawn
+  // (daemon.ts#ensureDaemon on ENOENT) BEFORE BootGate's fs phase had
+  // written daemon.json. The daemon would come up with empty rpc_urls,
+  // auto-start Colibri against no upstream (Daemon/Server.lean#5104),
+  // and then every chain read would EPIPE through colibri.uds because
+  // the bridge couldn't reach any RPC. Waiting for the "main" screen
+  // guarantees daemon.json is fully populated by the time we ask the
+  // daemon anything.
+  const bootDone = stack[stack.length - 1]?.kind !== "boot";
   useEffect(() => {
+    if (!bootDone) return;
     let cancelled = false;
     (async () => {
       const r = await call<{ running?: boolean }>("daemon.colibri.status", {});
@@ -136,7 +147,7 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [bootDone]);
 
   const toggleColibri = async () => {
     if (colibriPending) return;
@@ -418,6 +429,19 @@ function BootGate({ onDone }: { onDone: () => void }) {
     | { kind: "pass-through" };
 
   const [status, setStatus] = React.useState<Status>({ kind: "fs-probe" });
+  // `wroteConfigThisSession` flips true whenever RpcSetupGate or
+  // NetworkPolicyGate completes. When true, the transition from fs-probe
+  // to daemon-probe sends `daemon.shutdown` first — that kills any stale
+  // daemon that came up before daemon.json was complete (e.g. spawned by
+  // a stray RPC call earlier in the React tree) so phase 2's autospawn
+  // launches a fresh daemon reading the now-up-to-date config. Without
+  // this, a daemon that started with empty rpc_urls would route every
+  // chain read through its auto-started Colibri sidecar (Server.lean
+  // #5104 default-on), Colibri couldn't reach any upstream, and the
+  // user would see `colibri transport: write: Broken pipe` on every
+  // balance fetch.
+  const [wroteConfigThisSession, setWroteConfigThisSession] =
+    React.useState(false);
 
   // Phase 1: synchronous fs checks on daemon.json. No daemon call.
   React.useEffect(() => {
@@ -430,8 +454,28 @@ function BootGate({ onDone }: { onDone: () => void }) {
       setStatus({ kind: "needs-policy" });
       return;
     }
+    // fs is complete. If we just wrote config in this session, force a
+    // daemon restart so phase 2 talks to a fresh daemon reading the new
+    // config. The shutdown is fire-and-forget — autospawn re-launches
+    // automatically; the 300ms sleep covers Server.lean#exitSoon (50ms
+    // grace + socket unlink) plus a small buffer for the OS to actually
+    // release the path. If no daemon is running, the call errors and
+    // we just proceed (the sleep is harmless on the no-daemon path).
+    if (wroteConfigThisSession) {
+      (async () => {
+        try {
+          await call("daemon.shutdown", []);
+        } catch {
+          // best-effort
+        }
+        await new Promise((r) => setTimeout(r, 300));
+        setWroteConfigThisSession(false);
+        setStatus({ kind: "daemon-probe" });
+      })();
+      return;
+    }
     setStatus({ kind: "daemon-probe" });
-  }, [status.kind]);
+  }, [status.kind, wroteConfigThisSession]);
 
   // Phase 2: daemon-side master status. Triggers auto-spawn — by now
   // daemon.json is complete, so the spawned daemon reads good config.
@@ -469,13 +513,27 @@ function BootGate({ onDone }: { onDone: () => void }) {
 
   if (status.kind === "needs-rpc") {
     // After RPC save, re-enter fs-probe so the next missing piece
-    // (likely policy) gets picked up without skipping past it.
-    return <RpcSetupGate onDone={() => setStatus({ kind: "fs-probe" })} />;
+    // (likely policy) gets picked up without skipping past it. Set
+    // wroteConfigThisSession so the fs→daemon transition restarts any
+    // stale daemon that might already be running.
+    return (
+      <RpcSetupGate
+        onDone={() => {
+          setWroteConfigThisSession(true);
+          setStatus({ kind: "fs-probe" });
+        }}
+      />
+    );
   }
 
   if (status.kind === "needs-policy") {
     return (
-      <NetworkPolicyGate onDone={() => setStatus({ kind: "fs-probe" })} />
+      <NetworkPolicyGate
+        onDone={() => {
+          setWroteConfigThisSession(true);
+          setStatus({ kind: "fs-probe" });
+        }}
+      />
     );
   }
 
