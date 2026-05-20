@@ -4,6 +4,7 @@ import LeanKohaku.Daemon.LlmServer
 import LeanKohaku.Daemon.Log
 import LeanKohaku.Daemon.SkillsStore
 import LeanKohaku.Daemon.State
+import LeanKohaku.Daemon.PpDestinations
 import LeanKohaku.Daemon.TxJournal
 import LeanKohaku.Daemon.Uds
 import LeanKohaku.Privacy.NetworkPolicy
@@ -2031,6 +2032,16 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                       pure <| .error { code := -32020, message := "chain RPC failed", data := some (.str err) }
                   | .ok nonceJ =>
                       let nonceN := (asString nonceJ >>= parseHexQuantity).getD 0
+                      -- Local-knowledge signal: did we ever unshield to
+                      -- this address from this daemon? The TUI uses it
+                      -- to keep the green tag on PP-funded receivers
+                      -- whose only inbound value came from us via the
+                      -- relayer. False otherwise — we never try to read
+                      -- the chain to claim a third-party-PP-funded
+                      -- address is fresh (the Withdrawn event's
+                      -- indexed topic is the relayer, not the recipient,
+                      -- so we can't tell cheaply).
+                      let ppFunded ← LeanKohaku.Daemon.PpDestinations.contains address
                       -- Head block — bound the getLogs window.
                       let headRes ← LeanKohaku.RPC.Outbound.blockNumber cfg.policy ep via?
                       match headRes with
@@ -2038,6 +2049,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                           pure <| .ok <| .obj #[
                             ("address", .str address),
                             ("nonce", .num (Int.ofNat nonceN)),
+                            ("ppFunded", .bool ppFunded),
                             ("available", .bool false),
                             ("reason", .str "eth_blockNumber failed")
                           ]
@@ -2065,6 +2077,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                                 ("nonce", .num (Int.ofNat nonceN)),
                                 ("erc20OutCount", .num (Int.ofNat oc)),
                                 ("erc20InCount", .num (Int.ofNat ic)),
+                                ("ppFunded", .bool ppFunded),
                                 ("fromBlock", .num (Int.ofNat fromBlock)),
                                 ("toBlock", .num (Int.ofNat head)),
                                 ("available", .bool true)
@@ -2073,6 +2086,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                               pure <| .ok <| .obj #[
                                 ("address", .str address),
                                 ("nonce", .num (Int.ofNat nonceN)),
+                                ("ppFunded", .bool ppFunded),
                                 ("fromBlock", .num (Int.ofNat fromBlock)),
                                 ("toBlock", .num (Int.ofNat head)),
                                 ("available", .bool false),
@@ -4152,9 +4166,52 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           match ← unlockPpSecretSmart state passphrase? with
           | .error err => pure (.error err)
           | .ok mnemonic =>
-              shieldedBridgeCall cfg "shielded.unshieldDrain"
+              let res ← shieldedBridgeCall cfg "shielded.unshieldDrain"
                 (.obj #[("recipient", .str recipient), ("amountEth", .str amountEth)]) mnemonic req
+              -- Record the recipient locally so the wallets-hub 0-link
+              -- check still passes after we credit the address with a
+              -- PP withdrawal. PP v1 is Sepolia-only today; chainId is
+              -- pinned in `shieldedBridgeCall`. Best-effort: a failed
+              -- log write never overrides the bridge response.
+              --
+              -- The bridge envelopes relay errors as
+              -- `{ok: false, error: ...}` inside a successful RPC
+              -- response (e.g. RelayFeeGreaterThanMax). The outer .ok
+              -- only means the sidecar replied; the inner `ok` is what
+              -- tells us whether the withdrawal actually happened.
+              match res with
+              | .ok j =>
+                  let bridgeOk := (getField "ok" j >>= asBool).getD false
+                  if bridgeOk then
+                    LeanKohaku.Daemon.PpDestinations.append recipient 11155111 "shielded.unshieldDrain"
+                  else pure ()
+              | .error _ => pure ()
+              pure res
       | _, _ => pure (.error invalidParams)
+  | "daemon.ppDestinations.add" =>
+      -- Why: the auto-record hook in `shielded.unshieldDrain` only
+      -- catches unshields THIS daemon executed after the hook
+      -- existed. For older unshields, or unshields done out-of-band,
+      -- the user can attest manually so the wallets-hub still treats
+      -- the resulting address as PP-funded. Semantics: caller is
+      -- saying "I unshielded to this; trust me." We do not try to
+      -- verify against on-chain state.
+      match paramString req.params "address" with
+      | .error err => pure (.error err)
+      | .ok address =>
+          match LeanKohaku.Ethereum.Address.fromHex address with
+          | none => pure (.error invalidParams)
+          | some _ =>
+              let chainId := (getField "chainId" req.params >>= asNat).getD 11155111
+              LeanKohaku.Daemon.PpDestinations.append address chainId "manual"
+              pure <| .ok <| .obj #[
+                ("ok", .bool true),
+                ("address", .str address),
+                ("chainId", .num (Int.ofNat chainId))
+              ]
+  | "daemon.ppDestinations.list" =>
+      let entries ← LeanKohaku.Daemon.PpDestinations.list
+      pure <| .ok <| .obj #[("entries", .arr entries)]
   | "shielded.reveal" =>
       let passphrase? : Option String := getField "passphrase" req.params >>= asString
       match ← unlockPpSecretSmart state passphrase? with

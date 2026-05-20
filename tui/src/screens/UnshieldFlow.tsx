@@ -7,7 +7,8 @@ import Form, { Field } from "../widgets/Form.js";
 import Select from "../widgets/Select.js";
 import RpcRunner from "../widgets/RpcRunner.js";
 import { theme } from "../theme.js";
-import { AddressFreshness, EoaListEntry } from "../types.js";
+import { AddressFreshness, ChainBalance, EoaListEntry } from "../types.js";
+import { hexToBigInt } from "../format.js";
 
 type AccountListEntry = {
   index: number;
@@ -43,7 +44,9 @@ type Phase =
       kind: "existing-pick-account";
       wallet: EoaListEntry;
       accounts: AccountListEntry[];
-      freshness: Record<string, boolean | null>;
+      /** Per-address final 0-link verdict. `null` = still probing,
+       *  `true` = nonce=0 AND ERC-20-clean AND (balance=0 OR ppFunded). */
+      zeroLink: Record<string, boolean | null>;
     }
   /* recipient resolved → collect amount + privacy-pool passphrase */
   | { kind: "amount-passphrase"; recipient: string; source: RecipientSource }
@@ -154,16 +157,22 @@ export default function UnshieldFlow({ onDone }: Props) {
             },
             ...fromRpc,
           ];
-      // Seed freshness=null (loading) for every row, then probe sequentially.
+      // Seed zeroLink=null (still probing) for every row, then probe
+      // both balance + freshness sequentially. The combined rule is:
+      // nonce=0 AND ERC-20-clean AND (balance=0 OR ppFunded).
       const init: Record<string, boolean | null> = {};
       for (const a of accounts) init[a.address.toLowerCase()] = null;
       setPhase({
         kind: "existing-pick-account",
         wallet: slot,
         accounts,
-        freshness: init,
+        zeroLink: init,
       });
       for (const a of accounts) {
+        if (cancelled) return;
+        const balRes = await call<ChainBalance>("chain.balance", {
+          address: a.address,
+        });
         if (cancelled) return;
         const fr = await call<AddressFreshness>("chain.addressFreshness", {
           address: a.address,
@@ -172,17 +181,20 @@ export default function UnshieldFlow({ onDone }: Props) {
         let zero = false;
         if (fr.ok && fr.result && fr.result.available === true) {
           const d = fr.result;
-          zero =
-            d.nonce === 0 &&
-            (d.erc20OutCount ?? 0) === 0 &&
-            (d.erc20InCount ?? 0) === 0;
+          const nonceZero = d.nonce === 0;
+          const erc20Clean =
+            (d.erc20OutCount ?? 0) === 0 && (d.erc20InCount ?? 0) === 0;
+          const ppFunded = d.ppFunded === true;
+          const balanceZero =
+            balRes.ok && hexToBigInt(balRes.result?.balance) === 0n;
+          zero = nonceZero && erc20Clean && (balanceZero || ppFunded);
         }
         setPhase((prev) =>
           prev.kind === "existing-pick-account"
             ? {
                 ...prev,
-                freshness: {
-                  ...prev.freshness,
+                zeroLink: {
+                  ...prev.zeroLink,
                   [a.address.toLowerCase()]: zero,
                 },
               }
@@ -461,8 +473,8 @@ export default function UnshieldFlow({ onDone }: Props) {
     // 0-link accounts are listed first (green); others follow.
     const annotated = phase.accounts.map((a) => ({
       a,
-      zero: phase.freshness[a.address.toLowerCase()] === true,
-      loading: phase.freshness[a.address.toLowerCase()] === null,
+      zero: phase.zeroLink[a.address.toLowerCase()] === true,
+      loading: phase.zeroLink[a.address.toLowerCase()] === null,
     }));
     annotated.sort((x, y) => {
       const xs = x.zero ? 0 : x.loading ? 1 : 2;

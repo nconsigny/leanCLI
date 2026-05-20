@@ -2726,6 +2726,15 @@ def run (args : List String) : IO UInt32 := do
       let passphrase ← Passphrase.read "Passphrase to delete PP secret: "
       DaemonClient.printCall "shielded.delete"
         (.obj #[("passphrase", .str passphrase)])
+  | .shieldedMarkDestination address =>
+      -- Attest that `address` was funded by a Privacy Pools unshield
+      -- this user performed (possibly out of band, or from a pre-hook
+      -- daemon). Lets the wallets-hub keep its 0-link green tag on
+      -- addresses whose balance came from PP. No on-chain check.
+      DaemonClient.printCall "daemon.ppDestinations.add"
+        (.obj #[("address", .str address)])
+  | .shieldedListDestinations =>
+      DaemonClient.printCall "daemon.ppDestinations.list" (.obj #[])
   | .resolve name =>
       match ← DaemonClient.call "chain.resolveName" (.obj #[("name", .str name)]) with
       | .error err =>

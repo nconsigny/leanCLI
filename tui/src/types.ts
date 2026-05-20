@@ -41,6 +41,12 @@ export type AddressFreshness = {
   erc20OutCount?: number;
   /** ERC-20 Transfer events with this address as `to` in the lookback window. */
   erc20InCount?: number;
+  /** True iff this daemon's local log records a successful
+   *  `shielded.unshieldDrain` to this address. Lets the freshness check
+   *  keep the green tag on PP-funded receivers: a non-zero balance on
+   *  such an address came from the privacy pool, not from a regular
+   *  identity-linked transfer. */
+  ppFunded?: boolean;
   fromBlock?: number;
   toBlock?: number;
   available: boolean;

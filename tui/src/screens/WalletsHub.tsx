@@ -37,21 +37,39 @@ type BalanceCell =
 
 /** 0-link freshness state for one wallet row. Stored separately from
  *  balances so balance fetch is unblocked even when the heavier
- *  getLogs-driven freshness probe stalls or fails. */
+ *  getLogs-driven freshness probe stalls or fails. The final 0-link
+ *  rule is computed in `isZeroLink` below — it folds in the balance
+ *  cell on top of these fields so a balance change repaints the row
+ *  without re-firing the freshness probe. */
 type FreshnessCell =
   | { state: "pending" }
   | {
       state: "ok";
-      /** True iff nonce=0 AND both ERC-20 in/out counts are 0 AND the
-       *  daemon successfully ran both getLogs scans. False means the
-       *  address either has activity, or we don't have enough signal
-       *  to call it fresh. */
-      zeroLink: boolean;
-      /** Set when the daemon couldn't complete one of the getLogs scans
-       *  — the nonce alone is not enough to claim "0 link". */
+      /** Pending-tag nonce — 0 means the address never sent a tx. */
+      nonce: number;
+      /** True iff both ERC-20 in/out getLogs scans returned 0. */
+      erc20Clean: boolean;
+      /** Daemon-local flag: this daemon previously unshielded to this
+       *  address, so any positive balance is PP-sourced. */
+      ppFunded: boolean;
+      /** True when the daemon could not complete the getLogs scan;
+       *  erc20Clean is then treated as "unknown" and the address can
+       *  never qualify as 0-link. */
       partial?: boolean;
     }
   | { state: "err" };
+
+/** Final 0-link decision combining freshness + balance + ppFunded.
+ *  Rule: nonce=0 AND ERC-20-clean AND (balance=0 OR ppFunded). */
+function isZeroLink(fresh: FreshnessCell | undefined, bal: BalanceCell | undefined): boolean {
+  if (!fresh || fresh.state !== "ok") return false;
+  if (fresh.partial) return false;
+  if (fresh.nonce !== 0) return false;
+  if (!fresh.erc20Clean) return false;
+  if (fresh.ppFunded) return true;
+  if (bal?.state === "ok" && bal.wei === 0n) return true;
+  return false;
+}
 
 /** Balance map key — must include accountIndex so sub-accounts each get
  *  their own balance cell. The archive store uses the same shape so a
@@ -259,20 +277,25 @@ export default function WalletsHub({
           setFreshness((prev) => ({ ...prev, [key]: { state: "err" } }));
           continue;
         }
+        const ppFunded = d.ppFunded === true;
         if (d.available !== true) {
           setFreshness((prev) => ({
             ...prev,
-            [key]: { state: "ok", zeroLink: false, partial: true },
+            [key]: {
+              state: "ok",
+              nonce: d.nonce,
+              erc20Clean: false,
+              ppFunded,
+              partial: true,
+            },
           }));
           continue;
         }
-        const zeroLink =
-          d.nonce === 0 &&
-          (d.erc20OutCount ?? 0) === 0 &&
-          (d.erc20InCount ?? 0) === 0;
+        const erc20Clean =
+          (d.erc20OutCount ?? 0) === 0 && (d.erc20InCount ?? 0) === 0;
         setFreshness((prev) => ({
           ...prev,
-          [key]: { state: "ok", zeroLink },
+          [key]: { state: "ok", nonce: d.nonce, erc20Clean, ppFunded },
         }));
       }
     })();
@@ -332,10 +355,13 @@ export default function WalletsHub({
       cell?.state === "ok"
         ? { ...w, balanceWei: cell.wei, balanceChain: cell.chain }
         : w;
-    const linkTag =
-      fresh?.state === "ok" && fresh.zeroLink ? "  0-link" : "";
-    const isZeroLink = fresh?.state === "ok" && fresh.zeroLink;
-    const prefix = isZeroLink ? "\x02" : "";
+    const zero = isZeroLink(fresh, cell);
+    const linkTag = zero
+      ? fresh?.state === "ok" && fresh.ppFunded && cell?.state === "ok" && cell.wei !== 0n
+        ? "  0-link (PP-funded)"
+        : "  0-link"
+      : "";
+    const prefix = zero ? "\x02" : "";
     return {
       label: `${prefix}${tag} ${displayName.padEnd(16)} ${w.address}  ${balPart}${linkTag}`,
       value: key,
