@@ -850,9 +850,19 @@ export default function SwapFlow({ wallet, onDone }: Props) {
   // off to SendRawFlow — the canonical ConfirmGate path. After
   // SendRawFlow returns success, we advance to the swap (NOT batched —
   // user re-confirms each tx).
+  //
+  // The two SendRawFlow instances MUST carry distinct `key` props.
+  // Without them, React reconciles the second render against the first
+  // (same component type, same tree position) and reuses the existing
+  // instance, preserving its internal `phase` state at `{kind:"send"}`
+  // from the approval pass. The result: the approval-result screen is
+  // re-shown for the "swap" step, RpcRunner's mount-only useEffect
+  // never re-fires with the swap params, and pressing Enter advances
+  // straight to "✓ swap submitted" with only the approval on chain.
   if (phase.kind === "confirm-approval") {
     return (
       <SendRawFlow
+        key="approval"
         chainId={phase.ctx.chain.chainId}
         wallet={sendRawWallet}
         tx={{
@@ -877,6 +887,7 @@ export default function SwapFlow({ wallet, onDone }: Props) {
   if (phase.kind === "confirm-swap") {
     return (
       <SendRawFlow
+        key="swap"
         chainId={phase.ctx.chain.chainId}
         wallet={sendRawWallet}
         tx={{
