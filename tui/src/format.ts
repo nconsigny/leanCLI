@@ -35,9 +35,13 @@ export function shortChain(chain: string): string {
   return chain.slice(0, 4);
 }
 
-/** Decode a `0x`-prefixed hex string to bigint. Returns 0n on bad input. */
-export function hexToBigInt(hex: string | undefined | null): bigint {
-  if (!hex) return 0n;
+/** Decode a `0x`-prefixed hex string to bigint. Returns 0n on bad input.
+ *  Widened to `unknown` because daemon responses occasionally surface a
+ *  non-string in the balance field (observed on mainnet via Colibri); the
+ *  previous `if (!hex)` guard let truthy non-strings through and crashed
+ *  WalletsHub with "hex.startsWith is not a function". */
+export function hexToBigInt(hex: unknown): bigint {
+  if (typeof hex !== "string" || hex.length === 0) return 0n;
   const body = hex.startsWith("0x") || hex.startsWith("0X") ? hex.slice(2) : hex;
   if (body.length === 0) return 0n;
   try {

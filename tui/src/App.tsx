@@ -45,6 +45,7 @@ type Screen =
   // empty MainMenu.
   | { kind: "boot" }
   | { kind: "main" }
+  | { kind: "master-unlock" }
   | { kind: "wallets" }
   | { kind: "actions"; wallet: Wallet }
   | { kind: "send"; wallet: Wallet; chain?: string }
@@ -99,6 +100,11 @@ export default function App() {
   // for power users.
   const [colibriEnabled, setColibriEnabled] = useState(false);
   const [colibriPending, setColibriPending] = useState(false);
+  // Bumped whenever the master-unlock gate closes so MainMenu re-queries
+  // `wallet.master.status` and the locked-badge state stays consistent
+  // with the daemon. The bump is unconditional (we don't know whether the
+  // user actually unlocked or Esc'd out); a redundant refetch is cheap.
+  const [masterStatusKey, setMasterStatusKey] = useState(0);
 
   useEffect(() => {
     let cancelled = false;
@@ -142,6 +148,7 @@ export default function App() {
       case "private":         return push({ kind: "private" });
       case "network":         return push({ kind: "network" });
       case "toggle-colibri":  return void toggleColibri();
+      case "unlock":          return push({ kind: "master-unlock" });
       case "more":            return push({ kind: "more" });
       case "quit":            return exit();
     }
@@ -209,6 +216,16 @@ export default function App() {
           onPick={handleMain}
           colibriEnabled={colibriEnabled}
           colibriPending={colibriPending}
+          masterStatusKey={masterStatusKey}
+        />
+      );
+    case "master-unlock":
+      return (
+        <MasterUnlockGate
+          onDone={() => {
+            setMasterStatusKey((k) => k + 1);
+            pop();
+          }}
         />
       );
     case "wallets":

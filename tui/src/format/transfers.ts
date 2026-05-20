@@ -54,7 +54,7 @@ function parseTransferLog(log: any): ParsedTransfer | null {
 
 // 32-byte topic word → checksummed-ish 20-byte address (lowercased here;
 // the renderer can re-checksum if it cares).
-function topicToAddress(word: string): string | null {
+function topicToAddress(word: unknown): string | null {
   if (typeof word !== "string" || !word.startsWith("0x")) return null;
   if (word.length !== 66) return null;
   return "0x" + word.slice(26).toLowerCase();
