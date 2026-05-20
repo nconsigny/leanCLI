@@ -158,6 +158,18 @@ execute_signed() {
     "$target" "$value" "$data" "$r" "$s"
 }
 
+# Pure-bash hex → binary. `xxd` lives in the `vim` package on Arch and
+# is therefore not a guaranteed dep; relying on printf's `%b` escape
+# interpreter keeps this script working on minimal installs.
+hex_to_bin() {
+  local hex="$1"
+  local pairs="" i len="${#hex}"
+  for (( i = 0; i < len; i += 2 )); do
+    pairs+="\\x${hex:i:2}"
+  done
+  printf '%b' "$pairs"
+}
+
 # Split the inline 64-byte signature hex into r and s files inside the
 # key directory, so execute_signed -> signature_rs can pick them up
 # without having to touch the TPM. The daemon writes the live TPM2
@@ -173,7 +185,7 @@ write_signature_from_hex() {
     exit 1
   fi
   mkdir -p "$KEY_DIR"
-  printf '%s' "$raw" | xxd -r -p > "${KEY_DIR}/signature.bin"
+  hex_to_bin "$raw" > "${KEY_DIR}/signature.bin"
 }
 
 # Print the digest, the R1 account address, and the wei value as three

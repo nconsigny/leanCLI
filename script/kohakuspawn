@@ -129,6 +129,9 @@ Options:
   --rebuild-bridges   Force reinstalling sidecar deps even when node_modules
                       already exists.
   --no-modify-path    Do not append the kohaku bin dir to your shell rc.
+  --no-completion     Skip installing shell-completion files. By default,
+                      completion is installed for bash, zsh, AND fish so
+                      switching shells later doesn't require re-running.
   --force             Overwrite existing kohaku / kohaku-daemon symlinks
                       that point somewhere else. Default refuses.
   --uninstall         Remove ~/.kohaku/bin/{kohaku,kohaku-daemon,kohakuspawn}
@@ -150,6 +153,7 @@ BUILD_LEAN=1
 BUILD_TUI=auto        # auto | always | never
 BUILD_BRIDGES=auto    # auto | always | never
 MODIFY_PATH=1
+INSTALL_COMPLETION=1
 FORCE=0
 MODE=install      # install | uninstall
 
@@ -162,6 +166,7 @@ while [[ $# -gt 0 ]]; do
     --no-bridges) BUILD_BRIDGES=never; shift;;
     --rebuild-bridges) BUILD_BRIDGES=always; shift;;
     --no-modify-path) MODIFY_PATH=0; shift;;
+    --no-completion) INSTALL_COMPLETION=0; shift;;
     --force) FORCE=1; shift;;
     --uninstall) MODE=uninstall; shift;;
     -h|--help) usage; exit 0;;
@@ -468,6 +473,70 @@ if [[ $MODIFY_PATH -eq 1 ]]; then
     *":$KOHAKU_BIN:"*) ;;            # already on PATH; no-op
     *) modify_path;;
   esac
+fi
+
+# ---- shell-completion install -----------------------------------------------
+#
+# Install completion for bash, zsh, AND fish unconditionally. The three
+# target dirs are disjoint and each shell only reads its own, so writing
+# all three is harmless even if the user only ever runs one shell — and
+# it means switching shells later (or having multiple shells on the same
+# box) just works without re-running. Re-runs are idempotent (files are
+# overwritten).
+#
+# The one shell-specific side-effect is the zsh fpath/compinit block in
+# ~/.zshrc; we only append it when zsh is actually installed, so we don't
+# create a stray ~/.zshrc on a bash-only box.
+
+emit_completion() {
+  local shell_kind="$1" target_dir="$2" target_file="$3"
+  mkdir -p "$target_dir"
+  if ! "$LEAN_BIN" completion "$shell_kind" > "$target_file"; then
+    echo "kohakuspawn: failed to emit $shell_kind completion" >&2
+    rm -f "$target_file"
+    return 1
+  fi
+  echo "==> $shell_kind completion -> $target_file"
+}
+
+install_completion() {
+  local rc=0
+
+  local bash_dir="${XDG_DATA_HOME:-$HOME/.local/share}/bash-completion/completions"
+  emit_completion bash "$bash_dir" "$bash_dir/kohaku" || rc=1
+
+  local zsh_dir="${XDG_DATA_HOME:-$HOME/.local/share}/zsh/site-functions"
+  emit_completion zsh "$zsh_dir" "$zsh_dir/_kohaku" || rc=1
+
+  local fish_dir="${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions"
+  emit_completion fish "$fish_dir" "$fish_dir/kohaku.fish" || rc=1
+
+  # zsh needs $zsh_dir on $fpath and a compinit call to actually load the
+  # completion. Only wire up ~/.zshrc when zsh is on PATH — on a bash-only
+  # box, creating a ~/.zshrc the user never reads is just litter.
+  if command -v zsh >/dev/null 2>&1; then
+    local zshrc="$HOME/.zshrc"
+    local marker="# >>> kohakuspawn completion >>>"
+    local end_marker="# <<< kohakuspawn completion <<<"
+    touch "$zshrc"
+    if grep -q "$marker" "$zshrc" 2>/dev/null; then
+      echo "==> $zshrc: kohakuspawn completion block already present"
+    else
+      {
+        printf '\n%s\n' "$marker"
+        printf '%s\n' "fpath=(\"$zsh_dir\" \$fpath)"
+        printf '%s\n' 'autoload -Uz compinit && compinit -i'
+        printf '%s\n' "$end_marker"
+      } >> "$zshrc"
+      echo "==> $zshrc: appended completion fpath/compinit block"
+    fi
+  fi
+
+  return $rc
+}
+
+if [[ $INSTALL_COMPLETION -eq 1 ]]; then
+  install_completion || echo "kohakuspawn: completion install failed (non-fatal, continuing)" >&2
 fi
 
 # ---- TPM2 readiness probe (informational) -----------------------------------
