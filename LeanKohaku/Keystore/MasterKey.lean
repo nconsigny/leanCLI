@@ -1,6 +1,7 @@
 import LeanKohaku.Crypto.Hex
 import LeanKohaku.Crypto.Random
 import LeanKohaku.Keystore.Tpm2Runtime
+import LeanKohaku.Wallet.EoaStore
 
 /-!
 # TPM-sealed master attestation key
@@ -21,44 +22,44 @@ namespace LeanKohaku.Keystore.MasterKey
 
 open LeanKohaku.Keystore.Tpm2Runtime
 
-def masterDir : System.FilePath :=
-  ".leankohaku/keystore/tpm2/_master"
+/-- Absolute root for TPM-sealed master-key artefacts. Anchored at the same
+`dataHome` (typically `${XDG_DATA_HOME:-$HOME/.local/share}/leankohaku/`) as
+the rest of the wallet state, so the daemon finds the sealed key regardless
+of its CWD at spawn time. Historically this was a CWD-relative path
+(`.leankohaku/keystore/tpm2/_master`) and the sealed key ended up wherever
+`kohaku wallet master init` was run from; the master.json manifest is and
+always was absolute, so any subsequent daemon spawn from a different CWD
+desynced the two and unseal failed with "master key not initialized". -/
+def masterDir : IO System.FilePath := do
+  pure ((← LeanKohaku.Wallet.EoaStore.dataHome) / "leankohaku" / "keystore" / "tpm2" / "_master")
 
-def sealed : System.FilePath :=
-  masterDir / "sealed.bin"
+def sealed : IO System.FilePath := do pure ((← masterDir) / "sealed.bin")
 
 -- Why: `tpm2_load` needs both the wrapped private blob and its public part.
-def sealedPub : System.FilePath :=
-  masterDir / "sealed.pub"
+def sealedPub : IO System.FilePath := do pure ((← masterDir) / "sealed.pub")
 
-def primaryCtx : System.FilePath :=
-  masterDir / "primary.ctx"
+def primaryCtx : IO System.FilePath := do pure ((← masterDir) / "primary.ctx")
 
-def loadedCtx : System.FilePath :=
-  masterDir / "key.ctx"
+def loadedCtx : IO System.FilePath := do pure ((← masterDir) / "key.ctx")
 
-def plainSeed : System.FilePath :=
-  masterDir / "seed.bin"
+def plainSeed : IO System.FilePath := do pure ((← masterDir) / "seed.bin")
 
 -- Why: `tpm2_unseal` writes binary; round-tripping through `String` would
 -- break on non-UTF8 bytes, so we route through a transient `-o` file that
 -- is removed (and overwritten) on every unseal.
-def unsealOut : System.FilePath :=
-  masterDir / "unsealed.bin"
+def unsealOut : IO System.FilePath := do pure ((← masterDir) / "unsealed.bin")
 
 -- Why: chmod-600 transient file holding the user's PIN bytes. We pass
 -- `-p file:<path>` to tpm2-tools so the PIN never appears on argv.
-def authFile : System.FilePath :=
-  masterDir / "auth.tmp"
+def authFile : IO System.FilePath := do pure ((← masterDir) / "auth.tmp")
 
-def manifest : System.FilePath :=
-  masterDir / "manifest.txt"
+def manifest : IO System.FilePath := do pure ((← masterDir) / "manifest.txt")
 
 def sealTools : List String :=
   ["tpm2_createprimary", "tpm2_create", "tpm2_load", "tpm2_unseal"]
 
-def existsOnDisk : IO Bool :=
-  sealed.pathExists
+def existsOnDisk : IO Bool := do
+  (← sealed).pathExists
 
 /-- True when the host can actually use the TPM: kernel device node is
     present AND every tool in `sealTools` is callable. Used at init time
@@ -72,7 +73,8 @@ def hardwareReady : IO Bool := do
     | none => pure true
 
 def reset : IO Unit := do
-  let _ ← runChecked "rm" #["-rf", masterDir.toString]
+  let dir ← masterDir
+  let _ ← runChecked "rm" #["-rf", dir.toString]
   pure ()
 
 private def manifestText : String :=
@@ -89,30 +91,38 @@ private def manifestText : String :=
   "raw_master_key_exported=false\n"
 
 private def hardenMasterDir : IO Unit := do
-  hardenDir ".leankohaku"
-  hardenDir ".leankohaku/keystore"
-  hardenDir ".leankohaku/keystore/tpm2"
-  hardenDir masterDir
+  -- Walk up from the master dir and harden each ancestor under leankohaku/.
+  -- Built explicitly rather than via splitOn so we keep the absolute form.
+  let dir ← masterDir
+  -- dir = <dataHome>/leankohaku/keystore/tpm2/_master
+  let tpm2 := dir.parent.getD dir
+  let keystore := tpm2.parent.getD tpm2
+  let leanKohaku := keystore.parent.getD keystore
+  for p in [leanKohaku, keystore, tpm2, dir] do
+    hardenDir p
 
 private def hardenMasterFiles : IO Unit := do
-  for path in [primaryCtx, sealedPub, sealed, loadedCtx, manifest] do
+  for thunk in [primaryCtx, sealedPub, sealed, loadedCtx, manifest] do
+    let path ← thunk
     if ← path.pathExists then
       hardenFile path
 
 /-- Write the PIN to the transient auth file with mode 600. -/
 private def writeAuth (pin : String) : IO Unit := do
-  IO.FS.writeBinFile authFile pin.toUTF8
-  chmodPath "600" authFile
+  let path ← authFile
+  IO.FS.writeBinFile path pin.toUTF8
+  chmodPath "600" path
 
 /-- Best-effort removal of the transient auth file. -/
 private def clearAuth : IO Unit := do
   try
-    if ← authFile.pathExists then
-      IO.FS.removeFile authFile
+    let path ← authFile
+    if ← path.pathExists then
+      IO.FS.removeFile path
   catch _ => pure ()
 
-private def pinArg : String :=
-  s!"file:{authFile.toString}"
+private def pinArg : IO String := do
+  pure s!"file:{(← authFile).toString}"
 
 private def containsCI (haystack needle : String) : Bool :=
   decide ((haystack.toLower.splitOn needle.toLower).length > 1)
@@ -128,38 +138,51 @@ private def isAuthFailureStderr (stderr : String) : Bool :=
 private def isLockoutStderr (stderr : String) : Bool :=
   containsCI stderr "lockout" || containsCI stderr "0x921"
 
-private def createPrimaryAt : IO (Except String String) :=
+private def createPrimaryAt : IO (Except String String) := do
+  let pc ← primaryCtx
   runChecked "tpm2_createprimary"
     #["-C", "o", "-G", "ecc", "-g", "sha256",
-      "-c", primaryCtx.toString]
+      "-c", pc.toString]
 
-private def sealAtSimple : IO (Except String String) :=
+private def sealAtSimple : IO (Except String String) := do
+  let pc ← primaryCtx
+  let seed ← plainSeed
+  let pub ← sealedPub
+  let s ← sealed
+  let auth ← pinArg
   runChecked "tpm2_create"
-    #["-C", primaryCtx.toString,
+    #["-C", pc.toString,
       "-g", "sha256",
-      "-i", plainSeed.toString,
-      "-u", sealedPub.toString,
-      "-r", sealed.toString,
+      "-i", seed.toString,
+      "-u", pub.toString,
+      "-r", s.toString,
       "-a", "fixedtpm|fixedparent|userwithauth|noda",
-      "-p", pinArg]
+      "-p", auth]
 
-private def loadAt : IO (Except String String) :=
+private def loadAt : IO (Except String String) := do
+  let pc ← primaryCtx
+  let pub ← sealedPub
+  let s ← sealed
+  let lc ← loadedCtx
   runChecked "tpm2_load"
-    #["-C", primaryCtx.toString,
-      "-u", sealedPub.toString,
-      "-r", sealed.toString,
-      "-c", loadedCtx.toString]
+    #["-C", pc.toString,
+      "-u", pub.toString,
+      "-r", s.toString,
+      "-c", lc.toString]
 
 private def unsealAt : IO (Except String ByteArray) := do
+  let lc ← loadedCtx
+  let auth ← pinArg
+  let out ← unsealOut
   match ← runChecked "tpm2_unseal"
-      #["-c", loadedCtx.toString,
-        "-p", pinArg,
-        "-o", unsealOut.toString] with
+      #["-c", lc.toString,
+        "-p", auth,
+        "-o", out.toString] with
   | .error err => pure (.error err)
   | .ok _ =>
       try
-        let bytes ← IO.FS.readBinFile unsealOut
-        IO.FS.removeFile unsealOut
+        let bytes ← IO.FS.readBinFile out
+        IO.FS.removeFile out
         pure (.ok bytes)
       catch e =>
         pure (.error e.toString)
@@ -176,30 +199,33 @@ def bootstrap (pin : String) (notify : Notifier) : IO (Except String Unit) := do
   match ← firstMissingTool sealTools with
   | some tool => return .error s!"tpm2-tools missing: {tool}"
   | none => pure ()
-  IO.FS.createDirAll masterDir
+  let dir ← masterDir
+  let seedPath ← plainSeed
+  let manifestPath ← manifest
+  IO.FS.createDirAll dir
   hardenMasterDir
   notify "pin-required" (.obj #[("op", .str "master-bootstrap")])
   -- Why: 32 bytes is the symmetric-key size used by ChaCha20-Poly1305 wraps.
   let seedBytes ← LeanKohaku.Crypto.Random.getRandomBytes 32
-  IO.FS.writeBinFile plainSeed seedBytes
-  hardenFile plainSeed
+  IO.FS.writeBinFile seedPath seedBytes
+  hardenFile seedPath
   writeAuth pin
   match ← createPrimaryAt with
   | .error err =>
       clearAuth
-      IO.FS.removeFile plainSeed
+      IO.FS.removeFile seedPath
       return .error s!"tpm2_createprimary failed: {err}"
   | .ok _ => pure ()
   match ← sealAtSimple with
   | .error err =>
       clearAuth
-      IO.FS.removeFile plainSeed
+      IO.FS.removeFile seedPath
       return .error s!"tpm2_create (seal) failed: {err}"
   | .ok _ => pure ()
   clearAuth
   -- Why: erase the plaintext seed file as soon as the TPM has the sealed copy.
-  IO.FS.removeFile plainSeed
-  IO.FS.writeFile manifest manifestText
+  IO.FS.removeFile seedPath
+  IO.FS.writeFile manifestPath manifestText
   hardenMasterFiles
   notify "pin-success" (.obj #[("op", .str "master-bootstrap")])
   pure (.ok ())
