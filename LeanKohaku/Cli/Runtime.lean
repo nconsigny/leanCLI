@@ -2930,6 +2930,128 @@ def run (args : List String) : IO UInt32 := do
         (.obj #[("address", .str address)])
   | .shieldedListDestinations =>
       DaemonClient.printCall "daemon.ppDestinations.list" (.obj #[])
+  | .sphincsCreate name paramSet walletName ecdsaKind accountIndexOrPath chainOverride? =>
+      -- Why one prompt UX: per CLAUDE.md the CLI is a printer. We prompt
+      -- for one passphrase (`slot`) and optionally a wallet-unlock pass
+      -- only when `ecdsaKind = "derived"` (because we need the wallet's
+      -- BIP-39 seed to derive a new sub-path). For the `existing` path
+      -- the daemon reuses an already-cached EOA address — no unlock.
+      -- An empty `slot` passphrase + a loaded master KEK is the
+      -- recommended path; the daemon mints an ephemeral wrap and the
+      -- master KEK is the recovery factor (see sphincs.account.create
+      -- in Daemon/Server.lean for the full rationale).
+      let slotPass ← Passphrase.read "Per-slot passphrase (Enter to use master KEK if loaded): "
+      let mut fields : Array (String × LeanKohaku.Encoding.Json.Json) := #[
+        ("name", .str name),
+        ("paramSet", .str paramSet),
+        ("walletName", .str walletName),
+        ("ecdsaKind", .str ecdsaKind),
+        ("passphrase", .str slotPass)
+      ]
+      match chainOverride? with
+      | some c =>
+          match c.toNat? with
+          | some n => fields := fields.push ("chainId", .num (Int.ofNat n))
+          | none => pure ()
+      | none => pure ()
+      match ecdsaKind, accountIndexOrPath with
+      | "existing", some idxStr =>
+          match idxStr.toNat? with
+          | some n => fields := fields.push ("accountIndex", .num (Int.ofNat n))
+          | none =>
+              IO.eprintln s!"invalid accountIndex (expected non-negative integer): {idxStr}"
+              return 2
+      | "existing", none =>
+          -- default index 0 — the daemon also defaults to 0 if omitted
+          pure ()
+      | "derived", some pathStr =>
+          let walletPass ← Passphrase.read s!"Wallet passphrase to unlock '{walletName}': "
+          fields := fields ++ #[
+            ("path", .str pathStr),
+            ("walletPassphrase", .str walletPass)
+          ]
+      | "derived", none =>
+          IO.eprintln "sphincs create derived <slot> <paramSet> <wallet> derived <path> — missing path"
+          return 2
+      | other, _ =>
+          IO.eprintln s!"unknown ecdsaKind '{other}' (use 'existing' or 'derived')"
+          return 2
+      DaemonClient.printCall "sphincs.account.create" (.obj fields)
+  | .sphincsList =>
+      DaemonClient.printCall "sphincs.account.list" (.obj #[])
+  | .sphincsShow name =>
+      DaemonClient.printCall "sphincs.account.show" (.obj #[("name", .str name)])
+  | .sphincsComputeAddress name chain? =>
+      let base : Array (String × LeanKohaku.Encoding.Json.Json) :=
+        #[("name", .str name)]
+      let fields := match chain? with
+        | some c => base.push ("chain", .str c)
+        | none => base
+      DaemonClient.printCall "sphincs.account.computeAddress" (.obj fields)
+  | .sphincsDeploy name deployer acct? chain? =>
+      let base : Array (String × LeanKohaku.Encoding.Json.Json) := #[
+        ("name", .str name),
+        ("deployerWallet", .str deployer)
+      ]
+      let withChain := match chain? with
+        | some c => base.push ("chain", .str c)
+        | none => base
+      let fields := match acct?.bind String.toNat? with
+        | some n => withChain.push ("deployerAccountIndex", .num (Int.ofNat n))
+        | none => withChain
+      DaemonClient.printCall "sphincs.account.deploy" (.obj fields)
+  | .sphincsSend name to valueWei data? chain? =>
+      let base : Array (String × LeanKohaku.Encoding.Json.Json) := #[
+        ("name", .str name),
+        ("to", .str to),
+        ("value", .str valueWei)
+      ]
+      let withData := match data? with
+        | some d => base.push ("data", .str d)
+        | none => base
+      let fields := match chain? with
+        | some c => withData.push ("chain", .str c)
+        | none => withData
+      DaemonClient.printCall "sphincs.account.send" (.obj fields)
+  | .sphincsGetUserOp h chain? =>
+      let base : Array (String × LeanKohaku.Encoding.Json.Json) :=
+        #[("userOpHash", .str h)]
+      let fields := match chain? with
+        | some c => base.push ("chain", .str c)
+        | none => base
+      DaemonClient.printCall "sphincs.account.getUserOp" (.obj fields)
+  | .sphincsRotateOwner name newOwner chain? =>
+      let base : Array (String × LeanKohaku.Encoding.Json.Json) :=
+        #[("name", .str name), ("newOwner", .str newOwner)]
+      let fields := match chain? with
+        | some c => base.push ("chain", .str c)
+        | none => base
+      DaemonClient.printCall "sphincs.account.rotateOwner" (.obj fields)
+  | .sphincsBundlerCheck chain? =>
+      let fields : Array (String × LeanKohaku.Encoding.Json.Json) :=
+        match chain? with
+        | some c => #[("chain", .str c)]
+        | none => #[]
+      DaemonClient.printCall "sphincs.bundler.check" (.obj fields)
+  | .sphincsFactoryDeploy paramSet deployer acct? chain? =>
+      -- Prompt for the wallet passphrase here so the daemon's master-KEK
+      -- fallback path always has a value to try if the KEK is loaded.
+      -- Empty passphrase + loaded master KEK is the recommended flow,
+      -- mirroring sphincs.account.create.
+      let passphrase ← Passphrase.read "Deployer passphrase (Enter to use master KEK if loaded): "
+      let base : Array (String × LeanKohaku.Encoding.Json.Json) := #[
+        ("paramSet", .str paramSet),
+        ("deployerWallet", .str deployer)
+      ]
+      let withPass := if passphrase.length > 0
+        then base.push ("deployerPassphrase", .str passphrase) else base
+      let withChain := match chain? with
+        | some c => withPass.push ("chain", .str c)
+        | none => withPass
+      let fields := match acct?.bind String.toNat? with
+        | some n => withChain.push ("deployerAccountIndex", .num (Int.ofNat n))
+        | none => withChain
+      DaemonClient.printCall "sphincs.factory.deploy" (.obj fields)
   | .resolve name =>
       match ← DaemonClient.call "chain.resolveName" (.obj #[("name", .str name)]) with
       | .error err =>

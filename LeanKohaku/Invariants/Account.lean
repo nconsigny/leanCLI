@@ -18,6 +18,8 @@ theorem acceptedSupportedChainOnly (p : AccountPolicy) :
       simp [accepted, compatible] at h ⊢
     · exact h.left
     · exact h
+    · exact h
+    · exact h.left
 
 theorem acceptedLocalOnly (p : AccountPolicy) :
     accepted p = true → p.localOnly = true := by

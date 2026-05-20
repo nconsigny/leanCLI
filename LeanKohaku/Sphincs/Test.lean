@@ -3,9 +3,10 @@ import LeanKohaku.Sphincs.Bridge
 /-!
 # SPHINCS- shim smoke-test executable
 
-Runs `Sphincs.smokeRoundtrip` against each parameter set's binary. Both
-the NIST variant (`slhDsaSha2_128_24`) and the WOTS+C / FORS+C C9 variant
-must succeed end-to-end (keygen → sign → verify-after-sign).
+Runs `Sphincs.smokeRoundtrip` against each parameter set's binary. The
+NIST variant (`slhDsaSha2_128_24`), the JARDIN-Keccak variant
+(`jardinKeccak128_24`), and the WOTS+C / FORS+C C9 variant must all
+succeed end-to-end (keygen → sign → verify-after-sign).
 
 Used by humans / CI as:
 
@@ -90,8 +91,12 @@ def runSmoke (label : String) (ps : ParamSet) (seedHex : String)
 def main : IO UInt32 := do
   let okSlh ← runSmoke "SLH-DSA-SHA2-128-24"
                        ParamSet.slhDsaSha2_128_24 slhdsaSeedHex (expectStub := false)
+  -- JARDIN-Keccak shares the 48-byte seed shape with the SHA-2 variant
+  -- (same n=16, same d/h/a/k/w); only the hash backend differs.
+  let okJardin ← runSmoke "JARDIN-Keccak-128-24"
+                          ParamSet.jardinKeccak128_24 slhdsaSeedHex (expectStub := false)
   -- C9 takes a 32-byte seed (truncated from the same source the SLH-DSA
   -- variant uses, so both runs are reproducible from the file's literal).
-  let c9Seed : String := slhdsaSeedHex.take 64
+  let c9Seed : String := (slhdsaSeedHex.take 64).toString
   let okC9 ← runSmoke "C9" ParamSet.c9 c9Seed (expectStub := false)
-  pure (if okSlh && okC9 then 0 else 1)
+  pure (if okSlh && okJardin && okC9 then 0 else 1)

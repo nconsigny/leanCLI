@@ -9,6 +9,7 @@ export type MainAction =
   | "wallets"
   | "le-chat"
   | "create-wallet"
+  | "sphincs-accounts"
   | "private"
   | "status"
   | "toggle-colibri"
@@ -72,6 +73,7 @@ export default function MainMenu({
     { label: "le chat (local-LLM, experimental)",                        value: "le-chat" },
     { label: "Privacy Plugins",                                          value: "private" },
     { label: "Create wallet / Add account / Import",                     value: "create-wallet" },
+    { label: "SPHINCS- hybrid accounts (post-quantum)",                  value: "sphincs-accounts" },
     { label: "Status (daemon · sidecars · sandbox · network)",           value: "status" },
     {
       label: `Colibri RPC verification: ${

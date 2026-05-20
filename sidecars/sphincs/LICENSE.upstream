@@ -1,10 +1,14 @@
 leanKohaku SPHINCS- shim — vendoring provenance and license notes
 ==================================================================
 
-This directory contains a vendored copy (subtree, not submodule) of the
-sphincs/sphincsplus reference C signer, plus a small JSON-RPC shim
-(`shim/shim_main.c`) written for leanKohaku. Two binaries are produced,
-one per parameter set, sharing the same shim source.
+This directory contains vendored copies (subtree, not submodule) of the
+SPHINCS-/sphincsplus reference C signers, plus a small JSON-RPC shim
+(`shim/shim_main.c`) written for leanKohaku. Three binaries are produced,
+one per parameter set, all sharing the same shim source:
+
+  - SLH-DSA-SHA2-128-24  (C, SHA-2,   vendor-slhdsa-sha2-128-24/)
+  - JARDIN-Keccak-128-24 (C, keccak,  vendor-jardin-keccak-128-24/)
+  - C9                   (Rust,       vendor-c9/)
 
 Submodule was rejected in favour of a subtree because:
   1. The vendored tree is small (~30 files, source-only).
@@ -37,6 +41,43 @@ Excluded from the copy:
 Parameter set: SLH-DSA-SHA2-128-24 (NIST FIPS 205 candidate variant).
   SPX_N=16, SPX_BYTES=3856 (signature), SPX_PK_BYTES=32, SPX_SK_BYTES=64.
   Seed input: 48 bytes (= 3 * SPX_N).
+
+vendor-jardin-keccak-128-24/
+----------------------------
+Source:  https://github.com/nconsigny/SPHINCS-
+Path:    signers/jardin-keccak-128-24/
+Pin:     1acf942 (the commit that introduced the JARDIN-Keccak signer).
+         Verified byte-identical to 63617e1 for the sibling
+         signers/sphincsplus-128-24/ tree, so the pin gap between the
+         two vendor dirs is benign (a `git diff 63617e1..1acf942 --
+         signers/sphincsplus-128-24/` is empty).
+Vendored: 2026-05 by leanKohaku Phase 2 work.
+
+Files copied verbatim (no edits, no patches):
+  address.[ch] api.h context.h fors.[ch] hash.h hash_keccak.c
+  jardin_offsets.h keccak.[ch] merkle.[ch] params.h randombytes.[ch]
+  sign.c thash.h thash_keccak.c utils.[ch] utilsx1.[ch]
+  wots.[ch] wotsx1.[ch] LICENSE.upstream
+
+Excluded from the copy: main.c, Makefile, crosscheck.py (same rationale
+as vendor-slhdsa-sha2-128-24/).
+
+Parameter set: JARDIN-Keccak-128-24 (SPHINCS-/JARDIN kernel: native
+keccak256 truncated to 16 B, 32-byte ADRS, otherwise SLH-DSA-128-24
+parameters). SPX_N=16, SPX_BYTES=3856, SPX_PK_BYTES=32, SPX_SK_BYTES=64.
+Seed input: 48 bytes (= 3 * SPX_N).
+
+Internal symbols are namespaced via `#define SPX_NAMESPACE(s)
+SPX_KECCAK_##s` so the JARDIN-keccak object files do not collide with
+the SLH-DSA-SHA2 ones if both ever linked into a common harness; the
+high-level `crypto_sign_*` API symbols are unprefixed in both, which
+is why each parameter set ships as a SEPARATE binary, never linked.
+
+The on-chain verifier counterpart for this signer is the JARDIN
+SLH-DSA-Keccak verifier (`src/SLH-DSA-keccak-128-24verifier.sol` in
+the SPHINCS- repo). No mainnet/testnet deployment is recorded at
+vendoring time; `sphincs_verifiers` entries in daemon.json may carry
+a null address until a deployment lands.
 
 vendor-c9/
 ----------

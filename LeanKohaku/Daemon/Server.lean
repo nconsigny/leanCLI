@@ -12,6 +12,8 @@ import LeanKohaku.Privacy.NetworkPolicy
 import LeanKohaku.Privacy.Bridge
 import LeanKohaku.Clearsign.Bridge
 import LeanKohaku.Sphincs.Bridge
+import LeanKohaku.Sphincs.UserOp
+import LeanKohaku.Sphincs.Send
 import LeanKohaku.Colibri.Bridge
 import LeanKohaku.Colibri.Persistent
 import LeanKohaku.Daemon.Preflight
@@ -44,6 +46,7 @@ import LeanKohaku.Wallet.EOA
 import LeanKohaku.Wallet.HDKey
 import LeanKohaku.Wallet.Mnemonic
 import LeanKohaku.Wallet.PpSecretStore
+import LeanKohaku.Wallet.SphincsHybridStore
 import LeanKohaku.Registry.KnownProtocols
 import LeanKohaku.Swap.Tokens
 import LeanKohaku.Swap.UniV3
@@ -200,6 +203,19 @@ structure Config where
   -- Phase 3 daemon RPCs (`sphincs.create`, `sphincs.send`, ...). Empty by
   -- default; populated from `daemon.json`'s `sphincs_verifiers` block.
   sphincsVerifiers : Array SphincsVerifierEntry := #[]
+  -- Why: per-(chain, paramSet) SPHINCS- factory address map. Re-uses
+  -- `SphincsVerifierEntry` because the per-row shape is identical
+  -- (chain × paramSet → optional address). Read by
+  -- `sphincs.account.computeAddress` and `sphincs.account.deploy` —
+  -- both fail closed when no factory is configured. Populated from
+  -- `daemon.json`'s `sphincs_factories` block.
+  sphincsFactories : Array SphincsVerifierEntry := #[]
+  -- Why: per-chain ERC-4337 bundler URL (the UserOp submission
+  -- endpoint, e.g. Candide). Bundler is paramSet-agnostic — one URL
+  -- handles every paramSet on that chain — so the key is just the
+  -- chain name. Read by `sphincs.account.send`; populated from
+  -- `daemon.json`'s `sphincs_bundlers` block.
+  sphincsBundlers : Array (String × String) := #[]
 
 instance : Repr Config where
   reprPrec cfg _ :=
@@ -239,6 +255,29 @@ def sphincsVerifierFor (cfg : Config)
   | none =>
       .error
         s!"no sphincs verifier configured for chain '{chain}' paramSet '{ps.toString}'"
+
+/-- Same shape as `sphincsVerifierFor` but reads `cfg.sphincsFactories`.
+    Failure messages point at the `sphincs_factories` config key. -/
+def sphincsFactoryFor (cfg : Config)
+    (chain : String) (ps : LeanKohaku.Sphincs.ParamSet)
+    : Except String String :=
+  match cfg.sphincsFactories.find?
+      (fun e => e.chain = chain && e.paramSet = ps) with
+  | some { address := some addr, .. } => .ok addr
+  | some { address := none, .. } =>
+      .error
+        s!"no sphincs factory address for chain '{chain}' paramSet '{ps.toString}': set it in daemon.json under `sphincs_factories`"
+  | none =>
+      .error
+        s!"no sphincs factory configured for chain '{chain}' paramSet '{ps.toString}'"
+
+/-- Bundler URL per chain. Failure → caller fails closed. -/
+def sphincsBundlerFor (cfg : Config) (chain : String) : Except String String :=
+  match cfg.sphincsBundlers.find? (fun (c, _) => c = chain) with
+  | some (_, url) => .ok url
+  | none =>
+      .error
+        s!"no sphincs bundler configured for chain '{chain}': set it in daemon.json under `sphincs_bundlers`"
 
 -- Why: no `defaultConfig` with a URL substitute. The daemon must refuse to
 -- start without a user-configured `rpc_url` (env or daemon.json); see
@@ -1661,6 +1700,234 @@ private def chatDraftIntentResponse
             ])
           ]
 
+/-- "sepolia" / "mainnet" guess from chainId so callers can omit `chain`.
+    Empty string for unknown ids — every consumer checks the `endpointForChain`
+    result so a wrong guess can't silently route to the default chain. -/
+private def chainNameGuess (cid : Nat) : String :=
+  if cid = 11155111 then "sepolia"
+  else if cid = 1 then "mainnet"
+  else ""
+
+/-- Best-effort: query the configured factory's `getAddress(...)` view and
+    return the resulting smart-account address. Swallows every error so
+    callers can use this opportunistically (e.g. auto-populating
+    `smartAccountAddress` on a freshly created slot without making the
+    create RPC fail when the factory isn't deployed yet). -/
+private def tryComputeSmartAccountAddress (cfg : Config)
+    (rec : LeanKohaku.Wallet.SphincsHybridStore.Record) : IO (Option String) := do
+  let chainName := chainNameGuess rec.chainId
+  match sphincsFactoryFor cfg chainName rec.paramSet,
+        endpointForChain cfg (some chainName) with
+  | .error _, _ | _, .error _ => pure none
+  | .ok factory, .ok ep =>
+      match ← LeanKohaku.Crypto.Hacl.keccak256EthereumIO
+          (LeanKohaku.Crypto.Hex.encode "getAddress(address,bytes32,bytes32)".toByteArray) with
+      | .error _ => pure none
+      | .ok kh =>
+          let sel := LeanKohaku.Crypto.Hex.encode (kh.extract 0 4)
+          let ownerB := (LeanKohaku.Sphincs.UserOp.hexToWord32? rec.ownerAddress).getD ByteArray.empty
+          let pkSeedB := (LeanKohaku.Sphincs.UserOp.hexToWord32? rec.pkSeed).getD ByteArray.empty
+          let pkRootB := (LeanKohaku.Sphincs.UserOp.hexToWord32? rec.pkRoot).getD ByteArray.empty
+          let dataHex := "0x" ++ sel
+            ++ LeanKohaku.Crypto.Hex.encode ownerB
+            ++ LeanKohaku.Crypto.Hex.encode pkSeedB
+            ++ LeanKohaku.Crypto.Hex.encode pkRootB
+          match ← LeanKohaku.RPC.Outbound.ethCall cfg.policy ep factory dataHex "latest" none with
+          | .error _ => pure none
+          | .ok ret =>
+              let s := (asString ret).getD ""
+              let cleaned := if s.startsWith "0x" then (s.drop 2).toString else s
+              if cleaned.length < 64 then pure none
+              else pure (some ("0x" ++ String.ofList (cleaned.toList.drop (cleaned.length - 40))))
+
+/-- Full SPHINCS- hybrid UserOperation pipeline: unlock the SPHINCS- sk,
+    derive the ECDSA private key from the wallet attachment, fetch nonce
+    + gas + domain separator, build initCode if the account isn't yet
+    deployed, run bundler gas estimation, dual-sign the userOpHash, and
+    submit via the configured bundler.
+
+    `callData` is the `userOp.callData` field — the caller decides what
+    target/value/data shape it carries (e.g. `execute(...)` from
+    `sphincs.account.send` or a self-call from a future
+    `rotateOwner`/`rotateKeys` RPC).
+
+    `params` carries optional `passphrase` + `chain` overrides; only
+    those two fields are consulted. -/
+private partial def executeSphincsUserOp
+    (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
+    (rec : LeanKohaku.Wallet.SphincsHybridStore.Record)
+    (callData : ByteArray) (params : Json) :
+    IO (Except RpcError Json) := do
+  match rec.smartAccountAddress with
+  | none =>
+      pure <| .error
+        { code := -32033,
+          message := "smartAccountAddress unset — run sphincs.account.computeAddress (or .deploy) first",
+          data := none }
+  | some sender =>
+      let chainName := paramStringD params "chain" (chainNameGuess rec.chainId)
+      match sphincsBundlerFor cfg chainName,
+            endpointForChain cfg (some chainName) with
+      | .error e, _ | _, .error e =>
+          pure <| .error
+            { code := -32030, message := "sphincs bundler/endpoint unavailable",
+              data := some (.str e) }
+      | .ok bundlerUrl, .ok ep =>
+          -- 1) Unlock SPHINCS- sk (master KEK first, slot passphrase fallback).
+          let skResult : IO (Except String String) := do
+            match ← LeanKohaku.Daemon.State.getMasterKek? state with
+            | some mslot =>
+                match ← LeanKohaku.Wallet.SphincsHybridStore.openWithMaster mslot.kek rec with
+                | .ok sk => pure (.ok sk)
+                | .error _ =>
+                    match paramString params "passphrase" with
+                    | .error _ => pure (.error "passphrase required (master path failed)")
+                    | .ok pp => LeanKohaku.Wallet.SphincsHybridStore.openSk rec pp
+            | none =>
+                match paramString params "passphrase" with
+                | .error _ => pure (.error "passphrase required (master KEK not loaded)")
+                | .ok pp => LeanKohaku.Wallet.SphincsHybridStore.openSk rec pp
+          match ← skResult with
+          | .error e => pure <| .error { code := -32011, message := "sphincs sk unlock failed", data := some (.str e) }
+          | .ok sphincsSkHex =>
+              -- 2) Resolve ECDSA half via the wallet attachment.
+              let attach := rec.ecdsaAttachment
+              let walletName := match attach with
+                | .existing wn _ => wn | .derived wn _ => wn
+              match ← LeanKohaku.Wallet.EoaStore.load walletName with
+              | .error e => pure <| .error { code := -32010, message := "wallet not found", data := some (.str e) }
+              | .ok wRec =>
+                  let pathExc : Except String String := match attach with
+                    | .existing _ idx =>
+                        match wRec.accounts[idx]? with
+                        | some a => .ok a.path
+                        | none => .error s!"wallet has no account #{idx}"
+                    | .derived _ dp => .ok dp.asString
+                  match pathExc with
+                  | .error e => pure <| .error { code := -32012, message := "ecdsa path resolve failed", data := some (.str e) }
+                  | .ok path =>
+                      match ← unlockedSlot state walletName with
+                      | .error e => pure (.error e)
+                      | .ok wSlot =>
+                          match ← derivePrivateKeyFromSeed wSlot.seed path with
+                          | .error e => pure <| .error { code := -32012, message := "ecdsa key derive failed", data := some (.str e) }
+                          | .ok privKey =>
+                              -- 3) Nonce, gas, initCode.
+                              let nonceCalldata := "0x" ++ Sphincs.Send.entryPointGetNonceSelector
+                                ++ LeanKohaku.Crypto.Hex.encode ((LeanKohaku.Sphincs.UserOp.hexToWord32? sender).getD ByteArray.empty)
+                                ++ LeanKohaku.Crypto.Hex.encode (LeanKohaku.Sphincs.UserOp.padLeft32 ByteArray.empty)
+                              let nonceN : Nat ← do
+                                match ← LeanKohaku.RPC.Outbound.ethCall cfg.policy ep
+                                    Sphincs.Send.entryPointV09Address nonceCalldata "latest" none with
+                                | .ok r => pure ((parseHexQuantity ((asString r).getD "0x0")).getD 0)
+                                | .error _ => pure 0
+                              let gp ← LeanKohaku.RPC.Outbound.gasPrice cfg.policy ep none
+                              let pp ← LeanKohaku.RPC.Outbound.maxPriorityFeePerGas cfg.policy ep none
+                              let parseHexJ (j : Except String Json) : Nat :=
+                                match j with
+                                | .ok jj => (parseHexQuantity ((asString jj).getD "0x0")).getD 0
+                                | .error _ => 0
+                              let gasPriceN := parseHexJ gp
+                              let priorityFee := parseHexJ pp
+                              let maxFee := gasPriceN + priorityFee
+                              let initCodeBytes ← do
+                                match ← LeanKohaku.RPC.Outbound.call cfg.policy ep
+                                    .getCode (.arr #[.str sender, .str "latest"]) none with
+                                | .ok r =>
+                                    let codeHex := (asString r).getD "0x"
+                                    if Sphincs.Send.hasCodeAt codeHex then pure ByteArray.empty
+                                    else
+                                      match sphincsFactoryFor cfg chainName rec.paramSet with
+                                      | .error _ => pure ByteArray.empty
+                                      | .ok factory =>
+                                          match ← Sphincs.Send.buildInitCode factory
+                                              rec.ownerAddress rec.pkSeed rec.pkRoot with
+                                          | .error _ => pure ByteArray.empty
+                                          | .ok bs => pure bs
+                                | .error _ => pure ByteArray.empty
+                              -- 4) Skeleton + estimate gas.
+                              let senderAddrBs : ByteArray :=
+                                (LeanKohaku.Crypto.Hex.decode sender).getD ByteArray.empty
+                              let opSkeleton : LeanKohaku.Sphincs.UserOp.PackedUserOperation := {
+                                sender             := senderAddrBs,
+                                nonce              := LeanKohaku.Sphincs.UserOp.padLeft32
+                                  ((LeanKohaku.Crypto.Hex.decode (Sphincs.Send.natToEvenHex nonceN)).getD ByteArray.empty),
+                                initCode           := initCodeBytes,
+                                callData           := callData,
+                                accountGasLimits   := Sphincs.Send.packTwoHalves 15000000 300000,
+                                preVerificationGas := Sphincs.Send.natToWord32 80000,
+                                gasFees            := Sphincs.Send.packTwoHalves priorityFee maxFee,
+                                paymasterAndData   := ByteArray.empty
+                              }
+                              let dummyEcdsa := ByteArray.mk (Array.replicate 65 (0 : UInt8))
+                              let dummySphincs := ByteArray.mk
+                                (Array.replicate rec.paramSet.expectedSigBytes (0 : UInt8))
+                              let dummySig := Sphincs.Send.abiEncodeBytesPair dummyEcdsa dummySphincs
+                              let dummyOpJson := Sphincs.Send.packedUserOpToJson opSkeleton dummySig
+                              let estParams : Json :=
+                                .arr #[dummyOpJson, .str Sphincs.Send.entryPointV09Address]
+                              let (vgl, cgl, pvg) ← do
+                                match ← Sphincs.Send.bundlerCall bundlerUrl
+                                    "eth_estimateUserOperationGas" estParams with
+                                | .ok est =>
+                                    let getNat (k : String) : Nat :=
+                                      match getField k est >>= asString with
+                                      | some s => (parseHexQuantity s).getD 0
+                                      | none => 0
+                                    let vgl0 := getNat "verificationGasLimit"
+                                    let cgl0 := getNat "callGasLimit"
+                                    let pvg0 := getNat "preVerificationGas"
+                                    pure
+                                      (if vgl0 = 0 then 15000000 else vgl0,
+                                       if cgl0 = 0 then 300000 else cgl0,
+                                       if pvg0 = 0 then 80000 else pvg0)
+                                | .error _ => pure (15000000, 300000, 80000)
+                              let userOp : LeanKohaku.Sphincs.UserOp.PackedUserOperation :=
+                                { opSkeleton with
+                                    accountGasLimits   := Sphincs.Send.packTwoHalves vgl cgl,
+                                    preVerificationGas := Sphincs.Send.natToWord32 pvg }
+                              -- 5) Domain separator + userOpHash.
+                              let dsCalldata := "0x" ++ Sphincs.Send.domainSeparatorSelector
+                              match ← LeanKohaku.RPC.Outbound.ethCall cfg.policy ep
+                                  Sphincs.Send.entryPointV09Address dsCalldata "latest" none with
+                              | .error e => pure <| .error { code := -32020, message := "entryPoint.getDomainSeparator failed", data := some (.str e) }
+                              | .ok dsJ =>
+                                  let dsHex := (asString dsJ).getD ""
+                                  let ds : ByteArray :=
+                                    (LeanKohaku.Crypto.Hex.decode dsHex).getD ByteArray.empty
+                                  if ds.size ≠ 32 then
+                                    pure <| .error { code := -32034, message := s!"unexpected domain separator size {ds.size}", data := none }
+                                  else
+                                    match ← LeanKohaku.Sphincs.UserOp.userOpHash userOp ds with
+                                    | .error e => pure <| .error { code := -32031, message := "userOpHash failed", data := some (.str e) }
+                                    | .ok userOpH =>
+                                        match ← LeanKohaku.Wallet.EOA.signDigestIO privKey userOpH with
+                                        | .error e => pure <| .error { code := -32013, message := "ecdsa sign failed", data := some (.str e) }
+                                        | .ok ecdsaSig =>
+                                            let rBs := Sphincs.Send.natToWord32 ecdsaSig.r
+                                            let sBs := Sphincs.Send.natToWord32 ecdsaSig.s
+                                            let vBs := ByteArray.empty.push ecdsaSig.v
+                                            let ecdsaBytes := rBs ++ sBs ++ vBs
+                                            let userOpHashHex := LeanKohaku.Crypto.Hex.encode userOpH
+                                            match ← LeanKohaku.Sphincs.signWithVerify rec.paramSet
+                                                sphincsSkHex rec.pkSeed rec.pkRoot userOpHashHex with
+                                            | .error e => pure <| .error { code := -32014, message := "sphincs sign failed", data := some (.str (reprStr e)) }
+                                            | .ok sphincsSigHex =>
+                                                let sphincsBytes := (LeanKohaku.Crypto.Hex.decode sphincsSigHex).getD ByteArray.empty
+                                                let signature := Sphincs.Send.abiEncodeBytesPair ecdsaBytes sphincsBytes
+                                                let opJson := Sphincs.Send.packedUserOpToJson userOp signature
+                                                let subParams : Json :=
+                                                  .arr #[opJson, .str Sphincs.Send.entryPointV09Address]
+                                                match ← Sphincs.Send.bundlerCall bundlerUrl "eth_sendUserOperation" subParams with
+                                                | .error e => pure <| .error { code := -32021, message := "bundler error", data := some (.str e) }
+                                                | .ok r =>
+                                                    let userOpHash := (asString r).getD ""
+                                                    pure <| .ok <| .obj #[
+                                                      ("userOpHash", .str userOpHash),
+                                                      ("sender", .str sender),
+                                                      ("bundler", .str bundlerUrl)
+                                                    ]
+
 def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
     (notify : LeanKohaku.Keystore.Tpm2Runtime.Notifier)
     (req : Request) : IO (Except RpcError Json) := do
@@ -2756,6 +3023,593 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
         | .ok (record, mnemonic?) => pure (.ok (← importResultJson state record mnemonic?))
       catch e =>
         pure <| .error { invalidParams with data := some (.str e.toString) }
+  | "sphincs.account.create" =>
+      -- Create a hybrid ECDSA + SPHINCS- ERC-4337 account record. The
+      -- SPHINCS sk is generated locally by the shim from a fresh
+      -- 48-/32-byte random seed (per `ParamSet.expectedSeedBytes`),
+      -- sealed under the per-slot passphrase, and additionally wrapped
+      -- under the daemon's master KEK if one is loaded. The ECDSA half
+      -- references an existing wallet account or a freshly-derived
+      -- sub-path under the wallet's BIP-39 seed.
+      --
+      -- Params:
+      --   name           : slot name (unique in sphincs-hybrid namespace)
+      --   paramSet       : "SLH-DSA-SHA2-128-24" | "JARDIN-Keccak-128-24" | "C9"
+      --   chainId        : optional (defaults to daemon's primary chainId)
+      --   walletName     : EOA wallet supplying the ECDSA half
+      --   ecdsaKind      : "existing" | "derived"   (default "existing")
+      --   accountIndex   : (existing only) index in wallet's accounts; default 0
+      --   path           : (derived only) BIP-44 path; default = wallet's path
+      --   walletPassphrase : passphrase to unlock the wallet for `derived` ECDSA
+      --   passphrase     : per-slot passphrase used to seal the SPHINCS- sk
+      match paramName req.params,
+            paramString req.params "paramSet",
+            paramString req.params "walletName" with
+      | .ok name, .ok psStr, .ok walletName =>
+          let chainId := paramNatD req.params "chainId" cfg.chainId
+          let ecdsaKind := paramStringD req.params "ecdsaKind" "existing"
+          -- Passphrase is optional when the master KEK is in memory
+          -- (same pattern as `eoa.create` / `saveMnemonicSlot`). If
+          -- empty/missing AND KEK is loaded, we mint a 32-byte ephemeral
+          -- passphrase that only ever exists in this process; the slot
+          -- becomes master-unlockable on next call thanks to the
+          -- best-effort `masterWrap` write below. The ephemeral isn't
+          -- returned to the client and isn't a recovery factor.
+          let userSuppliedPassphrase : Bool :=
+            match paramString req.params "passphrase" with
+            | .ok p => p.length > 0
+            | .error _ => false
+          let masterSlot? ← LeanKohaku.Daemon.State.getMasterKek? state
+          let passphraseExcept : Except String String := do
+            match paramString req.params "passphrase" with
+            | .ok p =>
+                if p.length > 0 then .ok p
+                else if masterSlot?.isSome then .ok ""  -- placeholder, replaced below
+                else .error "missing passphrase (no master KEK loaded — set one with `wallet master init` or pick a per-slot passphrase)"
+            | .error _ =>
+                if masterSlot?.isSome then .ok ""
+                else .error "missing passphrase (no master KEK loaded — set one with `wallet master init` or pick a per-slot passphrase)"
+          match passphraseExcept with
+          | .error e =>
+              pure <| .error { invalidParams with data := some (.str e) }
+          | .ok rawPp =>
+          let slotPassphrase ←
+            if rawPp.length > 0 then pure rawPp
+            else do
+              let bytes ← LeanKohaku.Crypto.Random.getRandomBytes 32
+              pure (LeanKohaku.Crypto.Hex.encode bytes)
+          match LeanKohaku.Sphincs.ParamSet.parse? psStr with
+          | none =>
+              pure <| .error
+                { invalidParams with data := some (.str s!"unknown paramSet: {psStr}") }
+          | some ps =>
+              match ← LeanKohaku.Wallet.EoaStore.load walletName with
+              | .error err =>
+                  pure <| .error
+                    { code := -32010, message := "wallet not found",
+                      data := some (.str err) }
+              | .ok walletRec =>
+                  -- Resolve ECDSA owner address + attachment record.
+                  let resolved : IO
+                      (Except String (String × LeanKohaku.Wallet.Account.EcdsaAttachment)) :=
+                    match ecdsaKind with
+                    | "existing" =>
+                        let idx := paramNatD req.params "accountIndex" 0
+                        match walletRec.accounts[idx]? with
+                        | none =>
+                            pure (.error s!"wallet '{walletName}' has no account at index {idx}")
+                        | some acct =>
+                            pure (.ok (acct.address,
+                                        .existing walletName idx))
+                    | "derived" =>
+                        let pathStr :=
+                          paramStringD req.params "path" walletRec.derivationPath
+                        match paramString req.params "walletPassphrase" with
+                        | .error _ =>
+                            pure (.error "ecdsaKind='derived' requires walletPassphrase")
+                        | .ok walletPp => do
+                            match ← LeanKohaku.Wallet.EoaStore.unlockSeedIO
+                                walletRec walletPp with
+                            | .error err => pure (.error s!"wallet unlock: {err}")
+                            | .ok seed => do
+                                match ← deriveAddressFromSeed seed pathStr with
+                                | .error err => pure (.error err)
+                                | .ok addr =>
+                                    match LeanKohaku.Wallet.SphincsHybridStore.derivationPathFromString
+                                          pathStr with
+                                    | .error err => pure (.error err)
+                                    | .ok dpath =>
+                                        pure (.ok (addr, .derived walletName dpath))
+                    | other =>
+                        pure (.error s!"unknown ecdsaKind '{other}' (use 'existing' or 'derived')")
+                  match ← resolved with
+                  | .error err =>
+                      pure <| .error
+                        { invalidParams with data := some (.str err) }
+                  | .ok (ownerAddress, attachment) =>
+                      -- Generate fresh SPHINCS- seed + spawn shim keygen.
+                      let seedBytes ← LeanKohaku.Crypto.Random.getRandomBytes
+                        ps.expectedSeedBytes
+                      let seedHex := LeanKohaku.Crypto.Hex.encode seedBytes
+                      match ← LeanKohaku.Sphincs.keygen ps seedHex with
+                      | Except.error e =>
+                          pure <| Except.error
+                            { code := -32040,
+                              message := "sphincs keygen failed",
+                              data := some (.str (reprStr e)) }
+                      | Except.ok km =>
+                          let kdfSalt ← LeanKohaku.Crypto.Random.getRandomBytes 16
+                          let iters := LeanKohaku.Wallet.SphincsHybridStore.defaultKdfIters
+                          match ← LeanKohaku.Wallet.SphincsHybridStore.sealSk
+                              name ps ownerAddress slotPassphrase km.sk
+                              kdfSalt iters with
+                          | .error err =>
+                              pure <| .error
+                                { code := -32041,
+                                  message := "sphincs sk seal failed",
+                                  data := some (.str err) }
+                          | .ok passphraseCt =>
+                              -- Best-effort master-KEK wrap. Failure here
+                              -- is non-fatal — the slot still works
+                              -- through `passphraseCiphertext`. Reuses
+                              -- `masterSlot?` captured above so we don't
+                              -- race with a TTL-driven re-lock.
+                              let masterWrap? : Option ByteArray ←
+                                match masterSlot? with
+                                | none => pure none
+                                | some mslot =>
+                                    match ← LeanKohaku.Wallet.SphincsHybridStore.sealUnderMaster
+                                        mslot.kek name ps ownerAddress km.sk with
+                                    | .error _ => pure none
+                                    | .ok w => pure (some w)
+                              let now ← IO.monoMsNow
+                              let baseRecord : LeanKohaku.Wallet.SphincsHybridStore.Record := {
+                                version := LeanKohaku.Wallet.SphincsHybridStore.currentVersion,
+                                name := name,
+                                paramSet := ps,
+                                chainId := chainId,
+                                ecdsaAttachment := attachment,
+                                ownerAddress := ownerAddress,
+                                pkSeed := km.pkSeed,
+                                pkRoot := km.pkRoot,
+                                kdfSalt := kdfSalt,
+                                kdfIters := iters,
+                                passphraseCiphertext := passphraseCt,
+                                masterWrap := masterWrap?,
+                                smartAccountAddress := none,
+                                customPassphrase := userSuppliedPassphrase,
+                                createdAt := now / 1000
+                              }
+                              -- Auto-compute the counterfactual address when a
+                              -- factory is configured for (chain, paramSet).
+                              -- The helper swallows errors so the create RPC
+                              -- still succeeds even if the factory is
+                              -- unreachable or not yet deployed.
+                              let saa? ← tryComputeSmartAccountAddress cfg baseRecord
+                              let slotRecord := { baseRecord with smartAccountAddress := saa? }
+                              try
+                                LeanKohaku.Wallet.SphincsHybridStore.writeRecord slotRecord
+                                pure <| .ok <| .obj #[
+                                  ("name",         .str name),
+                                  ("paramSet",     .str ps.toString),
+                                  ("chainId",      .num (Int.ofNat chainId)),
+                                  ("ownerAddress", .str ownerAddress),
+                                  ("pkSeed",       .str km.pkSeed),
+                                  ("pkRoot",       .str km.pkRoot),
+                                  ("masterEnrolled", .bool masterWrap?.isSome),
+                                  ("smartAccountAddress",
+                                    match saa? with | some a => .str a | none => .null)
+                                ]
+                              catch e =>
+                                pure <| .error
+                                  { code := -32042,
+                                    message := "sphincs slot write failed",
+                                    data := some (.str e.toString) }
+      | _, _, _ => pure (.error invalidParams)
+  | "sphincs.account.list" =>
+      -- Enumerate hybrid slots on disk. Returns a JSON array of
+      -- `{name, paramSet, chainId, ownerAddress, pkSeed, pkRoot,
+      --   masterEnrolled, smartAccountAddress?, customPassphrase, createdAt}`
+      -- per slot. Best-effort: parse failures on individual files are
+      -- swallowed (the slot is omitted from the result) so a single
+      -- corrupt file doesn't poison the whole list.
+      try
+        let names ← LeanKohaku.Wallet.SphincsHybridStore.listSlotNames
+        let mut entries : Array Json := #[]
+        for n in names do
+          match ← LeanKohaku.Wallet.SphincsHybridStore.readRecord n with
+          | .error _ => pure ()
+          | .ok r =>
+              let attachJson : Json :=
+                LeanKohaku.Wallet.SphincsHybridStore.ecdsaAttachmentToJson r.ecdsaAttachment
+              let smart : Json :=
+                match r.smartAccountAddress with
+                | some a => .str a
+                | none => .null
+              entries := entries.push <| .obj #[
+                ("name",                .str r.name),
+                ("paramSet",            .str r.paramSet.toString),
+                ("chainId",             .num (Int.ofNat r.chainId)),
+                ("ownerAddress",        .str r.ownerAddress),
+                ("ecdsaAttachment",     attachJson),
+                ("pkSeed",              .str r.pkSeed),
+                ("pkRoot",              .str r.pkRoot),
+                ("masterEnrolled",      .bool r.masterWrap.isSome),
+                ("smartAccountAddress", smart),
+                ("customPassphrase",    .bool r.customPassphrase),
+                ("createdAt",           .num (Int.ofNat r.createdAt))
+              ]
+        pure <| .ok <| .obj #[("accounts", .arr entries)]
+      catch e =>
+        pure <| .error
+          { code := -32043,
+            message := "sphincs.account.list failed",
+            data := some (.str e.toString) }
+  | "sphincs.account.show" =>
+      -- Render a single hybrid slot's public state. Mirrors the per-row
+      -- shape from `sphincs.account.list`. The sk is never returned.
+      match paramName req.params with
+      | .error err => pure (.error err)
+      | .ok name =>
+          match ← LeanKohaku.Wallet.SphincsHybridStore.readRecord name with
+          | .error err =>
+              pure <| .error
+                { code := -32010, message := "sphincs slot not found",
+                  data := some (.str err) }
+          | .ok r =>
+              let attachJson : Json :=
+                LeanKohaku.Wallet.SphincsHybridStore.ecdsaAttachmentToJson r.ecdsaAttachment
+              let smart : Json :=
+                match r.smartAccountAddress with
+                | some a => .str a
+                | none => .null
+              pure <| .ok <| .obj #[
+                ("name",                .str r.name),
+                ("paramSet",            .str r.paramSet.toString),
+                ("chainId",             .num (Int.ofNat r.chainId)),
+                ("ownerAddress",        .str r.ownerAddress),
+                ("ecdsaAttachment",     attachJson),
+                ("pkSeed",              .str r.pkSeed),
+                ("pkRoot",              .str r.pkRoot),
+                ("masterEnrolled",      .bool r.masterWrap.isSome),
+                ("smartAccountAddress", smart),
+                ("customPassphrase",    .bool r.customPassphrase),
+                ("createdAt",           .num (Int.ofNat r.createdAt))
+              ]
+  | "sphincs.account.computeAddress" =>
+      -- eth_call factory.getAddress(owner, pkSeed, pkRoot) → counterfactual
+      -- smart-account address. The factory's own view function does the
+      -- CREATE2 math, so Lean only assembles the 100-byte calldata and
+      -- slices the returned 32-byte word's last 20 bytes. On success, the
+      -- on-disk record's `smartAccountAddress` is updated in place; the
+      -- next `sphincs.account.show` reads it back without a fresh RPC.
+      -- Fails closed when no factory is configured for (chain, paramSet).
+      match paramName req.params with
+      | .error err => pure (.error err)
+      | .ok name =>
+          match ← LeanKohaku.Wallet.SphincsHybridStore.readRecord name with
+          | .error err =>
+              pure <| .error { code := -32010, message := "sphincs slot not found", data := some (.str err) }
+          | .ok rec =>
+              -- Caller passes `chain` (e.g. "sepolia"); the slot's
+              -- `chainId` is the source of truth — if `chain` is omitted
+              -- we fall back to a name guess via the policy table.
+              let chainName := paramStringD req.params "chain" (chainNameGuess rec.chainId)
+              match sphincsFactoryFor cfg chainName rec.paramSet,
+                    endpointForChain cfg (some chainName) with
+              | .error e, _ | _, .error e =>
+                  pure <| .error { code := -32030, message := "sphincs factory/endpoint unavailable", data := some (.str e) }
+              | .ok factory, .ok ep =>
+                  -- selector(getAddress(address,bytes32,bytes32)) + 3 × 32B
+                  match ← LeanKohaku.Crypto.Hacl.keccak256EthereumIO
+                      (LeanKohaku.Crypto.Hex.encode "getAddress(address,bytes32,bytes32)".toByteArray) with
+                  | .error e => pure <| .error { code := -32031, message := "keccak failed", data := some (.str e) }
+                  | .ok kh =>
+                      let sel := LeanKohaku.Crypto.Hex.encode (kh.extract 0 4)
+                      let ownerBytes : ByteArray :=
+                        (LeanKohaku.Sphincs.UserOp.hexToWord32? rec.ownerAddress).getD ByteArray.empty
+                      let pkSeedB : ByteArray :=
+                        (LeanKohaku.Sphincs.UserOp.hexToWord32? rec.pkSeed).getD ByteArray.empty
+                      let pkRootB : ByteArray :=
+                        (LeanKohaku.Sphincs.UserOp.hexToWord32? rec.pkRoot).getD ByteArray.empty
+                      let dataHex := "0x" ++ sel
+                        ++ LeanKohaku.Crypto.Hex.encode ownerBytes
+                        ++ LeanKohaku.Crypto.Hex.encode pkSeedB
+                        ++ LeanKohaku.Crypto.Hex.encode pkRootB
+                      match ← LeanKohaku.RPC.Outbound.ethCall cfg.policy ep factory dataHex "latest" none with
+                      | .error e =>
+                          pure <| .error { code := -32020, message := "eth_call failed", data := some (.str e) }
+                      | .ok ret =>
+                          let retHex := (asString ret).getD ""
+                          let cleaned : String :=
+                            if retHex.startsWith "0x" then (retHex.drop 2).toString else retHex
+                          if cleaned.length < 64 then
+                            pure <| .error { code := -32032, message := "unexpected returnData", data := some (.str retHex) }
+                          else
+                            -- last 20 bytes (40 hex chars) of the 32-byte word
+                            let addrHex : String :=
+                              "0x" ++ (cleaned.toList.drop (cleaned.length - 40)).asString
+                            try
+                              LeanKohaku.Wallet.SphincsHybridStore.writeRecord
+                                { rec with smartAccountAddress := some addrHex }
+                            catch _ => pure ()
+                            pure <| .ok <| .obj #[
+                              ("name", .str name),
+                              ("smartAccountAddress", .str addrHex),
+                              ("factory", .str factory)
+                            ]
+  | "sphincs.account.deploy" =>
+      -- Build calldata for factory.createAccount(owner, pkSeed, pkRoot)
+      -- and submit through the existing EOA pipeline. The deployer EOA
+      -- pays gas — picked by the caller via `deployerWallet` + an
+      -- optional `deployerAccountIndex` (defaults to 0). On success we
+      -- echo the tx hash plus the post-deploy smart-account address
+      -- (taken from `rec.smartAccountAddress` if already populated by
+      -- `computeAddress`; otherwise the caller should call that first).
+      match paramName req.params, paramString req.params "deployerWallet" with
+      | .ok name, .ok deployer =>
+          let deployerIdx := paramNatD req.params "deployerAccountIndex" 0
+          match ← LeanKohaku.Wallet.SphincsHybridStore.readRecord name with
+          | .error err =>
+              pure <| .error { code := -32010, message := "sphincs slot not found", data := some (.str err) }
+          | .ok rec =>
+              -- Caller passes `chain` (e.g. "sepolia"); the slot's
+              -- `chainId` is the source of truth — if `chain` is omitted
+              -- we fall back to a name guess via the policy table.
+              let chainName := paramStringD req.params "chain" (chainNameGuess rec.chainId)
+              match sphincsFactoryFor cfg chainName rec.paramSet,
+                    endpointForChain cfg (some chainName) with
+              | .error e, _ | _, .error e =>
+                  pure <| .error { code := -32030, message := "sphincs factory/endpoint unavailable", data := some (.str e) }
+              | .ok factory, .ok ep =>
+                  match ← unlockedSlot state deployer with
+                  | .error e => pure (.error e)
+                  | .ok dslot =>
+                      let cfgEff : Config :=
+                        let cid := (LeanKohaku.RPC.Outbound.chainNameToId chainName).getD cfg.chainId
+                        { cfg with rpcEndpoint := ep, chainId := cid }
+                      -- Resolve deployer's account index → derivation path & address.
+                      match ← LeanKohaku.Wallet.EoaStore.load deployer with
+                      | .error e => pure <| .error { code := -32010, message := "deployer wallet not found", data := some (.str e) }
+                      | .ok dRec =>
+                          match dRec.accounts[deployerIdx]? with
+                          | none => pure <| .error { code := -32011, message := s!"deployer has no account #{deployerIdx}", data := none }
+                          | some dAcct =>
+                              match ← derivePrivateKeyFromSeed dslot.seed dAcct.path with
+                              | .error e => pure <| .error { code := -32012, message := "deployer key derive failed", data := some (.str e) }
+                              | .ok privKey =>
+                                  match ← LeanKohaku.Crypto.Hacl.keccak256EthereumIO
+                                      (LeanKohaku.Crypto.Hex.encode "createAccount(address,bytes32,bytes32)".toByteArray) with
+                                  | .error e => pure <| .error { code := -32031, message := "keccak failed", data := some (.str e) }
+                                  | .ok kh =>
+                                      let sel := LeanKohaku.Crypto.Hex.encode (kh.extract 0 4)
+                                      let ownerB := (LeanKohaku.Sphincs.UserOp.hexToWord32? rec.ownerAddress).getD ByteArray.empty
+                                      let pkSeedB := (LeanKohaku.Sphincs.UserOp.hexToWord32? rec.pkSeed).getD ByteArray.empty
+                                      let pkRootB := (LeanKohaku.Sphincs.UserOp.hexToWord32? rec.pkRoot).getD ByteArray.empty
+                                      let selBytes := (LeanKohaku.Crypto.Hex.decode sel).getD ByteArray.empty
+                                      let dataBytes := selBytes ++ ownerB ++ pkSeedB ++ pkRootB
+                                      let dslot' := { dslot with address := dAcct.address, derivationPath := dAcct.path }
+                                      match LeanKohaku.Ethereum.Address.fromHex factory with
+                                      | none => pure (.error invalidParams)
+                                      | some factoryAddr =>
+                                          let via? ← colibriVia state cfgEff.chainId
+                                          match ← buildSignBroadcastTx cfgEff dslot' privKey factory factoryAddr 0 dataBytes none none via? with
+                                          | .error e => pure (.error e)
+                                          | .ok j =>
+                                              -- Echo the slot's smart-account address (set by
+                                              -- `computeAddress` ahead of time when possible).
+                                              let saa : Json :=
+                                                match rec.smartAccountAddress with
+                                                | some a => .str a
+                                                | none => .null
+                                              pure <| .ok <| .obj #[
+                                                ("name", .str name),
+                                                ("factory", .str factory),
+                                                ("smartAccountAddress", saa),
+                                                ("tx", j)
+                                              ]
+      | _, _ => pure (.error invalidParams)
+  | "sphincs.account.send" =>
+      -- Submit a UserOperation from a hybrid SPHINCS- account through the
+      -- configured bundler. The signature field is `abi.encode(bytes
+      -- ecdsaSig, bytes sphincsSig)` matching the on-chain
+      -- `_validateSignature` decoder. The pipeline (sk unlock, ECDSA
+      -- derive, gas estimate, dual-sign, submit) lives in
+      -- `executeSphincsUserOp`; this RPC only assembles the `execute(...)`
+      -- callData from {to, value, data} before delegating.
+      match paramName req.params,
+            paramString req.params "to",
+            paramString req.params "value" with
+      | .ok name, .ok toStr, .ok valueStr =>
+          let valueWei := (valueStr.toNat?).getD ((parseHexQuantity valueStr).getD 0)
+          let dataHex := paramStringD req.params "data" "0x"
+          let userData : ByteArray :=
+            (LeanKohaku.Crypto.Hex.decode dataHex).getD ByteArray.empty
+          match ← LeanKohaku.Wallet.SphincsHybridStore.readRecord name with
+          | .error e => pure <| .error { code := -32010, message := "sphincs slot not found", data := some (.str e) }
+          | .ok rec =>
+              let callData := Sphincs.Send.buildExecuteCalldata toStr valueWei userData
+              match ← executeSphincsUserOp cfg state rec callData req.params with
+              | .error e => pure (.error e)
+              | .ok j =>
+                  -- Echo the slot name on top of the helper's result.
+                  let withName : Json := match j with
+                    | .obj fields => .obj (fields.push ("name", .str name))
+                    | _ => j
+                  pure (.ok withName)
+      | _, _, _ => pure (.error invalidParams)
+  | "sphincs.account.rotateOwner" =>
+      -- Submit a UserOp that calls `SphincsAccount.rotateOwner(newOwner)`.
+      -- The on-chain contract gates this on the EntryPoint OR self-call;
+      -- we wrap the rotate calldata in `execute(self, 0, rotateData)` so
+      -- the EntryPoint forwards through the account, producing the
+      -- `address(this)` self-call branch. The local store is NOT updated
+      -- automatically — the caller must reconfigure the slot (or its
+      -- `ecdsaAttachment`) after confirming the userOp succeeded on-chain
+      -- via `sphincs.account.getUserOp`.
+      match paramName req.params, paramString req.params "newOwner" with
+      | .ok name, .ok newOwner =>
+          match ← LeanKohaku.Wallet.SphincsHybridStore.readRecord name with
+          | .error e => pure <| .error { code := -32010, message := "sphincs slot not found", data := some (.str e) }
+          | .ok rec =>
+              match rec.smartAccountAddress with
+              | none => pure <| .error { code := -32033, message := "smartAccountAddress unset", data := none }
+              | some sender =>
+                  match ← Sphincs.Send.buildRotateOwnerCalldata newOwner with
+                  | .error e => pure <| .error { code := -32035, message := "rotateOwner calldata build failed", data := some (.str e) }
+                  | .ok rotateData =>
+                      let callData := Sphincs.Send.buildExecuteCalldata sender 0 rotateData
+                      match ← executeSphincsUserOp cfg state rec callData req.params with
+                      | .error e => pure (.error e)
+                      | .ok j =>
+                          let withFields : Json := match j with
+                            | .obj fs =>
+                                .obj (fs.push ("name", .str name)
+                                        |>.push ("newOwner", .str newOwner))
+                            | _ => j
+                          pure (.ok withFields)
+      | _, _ => pure (.error invalidParams)
+  | "sphincs.factory.deploy" =>
+      -- Sepolia-only one-shot factory deploy via the bundled shell.
+      -- Params:
+      --   paramSet           : "SLH-DSA-SHA2-128-24" | "JARDIN-Keccak-128-24" | "C9"
+      --   chain              : must be "sepolia" (mainnet refused — no factory
+      --                        has been deployed yet at the time of writing)
+      --   deployerWallet     : EOA slot to fund the deploy
+      --   deployerPassphrase : (optional if master KEK loaded) passphrase
+      --   deployerAccountIndex : optional (default 0)
+      match paramString req.params "paramSet",
+            paramString req.params "deployerWallet" with
+      | .ok psStr, .ok deployer =>
+          let chain := paramStringD req.params "chain" "sepolia"
+          if chain ≠ "sepolia" then
+            pure <| .error
+              { code := -32036,
+                message := "sphincs factory deploy is Sepolia-only (no mainnet factory yet)",
+                data := some (.str s!"got chain={chain}") }
+          else match LeanKohaku.Sphincs.ParamSet.parse? psStr with
+          | none =>
+              pure <| .error { invalidParams with data := some (.str s!"unknown paramSet: {psStr}") }
+          | some ps =>
+              match sphincsVerifierFor cfg chain ps with
+              | .error e =>
+                  pure <| .error { code := -32030, message := "verifier unavailable", data := some (.str e) }
+              | .ok verifierAddr =>
+                  match ← LeanKohaku.Wallet.EoaStore.load deployer with
+                  | .error e => pure <| .error { code := -32010, message := "deployer wallet not found", data := some (.str e) }
+                  | .ok dRec =>
+                      let idx := paramNatD req.params "deployerAccountIndex" 0
+                      match dRec.accounts[idx]? with
+                      | none => pure <| .error { code := -32011, message := s!"deployer has no account #{idx}", data := none }
+                      | some dAcct =>
+                          let seedExc : IO (Except String ByteArray) := do
+                            -- Prefer master KEK (slot may have lazy-enrolled);
+                            -- fall back to the explicit `deployerPassphrase`.
+                            match ← LeanKohaku.Daemon.State.getMasterKek? state with
+                            | some mslot =>
+                                match ← LeanKohaku.Keystore.MasterPassphrase.unwrapSlot
+                                    mslot.kek dRec.name dRec.derivationPath dRec.address
+                                    (dRec.masterWrap.getD ByteArray.empty) with
+                                | .ok seed => pure (.ok seed)
+                                | .error _ =>
+                                    match paramString req.params "deployerPassphrase" with
+                                    | .error _ => pure (.error "deployerPassphrase required (master path failed)")
+                                    | .ok pp =>
+                                        match ← LeanKohaku.Wallet.EoaStore.unlockSeedIO dRec pp with
+                                        | .ok seed => pure (.ok seed)
+                                        | .error e => pure (.error e)
+                            | none =>
+                                match paramString req.params "deployerPassphrase" with
+                                | .error _ => pure (.error "deployerPassphrase required (master KEK not loaded)")
+                                | .ok pp =>
+                                    match ← LeanKohaku.Wallet.EoaStore.unlockSeedIO dRec pp with
+                                    | .ok seed => pure (.ok seed)
+                                    | .error e => pure (.error e)
+                          match ← seedExc with
+                          | .error e => pure <| .error { code := -32011, message := "deployer unlock failed", data := some (.str e) }
+                          | .ok seed =>
+                              match ← derivePrivateKeyFromSeed seed dAcct.path with
+                              | .error e => pure <| .error { code := -32012, message := "deployer key derive failed", data := some (.str e) }
+                              | .ok pk =>
+                                  -- Hex.encode is `0x`-prefixed; forge expects no extra prefix.
+                                  let pkHex := LeanKohaku.Crypto.Hex.encode pk
+                                  try
+                                    let out ← IO.Process.output {
+                                      cmd := "./script/sphincs_sepolia.sh",
+                                      args := #["deploy", ps.toString],
+                                      env := #[
+                                        ("SPHINCS_VERIFIER_ADDR", some verifierAddr),
+                                        ("SEPOLIA_DEPLOYER_PRIVATE_KEY", some pkHex),
+                                        ("PRIVATE_KEY", some pkHex)
+                                      ]
+                                    }
+                                    -- Best-effort: grep the address out of stdout.
+                                    let stdout := out.stdout
+                                    let lines := stdout.splitOn "\n"
+                                    let factory? : Option String := lines.findSome? fun l =>
+                                      let t := l.trimAscii.toString
+                                      if t.startsWith "Deployed to:" then
+                                        some (((t.drop 12).trimAscii).toString)
+                                      else none
+                                    pure <| .ok <| .obj #[
+                                      ("paramSet", .str ps.toString),
+                                      ("chain", .str chain),
+                                      ("verifier", .str verifierAddr),
+                                      ("factory", match factory? with | some a => .str a | none => .null),
+                                      ("exitCode", .num (Int.ofNat out.exitCode.toNat)),
+                                      ("stdout", .str stdout),
+                                      ("stderr", .str out.stderr)
+                                    ]
+                                  catch e =>
+                                    pure <| .error { code := -32037, message := "deploy script failed to spawn", data := some (.str e.toString) }
+      | _, _ => pure (.error invalidParams)
+  | "sphincs.bundler.check" =>
+      -- Cheap pre-flight: call `eth_supportedEntryPoints` against the
+      -- configured bundler and report whether the v0.9 EntryPoint
+      -- singleton appears. Useful for catching a bundler that only
+      -- speaks v0.6/v0.7 before any signing happens. Does not gate the
+      -- send pipeline — different bundlers respond inconsistently (some
+      -- return empty arrays) so we leave the policy decision to the
+      -- caller, just surface the raw signal.
+      let chainName := paramStringD req.params "chain" (chainNameGuess cfg.chainId)
+      match sphincsBundlerFor cfg chainName with
+      | .error e => pure <| .error { code := -32030, message := "sphincs bundler unavailable", data := some (.str e) }
+      | .ok bundlerUrl =>
+          match ← Sphincs.Send.bundlerCall bundlerUrl "eth_supportedEntryPoints" (.arr #[]) with
+          | .error e => pure <| .error { code := -32021, message := "bundler error", data := some (.str e) }
+          | .ok r =>
+              let lowered (s : String) : String := s.toLower
+              let v09 : String := lowered Sphincs.Send.entryPointV09Address
+              let supports : Bool :=
+                match r with
+                | .arr xs => xs.any (fun j =>
+                    match asString j with
+                    | some s => lowered s = v09
+                    | none => false)
+                | _ => false
+              pure <| .ok <| .obj #[
+                ("bundler", .str bundlerUrl),
+                ("v09EntryPoint", .str Sphincs.Send.entryPointV09Address),
+                ("supported", .bool supports),
+                ("raw", r)
+              ]
+  | "sphincs.account.getUserOp" =>
+      -- Read-through to the bundler's `eth_getUserOperationByHash`.
+      -- Returns the raw bundler payload (or null while the userOp is
+      -- still pending); inclusion polling logic lives in the caller.
+      match paramString req.params "userOpHash" with
+      | .error e => pure (.error e)
+      | .ok userOpHash =>
+          let chainName := paramStringD req.params "chain" (chainNameGuess cfg.chainId)
+          match sphincsBundlerFor cfg chainName with
+          | .error e =>
+              pure <| .error { code := -32030, message := "sphincs bundler unavailable", data := some (.str e) }
+          | .ok bundlerUrl =>
+              match ← Sphincs.Send.bundlerCall bundlerUrl
+                  "eth_getUserOperationByHash" (.arr #[.str userOpHash]) with
+              | .error e =>
+                  pure <| .error { code := -32021, message := "bundler error", data := some (.str e) }
+              | .ok r => pure <| .ok <| .obj #[("userOpHash", .str userOpHash), ("info", r)]
   | "eoa.revealMnemonic" =>
       -- Why: passphrase-gated recovery of the BIP-39 words for slots
       -- created with mnemonic retention. Slots that predate the on-disk

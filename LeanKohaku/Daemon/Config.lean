@@ -319,9 +319,10 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
     | none => pure ()
   -- Why: SPHINCS- verifier address map. Per-(chain × paramSet); each entry's
   -- address is optional (null in JSON = "schema known, address pending").
-  -- We accept `paramSet` keys exactly as `Sphincs.ParamSet.toString` emits them
-  -- ("SLH-DSA-SHA2-128-24", "C7") and silently drop unknown values rather than
-  -- error — the daemon enforces fail-closed at use time via `sphincsVerifierFor`.
+  -- We accept `paramSet` keys exactly as `Sphincs.ParamSet.toString` emits
+  -- them ("SLH-DSA-SHA2-128-24", "JARDIN-Keccak-128-24", "C9") and silently
+  -- drop unknown values rather than error — the daemon enforces fail-closed
+  -- at use time via `sphincsVerifierFor`.
   let sphincsVerifiers : Array LeanKohaku.Daemon.Server.SphincsVerifierEntry :=
     match fileCfg.bind (getField "sphincs_verifiers") with
     | some (.obj chains) =>
@@ -340,6 +341,39 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
                     some { chain := chain, paramSet := ps, address := address }
                 | none => none
           | _ => #[]
+    | _ => #[]
+  -- Same shape as `sphincs_verifiers` but reads the factory address map.
+  -- Re-uses `SphincsVerifierEntry` because per-row structure is
+  -- identical (chain × paramSet → optional address).
+  let sphincsFactories : Array LeanKohaku.Daemon.Server.SphincsVerifierEntry :=
+    match fileCfg.bind (getField "sphincs_factories") with
+    | some (.obj chains) =>
+        chains.flatMap fun (chain, value) =>
+          match value with
+          | .obj psFields =>
+              psFields.filterMap fun (psName, addrJson) =>
+                match LeanKohaku.Sphincs.ParamSet.parse? psName with
+                | some ps =>
+                    let address : Option String :=
+                      match addrJson with
+                      | .str s =>
+                          let t := s.trimAscii.toString
+                          if t.isEmpty then none else some t
+                      | _ => none
+                    some { chain := chain, paramSet := ps, address := address }
+                | none => none
+          | _ => #[]
+    | _ => #[]
+  -- Per-chain bundler URLs, e.g. `{"sepolia": "https://api.candide.dev/.../v3/sepolia"}`.
+  let sphincsBundlers : Array (String × String) :=
+    match fileCfg.bind (getField "sphincs_bundlers") with
+    | some (.obj fields) =>
+        fields.filterMap fun (chain, value) =>
+          match value with
+          | .str s =>
+              let t := s.trimAscii.toString
+              if t.isEmpty then none else some (chain, t)
+          | _ => none
     | _ => #[]
   -- Why: bootstrap the entry for the daemon's primary chain from the
   -- default `rpc_url` when no per-chain entry covers it. Internally
@@ -429,6 +463,8 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
          rpcEndpoint := rpcEndpoint, ensRpcEndpoint := ensRpcEndpoint,
          chainEndpoints := chainEndpoints,
          indexers := indexers,
-         sphincsVerifiers := sphincsVerifiers }
+         sphincsVerifiers := sphincsVerifiers,
+         sphincsFactories := sphincsFactories,
+         sphincsBundlers := sphincsBundlers }
 
 end LeanKohaku.Daemon.Config

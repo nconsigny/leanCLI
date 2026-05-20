@@ -7,6 +7,7 @@ import { theme } from "../theme.js";
 export type CreateKind =
   | "eoa"
   | "r1"
+  | "sphincs-hybrid"
   | "add-account"
   | "import-bip39"
   | "back";
@@ -29,6 +30,7 @@ export default function CreateWalletPicker({ onPick }: Props) {
   const items: { label: string; value: CreateKind | "soon" }[] = [
     { label: "Create EOA — fresh BIP-39 mnemonic, passphrase-encrypted",  value: "eoa" },
     { label: "Create TPM/R1 — hardware-backed P-256 key, PIN-protected",  value: "r1" },
+    { label: "Create SPHINCS- hybrid — ECDSA + post-quantum ERC-4337",    value: "sphincs-hybrid" },
     { label: "Add account — new hardened branch on an existing EOA",      value: "add-account" },
     { label: "Import BIP-39 mnemonic (12 or 24 words)",                   value: "import-bip39" },
     { label: "Import raw private key — not yet supported",                value: "soon" },

@@ -8,9 +8,13 @@ sphincs/sphincsplus reference under `sidecars/sphincs/`) and exposed to the
 Lean tree via a small JSON-RPC shim. This module is the only place that
 spawns those binaries.
 
-Two parameter sets are wired in: SLH-DSA-SHA2-128-24 (NIST FIPS 205
-candidate) and C9 (WOTS+C / FORS+C, h=20 d=2 a=12 k=11 w=8, 3816-byte
-sig). C9 is deployed on Sepolia at
+Three parameter sets are wired in:
+  - SLH-DSA-SHA2-128-24 (NIST FIPS 205 candidate, SHA-2 thash)
+  - JARDIN-Keccak-128-24 (same d/h/a/k/w as SLH-DSA-SHA2-128-24, but with
+    the JARDIN kernel: native keccak256 thash + 32-byte JARDIN ADRS)
+  - C9 (WOTS+C / FORS+C, h=20 d=2 a=12 k=11 w=8, 3816-byte sig)
+
+C9 is deployed on Sepolia at
 0x18F005EECd41624644AA364bA8857258FEB3C26D and is the parameter set
 exercised by the SphincsAccount contract at
 0xA941116763AE386a50133c5af40356c9D93b2978 against EntryPoint v0.9.
@@ -65,6 +69,16 @@ inductive ParamSet
       for a v0 deployment because verification is fast and the spec is
       well reviewed. -/
   | slhDsaSha2_128_24
+  /-- JARDIN-Keccak-128-24 — the JARDIN kernel applied to the SPHINCS
+      minus SLH-DSA-128-24 parameter set: same n=16, h=22, d=1, a=24,
+      k=6, w=4 shape as the SHA-2 variant, but uses native keccak256
+      (truncated to 16 B) as the tweakable hash and a 32-byte ADRS
+      layout instead of the FIPS 205 ADRSc. Same signature/key sizes as
+      the SHA-2 variant. Useful when the on-chain verifier wants the
+      keccak precompile path rather than the SHA-2 precompile at 0x02.
+      Vendored from upstream `nconsigny SPHINCS minus` at commit 1acf942
+      in `sidecars/sphincs/vendor-jardin-keccak-128-24/`. -/
+  | jardinKeccak128_24
   /-- C9 (WOTS+C / FORS+C, n=16 h=20 d=2 a=12 k=11 w=8 l=43 target=208,
       3816-byte sig). Adapted from upstream nconsigny/SPHINCS-
       signer-wasm at commit 63617e1 with params.rs retuned to match the
@@ -77,22 +91,25 @@ inductive ParamSet
 /-- Serialise a `ParamSet` to its JSON tag (matches the shim's `info`
     output and the on-disk verifier address map keys). -/
 def ParamSet.toString : ParamSet → String
-  | .slhDsaSha2_128_24 => "SLH-DSA-SHA2-128-24"
-  | .c9                => "C9"
+  | .slhDsaSha2_128_24   => "SLH-DSA-SHA2-128-24"
+  | .jardinKeccak128_24  => "JARDIN-Keccak-128-24"
+  | .c9                  => "C9"
 
 /-- Inverse of `toString`. Used when reading shim `info` output back. -/
 def ParamSet.parse? : String → Option ParamSet
-  | "SLH-DSA-SHA2-128-24" => some .slhDsaSha2_128_24
-  | "C9"                  => some .c9
-  | _                     => none
+  | "SLH-DSA-SHA2-128-24"  => some .slhDsaSha2_128_24
+  | "JARDIN-Keccak-128-24" => some .jardinKeccak128_24
+  | "C9"                   => some .c9
+  | _                      => none
 
 /-- Default executable basenames produced by `sidecars/sphincs/Makefile`
     and copied into `.lake/build/bin/` by the lake hook. Used as the
     PATH-fallback when neither the env override nor the in-monorepo
     binary directory resolves. -/
 def ParamSet.defaultExecutable : ParamSet → String
-  | .slhDsaSha2_128_24 => "sphincs-slhdsa-128-24"
-  | .c9                => "sphincs-c9"
+  | .slhDsaSha2_128_24   => "sphincs-slhdsa-128-24"
+  | .jardinKeccak128_24  => "sphincs-jardin-keccak-128-24"
+  | .c9                  => "sphincs-c9"
 
 /-- Walk upward from the working directory looking for
     `sidecars/sphincs/bin/<basename>` that ships in this repo. Returns
@@ -122,8 +139,9 @@ private partial def findShimBinary (basename : String)
        has copied it there). -/
 def resolveExecutable (ps : ParamSet) : IO String := do
   let envKey := match ps with
-    | .slhDsaSha2_128_24 => "LEAN_KOHAKU_SPHINCS_SLHDSA"
-    | .c9                => "LEAN_KOHAKU_SPHINCS_C9"
+    | .slhDsaSha2_128_24   => "LEAN_KOHAKU_SPHINCS_SLHDSA"
+    | .jardinKeccak128_24  => "LEAN_KOHAKU_SPHINCS_JARDIN"
+    | .c9                  => "LEAN_KOHAKU_SPHINCS_C9"
   match (← IO.getEnv envKey) with
   | some s => pure s
   | none =>
@@ -166,32 +184,38 @@ inductive Err where
   deriving Repr
 
 /-- Expected byte counts per parameter set. These are the contract the
-    daemon enforces against shim output. -/
+    daemon enforces against shim output. JARDIN-Keccak shares all sizes
+    with SLH-DSA-SHA2-128-24: same n=16, same d/h/a/k/w, only the
+    hash backend and ADRS layout differ — neither affects byte counts. -/
 def ParamSet.expectedSigBytes : ParamSet → Nat
-  | .slhDsaSha2_128_24 => 3856
-  | .c9                => 3816
+  | .slhDsaSha2_128_24   => 3856
+  | .jardinKeccak128_24  => 3856
+  | .c9                  => 3816
 
 /-- C9: 64 bytes = 2 × 32-byte words. `pkSeed` and `pkRoot` are
     ABI-shaped as `bytes32` for the on-chain
     `SphincsC9Asm.verify(bytes32 pkSeed, bytes32 pkRoot, …)`, with the
     meaningful 16 bytes in the high half of each word. -/
 def ParamSet.expectedPkBytes : ParamSet → Nat
-  | .slhDsaSha2_128_24 => 32
-  | .c9                => 64
+  | .slhDsaSha2_128_24   => 32
+  | .jardinKeccak128_24  => 32
+  | .c9                  => 64
 
 /-- C9: 96 bytes = 3 × 32-byte words concatenated as
     `pkSeed || skSeed || pkRoot`, mirroring how the Rust signer's
     `sphincs::sign` consumes its `(pk_seed, sk_seed, pk_root)` triple. -/
 def ParamSet.expectedSkBytes : ParamSet → Nat
-  | .slhDsaSha2_128_24 => 64
-  | .c9                => 96
+  | .slhDsaSha2_128_24   => 64
+  | .jardinKeccak128_24  => 64
+  | .c9                  => 96
 
 /-- C9: 32 raw entropy bytes. The daemon hands TPM-sealed material in;
     the signer derives `(pk_seed, sk_seed, pk_root)` deterministically
     via keccak with the `"sphincs-c9-v1"`-equivalent domain tag. -/
 def ParamSet.expectedSeedBytes : ParamSet → Nat
-  | .slhDsaSha2_128_24 => 48
-  | .c9                => 32
+  | .slhDsaSha2_128_24   => 48
+  | .jardinKeccak128_24  => 48
+  | .c9                  => 32
 
 /-- One half of `expectedPkBytes` — public-key blobs are `pkSeed||pkRoot`
     with both halves equal-sized. -/

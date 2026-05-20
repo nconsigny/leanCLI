@@ -299,6 +299,44 @@ inductive Command where
   | shieldedDelete
   | shieldedMarkDestination (address : String)
   | shieldedListDestinations
+  -- SPHINCS- hybrid (ECDSA + post-quantum) ERC-4337 smart accounts. All
+  -- three flows forward to a single daemon RPC each — the CLI is a
+  -- printer per CLAUDE.md's thin-CLI rule.
+  | sphincsCreate (name : String) (paramSet : String) (walletName : String)
+      (ecdsaKind : String) (accountIndexOrPath : Option String)
+      (chainOverride? : Option String)
+  | sphincsList
+  | sphincsShow (name : String)
+  /-- Compute the counterfactual ERC-4337 smart-account address by
+      eth_call'ing the configured factory's `getAddress(...)` view.
+      Updates the slot's `smartAccountAddress` field in place. -/
+  | sphincsComputeAddress (name : String) (chainOverride? : Option String)
+  /-- Deploy the hybrid smart account by submitting a factory.createAccount
+      tx through a funded deployer EOA (mirrors the R1 deploy UX). -/
+  | sphincsDeploy (name deployer : String) (accountIndex? : Option String)
+      (chainOverride? : Option String)
+  /-- Send a UserOperation from the hybrid account via the configured
+      bundler. Caller supplies the target {to, value, data}; daemon
+      dual-signs (ECDSA owner + SPHINCS-) and submits. -/
+  | sphincsSend (name to valueWei : String) (data? : Option String)
+      (chainOverride? : Option String)
+  /-- Poll the bundler for inclusion status of a previously-submitted
+      UserOperation. Returns the bundler's raw payload (null when still
+      pending) so the caller can inspect the receipt / block fields. -/
+  | sphincsGetUserOp (userOpHash : String) (chainOverride? : Option String)
+  /-- Rotate the on-chain ECDSA owner. Submits a UserOp wrapping
+      `SphincsAccount.rotateOwner(newOwner)` via the existing send
+      pipeline; the local store is NOT updated automatically. -/
+  | sphincsRotateOwner (name newOwner : String) (chainOverride? : Option String)
+  /-- Sanity-check the configured bundler — probes
+      `eth_supportedEntryPoints` and reports whether the v0.9
+      EntryPoint singleton is in the response. -/
+  | sphincsBundlerCheck (chainOverride? : Option String)
+  /-- One-shot factory deploy. Sepolia-only — refuses other chains.
+      Pulls the per-paramSet verifier address from daemon.json and
+      shells out to `script/sphincs_sepolia.sh deploy`. -/
+  | sphincsFactoryDeploy (paramSet deployer : String)
+      (accountIndex? : Option String) (chainOverride? : Option String)
   | completion (shell : String)
   | tui
   | install
@@ -497,6 +535,62 @@ def parse : List String → Command
   | ["wallet", "account", "add", name] => .walletAccountAdd name none
   | ["wallet", "account", "add", name, path] => .walletAccountAdd name (some path)
   | ["wallet", "account", "rm", name, index] => .walletAccountRm name index
+  -- SPHINCS- hybrid commands. The `create` form takes:
+  --   sphincs create <slotName> <paramSet> <walletName> existing [<accountIdx>] [--chain <n>]
+  --   sphincs create <slotName> <paramSet> <walletName> derived <path>          [--chain <n>]
+  -- where <paramSet> is one of SLH-DSA-SHA2-128-24 | JARDIN-Keccak-128-24 | C9.
+  | "sphincs" :: "create" :: rest =>
+      let (rest, chain?) := extractChain rest
+      match rest with
+      | [name, paramSet, walletName, "existing"] =>
+          .sphincsCreate name paramSet walletName "existing" none chain?
+      | [name, paramSet, walletName, "existing", idx] =>
+          .sphincsCreate name paramSet walletName "existing" (some idx) chain?
+      | [name, paramSet, walletName, "derived", path] =>
+          .sphincsCreate name paramSet walletName "derived" (some path) chain?
+      | _ => .invalid ("sphincs" :: "create" :: rest)
+  | ["sphincs", "list"] => .sphincsList
+  | ["sphincs", "show", name] => .sphincsShow name
+  | "sphincs" :: "compute-address" :: rest =>
+      let (rest, chain?) := extractChain rest
+      match rest with
+      | [name] => .sphincsComputeAddress name chain?
+      | _ => .invalid ("sphincs" :: "compute-address" :: rest)
+  | "sphincs" :: "deploy" :: rest =>
+      let (rest, chain?) := extractChain rest
+      let (rest, acct?) := extractAccountFlag rest
+      match rest with
+      | [name, "--deployer", deployer] => .sphincsDeploy name deployer acct? chain?
+      | _ => .invalid ("sphincs" :: "deploy" :: rest)
+  | "sphincs" :: "send" :: rest =>
+      let (rest, chain?) := extractChain rest
+      match rest with
+      | [name, to, valueWei] => .sphincsSend name to valueWei none chain?
+      | [name, to, valueWei, "--data", data] =>
+          .sphincsSend name to valueWei (some data) chain?
+      | _ => .invalid ("sphincs" :: "send" :: rest)
+  | "sphincs" :: "get-userop" :: rest =>
+      let (rest, chain?) := extractChain rest
+      match rest with
+      | [h] => .sphincsGetUserOp h chain?
+      | _ => .invalid ("sphincs" :: "get-userop" :: rest)
+  | "sphincs" :: "rotate-owner" :: rest =>
+      let (rest, chain?) := extractChain rest
+      match rest with
+      | [name, newOwner] => .sphincsRotateOwner name newOwner chain?
+      | _ => .invalid ("sphincs" :: "rotate-owner" :: rest)
+  | "sphincs" :: "check-bundler" :: rest =>
+      let (rest, chain?) := extractChain rest
+      match rest with
+      | [] => .sphincsBundlerCheck chain?
+      | _ => .invalid ("sphincs" :: "check-bundler" :: rest)
+  | "sphincs" :: "factory-deploy" :: rest =>
+      let (rest, chain?) := extractChain rest
+      let (rest, acct?) := extractAccountFlag rest
+      match rest with
+      | [paramSet, "--deployer", deployer] =>
+          .sphincsFactoryDeploy paramSet deployer acct? chain?
+      | _ => .invalid ("sphincs" :: "factory-deploy" :: rest)
   | "wallet" :: "history" :: rest =>
       let (rest, allFlag) := extractAllFlag rest
       let (rest, scanLogs) := extractScanLogs rest

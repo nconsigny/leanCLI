@@ -24,6 +24,8 @@ import SwapFlow from "./screens/SwapFlow.js";
 import ShieldFlow from "./screens/ShieldFlow.js";
 import CreateEoaFlow from "./screens/CreateEoaFlow.js";
 import CreateR1Flow from "./screens/CreateR1Flow.js";
+import CreateSphincsHybridFlow from "./screens/CreateSphincsHybridFlow.js";
+import SphincsAccountsHub from "./screens/SphincsAccountsHub.js";
 import ImportEoaFlow from "./screens/ImportEoaFlow.js";
 import CreateWalletPicker, { CreateKind } from "./screens/CreateWalletPicker.js";
 import DecodeIntentFlow from "./screens/DecodeIntentFlow.js";
@@ -75,6 +77,8 @@ type Screen =
   | { kind: "create-wallet" }
   | { kind: "create-eoa" }
   | { kind: "create-r1" }
+  | { kind: "create-sphincs-hybrid" }
+  | { kind: "sphincs-accounts" }
   | { kind: "add-account" }
   | { kind: "import-eoa" }
   | { kind: "private" }
@@ -170,15 +174,16 @@ export default function App() {
 
   const handleMain = (a: MainAction) => {
     switch (a) {
-      case "wallets":         return push({ kind: "wallets" });
-      case "le-chat":         return push({ kind: "llm-chat" });
-      case "create-wallet":   return push({ kind: "create-wallet" });
-      case "private":         return push({ kind: "private" });
-      case "status":          return push({ kind: "status" });
-      case "toggle-colibri":  return void toggleColibri();
-      case "unlock":          return push({ kind: "master-unlock" });
-      case "more":            return push({ kind: "more" });
-      case "quit":            return exit();
+      case "wallets":          return push({ kind: "wallets" });
+      case "le-chat":          return push({ kind: "llm-chat" });
+      case "create-wallet":    return push({ kind: "create-wallet" });
+      case "sphincs-accounts": return push({ kind: "sphincs-accounts" });
+      case "private":          return push({ kind: "private" });
+      case "status":           return push({ kind: "status" });
+      case "toggle-colibri":   return void toggleColibri();
+      case "unlock":           return push({ kind: "master-unlock" });
+      case "more":             return push({ kind: "more" });
+      case "quit":             return exit();
     }
   };
 
@@ -194,6 +199,7 @@ export default function App() {
     const next: Screen =
       k === "eoa" ? { kind: "create-eoa" }
       : k === "r1" ? { kind: "create-r1" }
+      : k === "sphincs-hybrid" ? { kind: "create-sphincs-hybrid" }
       : k === "import-bip39" ? { kind: "import-eoa" }
       : { kind: "add-account" };
     setStack((prev) => [...prev.slice(0, -1), next]);
@@ -301,6 +307,10 @@ export default function App() {
       return <CreateEoaFlow onDone={finishAction} />;
     case "create-r1":
       return <CreateR1Flow onDone={finishAction} />;
+    case "create-sphincs-hybrid":
+      return <CreateSphincsHybridFlow onDone={finishAction} />;
+    case "sphincs-accounts":
+      return <SphincsAccountsHub onBack={pop} />;
     case "add-account":
       return <AddAccountFlow onDone={finishAction} />;
     case "import-eoa":
