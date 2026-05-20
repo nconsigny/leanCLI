@@ -1888,6 +1888,15 @@ def run (args : List String) : IO UInt32 := do
       NetworkConfig.unsetChainRpcUrl chain
       IO.println s!"cleared rpc_urls.{chain} in {← NetworkConfig.configPath}"
       return 0
+  | .networkSetChain chain =>
+      match NetworkConfig.parseChainSelector chain with
+      | none =>
+          IO.eprintln s!"unknown chain selector '{chain}'; expected mainnet, sepolia, or a positive integer chain id"
+          return 2
+      | some chainId =>
+          NetworkConfig.setChainId chainId
+          IO.println s!"set chain_id={chainId} in {← NetworkConfig.configPath}"
+          return 0
   | .networkMonitor =>
       IO.println (← NetworkConfig.humanReport)
       match ← NetworkConfig.networkLogPath with
@@ -2809,8 +2818,9 @@ def run (args : List String) : IO UInt32 := do
       match shell with
       | "bash" => IO.println bashCompletion; return 0
       | "zsh"  => IO.println zshCompletion; return 0
+      | "fish" => IO.println fishCompletion; return 0
       | _ =>
-          IO.eprintln s!"unknown shell: {shell} (supported: bash, zsh)"
+          IO.eprintln s!"unknown shell: {shell} (supported: bash, zsh, fish)"
           return 2
   | .tui =>
       -- Locate the bundled TUI in this priority order:

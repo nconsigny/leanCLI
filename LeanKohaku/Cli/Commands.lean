@@ -256,6 +256,7 @@ inductive Command where
   | networkUnsetEnsRpc
   | networkSetRpcChain (chain : String) (url : String) (transport? : Option String)
   | networkUnsetRpcChain (chain : String)
+  | networkSetChain (chain : String)
   | networkMonitor
   | doctor
   | policyCheck (policy peer purpose transport : String)
@@ -515,6 +516,7 @@ def parse : List String → Command
   | ["network", "set-rpc-chain", chain, url]            => .networkSetRpcChain chain url none
   | ["network", "set-rpc-chain", chain, url, transport] => .networkSetRpcChain chain url (some transport)
   | ["network", "unset-rpc-chain", chain]               => .networkUnsetRpcChain chain
+  | ["network", "set-chain", chain]                     => .networkSetChain chain
   | ["network", "monitor"]                 => .networkMonitor
   | ["doctor"]            => .doctor
   | ["daemon", "help"] => .daemonHelp none
@@ -975,6 +977,7 @@ def helpText : String :=
      network set-ens-rpc <url> | network unset-ens-rpc\n\
      network set-rpc-chain <chain> <url> [transport]\n\
      network unset-rpc-chain <chain>\n\
+     network set-chain <chain>          Set the daemon's default chain (name or numeric id).\n\
      network monitor\n\n\
    DAEMON / DOCS:\n\
      daemon | daemon ping | daemon version | daemon stop\n\
@@ -988,11 +991,13 @@ def helpText : String :=
      debug endpoint-check <mode> <kind> <scheme> <transport> <credentialed>\n\
      debug decode erc20 <calldata>\n\n\
    SHELL COMPLETION (install once):\n\
-     completion bash | completion zsh    Print a completion script\n\
+     completion bash | completion zsh | completion fish    Print a completion script\n\
      # bash:\n\
      #   kohaku completion bash > ~/.local/share/bash-completion/completions/kohaku\n\
      # zsh (after `autoload -U bashcompinit && bashcompinit`):\n\
-     #   kohaku completion zsh > \"${fpath[1]}/_kohaku\"\n"
+     #   kohaku completion zsh > \"${fpath[1]}/_kohaku\"\n\
+     # fish (no rc edits needed; fish autoloads from this dir):\n\
+     #   kohaku completion fish > ~/.config/fish/completions/kohaku.fish\n"
 
 def bashCompletion : String :=
   String.intercalate "\n" [
@@ -1138,7 +1143,7 @@ def bashCompletion : String :=
     "        _leankohaku_hint \"$cur\" \"<ens-name:vitalik.eth>\" \"<or-subdomain.eth>\";",
     "      fi ;;",
     "    network)",
-    "      if [ \"$COMP_CWORD\" -eq 2 ]; then COMPREPLY=( $(compgen -W \"show path set-rpc set-lightclient set-policy unset-rpc set-ens-rpc unset-ens-rpc set-rpc-chain unset-rpc-chain monitor\" -- \"$cur\") );",
+    "      if [ \"$COMP_CWORD\" -eq 2 ]; then COMPREPLY=( $(compgen -W \"show path set-rpc set-lightclient set-policy unset-rpc set-ens-rpc unset-ens-rpc set-rpc-chain unset-rpc-chain set-chain monitor\" -- \"$cur\") );",
     "      elif [ \"$COMP_CWORD\" -eq 3 ] && [ \"${COMP_WORDS[2]}\" = \"set-policy\" ]; then COMPREPLY=( $(compgen -W \"strict tor\" -- \"$cur\") ); fi ;;",
     "    daemon)",
     "      if [ \"$COMP_CWORD\" -eq 2 ]; then COMPREPLY=( $(compgen -W \"help ping version stop\" -- \"$cur\") ); fi ;;",
@@ -1169,7 +1174,7 @@ def bashCompletion : String :=
     "        esac;",
     "      fi ;;",
     "    completion)",
-    "      if [ \"$COMP_CWORD\" -eq 2 ]; then COMPREPLY=( $(compgen -W \"bash zsh\" -- \"$cur\") ); fi ;;",
+    "      if [ \"$COMP_CWORD\" -eq 2 ]; then COMPREPLY=( $(compgen -W \"bash zsh fish\" -- \"$cur\") ); fi ;;",
     "    from)",
     "      # from <wallet> send <to> <amount>",
     "      if [ \"$COMP_CWORD\" -eq 2 ]; then",
@@ -1261,5 +1266,129 @@ def zshAccountOverride : String :=
 
 def zshCompletion : String :=
   "#compdef leankohaku kohaku\nautoload -U bashcompinit && bashcompinit\n" ++ bashCompletion ++ "\n" ++ zshAccountOverride
+
+/-- Native fish completion. Unlike the zsh emitter (which wraps the bash
+    script under `bashcompinit`), this is written in fish's `complete`
+    syntax directly so we get descriptions in the tab menu and use fish's
+    native `commandline` / `string` builtins for the `--account` dynamic
+    case. Helper functions (`__kohaku_bin`, `__kohaku_wallet_names`,
+    `__kohaku_account_send_values`) are auto-loaded by fish when the file
+    lands under `~/.config/fish/completions/kohaku.fish`. -/
+def fishCompletion : String :=
+  String.intercalate "\n" [
+    "# leankohaku / kohaku fish completion",
+    "",
+    "# Resolve the binary fish is completing for (`kohaku` vs `leankohaku`)",
+    "# so dynamic completions invoke the same path the user typed.",
+    "function __kohaku_bin",
+    "    set -l toks (commandline -opc)",
+    "    if test (count $toks) -ge 1",
+    "        echo $toks[1]",
+    "    else",
+    "        echo kohaku",
+    "    end",
+    "end",
+    "",
+    "function __kohaku_wallet_names",
+    "    set -l bin (__kohaku_bin)",
+    "    $bin wallet list-names 2>/dev/null",
+    "end",
+    "",
+    "# --account candidates for `send`: <wallet>/<idx> for EOAs, bare name for TPM/R1.",
+    "# Mirrors the bash emitter's _leankohaku_account_value index-mode branch.",
+    "function __kohaku_account_send_values",
+    "    set -l bin (__kohaku_bin)",
+    "    set -l cur (commandline -ct)",
+    "    set cur (string replace -r '^--account=' '' -- $cur)",
+    "    if string match -q '*/*' -- $cur",
+    "        set -l parts (string split -m1 / -- $cur)",
+    "        set -l wallet $parts[1]",
+    "        for idx in ($bin wallet list-indices $wallet 2>/dev/null)",
+    "            echo \"$wallet/$idx\"",
+    "        end",
+    "    else",
+    "        $bin wallet list-typed-names 2>/dev/null | while read -l line",
+    "            set -l fields (string split \\t -- $line)",
+    "            test (count $fields) -ge 2; or continue",
+    "            switch $fields[1]",
+    "                case eoa",
+    "                    echo \"$fields[2]/\"",
+    "                case tpm",
+    "                    echo \"$fields[2]\"",
+    "            end",
+    "        end",
+    "    end",
+    "end",
+    "",
+    "# Suppress fallback file completion across the whole command surface.",
+    "complete -c kohaku     -f",
+    "complete -c leankohaku -f",
+    "",
+    "# --- top-level verbs ---",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a help          -d 'Show usage'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a version       -d 'Print version'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a doctor        -d 'Implementation/check status'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a policy        -d 'Show internal policy reference'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a network       -d 'Network/RPC configuration'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a wallet        -d 'Wallet management'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a shield        -d 'Privacy-Pools deposit / status'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a unshield      -d 'Privacy-Pools withdrawal'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a daemon        -d 'Daemon control'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a balance       -d 'Read ETH balance of one address'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a balances      -d 'Per-token balances for one address'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a list          -d 'Tree view of EOA + TPM/R1 wallets'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a send          -d 'Send ETH'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a from          -d 'Per-wallet send: from <wallet> send …'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a chain         -d 'Low-level chain utilities'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a debug         -d 'Debug / simulation'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a resolve       -d 'Resolve ENS name to address'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a tui           -d 'Open the interactive TUI'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a ui            -d 'Alias for tui'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a install       -d 'Rebuild + relink ~/.kohaku/bin'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a update        -d 'git pull + rebuild + relink'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a uninstall     -d 'Remove ~/.kohaku/bin symlinks'",
+    "complete -c kohaku -c leankohaku -n __fish_use_subcommand -a completion    -d 'Print a shell completion script'",
+    "",
+    "# --- wallet ---",
+    "set -l __kohaku_wallet_verbs create import deploy list show address unlock lock delete reveal derive sign-digest sign-message sign-tx sign-typed-data history account use current master enroll",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from wallet; and not __fish_seen_subcommand_from create import deploy list show address unlock lock delete reveal derive sign-digest sign-message sign-tx sign-typed-data history account use current master enroll' -a \"$__kohaku_wallet_verbs\"",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from create; and not __fish_seen_subcommand_from eoa r1' -a 'eoa r1' -d 'Account type'",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from account; and not __fish_seen_subcommand_from add list rm' -a 'add list rm' -d 'Sub-account op'",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from master; and not __fish_seen_subcommand_from init status set-timeout bind-tpm' -a 'init status set-timeout bind-tpm' -d 'Master KEK op'",
+    "# Dynamic wallet names for verbs that take a single <name>.",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from show address unlock lock delete reveal derive sign-digest sign-message sign-tx sign-typed-data history deploy use enroll' -a '(__kohaku_wallet_names)' -d Wallet",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from account; and __fish_seen_subcommand_from add list rm' -a '(__kohaku_wallet_names)' -d Wallet",
+    "",
+    "# --- send / from / --account ---",
+    "complete -c kohaku -c leankohaku -l account -r -d 'Wallet' -n 'not __fish_seen_subcommand_from send' -a '(__kohaku_wallet_names)'",
+    "complete -c kohaku -c leankohaku -l account -r -d 'Wallet/<index>' -n '__fish_seen_subcommand_from send' -a '(__kohaku_account_send_values)'",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from from; and not __fish_seen_subcommand_from send' -a '(__kohaku_wallet_names)' -d Wallet",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from from; and __fish_seen_subcommand_from send' -a send",
+    "",
+    "# --- shield ---",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from shield; and not __fish_seen_subcommand_from balance reveal import delete' -a 'balance reveal import delete' -d 'PP op'",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from shield; and not __fish_seen_subcommand_from balance reveal import delete' -a '(__kohaku_wallet_names)' -d Wallet",
+    "",
+    "# --- network ---",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from network; and not __fish_seen_subcommand_from show path set-rpc set-lightclient set-policy unset-rpc set-ens-rpc unset-ens-rpc set-rpc-chain unset-rpc-chain set-chain monitor' -a 'show path set-rpc set-lightclient set-policy unset-rpc set-ens-rpc unset-ens-rpc set-rpc-chain unset-rpc-chain set-chain monitor'",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from network; and __fish_seen_subcommand_from set-policy' -a 'strict tor' -d Policy",
+    "",
+    "# --- daemon ---",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from daemon; and not __fish_seen_subcommand_from help ping version stop' -a 'help ping version stop' -d 'Daemon op'",
+    "",
+    "# --- chain ---",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from chain; and not __fish_seen_subcommand_from balance nonce token-balance gas-price priority-fee estimate-gas broadcast' -a 'balance nonce token-balance gas-price priority-fee estimate-gas broadcast'",
+    "",
+    "# --- debug ---",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from debug; and not __fish_seen_subcommand_from policy-check rpc-check rpc-methods endpoint-check decode' -a 'policy-check rpc-check rpc-methods endpoint-check decode'",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from debug; and __fish_seen_subcommand_from decode' -a erc20",
+    "",
+    "# --- policy ---",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from policy; and not __fish_seen_subcommand_from accounts keystore lightclient network privacy security all' -a 'accounts keystore lightclient network privacy security all'",
+    "",
+    "# --- completion ---",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from completion; and not __fish_seen_subcommand_from bash zsh fish' -a 'bash zsh fish' -d Shell",
+    ""
+  ]
 
 end LeanKohaku.Cli.Commands

@@ -181,6 +181,30 @@ def unsetRpc : IO Unit := do
   fields := removeKey fields "rpcTransport"
   writeObject fields
 
+/-- Resolve a user-supplied chain selector (name or numeric id) to the
+canonical chain_id Nat. Returns `none` when the input is unrecognised
+so the caller can surface the error rather than silently default. -/
+def parseChainSelector (s : String) : Option Nat :=
+  let t := s.trimAscii.toString
+  match t.toLower with
+  | "mainnet" => some 1
+  | "sepolia" => some 11155111
+  | _ =>
+      match t.toNat? with
+      | some n => if n > 0 then some n else none
+      | none => none
+
+/-- Persist `chain_id` in `daemon.json`. Used by `kohaku network set-chain`
+to set the daemon's default chain in one step, without the user having
+to know about the env-var / file-field precedence chain. -/
+def setChainId (chainId : Nat) : IO Unit := do
+  let mut fields ← readObject
+  fields := upsert fields "chain_id" (.num (Int.ofNat chainId))
+  -- Strip the camelCase variant if it's present so there's only one
+  -- source of truth in the file.
+  fields := removeKey fields "chainId"
+  writeObject fields
+
 /-- Resolve the same network-log path the daemon uses. -/
 def networkLogPath : IO (Option String) :=
   LeanKohaku.RPC.Outbound.networkLogPath
