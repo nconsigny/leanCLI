@@ -136,5 +136,22 @@ def encode : Intent → Except String EncodedTx
       .ok { to := addrHex to
             valueWei := valueWei
             data := LeanKohaku.Crypto.Hex.encode data }
+  -- The four privacy/hygiene/wallet variants are NOT leaf-encodable:
+  -- `shielded.*` requires the bridge sidecar's witness generation
+  -- (chat.draft routes them to `shielded.prepareDeposit` / `…
+  -- prepareWithdraw` which return one or more prepared txs); the
+  -- read-only `approvals.audit` and the local `address.fresh`
+  -- never produce signing-path calldata. Returning `.error` here
+  -- guarantees that any code path which mistakenly tries to encode
+  -- them through this module surfaces the bug immediately, rather
+  -- than silently producing a wrong tx.
+  | .shieldedDeposit _ _ =>
+      .error "shielded.deposit: not leaf-encodable; route via daemon RPC shielded.prepareDeposit"
+  | .shieldedWithdraw _ _ _ _ =>
+      .error "shielded.withdraw: not leaf-encodable; route via daemon RPC shielded.prepareWithdraw"
+  | .approvalsAudit _ _ =>
+      .error "approvals.audit: read-only action; no encoded tx"
+  | .freshAddress _ _ _ _ =>
+      .error "address.fresh: local wallet creation; no encoded tx"
 
 end LeanKohaku.Ethereum.IntentEncode

@@ -189,6 +189,66 @@ def synth (draft : RegexDraft) (chainId : Nat) (senderAddr? : Option String := n
         let amtStr    ← fieldOrErr draft "amountBase"
         let amount    ← natOrErr "amountBase" amtStr
         pure (.aaveV3Withdraw chainId asset amount recipient)
+  | .shieldedDeposit =>
+      -- Privacy Pools deposit. Native ETH only; asset must resolve to
+      -- "eth". Amount comes from `amountBase` (Lean-side parseUnits).
+      let sym ← fieldOrErr draft "asset"
+      if sym.toLower ≠ "eth" then
+        .error s!"DirectSynth: shield only supports native ETH; got '{sym}'"
+      else
+        let amtStr ← fieldOrErr draft "amountBase"
+        let amount ← natOrErr "amountBase" amtStr
+        let _ := chain  -- chain not needed downstream; keep elaborated for symmetry
+        pure (.shieldedDeposit chainId amount)
+  | .shieldedWithdraw =>
+      -- Privacy Pools withdraw. Native ETH, amountBase, recipient (the
+      -- canonical fresh address). `viaRelayer` defaults to true here
+      -- because the regex draft never carries it — the user opts out of
+      -- relayer privacy only by emitting via the LLM with an explicit
+      -- field, which falls outside this synth path.
+      let sym ← fieldOrErr draft "asset"
+      if sym.toLower ≠ "eth" then
+        .error s!"DirectSynth: unshield only supports native ETH; got '{sym}'"
+      else
+        let amtStr    ← fieldOrErr draft "amountBase"
+        let amount    ← natOrErr "amountBase" amtStr
+        let recipStr  ← fieldOrErr draft "to"
+        let recipient ← parseAddr "recipient" recipStr
+        let _ := chain
+        pure (.shieldedWithdraw chainId amount recipient true)
+  | .approvalsAudit =>
+      -- Read-only. The optional `wallet` field is a 0x address by the
+      -- time the chat.draft wallet-resolver has run; if it's absent,
+      -- the daemon scopes to the default wallet.
+      let wallet ←
+        match draft.field? "wallet" with
+        | none => pure (none : Option Address)
+        | some s =>
+            if s.startsWith "0x" || s.startsWith "0X" then
+              match parseAddr "wallet" s with
+              | .ok a    => pure (some a)
+              | .error m => .error m
+            else
+              -- Unresolved wallet-name (e.g. "leanWallet") — chat.draft's
+              -- resolver should have substituted, but if it didn't we
+              -- defer to the LLM rather than silently dropping the hint.
+              .error s!"DirectSynth: approvals.audit wallet '{s}' not resolved to 0x"
+      let _ := chain
+      pure (.approvalsAudit chainId wallet)
+  | .freshAddress =>
+      -- Wallet kind defaults to .eoa per the design doc; the regex
+      -- writes the explicit choice into the `kind` field.
+      let kind : WalletKind :=
+        match draft.field? "kind" with
+        | some "r1" => .r1
+        | _         => .eoa
+      let label := draft.field? "label"
+      let deployImmediately :=
+        match draft.field? "deploy" with
+        | some "true" => true
+        | _           => false
+      let _ := chain
+      pure (.freshAddress chainId kind label deployImmediately)
   | _ =>
       .error s!"DirectSynth: action '{Action.toString draft.action}' is not in the pure-Lean synth set (defer to LLM)"
 

@@ -147,6 +147,27 @@ def at? (toks : List String) (i : Nat) : Option String :=
 `none` (no match). The top-level `parse` tries them in order and picks
 the first hit. -/
 
+/-- Extract an optional `from <name>` sender hint. Returns the token
+that follows the literal `from` keyword, when present. Used by the
+transfer + approve matchers so the user can override the default
+wallet inline (`approve 42 USDC for vitalik.eth from leanWallet`).
+chat.draft's resolveLocal then maps `<name>` → 0x address via the
+EOA store; the TUI uses that address to pre-select the signing
+wallet, skipping the picker.
+
+Tolerates "from <name>" appearing anywhere in the token stream; the
+next token wins. `from` itself is also used in Aave borrow/withdraw
+patterns (see matchProtocolAction), but those parsers run after this
+one in the dispatch order so there's no ambiguity for the supported
+templates. -/
+def extractFromHint (toks : List String) : List (String × String) :=
+  match indexOfKeyword toks "from" with
+  | none => []
+  | some idx =>
+      match at? toks (idx + 1) with
+      | none => []
+      | some name => [("from", name)]
+
 /-- `send/transfer <amount> <asset> to <recipient>`. -/
 def matchSendOrTransfer (toks : List String) : Option RegexDraft := do
   -- Token 0 is the verb.
@@ -171,6 +192,7 @@ def matchSendOrTransfer (toks : List String) : Option RegexDraft := do
   some {
     action     := action
     fields     := [("verb", verb), ("amount", amount), ("asset", asset), ("to", recipient)]
+                  ++ extractFromHint toks
     unresolved := unresolved
     confidence := confidence
   }
@@ -201,7 +223,7 @@ def matchApprove (toks : List String) : Option RegexDraft := do
     fields     := [
       ("verb", verb), ("amount", amount), ("asset", asset), ("spender", spender),
       ("unlimited", toString isUnlimited)
-    ]
+    ] ++ extractFromHint toks
     unresolved := unresolved
     confidence := confidence
   }
@@ -264,7 +286,7 @@ def matchRevoke (toks : List String) : Option RegexDraft := do
         fields     := [
           ("verb", verb), ("amount", "0"), ("asset", asset), ("spender", spender),
           ("revoke", "true")
-        ]
+        ] ++ extractFromHint toks
         unresolved := unresolved
         -- A revoke prompt with a number is ambiguous (did they want
         -- to revoke or to approve a non-zero amount?). Lower confidence
@@ -342,6 +364,163 @@ def matchWithdrawBorrowRepay (toks : List String) : Option RegexDraft :=
     <|> (matchProtocolAction toks "borrow" .aaveBorrow "from")
     <|> (matchProtocolAction toks "repay" .aaveRepay "to")
 
+/-- Privacy Pools deposit / withdraw atom extractor.
+
+Recognized verb forms:
+* Canonical: `shield <amount> <asset>` / `unshield <amount> <asset> [to <recipient>]`
+* Aliased shield: `deposit <amount> <asset> ...` when the prompt also
+  mentions `privacy` / `pool` / `shielded` / `privately` / `anonymously`
+  somewhere. Without the hint, `deposit` belongs to Aave (matchSupply).
+* Aliased unshield: `withdraw <amount> <asset> ... [to <recipient>]`
+  under the same hint gate (without it, `withdraw` belongs to Aave).
+
+Action is set to `.shieldedDeposit` / `.shieldedWithdraw` (per the
+ADT variants added in step 1A) so `DirectSynth.synth` can build an
+Intent without going through the LLM when all fields are resolved.
+The point of matching the template here is to populate `amount` /
+`asset` / `to` so the daemon's `parseUnits` pre-pass injects
+`amountBase`. Without this, the model would have to convert
+`0.05 ETH → wei` itself — exactly the off-by-zero failure mode the
+prompt explicitly forbids.
+
+Limitation: the colloquial "make this anonymous" / "make this private"
+forms have no amount/asset adjacent to a fixed verb position, so they
+fall through to the chat.draft phrase scan WITHOUT pre-computed
+amountBase. That phrasing is uncommon in practice; add a dedicated
+matcher if it becomes a real source of conversion bugs.
+
+Because the aliased verbs ("deposit", "withdraw") collide with Aave
+templates, this matcher MUST run before `matchSupply` /
+`matchWithdrawBorrowRepay` in the `parse` dispatch list. -/
+def matchShielded (toks : List String) : Option RegexDraft := do
+  let verb ← toks.head?
+  -- "private" / "anonymous" as bare adjectives are TOO GENERIC ("my
+  -- private wallet", "an anonymous donor") — they would hijack
+  -- unrelated prompts. Require the adverb forms or specific Privacy-
+  -- Pool nouns.
+  let hasPrivacyHint : Bool :=
+    toks.any (fun t =>
+      t = "privacy" ∨ t = "pool" ∨ t = "pools" ∨ t = "shielded"
+        ∨ t = "privately" ∨ t = "anonymously")
+  let isCanonical := verb = "shield" ∨ verb = "unshield"
+  let isAliasedShield := verb = "deposit" ∧ hasPrivacyHint
+  let isAliasedUnshield := verb = "withdraw" ∧ hasPrivacyHint
+  if ¬ (isCanonical ∨ isAliasedShield ∨ isAliasedUnshield) then none
+  let canonicalVerb : String :=
+    if verb = "unshield" ∨ isAliasedUnshield then "unshield" else "shield"
+  let amount ← at? toks 1
+  if ¬ (isAmount amount) then none
+  let asset ← at? toks 2
+  let assetOk := isEthLike asset ∨ isKnownSymbol asset ∨ isAddress asset
+  -- Recipient is only meaningful for unshield; for shield, the
+  -- destination IS the Privacy Pool contract (no user-supplied
+  -- recipient). For aliased "withdraw X from the privacy pool to
+  -- <recipient>", `indexOfKeyword "to"` returns the index of the
+  -- recipient "to" (the only "to" in that phrasing). We filter out
+  -- noise tokens that might sit after a stray "to" so a misplaced
+  -- preposition doesn't fabricate a recipient.
+  let isNoiseToken : String → Bool := fun s =>
+    s = "the" ∨ s = "pool" ∨ s = "pools" ∨ s = "privacy"
+      ∨ s = "shielded" ∨ s = "a" ∨ s = "an"
+  let recipient? : Option String :=
+    if canonicalVerb = "unshield" then
+      (indexOfKeyword toks "to").bind (fun i =>
+        (at? toks (i + 1)).filter (fun c => !(isNoiseToken c)))
+    else none
+  let fields : List (String × String) :=
+    [("verb", canonicalVerb), ("amount", amount), ("asset", asset)]
+    ++ (match recipient? with
+        | some r => [("to", r)]
+        | none   => [])
+  let unresolved : List String :=
+    if assetOk then [] else [s!"asset '{asset}' not recognized for shield/unshield"]
+  let action : Action :=
+    if canonicalVerb = "unshield" then .shieldedWithdraw else .shieldedDeposit
+  some {
+    action     := action
+    fields     := fields
+    unresolved := unresolved
+    -- For shield (no recipient field), high confidence when the asset
+    -- resolves; for unshield, require both asset AND recipient before
+    -- promoting to high (so the synth path has something to chew on).
+    confidence :=
+      if !assetOk then .medium
+      else if canonicalVerb = "shield" then .high
+      else
+        match recipient? with
+        | some _ => .high
+        | none   => .medium
+  }
+
+/-- `audit [my] approvals [on <chain>]` — read-only listing of outgoing
+ERC-20 allowances. No amount, no asset; the daemon scans `Approval`
+events from the user's wallet. Optional inline wallet via `for <name>`
+or `for <0x...>` — chat.draft's wallet-name resolution substitutes a
+0x address before the LLM sees the seed. -/
+def matchAuditApprovals (toks : List String) : Option RegexDraft := do
+  let verb ← toks.head?
+  let isAudit := verb = "audit"
+  -- "show approvals" / "list approvals" / "what approvals do i have"
+  -- are common enough alternative entry points to recognize them by
+  -- the second token instead of forcing the user to start with "audit".
+  let isShowList :=
+    (verb = "show" ∨ verb = "list" ∨ verb = "what")
+      ∧ toks.any (fun t => t = "approvals" ∨ t = "allowances")
+  if ¬ (isAudit ∨ isShowList) then none
+  -- Optional explicit wallet via `for <name>` (`indexOfKeyword "for"`).
+  let walletHint? : Option String :=
+    (indexOfKeyword toks "for").bind (fun i => at? toks (i + 1))
+  let fields : List (String × String) :=
+    [("verb", "audit")] ++
+    (match walletHint? with
+     | some w => [("wallet", w)]
+     | none   => [])
+  some {
+    action     := .approvalsAudit
+    fields     := fields
+    unresolved := []
+    -- Read-only — high confidence even without explicit wallet (daemon
+    -- defaults to the user's default wallet).
+    confidence := .high
+  }
+
+/-- `give me a fresh address [called <label>]`, `new EOA`, `new R1
+smart account [named <label>]`, `hardware wallet`, etc. The skill picks
+the wallet kind: `eoa` (BIP-39 default) vs `r1` (TPM hardware opt-in)
+based on keyword presence. Label is captured when the user named one. -/
+def matchFreshAddress (toks : List String) : Option RegexDraft := do
+  let verb ← toks.head?
+  let hasFreshHint :=
+    (toks.any (fun t => t = "fresh"))
+      ∨ (verb = "new" ∧ toks.any (fun t =>
+          t = "address" ∨ t = "wallet" ∨ t = "eoa" ∨ t = "r1"
+            ∨ t = "account"))
+      ∨ (verb = "create" ∧ toks.any (fun t =>
+          t = "wallet" ∨ t = "address" ∨ t = "account" ∨ t = "eoa" ∨ t = "r1"))
+      ∨ (verb = "give" ∧ toks.any (fun t => t = "fresh"))
+      ∨ (verb = "make" ∧ toks.any (fun t => t = "fresh"))
+  if ¬ hasFreshHint then none
+  -- R1 trigger words. EOA is the default; we flip to R1 only on
+  -- explicit hardware-key / smart-account / TPM phrasing.
+  let r1Triggers : List String :=
+    ["r1", "tpm", "hardware", "hardware-backed", "secure", "enclave", "smart"]
+  let isR1 := toks.any (fun t => r1Triggers.any (fun trig => t = trig))
+  -- Label after `called <label>` or `named <label>`.
+  let labelHint? : Option String :=
+    ((indexOfKeyword toks "called").bind (fun i => at? toks (i + 1)))
+      <|> ((indexOfKeyword toks "named").bind (fun i => at? toks (i + 1)))
+  let fields : List (String × String) :=
+    [("verb", "fresh"), ("kind", if isR1 then "r1" else "eoa")] ++
+    (match labelHint? with
+     | some l => [("label", l)]
+     | none   => [])
+  some {
+    action     := .freshAddress
+    fields     := fields
+    unresolved := []
+    confidence := .high
+  }
+
 /-- `wrap / unwrap <amount> <asset>` — no recipient or protocol. -/
 def matchWrap (toks : List String) : Option RegexDraft := do
   let verb ← toks.head?
@@ -389,7 +568,19 @@ def parse (input : String) : RegexDraft :=
   | [] => RegexDraft.empty
   | _ =>
       let candidates : List (Option RegexDraft) := [
-        matchSendOrTransfer toks
+        -- matchShielded MUST come before matchSupply /
+        -- matchWithdrawBorrowRepay because the aliased forms reuse
+        -- "deposit" / "withdraw" — those Aave matchers would steal
+        -- the prompt otherwise. matchShielded gates aliased verbs
+        -- on a privacy-hint check, so non-privacy Aave deposits/
+        -- withdraws fall through to the Aave matchers unchanged.
+        matchShielded toks
+        -- audit / fresh have unique enough trigger sets ("approvals",
+        -- "fresh", "new EOA", etc.) that they don't collide with any
+        -- other template; order among themselves is irrelevant.
+        , matchAuditApprovals toks
+        , matchFreshAddress toks
+        , matchSendOrTransfer toks
         , matchApprove toks
         , matchRevoke toks
         , matchSwap toks

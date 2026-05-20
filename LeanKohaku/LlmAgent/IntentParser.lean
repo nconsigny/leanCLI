@@ -42,6 +42,14 @@ model-failure mode?). Caller is the LLM chat path; output is fed to
 7. **Non-checksummed address** — model-supplied addresses must be
    checksum-correct per EIP-55. All-lowercase is a phishing vector
    (some wallets normalize, hiding wrong addresses).
+8. **Per-action shape rejects** for the privacy / hygiene / wallet
+   variants:
+   * `shielded.deposit`: amountWei below the 0.001 ETH dust floor
+     (anonymity set for dust is empty — see shield-eth SKILL.md).
+   * `shielded.withdraw`: amountWei = 0.
+   * `address.fresh`: label longer than 64 chars (opaque labels are a
+     privacy property; long descriptive labels leak when the user
+     screenshots).
 
 All rejects return `.error msg` with a human-readable reason. The TUI
 surfaces the reason verbatim so the user understands what the model
@@ -146,6 +154,35 @@ def securityChecks (raw : Json) (expectedChainId : Nat) (intent : Intent) :
           | some _ => .ok ()
           | none   => throw s!"Aave V3 not deployed (per Lean registry) on chainId {chainId}"
       | none => throw s!"Aave V3 not supported on chainId {chainId} in this build"
+  | .shieldedDeposit _ amountWei =>
+      -- Dust floor from shield-eth/SKILL.md: 0.001 ETH = 10^15 wei.
+      -- Below this, the anonymity set is too small for the deposit
+      -- to provide meaningful privacy.
+      let dustFloor : Nat := 1_000_000_000_000_000
+      if amountWei < dustFloor then
+        throw s!"shielded.deposit: amountWei {amountWei} below the 0.001 ETH dust floor (anonymity set is empty at this amount — see shield-eth SKILL.md)"
+      else .ok ()
+  | .shieldedWithdraw _ amountWei _ _ =>
+      -- A withdraw of 0 produces no movement and reveals timing
+      -- structure without privacy benefit.
+      if amountWei = 0 then
+        throw "shielded.withdraw: amountWei = 0 refused (no movement, leaks timing)"
+      else .ok ()
+  | .approvalsAudit _ _ =>
+      -- Read-only action; no signing, no chain side-effects to gate.
+      .ok ()
+  | .freshAddress _ _ label _ =>
+      -- Label sanity. Per fresh-address SKILL.md: "Encourage opaque
+      -- labels (`a`, `b`, `fresh-1`) over descriptive ones." Long
+      -- labels are a screenshot-leak vector. We cap at 64 chars; we
+      -- do NOT try to detect descriptive content (that's a privacy
+      -- oracle, out of scope) — only the obvious length foot-gun.
+      match label with
+      | none => .ok ()
+      | some s =>
+          if s.length > 64 then
+            throw s!"address.fresh: label too long ({s.length} chars; max 64). Use a short opaque label."
+          else .ok ()
   | _ => .ok ()
 
 /-- The two legitimate shapes the model can emit per the system prompt:

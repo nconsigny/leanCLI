@@ -100,8 +100,42 @@ def parseActionTag (s : String) : Except String String :=
   | "uniswapV3SwapSingle"
   | "aaveV3Supply"
   | "aaveV3Withdraw"
-  | "rawCall" => .ok s
+  | "rawCall"
+  | "shielded.deposit"
+  | "shielded.withdraw"
+  | "approvals.audit"
+  | "address.fresh" => .ok s
   | _ => .error s!"unknown intent action tag: {s}"
+
+/-- Parse a `WalletKind` from a wire-tag string. -/
+def parseWalletKind (s : String) : Except String WalletKind :=
+  match s with
+  | "eoa" => .ok .eoa
+  | "r1"  => .ok .r1
+  | _     => .error s!"walletKind: expected \"eoa\" or \"r1\", got {s}"
+
+/-- Optional address field — `none` when key missing OR explicitly null. -/
+def optAddrField (obj : Json) (key : String) : Except String (Option Address) :=
+  match getField key obj with
+  | none           => .ok none
+  | some .null     => .ok none
+  | some j         =>
+      match addressFromJson j with
+      | .ok a    => .ok (some a)
+      | .error e => .error e
+
+/-- Optional string field — `none` when key missing OR explicitly null. -/
+def optStrField (obj : Json) (key : String) : Option String :=
+  match getField key obj with
+  | none       => none
+  | some .null => none
+  | some j     => asString j
+
+/-- Optional boolean field defaulting to `false`. -/
+def optBoolField (obj : Json) (key : String) (default : Bool) : Bool :=
+  match getField key obj with
+  | some (.bool b) => b
+  | _              => default
 
 /-- Parse a `bytes` field: a `0x`-prefixed hex string → `ByteArray`. -/
 def bytesField (obj : Json) (key : String) : Except String ByteArray := do
@@ -159,6 +193,33 @@ def parseIntent (j : Json) : Except String Intent := do
       let data ← bytesField j "data"
       let rationale ← strField j "rationale"
       .ok (.rawCall chainId to valueWei data rationale)
+  | "shielded.deposit" =>
+      let amountWei ← natField j "amountWei"
+      .ok (.shieldedDeposit chainId amountWei)
+  | "shielded.withdraw" =>
+      let amountWei ← natField j "amountWei"
+      let recipient ← addrField j "recipient"
+      -- viaRelayer defaults to true: privacy-preserving by default.
+      -- Self-paid (false) reveals recipient's ETH balance change at
+      -- the chain level and partially defeats the shield.
+      let viaRelayer := optBoolField j "viaRelayer" true
+      .ok (.shieldedWithdraw chainId amountWei recipient viaRelayer)
+  | "approvals.audit" =>
+      -- `wallet` is optional — daemon defaults to the user's default
+      -- wallet when omitted.
+      let wallet ← optAddrField j "wallet"
+      .ok (.approvalsAudit chainId wallet)
+  | "address.fresh" =>
+      -- All three of kind / label / deployImmediately are optional.
+      -- kind defaults to .eoa (BIP-39 EOA — see Intent.WalletKind);
+      -- label defaults to none (TUI prompts for one); deploy defaults
+      -- to false (R1 wallets receive without deployment).
+      let kind ← match optStrField j "kind" with
+                 | none   => .ok WalletKind.eoa
+                 | some s => parseWalletKind s
+      let label := optStrField j "label"
+      let deployImmediately := optBoolField j "deployImmediately" false
+      .ok (.freshAddress chainId kind label deployImmediately)
   | other =>
       -- parseActionTag already vetted the whitelist; this is unreachable
       -- but keeps the match exhaustive.

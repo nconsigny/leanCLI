@@ -124,6 +124,43 @@ def toCanonicalString : Intent → String
         s!"data:       {LeanKohaku.Crypto.Hex.encode data}",
         s!"rationale:  {rationale}"
       ]
+  | .shieldedDeposit chainId amountWei =>
+      String.intercalate "\n" [
+        "action:     shielded.deposit",
+        s!"chain:      {chainId}",
+        s!"amountWei:  {amountWei}",
+        "note:       deposit enters the Privacy Pool contract; withdrawal must go to a never-used address to break the on-chain link"
+      ]
+  | .shieldedWithdraw chainId amountWei recipient viaRelayer =>
+      String.intercalate "\n" [
+        "action:     shielded.withdraw",
+        s!"chain:      {chainId}",
+        s!"amountWei:  {amountWei}",
+        s!"recipient:  {addrHex recipient}",
+        s!"viaRelayer: {viaRelayer}",
+        "note:       recipient should be a FRESH address with no link to the deposit source"
+      ]
+  | .approvalsAudit chainId wallet =>
+      let walletStr : String :=
+        match wallet with
+        | some a => addrHex a
+        | none   => "(default wallet)"
+      String.intercalate "\n" [
+        "action:     approvals.audit",
+        s!"chain:      {chainId}",
+        s!"wallet:     {walletStr}",
+        "note:       READ-ONLY; no signing"
+      ]
+  | .freshAddress chainId kind label deployImmediately =>
+      let labelStr := label.getD "(unnamed)"
+      String.intercalate "\n" [
+        "action:     address.fresh",
+        s!"chain:      {chainId}",
+        s!"kind:       {WalletKind.toString kind}",
+        s!"label:      {labelStr}",
+        s!"deploy:     {deployImmediately}",
+        "note:       LOCAL wallet creation; no chain interaction yet"
+      ]
 
 /-- The action tag alone, useful for one-liner badges. -/
 def actionTag : Intent → String
@@ -134,5 +171,9 @@ def actionTag : Intent → String
   | .aaveV3Supply   _ _ _ _            => "aaveV3Supply"
   | .aaveV3Withdraw _ _ _ _            => "aaveV3Withdraw"
   | .rawCall        _ _ _ _ _          => "rawCall"
+  | .shieldedDeposit  _ _              => "shielded.deposit"
+  | .shieldedWithdraw _ _ _ _          => "shielded.withdraw"
+  | .approvalsAudit   _ _              => "approvals.audit"
+  | .freshAddress     _ _ _ _          => "address.fresh"
 
 end LeanKohaku.Ethereum.IntentCanonical
