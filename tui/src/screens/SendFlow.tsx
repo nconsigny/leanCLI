@@ -9,6 +9,7 @@ import { call } from "../daemon.js";
 import { theme } from "../theme.js";
 import { formatEth, hexToBigInt, shortAddr } from "../format.js";
 import { TransfersBlock } from "../widgets/TransfersBlock.js";
+import UnlockEoaStep from "./UnlockEoaStep.js";
 
 type Props = {
   wallet: Wallet;
@@ -26,25 +27,22 @@ type Props = {
 
 type Phase =
   | { kind: "form" }
-  | { kind: "resolving"; raw: string; amountEth: string; passphrase?: string; pin?: string }
+  | { kind: "resolving"; raw: string; amountEth: string; pin?: string }
   | {
       kind: "unlocking";
       to: string;
       amountEth: string;
-      passphrase: string;
     }
   | {
       kind: "simulating";
       to: string;
       amountEth: string;
-      passphrase?: string;
       pin?: string;
     }
   | {
       kind: "confirm";
       to: string;
       amountEth: string;
-      passphrase?: string;
       pin?: string;
       decoded: any;
       sim: any;
@@ -54,7 +52,6 @@ type Phase =
       kind: "run";
       to: string;
       amountEth: string;
-      passphrase?: string;
       pin?: string;
     }
   | { kind: "resolveError"; raw: string; message: string }
@@ -98,15 +95,12 @@ export default function SendFlow({ wallet, chain, colibriEnabled, onDone }: Prop
         validate: (v) =>
           /^[0-9]+(\.[0-9]+)?$/.test(v) ? null : "expected a decimal ETH amount",
       },
+      // EOA: passphrase no longer captured in this form — the
+      // UnlockEoaStep below picks the right path (already-unlocked,
+      // master auto-unlock, per-slot passphrase). TPM/R1: PIN still
+      // gathered here because the daemon needs it at sign time.
       ...(wallet.kind === "eoa"
-        ? [
-            {
-              name: "passphrase",
-              label: `Passphrase for ${wallet.name}`,
-              secret: true,
-              validate: (v: string) => (v.length === 0 ? "required" : null),
-            } as Field,
-          ]
+        ? []
         : [
             {
               name: "pin",
@@ -135,7 +129,6 @@ export default function SendFlow({ wallet, chain, colibriEnabled, onDone }: Prop
                     kind: "unlocking",
                     to,
                     amountEth: v.amountEth ?? "",
-                    passphrase: v.passphrase ?? "",
                   } as Phase)
                 : ({
                     kind: "simulating",
@@ -153,7 +146,6 @@ export default function SendFlow({ wallet, chain, colibriEnabled, onDone }: Prop
                 kind: "resolving",
                 raw,
                 amountEth: v.amountEth ?? "",
-                passphrase: v.passphrase,
                 pin: v.pin,
               });
             }
@@ -174,7 +166,6 @@ export default function SendFlow({ wallet, chain, colibriEnabled, onDone }: Prop
                   kind: "unlocking",
                   to: addr,
                   amountEth: phase.amountEth,
-                  passphrase: phase.passphrase ?? "",
                 }
               : {
                   kind: "simulating",
@@ -214,20 +205,20 @@ export default function SendFlow({ wallet, chain, colibriEnabled, onDone }: Prop
 
   // EOA-only: unlock the slot before simulating. R1/TPM skip this step —
   // the TPM PIN is captured in the form and checked at sign time.
+  // UnlockEoaStep handles the four cases (already unlocked, master
+  // auto-unlock, per-slot passphrase, master-locked-and-enrolled).
   if (phase.kind === "unlocking") {
     return (
-      <UnlockStep
+      <UnlockEoaStep
         wallet={wallet}
-        passphrase={phase.passphrase}
         onUnlocked={() =>
           setPhase({
             kind: "simulating",
             to: phase.to,
             amountEth: phase.amountEth,
-            passphrase: phase.passphrase,
           })
         }
-        onError={(msg) => setPhase({ kind: "unlockError", message: msg })}
+        onCancel={() => onDone(false)}
       />
     );
   }
@@ -249,7 +240,6 @@ export default function SendFlow({ wallet, chain, colibriEnabled, onDone }: Prop
             kind: "confirm",
             to: phase.to,
             amountEth: phase.amountEth,
-            passphrase: phase.passphrase,
             pin: phase.pin,
             decoded,
             sim,
@@ -279,7 +269,6 @@ export default function SendFlow({ wallet, chain, colibriEnabled, onDone }: Prop
             kind: "run",
             to: phase.to,
             amountEth: phase.amountEth,
-            passphrase: phase.passphrase,
             pin: phase.pin,
           })
         }
@@ -336,40 +325,6 @@ export default function SendFlow({ wallet, chain, colibriEnabled, onDone }: Prop
       renderResult={(r) => <SendResult result={r} />}
       onDone={onDone}
     />
-  );
-}
-
-function UnlockStep({
-  wallet,
-  passphrase,
-  onUnlocked,
-  onError,
-}: {
-  wallet: Wallet;
-  passphrase: string;
-  onUnlocked: () => void;
-  onError: (msg: string) => void;
-}) {
-  useEffect(() => {
-    let cancelled = false;
-    call("eoa.unlock", { name: wallet.name, passphrase }).then((r) => {
-      if (cancelled) return;
-      if (!r.ok) return onError(`${r.error.message} (code ${r.error.code})`);
-      onUnlocked();
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  return (
-    <Layout title={`Unlocking ${wallet.name}…`}>
-      <Text>
-        <Text color={theme.primary}>
-          <Spinner type="dots" />
-        </Text>{" "}
-        <Text color={theme.dim}>verifying passphrase</Text>
-      </Text>
-    </Layout>
   );
 }
 

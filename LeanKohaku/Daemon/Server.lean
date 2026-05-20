@@ -1891,7 +1891,25 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                                 message := "deployer EOA load failed",
                                 data := some (.str err) })
                         | .ok record =>
-                            match ← LeanKohaku.Wallet.EoaStore.unlockSeedIO record pp with
+                            -- Master-KEK / already-unlocked fast path:
+                            -- when `pp` is empty, prefer the in-memory
+                            -- unlocked seed (set by an earlier
+                            -- eoa.unlock — possibly via the master fast
+                            -- path). This lets the TUI run UnlockEoaStep
+                            -- before tpm.deploy and pass an empty
+                            -- passphrase, instead of asking the user for
+                            -- an ephemeral passphrase they don't have.
+                            -- Additive: a real passphrase still runs the
+                            -- per-slot KDF path below unchanged.
+                            let seedRes ←
+                              if pp.length == 0 then
+                                match ← LeanKohaku.Daemon.State.getUnlocked? state eoaName with
+                                | some slot => pure (.ok slot.seed)
+                                | none =>
+                                    pure (.error "deployer EOA is locked — unlock it first (no passphrase supplied)")
+                              else
+                                LeanKohaku.Wallet.EoaStore.unlockSeedIO record pp
+                            match seedRes with
                             | .error err =>
                                 pure (.error
                                   { code := -32051,
@@ -2773,6 +2791,43 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
               | .error err =>
                   pure <| .error { code := -32010, message := "EOA slot not found", data := some (.str err) }
               | .ok record =>
+                  -- Master-KEK fast path: when the caller passes an empty
+                  -- passphrase, the slot is enrolled under master (has a
+                  -- `masterWrap` and is not `customPassphrase`), and the
+                  -- master KEK is currently loaded, unwrap via master
+                  -- instead of running the per-slot KDF. This lets the TUI
+                  -- skip the passphrase prompt entirely for master-enrolled
+                  -- slots without leaking which slots are enrolled (the
+                  -- gating check happens entirely server-side; an empty
+                  -- passphrase on a non-enrolled slot falls through to the
+                  -- regular KDF path below, which fails with the usual
+                  -- -32011). Additive: callers that supply a real
+                  -- passphrase keep the prior behaviour byte-for-byte.
+                  let masterFastPath? ← do
+                    if passphrase.length == 0 && !record.customPassphrase then
+                      match record.masterWrap with
+                      | none => pure none
+                      | some w =>
+                          match ← LeanKohaku.Daemon.State.getMasterKek? state with
+                          | none => pure none
+                          | some slot =>
+                              match ← LeanKohaku.Keystore.MasterPassphrase.unwrapSlot
+                                  slot.kek record.name record.derivationPath record.address w with
+                              | .error _ => pure none
+                              | .ok seed => pure (some seed)
+                    else pure none
+                  match masterFastPath? with
+                  | some seed =>
+                      LeanKohaku.Daemon.State.unlock state {
+                        name := record.name,
+                        seed := seed,
+                        address := record.address,
+                        derivationPath := record.derivationPath,
+                        unlockedAtMs := ← IO.monoMsNow,
+                        ttlMs := 300000
+                      }
+                      pure (.ok (← slotMetadataJson state record))
+                  | none =>
                   match ← LeanKohaku.Wallet.EoaStore.unlockSeedIO record passphrase with
                   | .error err =>
                       pure <| .error { code := -32011, message := "EOA unlock failed", data := some (.str err) }

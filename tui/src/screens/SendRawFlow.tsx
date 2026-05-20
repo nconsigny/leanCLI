@@ -9,6 +9,7 @@ import { call } from "../daemon.js";
 import { theme } from "../theme.js";
 import { formatEth, hexToBigInt, shortAddr } from "../format.js";
 import { TransfersBlock } from "../widgets/TransfersBlock.js";
+import UnlockEoaStep from "./UnlockEoaStep.js";
 
 /** A pre-selected signing wallet. Threaded in by callers (e.g. SwapFlow)
  *  who already know which wallet is active — skips the EOA picker and
@@ -40,20 +41,18 @@ type Props = {
 type Phase =
   | { kind: "loading-wallets" }
   | { kind: "pick-wallet"; eoas: EoaSlot[] }
-  | { kind: "passphrase"; wallet: EoaSlot }
+  | { kind: "unlock"; wallet: EoaSlot }
   | { kind: "pin"; wallet: EoaSlot }
   | { kind: "unlock-error"; message: string }
   | {
       kind: "simulate";
       wallet: EoaSlot;
-      passphrase: string;
       pin: string;
       tpm: boolean;
     }
   | {
       kind: "confirm";
       wallet: EoaSlot;
-      passphrase: string;
       pin: string;
       decoded: any;
       sim: any;
@@ -63,7 +62,6 @@ type Phase =
   | {
       kind: "send";
       wallet: EoaSlot;
-      passphrase: string;
       pin: string;
       tpm: boolean;
     };
@@ -83,7 +81,7 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
     wallet?.kind === "tpm"
       ? { kind: "pin", wallet: { name: wallet.name, address: wallet.address } }
       : wallet?.kind === "eoa"
-        ? { kind: "passphrase", wallet: { name: wallet.name, address: wallet.address } }
+        ? { kind: "unlock", wallet: { name: wallet.name, address: wallet.address } }
         : { kind: "loading-wallets" };
   const [phase, setPhase] = useState<Phase>(initialPhase);
 
@@ -153,41 +151,28 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
           }))}
           onSelect={(it) => {
             const w = phase.eoas.find((e) => e.name === it.value);
-            if (w) setPhase({ kind: "passphrase", wallet: w });
+            if (w) setPhase({ kind: "unlock", wallet: w });
           }}
         />
       </Layout>
     );
   }
 
-  if (phase.kind === "passphrase") {
-    const fields: Field[] = [
-      {
-        name: "passphrase",
-        label: `Passphrase for ${phase.wallet.name}`,
-        secret: true,
-        validate: (v) => (v.length === 0 ? "required" : null),
-      },
-    ];
+  if (phase.kind === "unlock") {
     return (
-      <Layout
-        title={`Unlock ${phase.wallet.name}`}
+      <UnlockEoaStep
+        wallet={phase.wallet}
         subtitle={`address: ${phase.wallet.address}`}
-      >
-        <Form
-          fields={fields}
-          onCancel={() => onDone(false)}
-          onSubmit={(v) =>
-            setPhase({
-              kind: "simulate",
-              wallet: phase.wallet,
-              passphrase: v.passphrase ?? "",
-              pin: "",
-              tpm: false,
-            })
-          }
-        />
-      </Layout>
+        onUnlocked={() =>
+          setPhase({
+            kind: "simulate",
+            wallet: phase.wallet,
+            pin: "",
+            tpm: false,
+          })
+        }
+        onCancel={() => onDone(false)}
+      />
     );
   }
 
@@ -212,7 +197,6 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
             setPhase({
               kind: "simulate",
               wallet: phase.wallet,
-              passphrase: "",
               pin: v.pin ?? "",
               tpm: true,
             })
@@ -224,10 +208,8 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
 
   if (phase.kind === "simulate") {
     return (
-      <UnlockAndSimulate
+      <SimulateOnly
         wallet={phase.wallet}
-        passphrase={phase.passphrase}
-        tpm={phase.tpm}
         tx={tx}
         chainId={chainId}
         onError={(message) => setPhase({ kind: "unlock-error", message })}
@@ -235,7 +217,6 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
           setPhase({
             kind: "confirm",
             wallet: phase.wallet,
-            passphrase: phase.passphrase,
             pin: phase.pin,
             decoded,
             sim,
@@ -262,7 +243,6 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
           setPhase({
             kind: "send",
             wallet: phase.wallet,
-            passphrase: phase.passphrase,
             pin: phase.pin,
             tpm: phase.tpm,
           })
@@ -340,18 +320,14 @@ function chainIdToName(chainId?: number): string | undefined {
   }
 }
 
-function UnlockAndSimulate({
+function SimulateOnly({
   wallet,
-  passphrase,
-  tpm,
   tx,
   chainId,
   onError,
   onReady,
 }: {
   wallet: EoaSlot;
-  passphrase: string;
-  tpm: boolean;
   tx: Props["tx"];
   chainId?: number;
   onError: (msg: string) => void;
@@ -360,13 +336,9 @@ function UnlockAndSimulate({
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      // Unlock first (EOA only); if it fails, no point in simulating.
-      // TPM/R1 wallets carry the PIN in params and authorize at sign time.
-      if (!tpm) {
-        const u = await call<any>("eoa.unlock", { name: wallet.name, passphrase });
-        if (cancelled) return;
-        if (!u.ok) return onError(`unlock: ${u.error.message}`);
-      }
+      // EOA slots are pre-unlocked by `UnlockEoaStep` before we reach
+      // this phase; TPM/R1 slots carry the PIN in send params and the
+      // TPM authorises at sign time. Either way, no unlock call here.
 
       // Decode + simulate + preflight context in parallel. preflight is
       // a separate daemon round-trip rather than baked into simulate so

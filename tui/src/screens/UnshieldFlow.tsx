@@ -9,6 +9,7 @@ import RpcRunner from "../widgets/RpcRunner.js";
 import { theme } from "../theme.js";
 import { AddressFreshness, ChainBalance, EoaListEntry } from "../types.js";
 import { hexToBigInt } from "../format.js";
+import UnlockEoaStep from "./UnlockEoaStep.js";
 
 type AccountListEntry = {
   index: number;
@@ -28,6 +29,12 @@ type Phase =
   | { kind: "derive-no-wallets" }
   | { kind: "derive-pick-wallet"; wallets: EoaListEntry[] }
   | { kind: "derive-form"; wallet: EoaListEntry; nextIdx: number }
+  | {
+      kind: "derive-unlock";
+      wallet: EoaListEntry;
+      nextIdx: number;
+      params: Record<string, unknown>;
+    }
   | {
       kind: "derive-running";
       wallet: EoaListEntry;
@@ -331,17 +338,15 @@ export default function UnshieldFlow({ onDone }: Props) {
   }
   if (phase.kind === "derive-form") {
     const path = `m/44'/60'/${phase.nextIdx}'/0/0`;
+    // EOA passphrase is no longer captured here — UnlockEoaStep below
+    // picks the right path before we fire eoa.account.add (which
+    // requires the slot to be unlocked but does NOT read a passphrase
+    // param itself).
     const fields: Field[] = [
       {
         name: "label",
         label: "Label (optional)",
         placeholder: "unshield-1, fresh-a, …",
-      },
-      {
-        name: "passphrase",
-        label: `Passphrase for ${phase.wallet.name}`,
-        secret: true,
-        validate: (v) => (v.length === 0 ? "required" : null),
       },
     ];
     return (
@@ -357,12 +362,11 @@ export default function UnshieldFlow({ onDone }: Props) {
             const params: Record<string, unknown> = {
               name: phase.wallet.name,
               path,
-              passphrase: v.passphrase ?? "",
             };
             const label = (v.label ?? "").trim();
             if (label.length > 0) params.label = label;
             setPhase({
-              kind: "derive-running",
+              kind: "derive-unlock",
               wallet: phase.wallet,
               nextIdx: phase.nextIdx,
               params,
@@ -370,6 +374,22 @@ export default function UnshieldFlow({ onDone }: Props) {
           }}
         />
       </Layout>
+    );
+  }
+  if (phase.kind === "derive-unlock") {
+    return (
+      <UnlockEoaStep
+        wallet={{ name: phase.wallet.name, address: phase.wallet.address }}
+        onUnlocked={() =>
+          setPhase({
+            kind: "derive-running",
+            wallet: phase.wallet,
+            nextIdx: phase.nextIdx,
+            params: phase.params,
+          })
+        }
+        onCancel={() => setPhase({ kind: "pick-source" })}
+      />
     );
   }
   if (phase.kind === "derive-running") {

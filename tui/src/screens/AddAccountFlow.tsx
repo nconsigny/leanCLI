@@ -8,6 +8,7 @@ import Select from "../widgets/Select.js";
 import RpcRunner from "../widgets/RpcRunner.js";
 import { theme } from "../theme.js";
 import { EoaListEntry } from "../types.js";
+import UnlockEoaStep from "./UnlockEoaStep.js";
 
 type AccountListEntry = {
   index: number;
@@ -23,6 +24,12 @@ type Phase =
   | { kind: "pick-wallet"; wallets: EoaListEntry[] }
   | { kind: "loading-accounts"; wallet: EoaListEntry }
   | { kind: "form"; wallet: EoaListEntry; nextIdx: number; existing: AccountListEntry[] }
+  | {
+      kind: "unlocking";
+      wallet: EoaListEntry;
+      nextIdx: number;
+      params: Record<string, unknown>;
+    }
   | {
       kind: "running";
       wallet: EoaListEntry;
@@ -115,7 +122,8 @@ export default function AddAccountFlow({ onDone }: Props) {
     // `q` is treated as a back shortcut on menu/list phases only — when
     // the form phase is active a TextInput owns input focus and the user
     // is typing real characters, including the letter "q" for labels.
-    if (phase.kind === "running") return;
+    // The unlocking phase delegates Esc/M handling to UnlockEoaStep.
+    if (phase.kind === "running" || phase.kind === "unlocking") return;
     if (key.escape) {
       onDone(false);
       return;
@@ -196,17 +204,14 @@ export default function AddAccountFlow({ onDone }: Props) {
 
   if (phase.kind === "form") {
     const path = `m/44'/60'/${phase.nextIdx}'/0/0`;
+    // No passphrase field — `eoa.account.add` requires the slot to be
+    // unlocked but ignores any `passphrase` param. Unlock is handled by
+    // UnlockEoaStep in the next phase.
     const fields: Field[] = [
       {
         name: "label",
         label: "Label (optional)",
         placeholder: "savings, hot, ops, …",
-      },
-      {
-        name: "passphrase",
-        label: `Passphrase for ${phase.wallet.name}`,
-        secret: true,
-        validate: (v) => (v.length === 0 ? "required" : null),
       },
     ];
     return (
@@ -233,13 +238,12 @@ export default function AddAccountFlow({ onDone }: Props) {
           onSubmit={(v) => {
             const params: Record<string, unknown> = {
               name: phase.wallet.name,
-              passphrase: v.passphrase ?? "",
               path,
             };
             const label = (v.label ?? "").trim();
             if (label.length > 0) params.label = label;
             setPhase({
-              kind: "running",
+              kind: "unlocking",
               wallet: phase.wallet,
               nextIdx: phase.nextIdx,
               params,
@@ -247,6 +251,23 @@ export default function AddAccountFlow({ onDone }: Props) {
           }}
         />
       </Layout>
+    );
+  }
+
+  if (phase.kind === "unlocking") {
+    return (
+      <UnlockEoaStep
+        wallet={{ name: phase.wallet.name, address: phase.wallet.address }}
+        onUnlocked={() =>
+          setPhase({
+            kind: "running",
+            wallet: phase.wallet,
+            nextIdx: phase.nextIdx,
+            params: phase.params,
+          })
+        }
+        onCancel={() => onDone(false)}
+      />
     );
   }
 

@@ -8,6 +8,7 @@ import RpcRunner from "../widgets/RpcRunner.js";
 import { call } from "../daemon.js";
 import { theme } from "../theme.js";
 import { shortAddr } from "../format.js";
+import UnlockEoaStep from "./UnlockEoaStep.js";
 
 type Props = { onDone: (success: boolean) => void };
 
@@ -246,38 +247,31 @@ export default function CreateR1Flow({ onDone }: Props) {
   }
 
   if (phase.kind === "deploy-eoa-form") {
-    const fields: Field[] = [
-      {
-        name: "passphrase",
-        label: `Passphrase for ${phase.deployer.name}`,
-        secret: true,
-        validate: (v) => (v.length === 0 ? "required" : null),
-      },
-    ];
+    // Route through UnlockEoaStep — handles already-unlocked / master
+    // auto-unlock / per-slot passphrase / master-locked notice. Then
+    // call tpm.deploy with an empty deployerPassphrase; the daemon will
+    // use the in-memory unlocked seed (master-KEK fast path on the
+    // daemon side).
     return (
-      <Layout
-        title={`Unlock ${phase.deployer.name} to deploy`}
-        subtitle={`address: ${phase.deployer.address}`}
-      >
-        <Form
-          fields={fields}
-          onCancel={() => onDone(false)}
-          onSubmit={(v) =>
-            setPhase({
-              kind: "deploying",
+      <UnlockEoaStep
+        wallet={phase.deployer}
+        subtitle={`deployer for ${phase.name} on sepolia`}
+        onUnlocked={() =>
+          setPhase({
+            kind: "deploying",
+            name: phase.name,
+            via: "eoa",
+            params: {
               name: phase.name,
-              via: "eoa",
-              params: {
-                name: phase.name,
-                chain: "sepolia",
-                deployer: "eoa",
-                deployerEoa: phase.deployer.name,
-                deployerPassphrase: v.passphrase ?? "",
-              },
-            })
-          }
-        />
-      </Layout>
+              chain: "sepolia",
+              deployer: "eoa",
+              deployerEoa: phase.deployer.name,
+              deployerPassphrase: "",
+            },
+          })
+        }
+        onCancel={() => onDone(false)}
+      />
     );
   }
 

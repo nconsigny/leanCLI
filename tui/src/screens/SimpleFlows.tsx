@@ -7,9 +7,16 @@ import Form, { Field } from "../widgets/Form.js";
 import RpcRunner from "../widgets/RpcRunner.js";
 import { theme } from "../theme.js";
 import { formatEth, hexToBigInt } from "../format.js";
+import UnlockEoaStep from "./UnlockEoaStep.js";
 
 /** Lock or unlock an EOA. Called from the action picker; we infer which
- *  direction based on `wallet.unlocked`. */
+ *  direction based on `wallet.unlocked`.
+ *
+ *  Unlock side now delegates to UnlockEoaStep, which picks the right
+ *  path: master-KEK auto-unlock for enrolled slots when master is
+ *  loaded, per-slot passphrase when the slot has a custom passphrase,
+ *  or a "master locked" notice when the slot is enrolled but master
+ *  isn't loaded yet. */
 export function LockToggleFlow({
   wallet,
   onDone,
@@ -17,8 +24,6 @@ export function LockToggleFlow({
   wallet: Wallet;
   onDone: (success: boolean) => void;
 }) {
-  const [pass, setPass] = useState<string | null>(null);
-
   if (wallet.kind !== "eoa") {
     return (
       <Layout title="Not applicable" hint="enter • back · esc • back">
@@ -39,33 +44,11 @@ export function LockToggleFlow({
     );
   }
 
-  if (!pass) {
-    const fields: Field[] = [
-      {
-        name: "passphrase",
-        label: `Passphrase for ${wallet.name}`,
-        secret: true,
-        validate: (v) => (v.length === 0 ? "required" : null),
-      },
-    ];
-    return (
-      <Layout title={`Unlock ${wallet.name}`}>
-        <Form
-          fields={fields}
-          onCancel={() => onDone(false)}
-          onSubmit={(v) => setPass(v.passphrase ?? "")}
-        />
-      </Layout>
-    );
-  }
-
   return (
-    <RpcRunner
-      title={`Unlocking ${wallet.name}…`}
-      method="eoa.unlock"
-      params={{ name: wallet.name, passphrase: pass }}
-      renderResult={() => <Text color={theme.ok}>unlocked</Text>}
-      onDone={onDone}
+    <UnlockEoaStep
+      wallet={{ name: wallet.name, address: wallet.address }}
+      onUnlocked={() => onDone(true)}
+      onCancel={() => onDone(false)}
     />
   );
 }

@@ -4,9 +4,9 @@ import { Wallet } from "../types.js";
 import { Layout, Banner } from "../widgets/Layout.js";
 import Form, { Field } from "../widgets/Form.js";
 import RpcRunner from "../widgets/RpcRunner.js";
-import { call } from "../daemon.js";
 import { theme } from "../theme.js";
 import { hexToBigInt, formatEth } from "../format.js";
+import UnlockEoaStep from "./UnlockEoaStep.js";
 
 type Props = {
   wallet: Wallet;
@@ -43,6 +43,9 @@ export default function ShieldFlow({ wallet, onDone }: Props) {
   }
 
   if (phase.kind === "form") {
+    // EOA unlock has been factored out into UnlockEoaStep — the form
+    // now only collects the amount and the PP passphrase (a distinct
+    // secret from the EOA passphrase by design).
     const fields: Field[] = [
       {
         name: "amountEth",
@@ -50,12 +53,6 @@ export default function ShieldFlow({ wallet, onDone }: Props) {
         placeholder: "0.01",
         validate: (v) =>
           /^[0-9]+(\.[0-9]+)?$/.test(v) ? null : "expected a decimal ETH amount",
-      },
-      {
-        name: "eoaPass",
-        label: `Passphrase for EOA '${wallet.name}'`,
-        secret: true,
-        validate: (v) => (v.length === 0 ? "required" : null),
       },
       {
         name: "ppPass",
@@ -76,13 +73,13 @@ export default function ShieldFlow({ wallet, onDone }: Props) {
   }
 
   if (phase.kind === "unlock") {
-    // Inline unlock then auto-advance to deposit.
+    // Auto-routes through master KEK when available, prompts per-slot
+    // otherwise. Then auto-advance to deposit.
     return (
-      <UnlockThen
-        name={wallet.name}
-        passphrase={phase.v.eoaPass!}
+      <UnlockEoaStep
+        wallet={wallet}
         onUnlocked={() => setPhase({ kind: "deposit", v: phase.v })}
-        onError={(msg) => setPhase({ kind: "error", message: msg })}
+        onCancel={() => onDone(false)}
       />
     );
   }
@@ -114,35 +111,6 @@ export default function ShieldFlow({ wallet, onDone }: Props) {
   return (
     <Layout title="Shield deposit failed" hint="enter • back · esc • back">
       <Banner kind="err" text={phase.message} />
-    </Layout>
-  );
-}
-
-function UnlockThen({
-  name,
-  passphrase,
-  onUnlocked,
-  onError,
-}: {
-  name: string;
-  passphrase: string;
-  onUnlocked: () => void;
-  onError: (msg: string) => void;
-}) {
-  React.useEffect(() => {
-    let cancelled = false;
-    call("eoa.unlock", { name, passphrase }).then((r) => {
-      if (cancelled) return;
-      if (r.ok) onUnlocked();
-      else onError(`unlock failed: ${r.error.message}`);
-    });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  return (
-    <Layout title="Unlocking EOA…">
-      <Text color={theme.dim}>verifying passphrase for {name}</Text>
     </Layout>
   );
 }
