@@ -37,7 +37,10 @@ ConfirmGate stays the load-bearing safety net. This module narrows
   bridgeDir + `node_modules` location; deferred to a follow-up slice
   to avoid breaking the build on dev hosts.
 * No seccomp filter. Defer to a follow-up.
-* No user namespace. The sidecar still runs as the daemon's UID.
+* User namespace is created (`--user --map-current-user`) so that
+  unprivileged daemons can use the other namespaces without
+  CAP_SYS_ADMIN. UID mapping is identity, so the sidecar still runs
+  as the daemon's UID — no privilege gain inside the namespace.
 
 ## Modes
 
@@ -98,9 +101,13 @@ def detectUnshare : IO (Option String) := do
 
 /-- Build the `unshare` arg prefix. PID + UTS + IPC are always
 unshared; the network namespace is unshared unless the sidecar needs
-loopback TCP to host services. -/
+loopback TCP to host services. `--user --map-current-user` is required
+so an unprivileged daemon can unshare the other namespaces without
+CAP_SYS_ADMIN; UID mapping is preserved so the sidecar still runs as
+the daemon's UID inside the namespace. -/
 private def unshareFlags (spec : SidecarSpec) : Array String :=
-  let base : Array String := #["--pid", "--fork", "--mount-proc", "--uts", "--ipc"]
+  let base : Array String :=
+    #["--user", "--map-current-user", "--pid", "--fork", "--mount-proc", "--uts", "--ipc"]
   if spec.needsTcpLoopback then base
   else base ++ #["--net"]
 
