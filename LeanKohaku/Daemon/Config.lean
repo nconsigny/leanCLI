@@ -232,7 +232,15 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
           configString? fileCfg "rpc_transport",
           configString? fileCfg "rpcTransport"
         ] >>= parseTransport?
-  let rpcEndpoint := endpointFromUrl rpcUrl transport?
+  -- Tag the default endpoint with the daemon's configured chainId.
+  -- Without this the endpoint is `chainId = none`, which the
+  -- `mainnetSafeDaemonPolicy` ("strict") treats as "unknown chain →
+  -- apply mainnet-strict rule" and denies configured-node broadcasts.
+  -- That trips every non-EOA broadcast path (r1.sendSepolia,
+  -- shielded.*, anything that uses `cfg.rpcEndpoint` directly), while
+  -- `eoa.send` works because it rebuilds the endpoint per call via
+  -- `endpointForChain` (Server.lean#"eoa.send").
+  let rpcEndpoint := endpointFromUrl rpcUrl transport? (some chainId)
   -- Why: ENS resolution is always against mainnet (names canonical there).
   -- Fallback chain so users only set one mainnet RPC and ENS just works:
   --   1. Explicit ENS RPC (env or file) — escape hatch for a different
@@ -324,6 +332,20 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
                 | none => none
           | _ => #[]
     | _ => #[]
+  -- Why: bootstrap the entry for the daemon's primary chain from the
+  -- default `rpc_url` when no per-chain entry covers it. Internally
+  -- consistent: if the user said "this URL is the daemon's RPC for
+  -- chain X", then `chain_endpoints[X]` should equal that. Otherwise
+  -- callers that pass `chain: X` to RPC handlers fail at `endpointForChain`
+  -- even though the daemon obviously has a usable endpoint for X.
+  -- Mismatched configs (rpc_url disagrees with chainId) are caught by
+  -- the eth_chainId probe below; this bootstrap only widens access, it
+  -- never lies about a chain we don't have.
+  match chainNameFromId with
+  | some primaryName =>
+      if !chainEndpoints.any (fun (k, _) => k = primaryName) then
+        chainEndpoints := chainEndpoints.push (primaryName, rpcEndpoint)
+  | none => pure ()
   -- Why: read configured indexers (urls only — never api keys on disk).
   let indexers : Array LeanKohaku.Daemon.Server.IndexerEntry :=
     match fileCfg.bind (getField "indexers") with
@@ -337,6 +359,60 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
               | none => none
           | _ => none
     | _ => #[]
+  -- Why: probe the configured RPC for its actual chainId and refuse to
+  -- start if it disagrees with `cfg.chainId`. Catches the silent
+  -- "rpc_url is sepolia but chain_id is 1" misconfiguration that
+  -- otherwise lets the daemon happily quote mainnet semantics for
+  -- testnet endpoints (or vice-versa). Skips silently when the probe
+  -- itself can't run (RPC unreachable, malformed response) — a flaky
+  -- RPC at boot should not soft-brick the wallet daemon.
+  --
+  -- Disable with `LEANKOHAKU_NO_CHAINID_PROBE=1` (escape hatch for
+  -- offline development / a node that doesn't yet expose eth_chainId).
+  let skipProbe : Bool ← do
+    match ← IO.getEnv "LEANKOHAKU_NO_CHAINID_PROBE" with
+    | some v =>
+        let t := v.trimAscii.toString
+        pure (t ≠ "" && t ≠ "0")
+    | none => pure false
+  if !skipProbe then
+    -- Why: the probe is config validation, not arbitrary outbound traffic.
+    -- We're asking the user's own explicitly-configured `rpc_url` what
+    -- chain it's on, with one call, at startup. Routing through
+    -- `cfg.policy` would deny this on every mainnet daemon (the default
+    -- `mainnetSafeDaemonPolicy` denies configured-node mainnet reads),
+    -- silently no-op'ing the mismatch check. Use a permissive policy
+    -- for THIS call only — all runtime calls still go through cfg.policy.
+    let probePolicy : LeanKohaku.Privacy.NetworkPolicy.Policy := fun _ => true
+    match ← LeanKohaku.RPC.Outbound.call probePolicy rpcEndpoint .chainId (.arr #[]) none with
+    | .ok j =>
+        match asString j with
+        | some hex =>
+            let body := if hex.startsWith "0x" || hex.startsWith "0X"
+                        then (hex.drop 2).toString
+                        else hex
+            let hexNibble : Char → Option Nat := fun c =>
+              if '0' ≤ c ∧ c ≤ '9' then some (c.toNat - '0'.toNat)
+              else if 'a' ≤ c ∧ c ≤ 'f' then some (10 + c.toNat - 'a'.toNat)
+              else if 'A' ≤ c ∧ c ≤ 'F' then some (10 + c.toNat - 'A'.toNat)
+              else none
+            let parsed : Option Nat :=
+              body.toList.foldl (init := some 0)
+                (fun acc c => acc.bind (fun n => (hexNibble c).map (fun d => n * 16 + d)))
+            match parsed with
+            | some onChainId =>
+                if onChainId ≠ chainId then
+                  throw <| IO.userError
+                    s!"daemon chain_id ({chainId}) disagrees with RPC eth_chainId ({onChainId}). \
+                       Fix: set `chain_id` in daemon.json (or LEANKOHAKU_CHAIN_ID) to match, \
+                       or point `rpc_url` at the RPC for chain {chainId}. \
+                       Bypass: LEANKOHAKU_NO_CHAINID_PROBE=1 (not recommended)."
+            | none =>
+                IO.eprintln s!"[config] eth_chainId returned unparseable hex ({hex}); skipping mismatch check"
+        | none =>
+            IO.eprintln "[config] eth_chainId returned non-string; skipping mismatch check"
+    | .error e =>
+        IO.eprintln s!"[config] eth_chainId probe failed ({e}); skipping mismatch check"
   pure { socketPath := socketPath, chainId := chainId, policy := policy,
          rpcEndpoint := rpcEndpoint, ensRpcEndpoint := ensRpcEndpoint,
          chainEndpoints := chainEndpoints,
