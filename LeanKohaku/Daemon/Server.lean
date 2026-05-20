@@ -29,6 +29,7 @@ import LeanKohaku.Ethereum.Intent
 import LeanKohaku.Ethereum.IntentCanonical
 import LeanKohaku.Ethereum.IntentEncode
 import LeanKohaku.Ethereum.IntentJson
+import LeanKohaku.Ethereum.Ownership
 import LeanKohaku.Ethereum.Tx
 import LeanKohaku.Keystore.Tpm2Runtime
 import LeanKohaku.Keystore.MasterKey
@@ -308,6 +309,58 @@ private partial def collectTransferTokens : Json → Array String
         | _ => #[]
       fromLogs ++ fromCalls
   | _ => #[]
+
+/-- Scan ABI-encoded calldata for 32-byte words that look like addresses
+    (12 leading zero bytes + 20 nonzero bytes). Returns lowercased
+    0x-prefixed addresses, deduplicated, in first-seen order. Used by
+    `tx.decodeIntent` to prefetch ERC-20 metadata for tokens referenced
+    *inside* a multicall payload — without this, inner `tokenAmount`
+    fields fall back to the short-address tag.
+
+    Sliding a 64-hex (32-byte) window in 4-byte (8 hex char) steps catches
+    addresses at any selector-shifted alignment: an inner element of a
+    `bytes[]` starts with a 4-byte function selector, so its parameter
+    words live at byte offsets that are *not* 32-aligned relative to the
+    outer calldata, but ARE always 4-aligned. False positives (small
+    uint256 values that happen to fit in 160 bits) are harmless — the
+    follow-up `decimals()`/`symbol()` eth_calls revert cleanly and the
+    cache absorbs the miss. -/
+private partial def scanCalldataAddrLoop
+    (chars : List Char) (acc : Array String) : Array String :=
+  let word := chars.take 64
+  if word.length < 64 then acc
+  else
+    let lead := word.take 24
+    let addrChars := word.drop 24
+    let leadAllZero := lead.all (· == '0')
+    -- Entropy guard: real EOA / contract addresses have ~35-40 nonzero hex
+    -- characters out of 40. Shifted small-integer matches (e.g. a uint256
+    -- value of 0x20 caught at a non-aligned offset) have only 1-4 nonzero
+    -- characters. Requiring ≥ 10 nonzero hex chars in the address portion
+    -- removes the vast majority of false positives without dropping any
+    -- realistic token address — and keeps the daemon's metadata prefetch
+    -- to a handful of eth_calls instead of dozens.
+    let nonzeroCount := addrChars.foldl (fun n c => if c == '0' then n else n + 1) 0
+    let acc' :=
+      if leadAllZero && nonzeroCount ≥ 10 then
+        let canonical := "0x" ++ (String.ofList addrChars).toLower
+        if acc.contains canonical then acc else acc.push canonical
+      else acc
+    scanCalldataAddrLoop (chars.drop 8) acc'
+
+def scanCalldataAddresses (data : String) : Array String :=
+  -- Stay in `List Char` for the whole walk: `String.drop` returns a
+  -- `String.Slice` in Lean 4.29 which doesn't roundtrip cleanly into the
+  -- chunked loop. The list-based path is simpler and the cost is bounded
+  -- by calldata length.
+  let chars := data.toList
+  let chars := match chars with
+    | '0' :: 'x' :: rest => rest
+    | _ => chars
+  -- Skip the 4-byte (8 hex char) outer function selector. `List.drop`
+  -- returns `[]` when the input is shorter, which the loop handles as a
+  -- no-op.
+  scanCalldataAddrLoop (chars.drop 8) #[]
 
 private def slotMetadataJson (state : LeanKohaku.Daemon.State.Shared)
     (record : LeanKohaku.Wallet.EoaStore.Record) : IO Json := do
@@ -1426,6 +1479,117 @@ private def r1SendFlow (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           message := "r1 digest preparation produced unexpected output",
           data := some (.str prepOut) }
 
+/-- Build the `chat.draft` response JSON for a parsed/synthesized Intent.
+
+For leaf-encodable variants (nativeTransfer, erc20*, swap-leg, aave*,
+rawCall) this returns the `encoded` tx shape the TUI feeds into
+`tx.simulate` + ConfirmGate exactly as before.
+
+For the privacy / hygiene / wallet variants the encoder isn't applicable
+(see `IntentEncode.encode`'s explicit `.error` branches). Instead we
+return a `prepare` / `audit` / `create` directive naming the daemon RPC
+the TUI should call next:
+
+* `shielded.deposit`  → `prepare = {rpc: "shielded.prepareDeposit",  …}`
+* `shielded.withdraw` → `prepare = {rpc: "shielded.prepareWithdraw", …}`
+* `approvals.audit`   → `audit   = {rpc: "daemon.approvals.list",    …}`
+* `address.fresh`     → `create  = {rpc: "eoa.create"|"tpm.create",  …}`
+
+The TUI dispatches the directive, then per-tx ConfirmGate over the
+returned prepared txs (for shielded) or shows the read-only result
+(for audit / create). The trust boundary — every tx still flows
+through `tx.simulate` + per-tx ConfirmGate before signing — is
+preserved by routing through `prepare*` RPCs that return prepared
+(unsigned) txs, NOT the existing one-shot `shielded.deposit` /
+`shielded.withdraw` RPCs which sign-and-broadcast internally. -/
+private def chatDraftIntentResponse
+    (intent : LeanKohaku.Ethereum.Intent.Intent)
+    (baseFields : Array (String × Json))
+    (synthLabel : Option String)
+    (chainId : Nat) :
+    Json :=
+  let canonical := LeanKohaku.Ethereum.IntentCanonical.toCanonicalString intent
+  let actionTag := LeanKohaku.Ethereum.IntentCanonical.actionTag intent
+  let synthArr : Array (String × Json) :=
+    match synthLabel with
+    | some s => #[("synth", .str s)]
+    | none   => #[]
+  let commonFields : Array (String × Json) :=
+    baseFields ++ #[
+      ("intentActionTag", .str actionTag),
+      ("canonical",       .str canonical)
+    ] ++ synthArr
+  let addrJson (a : LeanKohaku.Ethereum.Address.Address) : Json :=
+    .str (LeanKohaku.Crypto.Hex.encode a.bytes)
+  match intent with
+  | .shieldedDeposit _ amountWei =>
+      let amountEth := LeanKohaku.Util.Units.formatUnits amountWei 18
+      .obj <| commonFields ++ #[
+        ("prepare", .obj #[
+          ("rpc",    .str "shielded.prepareDeposit"),
+          ("params", .obj #[
+            ("amountEth", .str amountEth),
+            ("chainId",   .num (Int.ofNat chainId))
+          ])
+        ])
+      ]
+  | .shieldedWithdraw _ amountWei recipient viaRelayer =>
+      let amountEth := LeanKohaku.Util.Units.formatUnits amountWei 18
+      .obj <| commonFields ++ #[
+        ("prepare", .obj #[
+          ("rpc",    .str "shielded.prepareWithdraw"),
+          ("params", .obj #[
+            ("amountEth",  .str amountEth),
+            ("recipient",  addrJson recipient),
+            ("viaRelayer", .bool viaRelayer),
+            ("chainId",    .num (Int.ofNat chainId))
+          ])
+        ])
+      ]
+  | .approvalsAudit _ wallet =>
+      let walletEntry : Array (String × Json) :=
+        match wallet with
+        | some a => #[("wallet", addrJson a)]
+        | none   => #[]
+      .obj <| commonFields ++ #[
+        ("audit", .obj #[
+          ("rpc",    .str "daemon.approvals.list"),
+          ("params", .obj <| #[("chainId", .num (Int.ofNat chainId))] ++ walletEntry)
+        ])
+      ]
+  | .freshAddress _ kind label deployImmediately =>
+      let rpc : String :=
+        match kind with
+        | .eoa => "eoa.create"
+        | .r1  => "tpm.create"
+      let labelEntry : Array (String × Json) :=
+        match label with
+        | some l => #[("label", .str l)]
+        | none   => #[]
+      .obj <| commonFields ++ #[
+        ("create", .obj #[
+          ("rpc",    .str rpc),
+          ("params", .obj <| #[
+            ("kind",              .str (LeanKohaku.Ethereum.Intent.WalletKind.toString kind)),
+            ("deployImmediately", .bool deployImmediately),
+            ("chainId",           .num (Int.ofNat chainId))
+          ] ++ labelEntry)
+        ])
+      ]
+  | _ =>
+      match LeanKohaku.Ethereum.IntentEncode.encode intent with
+      | .error msg =>
+          .obj <| commonFields ++ #[("encodeError", .str msg)]
+      | .ok enc =>
+          .obj <| commonFields ++ #[
+            ("encoded", .obj #[
+              ("to",      .str enc.to),
+              ("value",   .num (Int.ofNat enc.valueWei)),
+              ("data",    .str enc.data),
+              ("chainId", .num (Int.ofNat chainId))
+            ])
+          ]
+
 def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
     (notify : LeanKohaku.Keystore.Tpm2Runtime.Notifier)
     (req : Request) : IO (Except RpcError Json) := do
@@ -1833,6 +1997,87 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                   ]
               | .error err =>
                   pure <| .error { code := -32020, message := "chain RPC failed", data := some (.str err) }
+  | "chain.addressFreshness" =>
+      -- Why: the wallets-hub TUI green-marks "0-link" rows so users
+      -- can pick an unshield destination without leaking on-chain
+      -- linkage. "0 link" here = nonce 0 (pending tag) AND no ERC-20
+      -- Transfer event in/out within the lookback window. The window
+      -- is bounded (default 5000 blocks ≈ 17 h on mainnet) because
+      -- public RPCs cap eth_getLogs ranges; this is a best-effort
+      -- signal, never used for signing decisions — the TUI degrades
+      -- to "unknown" (no green) when either getLogs call fails.
+      match paramString req.params "address" with
+      | .error err => pure (.error err)
+      | .ok address =>
+          match LeanKohaku.Ethereum.Address.fromHex address with
+          | none => pure (.error invalidParams)
+          | some _ =>
+              let chain? := getField "chain" req.params >>= asString
+              match endpointForChain cfg chain? with
+              | .error err =>
+                  pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
+              | .ok ep =>
+                  let chainIdForVerify :=
+                    match chain? with
+                    | some "mainnet" => 1
+                    | some "sepolia" => 11155111
+                    | _ => cfg.chainId
+                  let via? ← colibriVia state chainIdForVerify
+                  let lookback := paramNatD req.params "lookback" 5000
+                  -- Nonce (pending) — primary "did this account ever send a tx" signal.
+                  let nonceRes ← LeanKohaku.RPC.Outbound.getTransactionCount cfg.policy ep address "pending" via?
+                  match nonceRes with
+                  | .error err =>
+                      pure <| .error { code := -32020, message := "chain RPC failed", data := some (.str err) }
+                  | .ok nonceJ =>
+                      let nonceN := (asString nonceJ >>= parseHexQuantity).getD 0
+                      -- Head block — bound the getLogs window.
+                      let headRes ← LeanKohaku.RPC.Outbound.blockNumber cfg.policy ep via?
+                      match headRes with
+                      | .error _ =>
+                          pure <| .ok <| .obj #[
+                            ("address", .str address),
+                            ("nonce", .num (Int.ofNat nonceN)),
+                            ("available", .bool false),
+                            ("reason", .str "eth_blockNumber failed")
+                          ]
+                      | .ok headJ =>
+                          let head := (asString headJ >>= parseHexQuantity).getD 0
+                          let fromBlock := if head ≤ lookback then 0 else head - lookback
+                          let fromHex := natQuantityHex fromBlock
+                          let toHex := natQuantityHex head
+                          let paddedSelf := "0x" ++ LeanKohaku.Swap.UniV3.encodeAddress address
+                          -- Two scans: address as Transfer.from (topic1), address as Transfer.to (topic2).
+                          -- No `address` filter on the eth_getLogs query so any ERC-20
+                          -- contract matches; that's the heavier query, hence "best-effort".
+                          let outTopics : Array Json := #[.str transferEventTopic, .str paddedSelf, .null]
+                          let inTopics  : Array Json := #[.str transferEventTopic, .null, .str paddedSelf]
+                          let outRes ← LeanKohaku.RPC.Outbound.getLogsAnyAddress cfg.policy ep fromHex toHex outTopics via?
+                          let inRes  ← LeanKohaku.RPC.Outbound.getLogsAnyAddress cfg.policy ep fromHex toHex inTopics  via?
+                          let countOpt? : Json → Option Nat := fun j =>
+                            (asArray j).map (fun a => a.size)
+                          match outRes, inRes with
+                          | .ok oj, .ok ij =>
+                              let oc := (countOpt? oj).getD 0
+                              let ic := (countOpt? ij).getD 0
+                              pure <| .ok <| .obj #[
+                                ("address", .str address),
+                                ("nonce", .num (Int.ofNat nonceN)),
+                                ("erc20OutCount", .num (Int.ofNat oc)),
+                                ("erc20InCount", .num (Int.ofNat ic)),
+                                ("fromBlock", .num (Int.ofNat fromBlock)),
+                                ("toBlock", .num (Int.ofNat head)),
+                                ("available", .bool true)
+                              ]
+                          | _, _ =>
+                              pure <| .ok <| .obj #[
+                                ("address", .str address),
+                                ("nonce", .num (Int.ofNat nonceN)),
+                                ("fromBlock", .num (Int.ofNat fromBlock)),
+                                ("toBlock", .num (Int.ofNat head)),
+                                ("available", .bool false),
+                                ("reason", .str "eth_getLogs unavailable on this RPC")
+                              ]
   | "chain.gasPrice" =>
       let via? ← colibriVia state cfg.chainId
       match ← LeanKohaku.RPC.Outbound.gasPrice cfg.policy cfg.rpcEndpoint via? with
@@ -2951,7 +3196,12 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       -- still has the final say: it shows the encoded tx + canonical
       -- text in ConfirmGate, then signs.
       --
-      -- params: { prompt : String, chainId : Nat }
+      -- params: { prompt : String, chainId : Nat, history? : Array { role, content } }
+      -- `history` is forwarded verbatim to the sidecar. The sidecar
+      -- filters to {role: user|assistant, content: string} and caps to
+      -- the last N turns; the daemon does not need to inspect it. Trust
+      -- model: history text is untrusted exactly like `prompt` — the
+      -- Lean IntentParser still hard-rejects whatever the model emits.
       match paramString req.params "prompt",
             getField "chainId" req.params >>= asNat with
       | .ok prompt, some chainId =>
@@ -2988,24 +3238,27 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           -- extracted those, swap in the resolved address before the
           -- LLM ever sees the prompt — saves an entire ask-loop. Same
           -- pattern as ENS resolution above.
+          -- Per-entry shape carries derivation info so the resolver can
+          -- *re-derive* an unlocked EOA seed at the recorded path and
+          -- structurally compare against the on-disk address. The third
+          -- slot is `some (slotName, path)` for EOA entries (BIP-44
+          -- derivable) and `none` for TPM/R1 entries (hardware-bound,
+          -- not re-derivable). See Invariants/AddressOwnership.lean for
+          -- the safety proof.
           let eoaNames ← LeanKohaku.Wallet.EoaStore.list
-          let mut walletEntries : List (String × String) := []
+          let mut walletEntries : List (String × String × Option (String × String)) := []
           for name in eoaNames do
             match ← LeanKohaku.Wallet.EoaStore.load name with
             | .ok rec =>
-                -- Primary slot address ("leanWallet" → 0x…).
-                walletEntries := walletEntries ++ [(rec.name, rec.address)]
-                -- Each BIP-32 sub-account: "leanWallet/0",
-                -- "leanWallet/ops", etc. The label wins when present;
-                -- falls back to the integer index. Lets the user
-                -- reference a sub-account by name in the chat without
-                -- having to look up the derived address.
+                walletEntries := walletEntries ++
+                  [(rec.name, rec.address, some (rec.name, rec.derivationPath))]
                 for acct in recordAccounts rec do
                   let subKey :=
                     match acct.label with
                     | some l => s!"{rec.name}/{l}"
                     | none   => s!"{rec.name}/{acct.index}"
-                  walletEntries := walletEntries ++ [(subKey, acct.address)]
+                  walletEntries := walletEntries ++
+                    [(subKey, acct.address, some (rec.name, acct.path))]
             | .error _ => pure ()
           let tpmNames ← listSepoliaKeys
           let tpmStateDir : System.FilePath := ".leankohaku/keystore/tpm2"
@@ -3015,28 +3268,58 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
               let raw ← IO.FS.readFile addrFile
               let addr := raw.trimAscii.toString
               if !addr.isEmpty then
-                walletEntries := walletEntries ++ [(name, addr)]
+                walletEntries := walletEntries ++ [(name, addr, none)]
           let bookEntries ← LeanKohaku.Daemon.AddressBook.loadIO
           let book := match bookEntries with
             | .ok xs => xs
             | .error _ => []
+          -- Per-entry ownership status. EOA + unlocked → re-derive and
+          -- compare; EOA + locked → `.locked`; TPM → `.hardware`. The
+          -- only branch that emits `.verified` performs the actual
+          -- `deriveAddressFromSeed` and structurally compares
+          -- (invariant 14.1).
+          let computeOwnership :
+              String → Option (String × String) →
+              IO LeanKohaku.Ethereum.Ownership.Status :=
+            fun addr deriv? => do
+              match deriv? with
+              | none => pure .hardware
+              | some (slotName, path) =>
+                  match ← LeanKohaku.Daemon.State.getUnlocked? state slotName with
+                  | none => pure .locked
+                  | some slot =>
+                      match ← deriveAddressFromSeed slot.seed path with
+                      | .ok derived =>
+                          if derived.toLower = addr.toLower then
+                            pure (.verified path)
+                          else
+                            pure (.mismatch derived)
+                      | .error _ => pure .locked
           let resolveLocal (key : String) (d : LeanKohaku.Ethereum.Intent.RegexDraft) :
-              LeanKohaku.Ethereum.Intent.RegexDraft :=
+              IO (LeanKohaku.Ethereum.Intent.RegexDraft ×
+                  Option LeanKohaku.Ethereum.Ownership.Witness) := do
             match d.field? key with
-            | none => d
+            | none => pure (d, none)
             | some s =>
                 let lower := s.toLower
-                match walletEntries.find? (fun kv => kv.fst.toLower = lower) with
-                | some (_, addr) =>
-                    (d.setField key addr).note s!"resolved wallet '{s}' → {addr}"
+                match walletEntries.find? (fun e => e.fst.toLower = lower) with
+                | some (_, addr, deriv?) =>
+                    let d' := (d.setField key addr).note s!"resolved wallet '{s}' → {addr}"
+                    let status ← computeOwnership addr deriv?
+                    pure (d', some { key := key, address := addr, status := status })
                 | none =>
                     match book.find? (fun e => e.label.toLower = lower) with
                     | some e =>
-                        (d.setField key e.address).note s!"resolved book label '{s}' → {e.address}"
-                    | none => d
-          let regex3 := resolveLocal "to" regex2
-          let regex4 := resolveLocal "spender" regex3
-          let regex5 := resolveLocal "from" regex4
+                        let d' := (d.setField key e.address).note
+                          s!"resolved book label '{s}' → {e.address}"
+                        pure (d',
+                          some { key := key, address := e.address, status := .book })
+                    | none => pure (d, none)
+          let (regex3, w_to) ← resolveLocal "to" regex2
+          let (regex4, w_spender) ← resolveLocal "spender" regex3
+          let (regex5, w_from) ← resolveLocal "from" regex4
+          let ownerships : List LeanKohaku.Ethereum.Ownership.Witness :=
+            [w_to, w_spender, w_from].filterMap id
           -- 1a-ter. Deterministic amount conversion. Models are
           -- documented unreliable at unit conversion (we caught gpt-oss
           -- emit `1e15` for "0.01 ETH" instead of `1e16`). The daemon
@@ -3065,6 +3348,25 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                     | none => regex5.note s!"could not parseUnits {amt} with decimals {d}"
             | _, _ => regex5
           let _ := chainEnumOpt0  -- chainEnumOpt rebuilt below; this binding keeps the helper alive while we widen the scope of the chain enum after the upcoming chainContext step
+          -- Encode each ownership witness as a self-describing object.
+          -- The TUI parses `status` to pick a badge color; `derivationPath`
+          -- is present only for `.verified`, `derived` only for `.mismatch`.
+          let ownershipJson :
+              LeanKohaku.Ethereum.Ownership.Witness → Json :=
+            fun w =>
+              let base : List (String × Json) :=
+                [("key", .str w.key),
+                 ("address", .str w.address),
+                 ("status", .str w.statusTag)]
+              let withPath : List (String × Json) :=
+                match w.derivationPath? with
+                | some p => base ++ [("derivationPath", Json.str p)]
+                | none   => base
+              let full : List (String × Json) :=
+                match w.derivedAddress? with
+                | some d => withPath ++ [("derived", Json.str d)]
+                | none   => withPath
+              Json.obj full.toArray
           let regexJson : Json :=
             .obj #[
               ("action",     .str (LeanKohaku.Ethereum.Intent.Action.toString regex.action)),
@@ -3072,7 +3374,8 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                                 Json.obj #[("k", .str kv.fst), ("v", .str kv.snd)])
                               |>.toArray)),
               ("unresolved", .arr (regex.unresolved.map Json.str |>.toArray)),
-              ("confidence", .str (LeanKohaku.Ethereum.Intent.Confidence.toString regex.confidence))
+              ("confidence", .str (LeanKohaku.Ethereum.Intent.Confidence.toString regex.confidence)),
+              ("ownerships", .arr (ownerships.map ownershipJson |>.toArray))
             ]
           -- 1b. Skill picker. For erc20Approve, we pick between the
           -- two sibling skills based on what the regex saw: a revoke
@@ -3105,11 +3408,21 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
             needles.any (fun n => (promptLower.splitOn n).length > 1)
           let skillName : String :=
             match actionTag with
-            | "nativeTransfer" => "send-native"
-            | "erc20Transfer"  => "send-erc20"
-            | "erc20Approve"   =>
+            | "nativeTransfer"    => "send-native"
+            | "erc20Transfer"     => "send-erc20"
+            | "erc20Approve"      =>
                 if regexSawRevoke then "revoke-approval" else "approve-erc20"
-            | _                =>
+            -- New explicit action tags from matchShielded /
+            -- matchAuditApprovals / matchFreshAddress. The phrase-
+            -- fallback below remains as a safety net for aliased
+            -- forms the templates don't cover (e.g. "make this
+            -- anonymous").
+            | "shielded.deposit"  => "shield-eth"
+            | "shielded.withdraw" => "unshield-eth"
+            | "approvals.audit"   => "audit-approvals"
+            | "address.fresh"     => "fresh-address"
+            | "swap"              => "swap-uniswap-v3"
+            | _                   =>
                 -- Order tightest-first: "unshield" before "shield " to
                 -- keep the prefix collision off; rotate/fresh phrases
                 -- are kept specific so generic "send to a new address"
@@ -3204,7 +3517,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           let walletsJson : Json :=
             .arr (walletEntries.map (fun kv => Json.obj #[
               ("name",    .str kv.fst),
-              ("address", .str kv.snd)
+              ("address", .str kv.snd.fst)
             ])).toArray
           let bookJson : Json :=
             .arr (book.map (fun e => Json.obj #[
@@ -3242,44 +3555,27 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
             | none => none
             | some n =>
                 let lower := n.toLower
-                (walletEntries.find? (fun kv => kv.fst.toLower = lower)).map Prod.snd
+                (walletEntries.find? (fun kv => kv.fst.toLower = lower)).map (fun e => e.snd.fst)
           let earlyReturn : Option Json :=
             match LeanKohaku.LlmAgent.DirectSynth.synth regex chainId defaultSenderAddr? with
             | .error _ => none
             | .ok intent =>
-                match LeanKohaku.Ethereum.IntentEncode.encode intent with
-                | .error msg =>
-                    -- Encoder rejected a Lean-synthesized intent. Surface
-                    -- it AND don't fall back to the LLM: if Lean's own
-                    -- encoder said no, the model shouldn't be asked to
-                    -- reinterpret.
-                    some <| .obj #[
-                      ("regex", regexJson),
-                      ("intentActionTag",
-                        .str (LeanKohaku.Ethereum.IntentCanonical.actionTag intent)),
-                      ("encodeError", .str msg),
-                      ("synth", .str "wallet-direct")
-                    ]
-                | .ok enc =>
-                    some <| .obj #[
-                      ("regex", regexJson),
-                      ("intentActionTag",
-                        .str (LeanKohaku.Ethereum.IntentCanonical.actionTag intent)),
-                      ("canonical",
-                        .str (LeanKohaku.Ethereum.IntentCanonical.toCanonicalString intent)),
-                      ("encoded", .obj #[
-                        ("to",      .str enc.to),
-                        ("value",   .num (Int.ofNat enc.valueWei)),
-                        ("data",    .str enc.data),
-                        ("chainId", .num (Int.ofNat chainId))
-                      ]),
-                      ("synth", .str "wallet-direct")
-                    ]
+                some <| chatDraftIntentResponse
+                  intent
+                  #[("regex", regexJson)]
+                  (some "wallet-direct")
+                  chainId
           match earlyReturn with
           | some j => return .ok j
           | none   => pure ()
           -- 2. Call LLM sidecar with the regex as a seed + the matching
-          -- skill body + the chain's token registry.
+          -- skill body + the chain's token registry. Forward the
+          -- optional history field verbatim — the sidecar filters and
+          -- caps it.
+          let historyField : Array (String × Json) :=
+            match getField "history" req.params with
+            | some (j@(.arr _)) => #[("history", j)]
+            | _ => #[]
           let llmReq : Json :=
             .obj <| #[
               ("prompt",        .str prompt),
@@ -3287,7 +3583,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
               ("chainId",       .num (Int.ofNat chainId)),
               ("chainContext",  chainContextJson),
               ("walletContext", walletContextJson)
-            ] ++ (match skillBody? with
+            ] ++ historyField ++ (match skillBody? with
                   | some body => #[("skillContext", .obj #[
                       ("name", .str skillName),
                       ("body", .str body)
@@ -3342,31 +3638,15 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                       ])
                     ]
                 | .ok (.intent intent) =>
-                    -- 4. Encode via the leaf encoder.
-                    match LeanKohaku.Ethereum.IntentEncode.encode intent with
-                    | .error msg =>
-                        pure <| .ok <| .obj #[
-                          ("regex", regexJson),
-                          ("llmRaw", .str rawStr),
-                          ("intentActionTag",
-                            .str (LeanKohaku.Ethereum.IntentCanonical.actionTag intent)),
-                          ("encodeError", .str msg)
-                        ]
-                    | .ok enc =>
-                        pure <| .ok <| .obj #[
-                          ("regex", regexJson),
-                          ("llmRaw", .str rawStr),
-                          ("intentActionTag",
-                            .str (LeanKohaku.Ethereum.IntentCanonical.actionTag intent)),
-                          ("canonical",
-                            .str (LeanKohaku.Ethereum.IntentCanonical.toCanonicalString intent)),
-                          ("encoded", .obj #[
-                            ("to",      .str enc.to),
-                            ("value",   .num (Int.ofNat enc.valueWei)),
-                            ("data",    .str enc.data),
-                            ("chainId", .num (Int.ofNat chainId))
-                          ])
-                        ]
+                    -- 4. Route via chatDraftIntentResponse: leaf-encodable
+                    -- variants get the `encoded` tx shape; the new
+                    -- privacy/hygiene/wallet variants get a
+                    -- `prepare`/`audit`/`create` directive instead.
+                    pure <| .ok <| chatDraftIntentResponse
+                      intent
+                      #[("regex", regexJson), ("llmRaw", .str rawStr)]
+                      none
+                      chainId
       | .error msg, _ =>
           pure (.error msg)
       | _, none =>
@@ -3612,25 +3892,75 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           ]
       | none =>
           pure <| .ok <| .obj #[("running", .bool false)]
+  | "daemon.approvals.list" =>
+      -- Read-only listing of outgoing ERC-20 allowances for a wallet
+      -- on a chain. Spec (per D3 / audit-approvals SKILL.md): walk
+      -- `chain.scanTransfers` for `Approval` events from `wallet`
+      -- over a configurable block window and return unique
+      -- `[{token, spender, amount, lastSeenBlock}]` records, cached
+      -- daemon-side, refresh on demand.
+      --
+      -- This is a wire-level stub: the response shape is real so the
+      -- TUI's audit screen can integrate against it; the actual scan
+      -- + cache logic lands in a follow-up. Today it returns an empty
+      -- list with `implemented: false`, which the TUI surfaces as "no
+      -- approvals scanned yet (scan not implemented)".
+      let walletStr? : Option String :=
+        getField "wallet" req.params >>= asString
+      let chainIdParam : Nat :=
+        ((getField "chainId" req.params) >>= asNat).getD cfg.chainId
+      let walletEntry : Array (String × Json) :=
+        match walletStr? with
+        | some w => #[("wallet", .str w)]
+        | none   => #[]
+      pure <| .ok <| .obj <| #[
+        ("chainId",     .num (Int.ofNat chainIdParam)),
+        ("approvals",   .arr #[]),
+        ("implemented", .bool false),
+        ("note",        .str "approval scan not yet wired; see daemon.approvals.list TODO")
+      ] ++ walletEntry
   | "tx.decodeIntent" =>
       -- Why: forwards { chainId, to, value, data, from? } to the clearsign
-      -- sidecar. Before forwarding, prefetch ERC-20 metadata for `to` so
-      -- the sidecar's tokenAmount formatter can render real decimals +
-      -- ticker. For non-ERC-20 contracts the eth_calls revert and the
-      -- cache stays empty — formatters fall back to the address tag.
+      -- sidecar. Before forwarding, prefetch ERC-20 metadata for `to` AND
+      -- for any address-shaped 32-byte word found in the calldata so the
+      -- sidecar's tokenAmount formatter can render real decimals + ticker
+      -- on inner-call fields too (e.g. tokenIn/tokenOut inside a
+      -- multicall-wrapped Uniswap V3 swap). For non-ERC-20 contracts the
+      -- eth_calls revert and the cache stays empty — formatters fall back
+      -- to the address tag.
       let chainIdParam :=
         ((getField "chainId" req.params) >>= asNat).getD cfg.chainId
       let toParam :=
         ((getField "to" req.params) >>= asString).getD ""
-      let mut tokenMeta : Json := .obj #[]
+      let dataParam :=
+        ((getField "data" req.params) >>= asString).getD ""
+      let mut tokenMetaPairs : Array (String × Json) := #[]
+      let ep := chainEndpointFor cfg req.params chainIdParam
       if !toParam.isEmpty then
-        let ep := chainEndpointFor cfg req.params chainIdParam
         match ← LeanKohaku.Daemon.TokenMeta.lookupOrFetch
             state cfg.policy ep chainIdParam toParam with
         | some m =>
-            tokenMeta := .obj #[(toParam.toLower,
-              LeanKohaku.Daemon.TokenMeta.toJson m)]
+            tokenMetaPairs := tokenMetaPairs.push (toParam.toLower,
+              LeanKohaku.Daemon.TokenMeta.toJson m)
         | none => pure ()
+      -- Walk calldata for embedded address-shaped words (12 zero bytes +
+      -- 20 nonzero bytes) and prefetch metadata for each. False positives
+      -- (small uint256 values that fit in 160 bits) are harmless: the
+      -- eth_call reverts and the cache absorbs the miss.
+      let embeddedAddrs := scanCalldataAddresses dataParam
+      for addr in embeddedAddrs do
+        let lower := addr.toLower
+        let alreadyHave := tokenMetaPairs.any (fun p => p.1 == lower)
+        if alreadyHave then
+          pure ()
+        else
+          match ← LeanKohaku.Daemon.TokenMeta.lookupOrFetch
+              state cfg.policy ep chainIdParam addr with
+          | some m =>
+              tokenMetaPairs := tokenMetaPairs.push (lower,
+                LeanKohaku.Daemon.TokenMeta.toJson m)
+          | none => pure ()
+      let tokenMeta : Json := .obj tokenMetaPairs
       let augmented : Json :=
         match req.params with
         | .obj fields =>

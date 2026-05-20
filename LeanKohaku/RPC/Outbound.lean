@@ -378,4 +378,22 @@ def getLogs (policy : Policy) (endpoint : Endpoint)
       ]
     ]) via?
 
+/-- eth_getLogs over a block range filtered only by `topics`, with no
+contract-address filter. Used by address-freshness scans where we want
+"any ERC-20 contract emitted a Transfer involving this address" across
+the whole chain in the window. Note: public providers may rate-limit
+or cap this heavier query — callers must treat failures as "unknown",
+not "0 link". -/
+def getLogsAnyAddress (policy : Policy) (endpoint : Endpoint)
+    (fromBlockHex toBlockHex : String) (topics : Array Json)
+    (via? : Option VerifyVia := none) : IO (Except String Json) :=
+  call policy endpoint .getLogs
+    (.arr #[
+      .obj #[
+        ("fromBlock", .str fromBlockHex),
+        ("toBlock", .str toBlockHex),
+        ("topics", .arr topics)
+      ]
+    ]) via?
+
 end LeanKohaku.RPC.Outbound
