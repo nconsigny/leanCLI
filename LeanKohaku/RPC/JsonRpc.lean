@@ -62,7 +62,15 @@ private def metricsSentinel : String := "\n--LK_CURL_METRICS--\n"
 /-- HTTP shell-out with metric capture. Appends a sentinel-delimited
     metrics record (status / bytes / remote IP) to the response body via
     `curl -w` so we can surface "what server did the daemon actually
-    reach" without taking a dep on a Lean HTTP client. -/
+    reach" without taking a dep on a Lean HTTP client.
+
+    Timeouts: `--connect-timeout 5` bounds DNS+TCP handshake; `--max-time
+    20` bounds the whole operation. Without these curl waits forever on
+    a stuck endpoint, which in fan-out callers (e.g. `swap.balances`'s
+    18 parallel ERC20+ETH balance reads) presents to the user as a TUI
+    stuck on "loading balances…" with no failure signal. On timeout
+    curl exits 28 → we throw → `IO.asTask` records `.error` → caller
+    surfaces or drops per its fail-soft rule. -/
 def callRawDetailed (rpcUrl : String) (req : Request) : IO RawResponse := do
   let writeFmt :=
     metricsSentinel ++ "%{http_code}|%{size_download}|%{remote_ip}"
@@ -70,6 +78,8 @@ def callRawDetailed (rpcUrl : String) (req : Request) : IO RawResponse := do
     { cmd := "curl",
       args := #[
         "-sS",
+        "--connect-timeout", "5",
+        "--max-time", "20",
         "-H", "content-type: application/json",
         "--data", encodeRequest req,
         "-w", writeFmt,

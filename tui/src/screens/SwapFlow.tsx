@@ -248,6 +248,13 @@ export default function SwapFlow({ wallet, onDone }: Props) {
   // means "not yet fetched"; an empty map means "fetched, none ready".
   const [balances, setBalances] = useState<BalanceMap | null>(null);
   const [refreshingBalances, setRefreshingBalances] = useState(false);
+  // Error from the most recent `swap.balances` attempt. `null` means
+  // "no error" (either we haven't tried yet, or the last try succeeded).
+  // Surfaced inline above the picker so the user can tell a daemon /
+  // policy / RPC failure apart from "still loading…" — without this the
+  // screen pretends to keep loading forever on policy denial or curl
+  // timeout, with no way to diagnose the failure.
+  const [balancesError, setBalancesError] = useState<string | null>(null);
 
   // Step 1a: ask the daemon which chains have RPC URLs configured
   // (`network set-rpc-chain` entries). Pick the one the daemon flags as
@@ -312,34 +319,20 @@ export default function SwapFlow({ wallet, onDone }: Props) {
     };
   }, [phase.kind]);
 
-  // Step 1b: pull the token registry AND the per-token balances for the
-  // selected chain in parallel. We don't block tokens on balances — if
-  // balances are slower (typical on busy public RPCs) we render the
-  // pick-from screen with a placeholder column and update once the
-  // balance fan-out resolves. Re-runs every time `chain` changes (toggle
-  // key flips the phase back through here).
+  // Step 1b: pull the token registry for the selected chain. Advance to
+  // `pick-from` as soon as the registry lands so the user is not blocked
+  // on the balance fan-out (handled in Step 1c).
   useEffect(() => {
     if (phase.kind !== "load-tokens") return;
     const { chain, chains } = phase;
     let cancelled = false;
     (async () => {
-      // Race tokens + balances. The daemon's `swap.*` handlers parse
-      // `chainId` as a *string* ("mainnet" / "sepolia" / numeric); pass
-      // the canonical name so `paramStringD` does not silently fall
-      // back to "mainnet".
-      const tokensP = call<{ tokens: DaemonToken[] }>("swap.tokens.list", {
+      // The daemon's `swap.*` handlers parse `chainId` as a *string*
+      // ("mainnet" / "sepolia" / numeric); pass the canonical name so
+      // `paramStringD` does not silently fall back to "mainnet".
+      const r = await call<{ tokens: DaemonToken[] }>("swap.tokens.list", {
         chainId: chain.name,
       });
-      const balancesP = call<{
-        balances: Array<{
-          symbol: string;
-          address: string | null;
-          decimals: number;
-          balance: string;
-        }>;
-      }>("swap.balances", { chainId: chain.name, address: fromAddress });
-
-      const r = await tokensP;
       if (cancelled) return;
       if (!r.ok) {
         return setPhase({
@@ -351,25 +344,60 @@ export default function SwapFlow({ wallet, onDone }: Props) {
         (t) => ({ ...t, kind: "erc20" as const }),
       );
       const tokens: TokenItem[] = [ETH_ITEM, ...reg];
-
-      // Reset balances for the new chain; advance to pick-from
-      // immediately so the user is not blocked on balance fan-out.
+      // Reset balances for the new chain; Step 1c will refill them.
       setBalances(null);
+      setBalancesError(null);
       setRefreshingBalances(false);
       setPhase({ kind: "pick-from", tokens, chain, chains });
-
-      // Patch in balances when they arrive (fail-soft on RPC error —
-      // the placeholder column just stays in place).
-      const b = await balancesP;
-      if (cancelled) return;
-      if (b.ok) {
-        setBalances(balanceArrayToMap(b.result?.balances ?? []));
-      }
     })();
     return () => {
       cancelled = true;
     };
   }, [phase.kind, phase.kind === "load-tokens" ? phase.chain.name : ""]);
+
+  // Step 1c: fetch per-token balances once we reach `pick-from` with no
+  // balances yet. Kept separate from Step 1b because the previous
+  // combined effect cancelled the in-flight balance call on its own
+  // phase transition (load-tokens → pick-from changed the deps, React
+  // ran cleanup, and the awaited `swap.balances` was discarded),
+  // leaving the screen stuck on "loading balances…" until the user
+  // pressed `r`. Fail-soft on RPC error — placeholder column stays.
+  useEffect(() => {
+    if (phase.kind !== "pick-from") return;
+    if (balances !== null) return;
+    const chainName = phase.chain.name;
+    let cancelled = false;
+    (async () => {
+      const b = await call<{
+        balances: Array<{
+          symbol: string;
+          address: string | null;
+          decimals: number;
+          balance: string;
+        }>;
+      }>("swap.balances", { chainId: chainName, address: fromAddress });
+      if (cancelled) return;
+      if (b.ok) {
+        setBalances(balanceArrayToMap(b.result?.balances ?? []));
+        setBalancesError(null);
+      } else {
+        // Surface the daemon error so the user can tell policy denial
+        // from an RPC timeout from a missing endpoint. Leave `balances`
+        // as null so the column stays placeholder; the inline banner
+        // tells the user what to do (typically: press `r` to retry, or
+        // adjust the network policy / RPC URL).
+        setBalancesError(b.error.message);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    phase.kind,
+    phase.kind === "pick-from" ? phase.chain.name : "",
+    fromAddress,
+    balances === null,
+  ]);
 
   // Wizard-level navigation rule: sub-components (ink-select-input,
   // ink-text-input) own ↑/↓ and ←/→ where they need them; the wizard
@@ -427,12 +455,18 @@ export default function SwapFlow({ wallet, onDone }: Props) {
         dim: isZero,
       };
     });
+    // Balance-status line. Error wins over loading because a persistent
+    // "loading balances…" spinner on top of an already-failed fetch is
+    // exactly the bug this surfaces — the user needs to see *why* it's
+    // not loading and that pressing `r` is the retry path.
     const balanceStatus =
-      balances === null
-        ? "loading balances…"
-        : refreshingBalances
-          ? "refreshing balances…"
-          : "press r to refresh balances";
+      balancesError !== null
+        ? `balances unavailable — press r to retry`
+        : balances === null
+          ? "loading balances…"
+          : refreshingBalances
+            ? "refreshing balances…"
+            : "press r to refresh balances";
     return (
       <Layout
         title="Swap — pick the token to sell"
@@ -447,6 +481,7 @@ export default function SwapFlow({ wallet, onDone }: Props) {
             // Switching chains discards the old balances; load-tokens
             // will re-fan-out for the new chain.
             setBalances(null);
+            setBalancesError(null);
             setRefreshingBalances(false);
             setPhase({ kind: "load-tokens", chain: c, chains: phase.chains });
           }}
@@ -456,9 +491,13 @@ export default function SwapFlow({ wallet, onDone }: Props) {
           chainName={phase.chain.name}
           address={fromAddress}
           enabled={!refreshingBalances}
-          onStart={() => setRefreshingBalances(true)}
-          onResult={(map) => {
+          onStart={() => {
+            setRefreshingBalances(true);
+            setBalancesError(null);
+          }}
+          onResult={(map, errMsg) => {
             if (map !== null) setBalances(map);
+            setBalancesError(errMsg);
             setRefreshingBalances(false);
           }}
         />
@@ -470,8 +509,33 @@ export default function SwapFlow({ wallet, onDone }: Props) {
           </Box>
         )}
         <Box marginBottom={1}>
-          <Text color={theme.dim}>{balanceStatus}</Text>
+          <Text color={balancesError !== null ? theme.err : theme.dim}>
+            {balanceStatus}
+          </Text>
         </Box>
+        {balancesError !== null && (
+          <Box marginBottom={1} flexDirection="column">
+            <Text color={theme.dim}>
+              <Text color={theme.err}>err: </Text>
+              {balancesError}
+            </Text>
+            {/* Common case: default `strict` policy denies configured-node
+                mainnet reads on purpose (privacy). Hint at the opt-out so
+                the user isn't left guessing what to do. Detection is loose
+                on substring — daemon error text is stable enough. */}
+            {/policy denied/i.test(balancesError) && (
+              <Text color={theme.dim}>
+                hint: run{" "}
+                <Text color={theme.primary}>
+                  kohaku network set-policy permissive
+                </Text>{" "}
+                to allow configured-RPC mainnet reads (privacy tradeoff: RPC
+                provider sees your address). For privacy, set{" "}
+                <Text color={theme.primary}>tor</Text> instead.
+              </Text>
+            )}
+          </Box>
+        )}
         <Select
           items={items}
           onSelect={(it) => {
@@ -1185,7 +1249,11 @@ function RefreshBalancesOnR({
   address: string;
   enabled: boolean;
   onStart: () => void;
-  onResult: (balances: BalanceMap | null) => void;
+  /** Called with (map, errMsg). On success: map = fresh BalanceMap and
+   *  errMsg = null. On failure: map = null (caller keeps old data) and
+   *  errMsg = the daemon's error message, surfaced in the pick-from
+   *  banner so the user can see why the refresh failed. */
+  onResult: (balances: BalanceMap | null, errMsg: string | null) => void;
 }) {
   useInput((input) => {
     if (!enabled) return;
@@ -1201,12 +1269,13 @@ function RefreshBalancesOnR({
         }>;
       }>("swap.balances", { chainId: chainName, address });
       if (r.ok) {
-        onResult(balanceArrayToMap(r.result?.balances ?? []));
+        onResult(balanceArrayToMap(r.result?.balances ?? []), null);
       } else {
-        // Fail-soft: keep old balances on transient RPC error so the
-        // user doesn't lose context. Surface only by returning `null`
-        // (caller chooses whether to overwrite).
-        onResult(null);
+        // Fail-soft on the data side: keep old balances so the user
+        // doesn't lose context. Loud on the diagnostic side: surface
+        // the daemon error so they can tell a curl timeout from a
+        // policy denial from an unknown chain.
+        onResult(null, r.error.message);
       }
     })();
   });

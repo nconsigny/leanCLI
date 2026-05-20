@@ -293,6 +293,8 @@ inductive Command where
   | shieldedReveal
   | shieldedImport (mnemonic : String)
   | shieldedDelete
+  | shieldedMarkDestination (address : String)
+  | shieldedListDestinations
   | completion (shell : String)
   | tui
   | install
@@ -573,6 +575,8 @@ def parse : List String → Command
   | ["shield", "reveal"] => .shieldedReveal
   | ["shield", "delete"] => .shieldedDelete
   | ["shield", "import", mnemonic] => .shieldedImport mnemonic
+  | ["shield", "mark-destination", address] => .shieldedMarkDestination address
+  | ["shield", "list-destinations"] => .shieldedListDestinations
   | ["shield", walletName, amountEth] => .shieldedDeposit walletName amountEth
   | ["unshield", to, amountEth] => .shieldedWithdraw to amountEth
   | "swap" :: "quote" :: rest =>
@@ -963,6 +967,8 @@ def helpText : String :=
      shield reveal                       Print the stored PP mnemonic once.\n\
      shield import <mnemonic>            Store a user-supplied PP mnemonic.\n\
      shield delete                       WARNING: removes the stored PP secret.\n\
+     shield mark-destination <addr>      Backfill the PP-funded log (manual attestation).\n\
+     shield list-destinations            Print every recorded PP-funded recipient.\n\
      unshield <to> <eth>                 Privacy-Pools withdrawal via the relayer.\n\n\
    CHAIN UTILITIES (advanced):\n\
      chain balance <addr> | nonce <addr> | gas-price | priority-fee\n\
@@ -972,7 +978,7 @@ def helpText : String :=
      network show | network path\n\
      network set-rpc <url> [transport]\n\
      network set-lightclient <url>\n\
-     network set-policy <strict|tor>\n\
+     network set-policy <strict|tor|permissive>\n\
      network unset-rpc\n\
      network set-ens-rpc <url> | network unset-ens-rpc\n\
      network set-rpc-chain <chain> <url> [transport]\n\
@@ -1144,7 +1150,7 @@ def bashCompletion : String :=
     "      fi ;;",
     "    network)",
     "      if [ \"$COMP_CWORD\" -eq 2 ]; then COMPREPLY=( $(compgen -W \"show path set-rpc set-lightclient set-policy unset-rpc set-ens-rpc unset-ens-rpc set-rpc-chain unset-rpc-chain set-chain monitor\" -- \"$cur\") );",
-    "      elif [ \"$COMP_CWORD\" -eq 3 ] && [ \"${COMP_WORDS[2]}\" = \"set-policy\" ]; then COMPREPLY=( $(compgen -W \"strict tor\" -- \"$cur\") ); fi ;;",
+    "      elif [ \"$COMP_CWORD\" -eq 3 ] && [ \"${COMP_WORDS[2]}\" = \"set-policy\" ]; then COMPREPLY=( $(compgen -W \"strict tor permissive\" -- \"$cur\") ); fi ;;",
     "    daemon)",
     "      if [ \"$COMP_CWORD\" -eq 2 ]; then COMPREPLY=( $(compgen -W \"help ping version stop\" -- \"$cur\") ); fi ;;",
     "    chain)",
@@ -1371,7 +1377,7 @@ def fishCompletion : String :=
     "",
     "# --- network ---",
     "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from network; and not __fish_seen_subcommand_from show path set-rpc set-lightclient set-policy unset-rpc set-ens-rpc unset-ens-rpc set-rpc-chain unset-rpc-chain set-chain monitor' -a 'show path set-rpc set-lightclient set-policy unset-rpc set-ens-rpc unset-ens-rpc set-rpc-chain unset-rpc-chain set-chain monitor'",
-    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from network; and __fish_seen_subcommand_from set-policy' -a 'strict tor' -d Policy",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from network; and __fish_seen_subcommand_from set-policy' -a 'strict tor permissive' -d Policy",
     "",
     "# --- daemon ---",
     "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from daemon; and not __fish_seen_subcommand_from help ping version stop' -a 'help ping version stop' -d 'Daemon op'",

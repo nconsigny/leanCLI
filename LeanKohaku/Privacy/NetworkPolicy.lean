@@ -150,6 +150,26 @@ def devDaemonPolicy : Policy
   | _ => false
 
 /--
+Permissive policy:
+* local node + configured-node reads and broadcasts allowed on any chain
+  over any transport;
+* third-party APIs still denied.
+
+Same semantics as `devDaemonPolicy` but advertised as the supported
+opt-in for users who want to query and broadcast on mainnet through a
+configured third-party RPC. The privacy tradeoff is explicit: the RPC
+provider learns the queried address(es) and the broadcast tx contents.
+Pick `tor` instead to preserve the address-leak resistance.
+-/
+def permissiveDaemonPolicy : Policy
+  | { peer := .localNode, .. } => true
+  | { peer := .configuredNode, purpose := .nodeRead, .. } => true
+  | { peer := .configuredNode, purpose := .broadcastTx, .. } => true
+  | { peer := .configuredNode, purpose := .shieldedRead, .. } => true
+  | { peer := .configuredNode, purpose := .shieldedBroadcast, .. } => true
+  | _ => false
+
+/--
 Indexer-enabled policy: extends `strictDaemonPolicy` with a single
 allowed third-party purpose, `indexerLookup`. This is opt-in only — the
 user must run `kohaku network allow-indexer <name>` to enable it. Strict
@@ -237,12 +257,13 @@ def parsePolicy : String → Option Policy
   | "loopback-strict" => some strictDaemonPolicy
   | "tor" => some torDaemonPolicy
   | "dev" => some devDaemonPolicy
+  | "permissive" => some permissiveDaemonPolicy
   | "indexer" => some indexerEnabledPolicy
   | "deny" => some denyByDefault
   | _ => none
 
 def policyNames : List String :=
-  ["cli", "strict", "loopback-strict", "tor", "dev", "indexer", "deny"]
+  ["cli", "strict", "loopback-strict", "tor", "dev", "permissive", "indexer", "deny"]
 def peerNames : List String := ["local-daemon", "local-node", "configured-node", "third-party-api"]
 def purposeNames : List String :=
   ["daemon-control", "node-read", "broadcast-tx", "peer-discovery", "analytics",
