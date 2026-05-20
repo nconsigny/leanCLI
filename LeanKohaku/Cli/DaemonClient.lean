@@ -52,14 +52,21 @@ def autoSpawnDisabled : IO Bool := do
 def noAutoSpawnMethod (method : String) : Bool :=
   method == "daemon.shutdown"
 
-def spawnDaemon (path : String) : IO Unit := do
+/-- Spawn the daemon with stderr piped back to us. We keep the child handle
+    alive so `ensureDaemon` can read any startup-failure message after the
+    socket-wait times out. Stdout is /dev/null — the daemon's own logger
+    writes to `$XDG_STATE_HOME/leankohaku/network.log`, not stderr, so on
+    successful startup we expect at most a few lines on this pipe and the
+    kernel buffer (64 KB default) will not fill before the CLI exits. -/
+def spawnDaemonChild (path : String) :
+    IO (IO.Process.Child ⟨.null, .null, .piped⟩) := do
   let bin ← daemonBin
-  discard <| IO.Process.spawn
+  IO.Process.spawn
     { cmd := bin,
       env := #[("LEANKOHAKU_SOCKET", some path)],
       stdin := .null,
       stdout := .null,
-      stderr := .null,
+      stderr := .piped,
       setsid := true }
 
 partial def waitForSocketConnect (path : String) (remaining : Nat) : IO Bool := do
@@ -74,12 +81,51 @@ partial def waitForSocketConnect (path : String) (remaining : Nat) : IO Bool := 
       IO.sleep 100
       waitForSocketConnect path (remaining - 1)
 
-def ensureDaemon (path method : String) : IO Bool := do
-  if noAutoSpawnMethod method || (← autoSpawnDisabled) then
-    pure false
+/-- Read whatever the daemon wrote to stderr before exiting, trim it, and
+    fall back to a generic message if the pipe was empty or non-UTF-8.
+    Called only after we know the child exited (so the read returns at EOF
+    without blocking). -/
+private def readChildStderr
+    (child : IO.Process.Child ⟨.null, .null, .piped⟩) : IO String := do
+  let bytes ← child.stderr.readBinToEnd
+  match String.fromUTF8? bytes with
+  | some s =>
+      let trimmed := s.trimAscii.toString
+      if trimmed.isEmpty then pure "daemon exited without an error message"
+      else pure trimmed
+  | none => pure "daemon stderr was not valid UTF-8"
+
+/-- Auto-spawn the daemon on demand.
+
+`Except.ok ()`  ⇒ daemon socket is up; the caller may retry the RPC.
+`Except.error msg` ⇒ daemon could not be brought up. `msg` carries the
+underlying reason (daemon exit message, "autospawn disabled", or
+"socket did not appear"), suitable for surfacing verbatim to the user.
+
+The motivation for plumbing the daemon's startup failure back through the
+CLI is the "no rpc_url configured" case (LeanKohaku/Daemon/Config.lean):
+on a fresh install the daemon refuses to start, but the CLI used to
+report only `connect: ENOENT` — the *symptom*, not the *cause*. With
+this, `kohaku daemon ping` on a fresh box says exactly what to fix. -/
+def ensureDaemon (path method : String) : IO (Except String Unit) := do
+  if noAutoSpawnMethod method then
+    pure (.error s!"autospawn skipped for {method}")
+  else if ← autoSpawnDisabled then
+    pure (.error "autospawn disabled (LEANKOHAKU_NO_AUTOSPAWN is set)")
   else
-    spawnDaemon path
-    waitForSocketConnect path 20
+    let child ← spawnDaemonChild path
+    if ← waitForSocketConnect path 20 then
+      pure (.ok ())
+    else
+      -- Socket never appeared. Distinguish "daemon already exited" (read
+      -- its stderr — that's the actionable reason) from "still running
+      -- but slow" (rare; user should retry or check the daemon logs).
+      match ← child.tryWait with
+      | some code =>
+          let msg ← readChildStderr child
+          pure (.error s!"daemon exited (code {code}) before binding socket: {msg}")
+      | none =>
+          pure (.error "daemon spawned but socket did not appear within 2s")
 
 def requestJson (method : String) (params : Json) : Json :=
   .obj #[
@@ -249,13 +295,20 @@ def call (method : String) (params : Json := .arr #[]) : IO (Except RpcError Jso
   try
     callOnce path method params
   catch first =>
-    if ← ensureDaemon path method then
-      try
-        callOnce path method params
-      catch second =>
-        pure (.error { code := -32000, message := second.toString })
-    else
-      pure (.error { code := -32000, message := first.toString })
+    match ← ensureDaemon path method with
+    | .ok () =>
+        try
+          callOnce path method params
+        catch second =>
+          pure (.error { code := -32000, message := second.toString })
+    | .error reason =>
+        -- Prefer the daemon's own failure message over the connect() ENOENT
+        -- the socket walk produced (`first`). Keep the original around in
+        -- parentheses so transport-level issues stay visible when the
+        -- daemon itself is fine but e.g. the socket path is mistyped.
+        pure (.error
+          { code := -32000,
+            message := s!"daemon auto-spawn failed: {reason} (transport: {first.toString})" })
 
 def printCall (method : String) (params : Json := .arr #[]) : IO UInt32 := do
   match ← call method params with

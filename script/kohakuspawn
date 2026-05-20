@@ -128,6 +128,14 @@ Options:
                       clearsign, privacy and LLM features will be degraded.
   --rebuild-bridges   Force reinstalling sidecar deps even when node_modules
                       already exists.
+  --no-helpers        Skip building the HACL + secp256k1 native helpers. Wallet
+                      crypto (PBKDF2, secp256k1 signing, BIP-32 derivation,
+                      keystore wrapping) will be non-functional until they are
+                      built. Useful only on systems where helpers are
+                      pre-installed in /usr/bin (Arch/Nix packaging).
+  --rebuild-helpers   Force rebuilding native helpers even when present in
+                      .lake/build/bin/. Pair with --pull when the HACL or
+                      secp256k1 pinned revision has moved.
   --no-modify-path    Do not append the kohaku bin dir to your shell rc.
   --no-completion     Skip installing shell-completion files. By default,
                       completion is installed for bash, zsh, AND fish so
@@ -155,6 +163,7 @@ PULL=0
 BUILD_LEAN=1
 BUILD_TUI=auto        # auto | always | never
 BUILD_BRIDGES=auto    # auto | always | never
+BUILD_HELPERS=auto    # auto | always | never — HACL + secp256k1 native helpers
 MODIFY_PATH=1
 INSTALL_COMPLETION=1
 RUN_INIT_WIZARD=1
@@ -169,6 +178,8 @@ while [[ $# -gt 0 ]]; do
     --rebuild-tui) BUILD_TUI=always; shift;;
     --no-bridges) BUILD_BRIDGES=never; shift;;
     --rebuild-bridges) BUILD_BRIDGES=always; shift;;
+    --no-helpers) BUILD_HELPERS=never; shift;;
+    --rebuild-helpers) BUILD_HELPERS=always; shift;;
     --no-modify-path) MODIFY_PATH=0; shift;;
     --no-completion) INSTALL_COMPLETION=0; shift;;
     --no-init) RUN_INIT_WIZARD=0; shift;;
@@ -329,6 +340,68 @@ build_tui() {
 }
 
 build_tui
+
+# Native crypto helpers (HACL Packages + libsecp256k1). The daemon shells
+# out to these for PBKDF2 (master KEK derivation, BIP-39 seed), HMAC-SHA-256/512
+# (BIP-32 derivation), keccak/sha256, ChaCha20-Poly1305 (keystore wrapping),
+# RIPEMD160 (BIP-32 fingerprint), and secp256k1 sign/pubkey/recover/verify.
+# A fresh `lake build` does NOT produce them — they have their own bootstrap
+# scripts that clone hacl-packages and bitcoin-core/secp256k1 then build
+# small C helpers. Without these, `wallet master init` (and every signing
+# op) fails with "could not execute external process 'leankohaku-hacl-*'".
+build_native_helpers() {
+  if [[ "$BUILD_HELPERS" == "never" ]]; then
+    echo "==> native helpers: skipped (--no-helpers)"
+    return 0
+  fi
+  # Canary files. We check ONE from each of the two setup scripts so a
+  # partial install (e.g. interrupted secp256k1 stage) gets rebuilt.
+  local hacl_canary="$CHECKOUT/.lake/build/bin/leankohaku-hacl-pbkdf2"
+  local secp_canary="$CHECKOUT/.lake/build/bin/leankohaku-secp256k1-sign"
+  if [[ "$BUILD_HELPERS" == "auto" ]]; then
+    if [[ -x "$hacl_canary" && -x "$secp_canary" ]]; then
+      echo "==> native helpers: present, skipping (use --rebuild-helpers to force)"
+      return 0
+    fi
+    echo "==> native helpers: building (missing or incomplete)"
+  fi
+  local helper_missing=()
+  for tool in git cmake ninja cc cargo; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      helper_missing+=("$tool")
+    fi
+  done
+  if [[ ${#helper_missing[@]} -ne 0 ]]; then
+    echo "==> native helpers: SKIPPED — missing build tools (${helper_missing[*]})"
+    echo "    Wallet crypto will fail at runtime until these are installed and"
+    echo "    \`kohakuspawn --rebuild-helpers\` is re-run."
+    if command -v apt-get >/dev/null 2>&1; then
+      echo "    Ubuntu: sudo apt install git cmake ninja-build gcc"
+    elif command -v pacman >/dev/null 2>&1; then
+      echo "    Arch:   sudo pacman -S git cmake ninja gcc"
+    elif command -v dnf >/dev/null 2>&1; then
+      echo "    Fedora: sudo dnf install git cmake ninja-build gcc"
+    fi
+    if [[ ! " ${helper_missing[*]} " == *" cargo "* ]]; then
+      : # cargo already present
+    else
+      echo "    cargo:  https://rustup.rs/  (curl --proto =https --tlsv1.2 -sSf https://sh.rustup.rs | sh)"
+    fi
+    return 0
+  fi
+  echo "==> native helpers: script/setup_hacl.sh (HACL Packages — keccak, sha256, hmac, pbkdf2, drbg, chacha20poly1305 + RustCrypto ripemd160)"
+  if ! (cd "$CHECKOUT" && bash script/setup_hacl.sh); then
+    echo "kohakuspawn: setup_hacl.sh failed — wallet crypto will not work until re-run" >&2
+    return 1
+  fi
+  echo "==> native helpers: script/setup_secp256k1.sh (libsecp256k1 — sign, pubkey, recover, verify)"
+  if ! (cd "$CHECKOUT" && bash script/setup_secp256k1.sh); then
+    echo "kohakuspawn: setup_secp256k1.sh failed — EOA signing will not work until re-run" >&2
+    return 1
+  fi
+}
+
+build_native_helpers
 
 # Sidecar JSON-RPC bridges (privacy/Railgun, clearsign, colibri light client,
 # LLM agent). Each is a stdio Node process spawned by the daemon; deps must
@@ -557,7 +630,7 @@ fi
 # All three checks are soft (warn-only) — a working passphrase-only
 # install is still a fully functional kohaku. We exit 0 either way.
 echo
-echo "==> TPM2 hardware probe (optional, enables `wallet master bind-tpm`):"
+echo "==> TPM2 hardware probe (optional, enables \`wallet master bind-tpm\`):"
 
 tpm_device_present=0
 if [[ -e /dev/tpm0 || -e /dev/tpmrm0 ]]; then
@@ -618,18 +691,22 @@ echo "  After fixing any of the above, verify with: kohaku wallet master status"
 #
 # Two pieces a fresh install otherwise leaves the user to discover:
 #   1. The daemon refuses to start without an RPC URL (see
-#      LeanKohaku/Daemon/Config.lean), so step 1 prompts for one and writes
-#      it to daemon.json via the CLI's `network set-rpc-chain` — no daemon
-#      needed yet because that command edits the JSON file directly.
+#      LeanKohaku/Daemon/Config.lean). Without one, `wallet master init`
+#      would fail when it tries to auto-spawn the daemon.
 #   2. The wallet master KEK (one passphrase wraps every EOA seed + the PP
-#      secret) is the single-credential UX from commit f747398; without it
-#      every EOA needs its own per-slot passphrase. We invoke
-#      `kohaku wallet master init` (which auto-spawns the daemon).
+#      secret); without it every EOA needs its own per-slot passphrase.
+#
+# Preferred surface: `kohaku tui`. Its BootGate walks the same dependency
+# chain — RpcSetupGate (writes daemon.json directly from Node, no daemon
+# needed), then MasterInitGate, then MasterUnlockGate — and is the same UI
+# the user gets on every subsequent `kohaku tui` launch, so first-run looks
+# like normal-run. The shell `prompt_*` helpers below are kept as the
+# `--no-tui` fallback for headless installs.
 #
 # Skip rules:
 #   - --no-init flag,
 #   - non-TTY stdin/stdout (covers `curl ... | bash` and CI),
-#   - each piece's check passes (RPC already configured / master.json present).
+#   - both checks already pass (RPC configured AND master.json present).
 
 has_rpc_configured() {
   local v
@@ -722,21 +799,64 @@ prompt_master_init() {
   fi
 }
 
-if [[ $RUN_INIT_WIZARD -eq 1 && -t 0 && -t 1 ]]; then
+launch_first_run_tui() {
   echo
-  echo "==> First-run setup"
-  if has_rpc_configured; then
+  echo "==> First-run setup — launching kohaku tui"
+  echo "  The TUI walks RPC config → master passphrase → main menu."
+  echo "  Press q on the main menu (or Esc on any gate) to finish."
+  echo
+  # The TUI's BootGate routes:
+  #   probe wallet.master.status →  transport-err  → RpcSetupGate
+  #                              →  !initialized   → MasterInitGate
+  #                              →  initialized    → MasterUnlockGate
+  # so a fresh install lands in RpcSetupGate, an RPC-only-missing install
+  # in RpcSetupGate, an RPC-set-but-no-master install in MasterInitGate,
+  # and a fully-set install drops straight to MainMenu. Either way the
+  # user only sees the gate(s) that are still needed.
+  #
+  # We don't fail the install on a non-zero TUI exit — the user may have
+  # quit early on purpose, and the post-install message points them at
+  # `kohaku tui` if they want to come back.
+  "$LEAN_BIN" tui || true
+}
+
+# Outcome tracking for the post-install footer. We want a green "Installed."
+# only when first-run actually completed — anything else (user skipped,
+# wizard ran but bailed, daemon failure mid-init) should call out the
+# specific missing piece(s) so users don't read "Installed." and assume
+# everything works.
+#
+#   SETUP_ATTEMPTED  1 = wizard ran (TUI or shell). 0 = skipped by flag or non-TTY.
+#   has_rpc_configured / master_init_done  re-evaluated after the dispatcher.
+SETUP_ATTEMPTED=0
+
+if [[ $RUN_INIT_WIZARD -eq 1 && -t 0 && -t 1 ]]; then
+  if has_rpc_configured && master_init_done; then
+    echo
+    echo "==> First-run setup"
     echo "  ✓ RPC endpoint already configured (\`kohaku network show\` to inspect)"
-  else
-    prompt_rpc_setup || true
-  fi
-  if master_init_done; then
     echo "  ✓ wallet master already initialized"
-  elif has_rpc_configured; then
-    prompt_master_init || true
+  elif [[ -f "$TUI_BUNDLE" ]]; then
+    SETUP_ATTEMPTED=1
+    launch_first_run_tui
   else
-    echo "  (skipping master passphrase: needs at least one RPC URL first."
-    echo "   Run \`kohaku network set-rpc-chain mainnet <url>\` then \`kohaku wallet master init\`.)"
+    # --no-tui install or build failure: fall back to the shell wizard.
+    SETUP_ATTEMPTED=1
+    echo
+    echo "==> First-run setup (shell mode — TUI bundle unavailable)"
+    if has_rpc_configured; then
+      echo "  ✓ RPC endpoint already configured (\`kohaku network show\` to inspect)"
+    else
+      prompt_rpc_setup || true
+    fi
+    if master_init_done; then
+      echo "  ✓ wallet master already initialized"
+    elif has_rpc_configured; then
+      prompt_master_init || true
+    else
+      echo "  (skipping master passphrase: needs at least one RPC URL first."
+      echo "   Run \`kohaku network set-rpc-chain mainnet <url>\` then \`kohaku wallet master init\`.)"
+    fi
   fi
 elif [[ $RUN_INIT_WIZARD -eq 0 ]]; then
   echo
@@ -745,31 +865,76 @@ else
   # Non-TTY path (curl|bash, CI). Don't fail; just point at the manual commands.
   echo
   echo "==> First-run setup: skipped (non-interactive shell)"
-  echo "    Run \`kohakuspawn\` again from a TTY, or configure manually:"
+  echo "    Run \`kohakuspawn\` again from a TTY for the interactive TUI setup,"
+  echo "    or configure manually:"
   echo "      kohaku network set-rpc-chain mainnet <url>"
   echo "      kohaku network set-rpc-chain sepolia <url>"
   echo "      kohaku wallet master init"
 fi
 
 echo
-case ":${PATH:-}:" in
-  *":$KOHAKU_BIN:"*)
-    echo "Installed. Try:"
-    echo "  kohaku help"
-    echo "  kohaku tui"
-    echo
-    echo "To update later:  kohakuspawn --pull"
-    ;;
-  *)
-    echo "Installed under $KOHAKU_BIN."
-    if [[ $MODIFY_PATH -eq 1 ]]; then
-      echo "Restart your shell (or 'source $(pick_rc)') to pick up PATH, then:"
-    else
-      echo "Add $KOHAKU_BIN to your PATH, then:"
-    fi
-    echo "  kohaku help"
-    echo "  kohaku tui"
-    echo
-    echo "To update later:  kohakuspawn --pull"
-    ;;
-esac
+# Footer.
+#
+# A green "Installed." should mean the wallet is actually ready to use —
+# RPC configured AND master passphrase set. If the user attempted the
+# first-run wizard but didn't complete it (TUI exited mid-flow, daemon
+# error during `wallet master init`, etc.) the trailing message used to
+# still read "Installed.", which trained users to ignore the warnings
+# scrolled off the top. Now: if anything's missing, the footer leads
+# with what to do.
+RPC_OK=0
+MASTER_OK=0
+if has_rpc_configured; then RPC_OK=1; fi
+if master_init_done; then MASTER_OK=1; fi
+
+print_path_hint() {
+  case ":${PATH:-}:" in
+    *":$KOHAKU_BIN:"*) ;;
+    *)
+      if [[ $MODIFY_PATH -eq 1 ]]; then
+        echo "  (restart your shell or 'source $(pick_rc)' to pick up PATH)"
+      else
+        echo "  (add $KOHAKU_BIN to your PATH first)"
+      fi
+      ;;
+  esac
+}
+
+if [[ $RPC_OK -eq 1 && $MASTER_OK -eq 1 ]]; then
+  echo "Installed. Try:"
+  print_path_hint
+  echo "  kohaku help"
+  echo "  kohaku tui"
+  echo
+  echo "To update later:  kohakuspawn --pull"
+elif [[ $SETUP_ATTEMPTED -eq 1 ]]; then
+  # Wizard ran but at least one step didn't land. Lead with the missing
+  # piece so it doesn't get lost above the "Installed" line.
+  echo "Installed, but first-run setup is incomplete:"
+  if [[ $RPC_OK -eq 0 ]]; then
+    echo "  ✗ no RPC URL configured — daemon will refuse to start"
+    echo "      kohaku network set-rpc-chain mainnet <url>"
+  else
+    echo "  ✓ RPC URL configured"
+  fi
+  if [[ $MASTER_OK -eq 0 ]]; then
+    echo "  ✗ wallet master not initialized — EOA seeds will need per-slot passphrases"
+    echo "      kohaku wallet master init   (or relaunch \`kohaku tui\`)"
+  else
+    echo "  ✓ wallet master initialized"
+  fi
+  print_path_hint
+  echo
+  echo "Re-run \`kohakuspawn\` to retry the setup wizard."
+else
+  # --no-init or non-TTY: the dispatcher already printed the manual
+  # commands. Keep the footer minimal so it doesn't compete with that.
+  echo "Installed under $KOHAKU_BIN."
+  print_path_hint
+  echo
+  echo "Try:"
+  echo "  kohaku help"
+  echo "  kohaku tui"
+  echo
+  echo "To update later:  kohakuspawn --pull"
+fi
