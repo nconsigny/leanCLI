@@ -467,6 +467,153 @@ def runDaemonForeground : IO UInt32 := do
       stderr := .inherit }
   child.wait
 
+/-! ### systemd-aware daemon lifecycle wrappers
+
+When the `managed-by-systemd` marker is present, lifecycle verbs (`start`,
+`stop`, `restart`) delegate to `systemctl --user` so the cgroup (and the
+colibri sidecar living in the same unit) is brought up and torn down by
+the manager. We forward exit codes and pass stderr through to the user;
+the helpers below are thin wrappers so each verb stays a one-line case
+in the dispatcher. -/
+
+/-- Run `systemctl --user <verb> kohaku-daemon`, inheriting stdio so any
+    failure (e.g. unit not installed) lands on the user's terminal. Returns
+    the underlying exit code as `UInt32`. -/
+def systemctlUser (verb : String) : IO UInt32 := do
+  try
+    let child ← IO.Process.spawn
+      { cmd := "systemctl",
+        args := #["--user", verb, "kohaku-daemon"],
+        stdin := .inherit, stdout := .inherit, stderr := .inherit }
+    let code ← child.wait
+    pure (UInt32.ofNat code.toNat)
+  catch e =>
+    IO.eprintln s!"failed to invoke systemctl: {e.toString}"
+    pure 2
+
+/-- Capture the single-line output of `systemctl --user is-active
+    kohaku-daemon`. `systemctl is-active` exits non-zero when the unit
+    isn't active, but still prints the state (`inactive`, `failed`, …)
+    on stdout — so we don't treat that as an error here, we just return
+    whatever it said, trimmed. -/
+def systemctlIsActive : IO String := do
+  try
+    let out ← IO.Process.output
+      { cmd := "systemctl",
+        args := #["--user", "is-active", "kohaku-daemon"] }
+    pure out.stdout.trim
+  catch _ =>
+    pure "unknown"
+
+/-- Best-effort UDS probe used by `daemon status` and the post-start
+    wait. Returns `true` if a connection round-trip succeeded within
+    ~2s (20 × 100ms — same budget `ensureDaemon` uses for autospawn). -/
+def probeDaemonSocket : IO Bool := do
+  let path ← DaemonClient.socketPath
+  DaemonClient.waitForSocketConnect path 20
+
+/-- Handler for `kohaku daemon start`. systemd-managed: delegate then
+    probe so we don't return before the daemon is actually accepting
+    connections. Autospawn: same behavior as `kohaku daemon` (run in
+    foreground), since there is no detached "start" in that mode. -/
+def daemonStartHandler : IO UInt32 := do
+  if ← DaemonClient.systemdManaged then
+    let code ← systemctlUser "start"
+    if code ≠ 0 then return code
+    -- Probe briefly so callers (scripts, the TUI bootgate) can rely on
+    -- "daemon start returned 0 ⇒ socket reachable".
+    if ← probeDaemonSocket then
+      IO.println "kohaku-daemon is running."
+      pure 0
+    else
+      IO.eprintln "systemctl reported success but the daemon socket did not appear within 2s."
+      IO.eprintln "Run `kohaku daemon logs` to investigate."
+      pure 2
+  else
+    runDaemonForeground
+
+/-- Handler for `kohaku daemon stop`. systemd-managed: `systemctl stop`
+    so the whole cgroup (daemon + colibri sidecar) shuts down cleanly.
+    Autospawn: send the existing `daemon.shutdown` RPC. -/
+def daemonStopHandler : IO UInt32 := do
+  if ← DaemonClient.systemdManaged then
+    systemctlUser "stop"
+  else
+    DaemonClient.printCall "daemon.shutdown"
+
+/-- Handler for `kohaku daemon restart`. systemd: one `systemctl restart`.
+    Autospawn: shutdown via RPC, then `ensureDaemon` will re-spawn on the
+    next request — but the user typed `restart`, so we explicitly probe
+    to bring it back up before returning. -/
+def daemonRestartHandler : IO UInt32 := do
+  if ← DaemonClient.systemdManaged then
+    let code ← systemctlUser "restart"
+    if code ≠ 0 then return code
+    if ← probeDaemonSocket then
+      IO.println "kohaku-daemon restarted."
+      pure 0
+    else
+      IO.eprintln "systemctl reported restart success but the daemon socket did not reappear within 2s."
+      pure 2
+  else
+    -- Best-effort stop (the daemon may already be down — that's fine).
+    discard <| DaemonClient.call "daemon.shutdown"
+    -- Give the OS a moment to release the socket path so the fresh
+    -- daemon doesn't see an EADDRINUSE on bind.
+    IO.sleep 200
+    runDaemonForeground
+
+/-- Handler for `kohaku daemon status`. Prints two lines:
+    1. systemctl is-active state (if systemd-managed; otherwise `autospawn`)
+    2. UDS-probe outcome (`reachable` vs `unreachable`).
+    Intentionally not full `systemctl status` output — that's too noisy
+    for a CLI status check; users who want the unit log can use
+    `kohaku daemon logs`. -/
+def daemonStatusHandler : IO UInt32 := do
+  let managed ← DaemonClient.systemdManaged
+  if managed then
+    let state ← systemctlIsActive
+    IO.println s!"systemd: {state}"
+  else
+    IO.println "systemd: autospawn (no marker present)"
+  let reachable ← probeDaemonSocket
+  let path ← DaemonClient.socketPath
+  if reachable then
+    IO.println s!"socket:  reachable ({path})"
+    pure 0
+  else
+    IO.println s!"socket:  unreachable ({path})"
+    -- Exit non-zero when the daemon isn't reachable; lets scripts gate
+    -- on `kohaku daemon status` exit code instead of grepping output.
+    pure 1
+
+/-- Handler for `kohaku daemon logs`. systemd: spawn `journalctl --user
+    -u kohaku-daemon -f` and wait — we approximate execv by inheriting
+    stdio and forwarding the child's exit code, so Ctrl-C is delivered
+    to journalctl directly. Lean 4's plain IO doesn't expose execv. -/
+def daemonLogsHandler : IO UInt32 := do
+  if ← DaemonClient.systemdManaged then
+    try
+      let child ← IO.Process.spawn
+        { cmd := "journalctl",
+          args := #["--user", "-u", "kohaku-daemon", "-f"],
+          stdin := .inherit, stdout := .inherit, stderr := .inherit }
+      let code ← child.wait
+      pure (UInt32.ofNat code.toNat)
+    catch e =>
+      IO.eprintln s!"failed to invoke journalctl: {e.toString}"
+      pure 2
+  else
+    -- The autospawned daemon writes its application log to
+    -- $XDG_STATE_HOME/leankohaku/network.log (see DaemonClient.spawnDaemonChild)
+    -- but there's no unified stderr stream we can tail across restarts.
+    -- Direct the user toward the systemd install path rather than
+    -- pretending we can tail a nonexistent journal.
+    IO.eprintln "`daemon logs` requires the systemd-managed install."
+    IO.eprintln "Run `script/kohakuspawn` from the repo to install the user unit,"
+    IO.eprintln "or read $XDG_STATE_HOME/leankohaku/network.log directly."
+    pure 2
+
 private def withOptionalPath (fields : Array (String × LeanKohaku.Encoding.Json.Json))
     (path? : Option String) : LeanKohaku.Encoding.Json.Json :=
   match path? with
@@ -1983,9 +2130,19 @@ def run (args : List String) : IO UInt32 := do
   | .daemonVersion =>
       DaemonClient.printCall "daemon.version"
   | .daemonStop =>
-      DaemonClient.printCall "daemon.shutdown"
+      daemonStopHandler
+  | .daemonStart =>
+      daemonStartHandler
+  | .daemonRestart =>
+      daemonRestartHandler
+  | .daemonStatus =>
+      daemonStatusHandler
+  | .daemonLogs =>
+      daemonLogsHandler
   | .daemon =>
-      runDaemonForeground
+      -- Bare `kohaku daemon`: same semantics as `daemon start`.
+      -- systemd: bring the unit up + probe. Autospawn: run foreground.
+      daemonStartHandler
   | .walletHistory name scanLogs indexer? limit? chain? =>
       let limit := limit?.getD 50
       -- Why: account-filter via the parsed --account flag.

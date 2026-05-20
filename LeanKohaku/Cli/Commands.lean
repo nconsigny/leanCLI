@@ -268,6 +268,10 @@ inductive Command where
   | daemonPing
   | daemonVersion
   | daemonStop
+  | daemonStart   -- start (systemd: `systemctl --user start`; autospawn: same as `.daemon`)
+  | daemonRestart -- restart (systemd: `systemctl --user restart`; autospawn: stop+start)
+  | daemonStatus  -- one-line status (systemctl is-active + UDS probe)
+  | daemonLogs    -- tail logs (systemd only; autospawn prints a message)
   | daemon      -- run the daemon (same as `leankohaku-daemon`)
   | networkAllowIndexer (name : String) (url : String)
   | networkDenyIndexer (name : String)
@@ -525,6 +529,10 @@ def parse : List String → Command
   | ["daemon", "ping"] => .daemonPing
   | ["daemon", "version"] => .daemonVersion
   | ["daemon", "stop"] => .daemonStop
+  | ["daemon", "start"] => .daemonStart
+  | ["daemon", "restart"] => .daemonRestart
+  | ["daemon", "status"] => .daemonStatus
+  | ["daemon", "logs"] => .daemonLogs
   | ["daemon", walletName, "help"] => .daemonHelp (some walletName)
   | ["daemon"]            => .daemon
   | ["network", "allow-indexer", "etherscan"] =>
@@ -773,8 +781,18 @@ def doctorText : String :=
 
 def daemonHelpText (walletName? : Option String) : String :=
   let walletName := walletName?.getD "<wallet>"
-  "leanKohaku daemon wallet commands\n\n\
-   Primary command shape:\n\
+  "leanKohaku daemon commands\n\n\
+   Lifecycle (systemd-aware when ~/.config/leankohaku/managed-by-systemd is present;\n\
+   otherwise autospawn — the next CLI request brings the daemon up on demand):\n\
+     leankohaku daemon                   Start the daemon (foreground or via systemd).\n\
+     leankohaku daemon start             Same as above; explicit form.\n\
+     leankohaku daemon stop              Stop the daemon (RPC shutdown or systemctl).\n\
+     leankohaku daemon restart           Restart in place.\n\
+     leankohaku daemon ping              JSON-RPC ping over the UDS.\n\
+     leankohaku daemon status            One-line is-active + UDS-probe summary.\n\
+     leankohaku daemon logs              Tail the journal (systemd install only).\n\
+     leankohaku daemon version           Print the running daemon's build version.\n\n\
+   Primary wallet send shape:\n\
      leankohaku daemon <wallet> send <chain> <to> <eth>\n\n\
    Example:\n\
      leankohaku daemon " ++ walletName ++ " send sepolia 0xAa651C04bfE4F302eE243D6638d3B91389C4C02C 0.002\n\n\
@@ -986,7 +1004,10 @@ def helpText : String :=
      network set-chain <chain>          Set the daemon's default chain (name or numeric id).\n\
      network monitor\n\n\
    DAEMON / DOCS:\n\
-     daemon | daemon ping | daemon version | daemon stop\n\
+     daemon                              Start the daemon (foreground or via systemd).\n\
+     daemon start | stop | restart       Lifecycle control (systemd-aware when installed).\n\
+     daemon ping | status | version      Health probe, one-line status, build version.\n\
+     daemon logs                         Tail journal (systemd install only).\n\
      policy [accounts|keystore|lightclient|network|privacy|security|all]\n\
                                          Show internal policy reference\n\
      doctor                              Implementation/check status\n\n\
@@ -1152,7 +1173,7 @@ def bashCompletion : String :=
     "      if [ \"$COMP_CWORD\" -eq 2 ]; then COMPREPLY=( $(compgen -W \"show path set-rpc set-lightclient set-policy unset-rpc set-ens-rpc unset-ens-rpc set-rpc-chain unset-rpc-chain set-chain monitor\" -- \"$cur\") );",
     "      elif [ \"$COMP_CWORD\" -eq 3 ] && [ \"${COMP_WORDS[2]}\" = \"set-policy\" ]; then COMPREPLY=( $(compgen -W \"strict tor permissive\" -- \"$cur\") ); fi ;;",
     "    daemon)",
-    "      if [ \"$COMP_CWORD\" -eq 2 ]; then COMPREPLY=( $(compgen -W \"help ping version stop\" -- \"$cur\") ); fi ;;",
+    "      if [ \"$COMP_CWORD\" -eq 2 ]; then COMPREPLY=( $(compgen -W \"help start stop restart ping status logs version\" -- \"$cur\") ); fi ;;",
     "    chain)",
     "      if [ \"$COMP_CWORD\" -eq 2 ]; then",
     "        COMPREPLY=( $(compgen -W \"balance nonce token-balance gas-price priority-fee estimate-gas broadcast\" -- \"$cur\") );",
@@ -1380,7 +1401,7 @@ def fishCompletion : String :=
     "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from network; and __fish_seen_subcommand_from set-policy' -a 'strict tor permissive' -d Policy",
     "",
     "# --- daemon ---",
-    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from daemon; and not __fish_seen_subcommand_from help ping version stop' -a 'help ping version stop' -d 'Daemon op'",
+    "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from daemon; and not __fish_seen_subcommand_from help start stop restart ping status logs version' -a 'help start stop restart ping status logs version' -d 'Daemon op'",
     "",
     "# --- chain ---",
     "complete -c kohaku -c leankohaku -n '__fish_seen_subcommand_from chain; and not __fish_seen_subcommand_from balance nonce token-balance gas-price priority-fee estimate-gas broadcast' -a 'balance nonce token-balance gas-price priority-fee estimate-gas broadcast'",

@@ -49,6 +49,31 @@ def autoSpawnDisabled : IO Bool := do
   | some "FALSE" => pure false
   | some _ => pure true
 
+/-- Path of the "this machine is managed by systemd" marker dropped by
+    `kohakuspawn`. The presence of this file disables autospawn so the
+    CLI doesn't race the systemd-managed daemon on the same UDS path.
+
+    Honors `$XDG_CONFIG_HOME` like the rest of the config layout; falls
+    back to `$HOME/.config/leankohaku/managed-by-systemd`. The function
+    only reads env — it doesn't stat — so callers can cheaply compute
+    the path even when the marker is absent. -/
+def systemdMarkerPath : IO String := do
+  let cfgRoot ← match ← IO.getEnv "XDG_CONFIG_HOME" with
+    | some p => pure p
+    | none =>
+        match ← IO.getEnv "HOME" with
+        | some h => pure s!"{h}/.config"
+        | none => pure "/root/.config"
+  pure s!"{cfgRoot}/leankohaku/managed-by-systemd"
+
+/-- True iff the systemd-handoff marker exists. Reading the marker is a
+    single stat() call, so we re-check it on every autospawn attempt
+    instead of caching — that way `rm` of the marker (for a deliberate
+    fallback to autospawn) takes effect without restarting the CLI. -/
+def systemdManaged : IO Bool := do
+  let path ← systemdMarkerPath
+  (System.FilePath.mk path).pathExists
+
 def noAutoSpawnMethod (method : String) : Bool :=
   method == "daemon.shutdown"
 
