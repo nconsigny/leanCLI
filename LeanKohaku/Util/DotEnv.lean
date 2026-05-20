@@ -6,13 +6,22 @@ Reads `KEY=VALUE` pairs from a dotenv file and surfaces them through
 the FFI uses `setenv(..., overwrite=0)`, so explicit shell exports are
 never silently shadowed by a `.env` line.
 
-Search order at startup:
+Search order at startup (first hit wins per key — setenv-if-absent):
 
-1. `./.env` in the daemon's CWD (typical `git clone` workflow).
-2. `${XDG_CONFIG_HOME:-$HOME/.config}/leankohaku/.env`.
+1. `LEANKOHAKU_DOTENV_PATH` env var, if set (explicit override).
+2. `./.env` in the daemon's CWD (typical `git clone` workflow).
+3. `<appDir>/../../.env` — the checkout root, resolved relative to
+   the daemon binary's location (`.lake/build/bin/leankohaku-daemon`
+   → `<checkout>/.env`). Works whether the user invokes the binary
+   directly or via the `~/.kohaku/bin/kohaku-daemon` symlink, since
+   `/proc/self/exe` follows symlinks. This is the location that
+   "just works" for users who keep their `.env` in the repo and
+   spawn the daemon from an arbitrary cwd.
+4. `${XDG_CONFIG_HOME:-$HOME/.config}/leankohaku/.env`.
 
-Both are loaded if both exist, with CWD taking precedence (it loads
-first; entries already in the env are skipped at the second site).
+All four locations are loaded if present, in order. setenv-if-absent
+semantics mean earlier sites cannot be overwritten by later ones, and
+real shell exports are never overwritten by any of them.
 
 Disable entirely with `LEANKOHAKU_NO_DOTENV=1`.
 
@@ -101,10 +110,28 @@ def autoload : IO Unit := do
       let s := trimS s
       if s = "1" || s.toLower = "true" then return ()
   | none => pure ()
-  -- 1) CWD `.env` wins. Loading it first means the user-config site can
-  --    never overwrite a CWD entry (setenvIfAbsent skips already-set keys).
+  -- 1) Explicit override. Highest priority; lets a service-manager unit
+  --    pin a specific dotenv without touching cwd or config dir.
+  match ← IO.getEnv "LEANKOHAKU_DOTENV_PATH" with
+  | some path =>
+      let p := trimS path
+      if !p.isEmpty then loadFile (System.FilePath.mk p)
+  | none => pure ()
+  -- 2) CWD `.env`. Loading it second means an explicit override wins,
+  --    but the typical `cd repo && kohaku daemon` workflow still works.
   loadFile (System.FilePath.mk ".env")
-  -- 2) User config dir.
+  -- 3) Checkout `.env`, resolved relative to the daemon binary. The
+  --    binary lives at `<checkout>/.lake/build/bin/leankohaku-daemon`
+  --    (or a symlink that points there), so two `..` parents land on
+  --    the checkout root. This makes `kohaku daemon` Just Work from
+  --    any cwd as long as the user has a `.env` next to their lakefile.
+  try
+    let appDir ← IO.appDir
+    let checkoutEnv := appDir / ".." / ".." / ".env"
+    loadFile checkoutEnv
+  catch e =>
+    IO.eprintln s!"[dotenv] could not resolve appDir for checkout .env lookup: {e}"
+  -- 4) User config dir (global default).
   let home ← configHome
   loadFile (System.FilePath.mk s!"{home}/leankohaku/.env")
 
