@@ -1,10 +1,15 @@
 // ERC-7730 formatters — render raw decoded values into user-facing strings.
 //
-// Implemented (Phase 1): tokenAmount, addressName, amount, date, raw, enum.
-// Not implemented (Phase 2+): nftName, calldata (recursive decode), duration,
-//   percentage. Unknown formatters fall back to "raw".
+// Implemented: tokenAmount, addressName, amount, date, raw, enum, calldata.
+// Not implemented (Phase 2+): nftName, duration, percentage. Unknown
+// formatters fall back to "raw".
 import { getAddress } from "viem";
 import { resolvePath } from "./paths.mjs";
+// `calldata` formatter recursively decodes each `bytes[]` element against
+// the same descriptor set. Import is at top level — ESM handles the cycle
+// with decoder.mjs because `decodeTxIntent` is only invoked at call time,
+// not at module init time.
+import { decodeTxIntent } from "./decoder.mjs";
 
 const ETHER_DECIMALS = 18;
 
@@ -38,6 +43,8 @@ function renderValue(formatter, raw, params, ctx) {
       return formatDate(raw, params);
     case "enum":
       return formatEnumValue(raw, params, ctx);
+    case "calldata":
+      return formatCalldataArray(raw, params, ctx);
     case "raw":
     default:
       return formatRaw(raw);
@@ -120,6 +127,64 @@ function formatEnumValue(raw, params, ctx) {
   const map = enums[m[1]];
   if (!map) return formatRaw(raw);
   return map[String(raw)] ?? formatRaw(raw);
+}
+
+// Render a `bytes[]` argument by recursively decoding each element against
+// the same descriptor registry. Used for `multicall(bytes[])` — without it,
+// ETH↔token Uniswap V3 swaps (which wrap exactInputSingle + refundETH /
+// unwrapWETH9 in a multicall) render as raw hex.
+//
+// Inner calls of a router-side multicall execute via delegatecall, so they
+// target the same (chainId, to). We reuse the outer container's tokenMetadata
+// so per-token decimals/symbol resolved by the daemon still apply.
+function formatCalldataArray(raw, _params, ctx) {
+  if (!Array.isArray(raw)) return formatRaw(raw);
+  if (raw.length === 0) return "(empty)";
+  const registry = ctx.registry;
+  const chainId = ctx.container?.chainId;
+  const to = ctx.container?.to;
+  const tokenMetadata = ctx.tokenMetadata ?? {};
+  const out = [`${raw.length} call${raw.length === 1 ? "" : "s"}:`];
+  for (let i = 0; i < raw.length; i++) {
+    const sub = renderInnerCall(raw[i], { registry, chainId, to, tokenMetadata });
+    // sub is `{ head: string, fields: [{label, formatted}] }`. Render the
+    // header line with the `[i]` tag and each field on its own indented
+    // line. The ConfirmGate renders this whole string under one `Text`
+    // node, so `\n` inside is honored by Ink.
+    out.push(`  [${i}] ${sub.head}`);
+    const labelWidth = Math.max(0, ...sub.fields.map((f) => f.label.length));
+    for (const f of sub.fields) {
+      out.push(`        ${(f.label + ":").padEnd(labelWidth + 2)} ${f.formatted}`);
+    }
+  }
+  return out.join("\n");
+}
+
+function renderInnerCall(element, { registry, chainId, to, tokenMetadata }) {
+  const hex = toCalldataHex(element);
+  if (!hex || hex.length < 10) return { head: `(too short: ${hex || "0x"})`, fields: [] };
+  if (!registry) return { head: `${hex.slice(0, 10)} (registry unavailable)`, fields: [] };
+  try {
+    const r = decodeTxIntent(
+      { chainId, to, value: "0x0", data: hex, tokenMetadata },
+      registry,
+    );
+    if (r.matched) {
+      return {
+        head: r.intent ?? r.function ?? r.selector ?? "(matched)",
+        fields: (r.fields ?? []).map((f) => ({ label: f.label, formatted: f.formatted })),
+      };
+    }
+    return { head: `${hex.slice(0, 10)} (no descriptor)`, fields: [] };
+  } catch (e) {
+    return { head: `${hex.slice(0, 10)} (decode error: ${e?.message ?? e})`, fields: [] };
+  }
+}
+
+function toCalldataHex(v) {
+  if (typeof v === "string") return v.startsWith("0x") ? v : `0x${v}`;
+  if (v instanceof Uint8Array) return "0x" + Buffer.from(v).toString("hex");
+  return "0x";
 }
 
 function formatRaw(raw) {

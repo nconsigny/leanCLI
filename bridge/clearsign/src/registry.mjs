@@ -11,28 +11,28 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { keccak256, toBytes } from "viem";
+import { parseAbiItem, toFunctionSelector } from "viem";
 
 const SELF_DIR = path.dirname(fileURLToPath(import.meta.url));
 const REGISTRY_DIR = path.resolve(SELF_DIR, "..", "registry");
 
-// Strip parameter names from a format key per ERC-7730 §"Function Call":
-//   "transfer(address to,uint256 value)" → "transfer(address,uint256)"
-// then keccak256 the result, take the leading 4 bytes.
+// Compute the 4-byte selector for an ERC-7730 format key. The format key
+// is the human-readable ABI signature *with* parameter names (e.g.
+// "transfer(address to,uint256 value)"); viem's parseAbiItem strips names
+// and hashes the canonical form. Returns null if the key isn't a valid
+// function signature (e.g. EIP-712 encodeType keys).
+//
+// Using viem instead of an ad-hoc regex because the regex form did not
+// descend into nested tuple parens — `exactInputSingle((address tokenIn,…)
+// params)` would have kept the trailing ` params` in the hashed signature
+// and produced a wrong selector. viem's parser handles arbitrary nesting.
 export function formatKeyToSelector(formatKey) {
-  // Remove parameter names: anything after a space inside the parens.
-  const sig = formatKey.replace(
-    /\(([^)]*)\)/,
-    (_, inside) =>
-      "(" +
-      inside
-        .split(",")
-        .map((p) => p.trim().split(/\s+/)[0])
-        .join(",") +
-      ")",
-  );
-  const h = keccak256(toBytes(sig));
-  return h.slice(0, 10).toLowerCase(); // "0x" + 8 hex chars
+  try {
+    const item = parseAbiItem(`function ${formatKey}`);
+    return toFunctionSelector(item).toLowerCase();
+  } catch {
+    return null;
+  }
 }
 
 export function loadRegistry() {
@@ -101,11 +101,9 @@ export function loadRegistry() {
       // doesn't look like a function ABI fragment ("name(args)"), skip the
       // selector index — this format is for EIP-712 messages.
       if (!/^[A-Za-z_][A-Za-z0-9_]*\(/.test(formatKey)) continue;
-      let sel;
-      try {
-        sel = formatKeyToSelector(formatKey);
-      } catch (e) {
-        console.error(`[clearsign] skip selector for "${formatKey}": ${e?.message}`);
+      const sel = formatKeyToSelector(formatKey);
+      if (!sel) {
+        console.error(`[clearsign] skip selector for "${formatKey}": unparseable signature`);
         continue;
       }
       if (!bySelector.has(sel)) bySelector.set(sel, []);

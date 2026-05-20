@@ -26,6 +26,14 @@
             { "name": "amountIn",         "type": "uint256" },
             { "name": "amountOutMinimum", "type": "uint256" }
           ] }
+        ] },
+        { "type": "function", "name": "multicall", "inputs": [
+          { "name": "data", "type": "bytes[]" }
+        ] },
+        { "type": "function", "name": "refundETH", "inputs": [] },
+        { "type": "function", "name": "unwrapWETH9", "inputs": [
+          { "name": "amountMinimum", "type": "uint256" },
+          { "name": "recipient",     "type": "address" }
         ] }
       ]
     }
@@ -37,7 +45,7 @@
   },
   "display": {
     "formats": {
-      "exactInputSingle((address,address,uint24,address,uint256,uint256,uint160))": {
+      "exactInputSingle((address tokenIn,address tokenOut,uint24 fee,address recipient,uint256 amountIn,uint256 amountOutMinimum,uint160 sqrtPriceLimitX96) params)": {
         "intent": "Swap tokens (Uniswap V3, single hop)",
         "fields": [
           { "path": "params.tokenIn",          "label": "Token in",     "format": "addressName" },
@@ -48,13 +56,30 @@
           { "path": "params.fee",              "label": "Pool fee",     "format": "raw" }
         ]
       },
-      "exactInput((bytes,address,uint256,uint256))": {
+      "exactInput((bytes path,address recipient,uint256 amountIn,uint256 amountOutMinimum) params)": {
         "intent": "Swap tokens (Uniswap V3, multi-hop)",
         "fields": [
           { "path": "params.path",             "label": "Path (encoded)", "format": "raw" },
           { "path": "params.amountIn",         "label": "Amount in",      "format": "raw" },
           { "path": "params.amountOutMinimum", "label": "Min out",        "format": "raw" },
           { "path": "params.recipient",        "label": "Recipient",      "format": "addressName" }
+        ]
+      },
+      "multicall(bytes[] data)": {
+        "intent": "Multicall (Uniswap V3 router)",
+        "fields": [
+          { "path": "data", "label": "Inner calls", "format": "calldata" }
+        ]
+      },
+      "refundETH()": {
+        "intent": "Refund leftover ETH to sender",
+        "fields": []
+      },
+      "unwrapWETH9(uint256 amountMinimum, address recipient)": {
+        "intent": "Unwrap WETH to ETH",
+        "fields": [
+          { "path": "amountMinimum", "label": "Min amount", "format": "amount" },
+          { "path": "recipient",     "label": "Recipient",  "format": "addressName" }
         ]
       }
     }

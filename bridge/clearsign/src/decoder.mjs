@@ -9,6 +9,7 @@
 //   4. Walk the format spec's `fields` array, resolve paths, run formatters.
 //
 // Output shape is small + JSON-safe; the Lean side re-validates and renders.
+import { parseAbiItem } from "viem";
 import { decodeCalldata } from "./abi.mjs";
 import { formatField } from "./formatters.mjs";
 import { formatKeyToSelector } from "./registry.mjs";
@@ -137,6 +138,11 @@ export function decodeTxIntent(req, registry) {
     structured,
     container: { chainId, to, value, from: req.from ?? null },
     tokenMetadata,
+    // Threaded through so the `calldata` formatter can recursively decode
+    // each element of a `multicall(bytes[])` against the same descriptor
+    // set. Inner calls in a multicall execute via `delegatecall` from the
+    // outer `to`, so we reuse {chainId, to} for the recursive lookup.
+    registry,
   };
 
   const fields = (chosen.formatSpec.fields ?? []).map((f) =>
@@ -188,21 +194,25 @@ function renderRaw(v) {
   }
 }
 
-// Re-parse the format key to extract input names + positions, then expose
-// each arg under its declared name (e.g. "to", "value", "params") so
-// descriptor paths address them directly.
+// Parse the format key via viem to extract input names + positions, then
+// expose each arg under its declared name (e.g. "to", "value", "params")
+// so descriptor paths address them directly. viem also resolves nested
+// tuples — for `(address tokenIn,…) params`, the outer parameter is named
+// `params` and viem already returns the inner components as an object
+// keyed by component name (so `params.tokenIn` resolves correctly).
 function buildStructuredRoot(formatKey, args) {
-  const m = /\(([^)]*)\)/.exec(formatKey);
-  if (!m) return {};
-  const params = m[1].split(",").map((p) => p.trim()).filter(Boolean);
-
+  let item;
+  try {
+    item = parseAbiItem(`function ${formatKey}`);
+  } catch {
+    return {};
+  }
+  const inputs = item?.inputs ?? [];
   const root = {};
-  args.forEach((arg, i) => {
-    const decl = params[i] ?? "";
-    const parts = decl.split(/\s+/);
-    const name = parts.length >= 2 ? parts[parts.length - 1] : `arg${i}`;
-    root[name] = arg;
-    root[String(i)] = arg;
-  });
+  for (let i = 0; i < inputs.length; i++) {
+    const name = inputs[i]?.name || `arg${i}`;
+    root[name] = args[i];
+    root[String(i)] = args[i];
+  }
   return root;
 }
