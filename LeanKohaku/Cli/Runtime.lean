@@ -22,6 +22,33 @@ namespace LeanKohaku.Cli
 
 open LeanKohaku.Cli.Commands
 
+/-- After a `network set-*` / `network unset-*` writes to daemon.json,
+    bounce the running daemon so its in-memory `cfg : Config` (loaded once
+    at `Server.run` startup, never reloaded — see LeanKohaku/Daemon/Config
+    .lean#resolve) gets refreshed from the new file. We don't proactively
+    spawn the replacement: the next CLI/TUI request will auto-spawn via
+    `DaemonClient.ensureDaemon` (Lean side) or daemon.ts#ensureDaemon (TUI
+    side), and that auto-spawn reads the up-to-date config.
+
+    Best-effort: if the daemon isn't running, the call errors out and we
+    just say so. No retry, no failure exit code — the file write itself
+    already succeeded, the user shouldn't be told the command failed.
+
+    The 200ms sleep covers the gap between `daemon.shutdown` returning
+    `{ok:true}` and the daemon's `exitSoon` actually unlinking the socket
+    file. Without it, a rapid next-command can race the cleanup and hit
+    "another instance is already listening …" when its autospawn tries to
+    bind the still-present socket path. -/
+private def restartDaemonForConfigChange : IO Unit := do
+  match ← LeanKohaku.Cli.DaemonClient.call "daemon.shutdown" (.arr #[]) with
+  | .ok _ =>
+      IO.sleep 200
+      IO.println "  ✓ daemon stopped; next request auto-spawns with the new config"
+  | .error _ =>
+      -- Common case during onboarding or after a manual `daemon stop`:
+      -- nothing to bounce, so just confirm the file landed and move on.
+      IO.println "  (no running daemon; new config will apply on next start)"
+
 /-- Locate the `kohakuspawn` script and exec it with the given args. Search
     order:
       1. `$LEANKOHAKU_KOHAKUSPAWN`        — explicit override (dev / packagers)
@@ -1837,15 +1864,18 @@ def run (args : List String) : IO UInt32 := do
           else
             NetworkConfig.setRpcUrl url (some t)
             IO.println s!"set rpc_url={url} rpc_transport={t} in {← NetworkConfig.configPath}"
+            restartDaemonForConfigChange
             return 0
       | none =>
           NetworkConfig.setRpcUrl url none
           IO.println s!"set rpc_url={url} in {← NetworkConfig.configPath}"
+          restartDaemonForConfigChange
           return 0
   | .networkSetLightclient url =>
       NetworkConfig.setRpcUrl url (some "loopback")
       IO.println s!"set rpc_url={url} rpc_transport=loopback in {← NetworkConfig.configPath}"
       IO.println "note: light-client URL must already be reachable on loopback"
+      restartDaemonForConfigChange
       return 0
   | .networkSetPolicy policy =>
       match LeanKohaku.Privacy.NetworkPolicy.parsePolicy policy with
@@ -1856,27 +1886,23 @@ def run (args : List String) : IO UInt32 := do
       | some _ =>
           NetworkConfig.setPolicy policy
           IO.println s!"set network_policy={policy} in {← NetworkConfig.configPath}"
-          -- Daemon's cfg.policy is loaded once at Server.run startup
-          -- (LeanKohaku/Daemon/Config.lean#resolve) and threaded through
-          -- request handlers by value — there's no hot reload. So the
-          -- file is updated but the running daemon still uses whatever
-          -- it had at startup. Hint at the restart so users don't waste
-          -- time wondering why their permissive setting still denies.
-          IO.println "  note: restart the daemon for this to take effect:"
-          IO.println "    kohaku daemon stop && kohaku daemon ping"
+          restartDaemonForConfigChange
           return 0
   | .networkUnsetRpc =>
       NetworkConfig.unsetRpc
       IO.println s!"cleared rpc_url/rpc_transport in {← NetworkConfig.configPath}"
+      restartDaemonForConfigChange
       return 0
   | .networkSetEnsRpc url =>
       NetworkConfig.setEnsRpcUrl url
       IO.println s!"set ens_rpc_url={url} in {← NetworkConfig.configPath}"
       IO.println "note: ENS resolution always queries mainnet regardless of operating chain"
+      restartDaemonForConfigChange
       return 0
   | .networkUnsetEnsRpc =>
       NetworkConfig.unsetEnsRpc
       IO.println s!"cleared ens_rpc_url in {← NetworkConfig.configPath}"
+      restartDaemonForConfigChange
       return 0
   | .networkSetRpcChain chain url transport? =>
       match transport? with
@@ -1887,14 +1913,17 @@ def run (args : List String) : IO UInt32 := do
           else
             NetworkConfig.setChainRpcUrl chain url (some t)
             IO.println s!"set rpc_urls.{chain}.url={url} rpc_urls.{chain}.transport={t} in {← NetworkConfig.configPath}"
+            restartDaemonForConfigChange
             return 0
       | none =>
           NetworkConfig.setChainRpcUrl chain url none
           IO.println s!"set rpc_urls.{chain}={url} in {← NetworkConfig.configPath}"
+          restartDaemonForConfigChange
           return 0
   | .networkUnsetRpcChain chain =>
       NetworkConfig.unsetChainRpcUrl chain
       IO.println s!"cleared rpc_urls.{chain} in {← NetworkConfig.configPath}"
+      restartDaemonForConfigChange
       return 0
   | .networkSetChain chain =>
       match NetworkConfig.parseChainSelector chain with
@@ -1904,6 +1933,7 @@ def run (args : List String) : IO UInt32 := do
       | some chainId =>
           NetworkConfig.setChainId chainId
           IO.println s!"set chain_id={chainId} in {← NetworkConfig.configPath}"
+          restartDaemonForConfigChange
           return 0
   | .networkMonitor =>
       IO.println (← NetworkConfig.humanReport)
