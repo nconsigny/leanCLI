@@ -41,6 +41,7 @@ import { archiveKey, toggleArchive } from "./archiveStore.js";
 import PrivacyMenu from "./screens/PrivacyMenu.js";
 import NetworkScreen from "./screens/NetworkScreen.js";
 import NetworkMonitor from "./screens/NetworkMonitor.js";
+import StatusFlow from "./screens/StatusFlow.js";
 import {
   LockToggleFlow,
   ResolveFlow,
@@ -80,6 +81,7 @@ type Screen =
   | { kind: "privacy" }
   | { kind: "network" }
   | { kind: "network-monitor" }
+  | { kind: "status" }
   | { kind: "resolve" }
   | { kind: "daemon" }
   | { kind: "more" }
@@ -172,7 +174,7 @@ export default function App() {
       case "le-chat":         return push({ kind: "llm-chat" });
       case "create-wallet":   return push({ kind: "create-wallet" });
       case "private":         return push({ kind: "private" });
-      case "network":         return push({ kind: "network" });
+      case "status":          return push({ kind: "status" });
       case "toggle-colibri":  return void toggleColibri();
       case "unlock":          return push({ kind: "master-unlock" });
       case "more":            return push({ kind: "more" });
@@ -326,6 +328,13 @@ export default function App() {
       );
     case "network-monitor":
       return <NetworkMonitor onDone={pop} />;
+    case "status":
+      return (
+        <StatusFlow
+          onLiveMonitor={() => push({ kind: "network-monitor" })}
+          onBack={pop}
+        />
+      );
     case "resolve":
       return <ResolveFlow onDone={pop} />;
     case "daemon":

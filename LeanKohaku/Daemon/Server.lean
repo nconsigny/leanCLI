@@ -4,6 +4,7 @@ import LeanKohaku.Daemon.LlmServer
 import LeanKohaku.Daemon.Log
 import LeanKohaku.Daemon.SkillsStore
 import LeanKohaku.Daemon.State
+import LeanKohaku.Daemon.Status
 import LeanKohaku.Daemon.PpDestinations
 import LeanKohaku.Daemon.TxJournal
 import LeanKohaku.Daemon.Uds
@@ -1707,6 +1708,19 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       LeanKohaku.Daemon.State.requestShutdown state
       discard <| IO.asTask (exitSoon cfg.socketPath)
       pure <| .ok <| .obj #[("ok", .bool true)]
+  | "status.snapshot" =>
+      -- One-shot debugging snapshot for the TUI's Status page. Aggregates
+      -- daemon identity, sidecar ping results, sandbox posture, version
+      -- markers, and wallet posture. Read-only and policy-free — it's
+      -- pure introspection on local process state and the recorded
+      -- checkout. Network policy/chainId/socketPath are mirrored from
+      -- the active config so the page renders atomically without a
+      -- second `network.show` round-trip. See `Daemon/Status.lean` for
+      -- the field contract.
+      let (_, _, _, _, policyName) ← LeanKohaku.Cli.NetworkConfig.resolved
+      let snap ← LeanKohaku.Daemon.Status.buildSnapshot
+        state cfg.chainId policyName cfg.socketPath
+      pure <| .ok snap
   | "network.show" =>
       -- Structured snapshot of the daemon's *currently-active* network
       -- config: what handlers will dial *right now*. Mirrors what

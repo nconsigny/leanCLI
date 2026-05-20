@@ -10,7 +10,7 @@ export type MainAction =
   | "le-chat"
   | "create-wallet"
   | "private"
-  | "network"
+  | "status"
   | "toggle-colibri"
   | "unlock"
   | "more"
@@ -72,7 +72,7 @@ export default function MainMenu({
     { label: "le chat (local-LLM, experimental)",                        value: "le-chat" },
     { label: "Privacy Plugins",                                          value: "private" },
     { label: "Create wallet / Add account / Import",                     value: "create-wallet" },
-    { label: "Network",                                                  value: "network" },
+    { label: "Status (daemon · sidecars · sandbox · network)",           value: "status" },
     {
       label: `Colibri RPC verification: ${
         colibriPending ? "…" : colibriEnabled ? "ON  ✓" : "off"
