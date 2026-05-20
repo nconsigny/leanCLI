@@ -47,10 +47,30 @@ ConfirmGate stays the load-bearing safety net. This module narrows
 `LEAN_KOHAKU_SANDBOX` env var:
 
 * `off`     — passthrough, no wrapping. Use only for debugging.
-* `auto`    — (default) wrap with `unshare` if present; warn-and-skip
-              if missing. Suitable for dev hosts on non-Linux.
-* `require` — refuse to spawn the sidecar if `unshare` is missing.
+* `auto`    — (default) wrap with `unshare` if it is present AND usable
+              at runtime; warn-once-and-skip if missing or refused.
+              Suitable for dev hosts on non-Linux *and* for Linux hosts
+              where AppArmor / hardened-kernel policies forbid
+              unprivileged user namespaces (Ubuntu 23.10+ default).
+* `require` — refuse to spawn the sidecar if `unshare` is not usable.
               Use in production deployments to enforce the floor.
+
+## Runtime probe (Ubuntu 23.10+ / AppArmor caveat)
+
+`auto` mode used to degrade only when `unshare(1)` was missing from
+PATH. That left a silent-failure window on hosts where `unshare(1)` is
+installed but
+`kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu 23.10+ default)
+or `kernel.unprivileged_userns_clone=0` (hardened kernels) refuses the
+write to `/proc/self/uid_map`. Every sidecar spawn returned exit-1
+with empty stderr, and the daemon surfaced `{ok:false, crash:...}` to
+the TUI without any user-visible explanation of why.
+
+The probe now runs `unshare --user --map-current-user -- true` once per
+daemon process (cached in a ref). If it exits non-zero, the rest of the
+session takes the warn-once-and-skip path — same code path as
+"unshare not installed". The warning includes the sysctl knob to restore
+the sandbox on Ubuntu 23.10+.
 
 Reference: [[reference-vitalik-secure-llms]] ("Sandbox everything. Be
 paranoid about what exploits and threats rest on the outside internet.")
@@ -99,6 +119,56 @@ def detectUnshare : IO (Option String) := do
     else return none
   catch _ => return none
 
+/-- Cached result of the runtime usability probe. Three states:
+    `none` = not probed yet; `some none` = probed, not usable;
+    `some (some path)` = probed, usable at that path. -/
+initialize usableUnshareRef : IO.Ref (Option (Option String)) ← IO.mkRef none
+
+/-- Whether we've already printed the "sandbox disabled" warning to
+    stderr. Keeps the auto-degrade path from spamming the daemon log
+    once per sidecar spawn. -/
+initialize sandboxWarnedRef : IO.Ref Bool ← IO.mkRef false
+
+/-- Probe `unshare --user --map-current-user -- true` once and cache the
+    result. Returns the path to a usable `unshare` binary, or `none` if
+    either `unshare(1)` is missing or the syscall is refused at runtime
+    (AppArmor unprivileged-userns restriction on Ubuntu 23.10+,
+    `kernel.unprivileged_userns_clone=0` on hardened kernels, etc.). -/
+def probeUsableUnshare : IO (Option String) := do
+  match ← usableUnshareRef.get with
+  | some cached => pure cached
+  | none =>
+      let result ← do
+        match ← detectUnshare with
+        | none => pure none
+        | some path =>
+            try
+              let child ← IO.Process.spawn {
+                cmd := path,
+                args := #["--user", "--map-current-user", "--", "true"],
+                stdin := .null,
+                stdout := .null,
+                -- Probe noise (e.g. "unshare: write failed
+                -- /proc/self/uid_map: Operation not permitted") would
+                -- otherwise hit the daemon journal on every fresh boot.
+                -- The diagnostic gets printed by `warnSandboxDisabled`
+                -- below in user-friendly form instead.
+                stderr := .null
+              }
+              let code ← child.wait
+              pure (if code == 0 then some path else none)
+            catch _ => pure none
+      usableUnshareRef.set (some result)
+      pure result
+
+/-- Print the "sandbox disabled" warning once per process. Includes the
+    sysctl knob to restore the sandbox on the most common blocking host
+    config (Ubuntu 23.10+ AppArmor). -/
+private def warnSandboxDisabled (cmd : String) : IO Unit := do
+  unless (← sandboxWarnedRef.get) do
+    sandboxWarnedRef.set true
+    IO.eprintln s!"[sandbox] WARNING: `unshare --user --map-current-user` is not usable on this host (missing or refused by AppArmor/kernel). Spawning {cmd} and subsequent sidecars without OS-level sandboxing. The cryptographic trust model is unchanged — the daemon still re-decodes every signed tx before broadcast — but a compromised sidecar has more reach at the OS level. Set LEAN_KOHAKU_SANDBOX=require to fail-fast instead. To restore sandboxing on Ubuntu 23.10+: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+
 /-- Build the `unshare` arg prefix. PID + UTS + IPC are always
 unshared; the network namespace is unshared unless the sidecar needs
 loopback TCP to host services. `--user --map-current-user` is required
@@ -113,13 +183,21 @@ private def unshareFlags (spec : SidecarSpec) : Array String :=
 
 /-- Wrap a sidecar spawn for sandboxing. Returns the (cmd, args) to
 hand to `IO.Process.spawn`. The caller's existing env / stdin / stdout
-/ stderr handling is unchanged. -/
+/ stderr handling is unchanged.
+
+In `auto` mode, the wrap degrades to the unsandboxed spawn whenever
+`probeUsableUnshare` returns `none` — i.e. when `unshare(1)` is
+missing OR present-but-refused-at-runtime. The latter case (Ubuntu
+23.10+ AppArmor restriction, hardened-kernel `unprivileged_userns_clone=0`)
+used to manifest as silent sidecar exit-1; the probe + warn-once path
+makes the failure mode observable and recoverable without an install-
+time `LEAN_KOHAKU_SANDBOX=off` override. -/
 def wrap (spec : SidecarSpec) : IO (String × Array String) := do
   let mode := parseMode (← IO.getEnv "LEAN_KOHAKU_SANDBOX")
   match mode with
   | .off => pure (spec.cmd, spec.args)
   | _ =>
-      match ← detectUnshare with
+      match ← probeUsableUnshare with
       | some unshare =>
           let pre   := unshareFlags spec
           let full  := pre ++ #["--", spec.cmd] ++ spec.args
@@ -128,9 +206,9 @@ def wrap (spec : SidecarSpec) : IO (String × Array String) := do
           match mode with
           | .require =>
               throw <| IO.userError
-                "LEAN_KOHAKU_SANDBOX=require but `unshare` not found on PATH"
+                "LEAN_KOHAKU_SANDBOX=require but `unshare --user --map-current-user` is not usable on this host (missing or refused — e.g. AppArmor unprivileged-userns restriction on Ubuntu 23.10+; lift with: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0)"
           | _ =>
-              IO.eprintln s!"[sandbox] WARNING: unshare not found; spawning {spec.cmd} without sandbox (set LEAN_KOHAKU_SANDBOX=require to refuse)"
+              warnSandboxDisabled spec.cmd
               pure (spec.cmd, spec.args)
 
 end LeanKohaku.Util.Sandbox

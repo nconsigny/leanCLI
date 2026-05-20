@@ -1,5 +1,6 @@
 import LeanKohaku.Encoding.Json
 import LeanKohaku.Util.Sandbox
+import LeanKohaku.Util.BridgeResolve
 
 /-!
 # Clearsign-bridge sidecar boundary
@@ -27,36 +28,14 @@ open LeanKohaku.Encoding.Json
 /-- Default executable name for the clearsign sidecar (when on PATH). -/
 def defaultExecutable : String := "leankohaku-clearsign-bridge"
 
-/-- Walk upward from the working directory looking for the
-    `bridge/clearsign/bridge.mjs` script that ships in this repo. Returns
-    the first match within `maxHops` parents, or `none`. Mirrors the
-    `Colibri/Persistent.lean::findBridgeMjs` helper so the daemon works
-    out-of-the-box from anywhere inside the monorepo without an explicit
-    `LEAN_KOHAKU_CLEARSIGN_BRIDGE` env var. -/
-private partial def findBridgeMjs (start : System.FilePath) (maxHops : Nat) :
-    IO (Option String) := do
-  let candidate := start / "bridge" / "clearsign" / "bridge.mjs"
-  if (← candidate.pathExists) then
-    pure (some candidate.toString)
-  else
-    match maxHops, start.parent with
-    | 0, _ => pure none
-    | _ + 1, none => pure none
-    | n + 1, some parent =>
-        if parent == start then pure none else findBridgeMjs parent n
-
-/-- Resolve the bridge executable in this order:
-    1. `LEAN_KOHAKU_CLEARSIGN_BRIDGE` env var (explicit override).
-    2. `bridge/clearsign/bridge.mjs` walked upward from CWD (monorepo).
-    3. `leankohaku-clearsign-bridge` on PATH (installed binary). -/
-def resolveExecutable : IO String := do
-  match (← IO.getEnv "LEAN_KOHAKU_CLEARSIGN_BRIDGE") with
-  | some s => pure s
-  | none =>
-      let cwd ← IO.currentDir
-      match ← findBridgeMjs cwd 8 with
-      | some p => pure p
-      | none => pure defaultExecutable
+/-- Resolve via the shared `BridgeResolve` chain
+    (env → cwd-walk → recorded-checkout → PATH fallback).
+    See `LeanKohaku/Util/BridgeResolve.lean` for the resolution order. -/
+def resolveExecutable : IO String :=
+  LeanKohaku.Util.BridgeResolve.resolveExecutable
+    "LEAN_KOHAKU_CLEARSIGN_BRIDGE"
+    ("bridge" / "clearsign" / "bridge.mjs")
+    defaultExecutable
 
 structure Request where
   method : String

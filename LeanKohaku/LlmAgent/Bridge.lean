@@ -1,5 +1,6 @@
 import LeanKohaku.Encoding.Json
 import LeanKohaku.Util.Sandbox
+import LeanKohaku.Util.BridgeResolve
 
 /-!
 # LLM-agent bridge
@@ -21,16 +22,14 @@ open LeanKohaku.Encoding.Json
 
 def defaultExecutable : String := "leankohaku-llm-bridge"
 
-/-- Three-tier resolution (env > in-repo dev path > PATH binary).
-See the matching helper in `LeanKohaku.Privacy.Bridge` for the
-rationale — same dev-friendliness fix. -/
-def resolveExecutable : IO String := do
-  match (← IO.getEnv "LEAN_KOHAKU_LLM_BRIDGE") with
-  | some s => pure s
-  | none =>
-      let candidate : System.FilePath := (← IO.currentDir) / "bridge" / "llm" / "bridge.mjs"
-      if ← candidate.pathExists then pure candidate.toString
-      else pure defaultExecutable
+/-- Resolve via the shared `BridgeResolve` chain
+    (env → cwd-walk → recorded-checkout → PATH fallback).
+    See `LeanKohaku/Util/BridgeResolve.lean` for the resolution order. -/
+def resolveExecutable : IO String :=
+  LeanKohaku.Util.BridgeResolve.resolveExecutable
+    "LEAN_KOHAKU_LLM_BRIDGE"
+    ("bridge" / "llm" / "bridge.mjs")
+    defaultExecutable
 
 structure Request where
   method : String
