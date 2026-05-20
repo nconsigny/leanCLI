@@ -107,8 +107,9 @@ def fetchAndCache
     (endpoint : LeanKohaku.RPC.Outbound.Endpoint)
     (chainId : Nat) (address : String) : IO (Option TokenMeta) := do
   -- Route through Colibri when the persistent client is up so token
-  -- metadata reads are committee-verified, same as balances/calls.
-  let via? ← (← state.get).colibri.mapM (fun c => pure (c, chainId))
+  -- metadata reads are committee-verified, same as balances/calls. Uses
+  -- the shared respawn-on-transport-crash policy via `buildColibriVia`.
+  let via? ← LeanKohaku.Daemon.State.buildColibriVia state chainId
   let decRes ← LeanKohaku.RPC.Outbound.ethCall policy endpoint address decimalsSelector "latest" via?
   let symRes ← LeanKohaku.RPC.Outbound.ethCall policy endpoint address symbolSelector "latest" via?
   match decRes, symRes with

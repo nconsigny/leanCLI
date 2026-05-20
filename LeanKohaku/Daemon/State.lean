@@ -1,4 +1,5 @@
 import LeanKohaku.Colibri.Persistent
+import LeanKohaku.RPC.Outbound
 
 /-!
 # Daemon state
@@ -50,6 +51,11 @@ structure DaemonState where
   lifetime, which is why we keep it persistent rather than spawning
   per-call. -/
   colibri : Option LeanKohaku.Colibri.Persistent.Client := none
+  /-- Socket path used to spawn `colibri`. Cached so `colibriRespawn` can
+  bring the sidecar back without re-deriving the path (which lives in
+  `Daemon.Config` and is otherwise not reachable from here). Cleared
+  alongside `colibri` on `colibriDisable`. -/
+  colibriSocket : Option String := none
   /-- Wallet-level master KEK, when currently loaded. `none` means the
   wallet is locked at the master level — slot unlocks must come through
   the per-slot `eoa.unlock` path. Populated by `wallet.unlock`. -/
@@ -152,7 +158,7 @@ def colibriEnable (state : Shared) (socketPath : String) : IO LeanKohaku.Colibri
   | some c => pure c
   | none =>
       let c ← LeanKohaku.Colibri.Persistent.start socketPath
-      state.modify (fun s => { s with colibri := some c })
+      state.modify (fun s => { s with colibri := some c, colibriSocket := some socketPath })
       pure c
 
 /-- Tear down the persistent Colibri client. Idempotent. -/
@@ -162,10 +168,154 @@ def colibriDisable (state : Shared) : IO Unit := do
   | none => pure ()
   | some c =>
       try LeanKohaku.Colibri.Persistent.close c catch _ => pure ()
-      state.modify (fun s => { s with colibri := none })
+      state.modify (fun s => { s with colibri := none, colibriSocket := none })
+
+/-- Best-effort respawn after a transport-level death of the persistent
+    Colibri client (broken pipe / sidecar exit). Closes the dead client
+    (ignoring secondary errors), spawns a fresh one on the same socket
+    path, and atomically swaps it into shared state. Returns the new
+    client on success, `none` if no socket path was previously recorded
+    or the spawn failed.
+
+    Single-call recovery scope: this is invoked by the closure built in
+    `Server.lean`'s `colibriVia`, and only on the call that observed the
+    crash. Because the daemon serializes through one persistent
+    connection per `DaemonState`, two concurrent requests cannot both
+    enter this path before the swap settles (the first will already have
+    replaced the dead client by the time the second reads `state.colibri`
+    in `colibriVia`). The single-actor recovery property documented in
+    `Persistent.call` therefore still holds without an explicit lock. -/
+def colibriRespawn (state : Shared) : IO (Option LeanKohaku.Colibri.Persistent.Client) := do
+  let s ← state.get
+  match s.colibriSocket with
+  | none => pure none
+  | some socketPath =>
+      -- Close the dead client first so the spawned sidecar can claim the
+      -- socket path cleanly. Errors here are expected (the conn is
+      -- already broken) and intentionally swallowed.
+      match s.colibri with
+      | some c => try LeanKohaku.Colibri.Persistent.close c catch _ => pure ()
+      | none => pure ()
+      try
+        let c ← LeanKohaku.Colibri.Persistent.start socketPath
+        state.modify (fun s => { s with colibri := some c })
+        pure (some c)
+      catch _ =>
+        -- Spawn failed: leave `colibri := none` so subsequent
+        -- `colibriClient?` reads see verified-reads as off. Keep the
+        -- socket path on state so an operator-triggered respawn (via
+        -- `daemon.colibri.toggle`) still has it.
+        state.modify (fun s => { s with colibri := none })
+        pure none
 
 /-- Read the current Colibri client without spawning. -/
 def colibriClient? (state : Shared) : IO (Option LeanKohaku.Colibri.Persistent.Client) := do
   pure (← state.get).colibri
+
+/-! ## Verified-read backend builder
+
+  These helpers wire the persistent Colibri client into the Outbound RPC
+  layer, including the auto-respawn-and-retry policy on transport
+  crashes. They live in `Daemon.State` (rather than in `Daemon.Server`)
+  because (a) `Daemon.TokenMeta` and `Daemon.Preflight` build verified-
+  read clients too and need to share the same recovery semantics, and
+  (b) the closure mutates `Shared`, so co-locating it with the state
+  type keeps invariants reviewable.
+-/
+
+private def colibriCompact (j : LeanKohaku.Encoding.Json.Json) : String :=
+  LeanKohaku.Encoding.Json.compact j
+
+/-- Issue one Colibri request, classify the result, and surface transport-
+    level deaths as `.transportDead` (distinct from legitimate sidecar-
+    reported RPC errors). No recovery — the caller decides. -/
+private def runColibriOnce (client : LeanKohaku.Colibri.Persistent.Client)
+    (chainId : Nat) (method : LeanKohaku.Network.Provider.RpcMethod)
+    (params : LeanKohaku.Encoding.Json.Json) :
+    IO LeanKohaku.RPC.Outbound.ColibriOutcome := do
+  let proxyParams : LeanKohaku.Encoding.Json.Json := .obj #[
+    ("chainId", .num (Int.ofNat chainId)),
+    ("method", .str method.asString),
+    ("params", params)
+  ]
+  let resp ← LeanKohaku.Colibri.Persistent.call client "eth.proxy" proxyParams
+  match resp with
+  | .ok j => pure (.ok j)
+  | .err code msg _ => pure (.rpcError s!"colibri rpc-error code={code}: {msg}")
+  | .crash reason => pure (.rpcError s!"colibri transport: {reason}")
+  | .transportCrash reason => pure (.transportDead reason)
+
+/-- Append a JSONL line to the daemon network log under a colibri-respawn
+    event kind. Mirrors `Outbound.logEvent` but is reproduced here to
+    avoid widening the public surface of `Outbound`. -/
+private def logColibriRespawnEvent
+    (method : LeanKohaku.Network.Provider.RpcMethod) (phase : String)
+    (extra : Array (String × LeanKohaku.Encoding.Json.Json)) : IO Unit := do
+  let ts ← IO.monoMsNow
+  match ← LeanKohaku.RPC.Outbound.networkLogPath with
+  | none => pure ()
+  | some p =>
+      try
+        let fp : System.FilePath := p
+        match fp.parent with
+        | some parent => IO.FS.createDirAll parent
+        | none => pure ()
+        let h ← IO.FS.Handle.mk fp .append
+        let fields : Array (String × LeanKohaku.Encoding.Json.Json) :=
+          #[("ts_ms", .num (Int.ofNat ts)),
+            ("kind", .str "colibri-respawn"),
+            ("method", .str method.asString),
+            ("backend", .str "colibri"),
+            ("phase", .str phase)] ++ extra
+        h.putStr (colibriCompact (.obj fields) ++ "\n")
+        h.flush
+      catch _ => pure ()
+
+/-- Build the verified-read backend if the persistent Colibri client is
+    running. Returns `none` when colibri is off so calls fall through to
+    the configured HTTP endpoint. Read sites pass the result to
+    `Outbound.*` to opt every proofable read into stateless verification.
+
+    The returned `VerifyVia` closes over `state` so it can do one
+    auto-respawn-and-retry when the sidecar dies mid-session. On a
+    second consecutive transport crash (or a respawn failure) the closure
+    clears the client from shared state and returns `.transportDead`,
+    letting `Outbound.call` fall back to HTTP and emit a user-visible
+    notice. Single-actor recovery: only the call that hit the crash
+    initiates respawn; the dead-client cascade observed in the original
+    bug (every subsequent call ✗ in 0–1ms) is prevented by clearing
+    `colibri` on the second crash. -/
+def buildColibriVia (state : Shared) (chainId : Nat) :
+    IO (Option LeanKohaku.RPC.Outbound.VerifyVia) := do
+  match (← state.get).colibri with
+  | none => pure none
+  | some client =>
+      let runCall :
+          LeanKohaku.Network.Provider.RpcMethod →
+          LeanKohaku.Encoding.Json.Json →
+          IO LeanKohaku.RPC.Outbound.ColibriOutcome :=
+        fun method params => do
+          match ← runColibriOnce client chainId method params with
+          | .ok j => pure (.ok j)
+          | .rpcError m => pure (.rpcError m)
+          | .transportDead reason =>
+              logColibriRespawnEvent method "start"
+                #[("reason", .str reason)]
+              match ← colibriRespawn state with
+              | none =>
+                  logColibriRespawnEvent method "failed"
+                    #[("reason", .str "spawn-failed")]
+                  pure (.transportDead s!"respawn failed after {reason}")
+              | some fresh =>
+                  logColibriRespawnEvent method "ok" #[]
+                  match ← runColibriOnce fresh chainId method params with
+                  | .ok j => pure (.ok j)
+                  | .rpcError m => pure (.rpcError m)
+                  | .transportDead reason2 =>
+                      colibriDisable state
+                      logColibriRespawnEvent method "second-crash"
+                        #[("reason", .str reason2)]
+                      pure (.transportDead s!"second crash after respawn: {reason2}")
+      pure (some { chainId := chainId, runCall := runCall })
 
 end LeanKohaku.Daemon.State

@@ -244,13 +244,13 @@ def sphincsVerifierFor (cfg : Config)
 -- `LeanKohaku.Daemon.Config.resolve`. Avoids any silent loopback dial.
 
 /-- Build the verified-read backend if the persistent Colibri client is
-    running. Returns `none` when colibri is off so calls fall through to
-    the configured HTTP endpoint. Read sites in this server pass the
-    result to `Outbound.*` to opt every proofable read into stateless
-    verification with one call per use site. -/
+    running. Thin wrapper over `State.buildColibriVia`; kept as a private
+    alias because most call sites in this file already use the short
+    name. Recovery policy (one respawn + HTTP fallback on second crash)
+    lives in `Daemon.State` so `Daemon.TokenMeta` and others share it. -/
 private def colibriVia (state : LeanKohaku.Daemon.State.Shared) (chainId : Nat) :
-    IO (Option LeanKohaku.RPC.Outbound.VerifyVia) := do
-  pure ((← state.get).colibri.map (fun c => (c, chainId)))
+    IO (Option LeanKohaku.RPC.Outbound.VerifyVia) :=
+  LeanKohaku.Daemon.State.buildColibriVia state chainId
 
 /-- Resolve an RPC endpoint from a request. Honors an explicit `chain`
     string in `params` first; falls back to a tiny chainId → name map for

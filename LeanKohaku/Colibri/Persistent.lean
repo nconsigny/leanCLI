@@ -175,7 +175,30 @@ inductive Response where
   | ok    (result : Json)
   | err   (code : Int) (message : String) (data : Option Json)
   | crash (reason : String)
+  /-- A transport-level failure on the persistent UDS conn: the sidecar
+      died (broken pipe / SIGPIPE), the conn was closed under us, or a
+      write returned 0. Distinct from `crash` so the daemon can decide to
+      respawn-and-retry instead of propagating an opaque crash. -/
+  | transportCrash (reason : String)
   deriving Repr
+
+/-- Heuristic classifier over an `IO.Error.toString` payload. We keep this
+    string-shaped (rather than pattern-matching on the error variant) because
+    the runtime types in `IO.Error` are unstable across Lean versions; the
+    actual recoverable cases all surface through `IO.userError` from this
+    module (`writeAll` "short write", `recvLine` "connection closed") and
+    through the Lean IO wrapper when libc reports EPIPE / ECONNRESET on a
+    UDS write. -/
+def isTransportCrashMsg (s : String) : Bool :=
+  let s := s.toLower
+  let contains (needle : String) : Bool :=
+    (s.splitOn needle).length > 1
+  contains "broken pipe"
+    || contains "connection closed"
+    || contains "connection reset"
+    || contains "short write"
+    || contains "epipe"
+    || contains "econnreset"
 
 private def parseResponse (raw : String) : Response :=
   match parse raw with
@@ -218,7 +241,11 @@ def call (c : Client) (method : String) (params : Json) : IO Response := do
     let respStr := String.fromUTF8! respBytes
     pure (parseResponse respStr)
   catch e =>
-    pure (Response.crash s!"transport error: {e}")
+    let msg := e.toString
+    if isTransportCrashMsg msg then
+      pure (Response.transportCrash msg)
+    else
+      pure (Response.crash s!"transport error: {msg}")
 
 /-- Render a `Response` as JSON for forwarding through the daemon's
     JSON-RPC surface. Mirrors `Bridge.responseToJson`. -/
@@ -238,6 +265,11 @@ def responseToJson : Response → Json
       .obj #[
         ("ok", .bool false),
         ("crash", .obj #[("reason", .str reason)])
+      ]
+  | .transportCrash reason =>
+      .obj #[
+        ("ok", .bool false),
+        ("crash", .obj #[("reason", .str reason), ("transport", .bool true)])
       ]
 
 /-- Tear down the connection. The sidecar exits on the resulting EOF. -/

@@ -165,30 +165,36 @@ private def logEvent (kind method : String) (extra : Array (String × Json)) : I
       ("method", .str method)] ++ extra
   appendNetLog (compact (.obj fields))
 
-/-- Optional verified-read backend. When `some (client, chainId)` is
-    supplied AND the method is proofable, the request is routed through
-    the Colibri stateless light client over the persistent UDS instead of
-    the configured HTTP endpoint. State is pulled via committee-signed
-    Merkle proofs, so the result is verified against consensus. Non-
-    proofable methods (sendRawTransaction, debug_traceCall) always go
-    over HTTP regardless. -/
-abbrev VerifyVia := LeanKohaku.Colibri.Persistent.Client × Nat
+/-- Outcome of one verified-read attempt. Distinguishes a real JSON-RPC
+    error (which the upstream colibri sidecar produced and we should
+    propagate as-is) from a transport-level failure (broken pipe / dead
+    sidecar) that warrants respawn-and-fallback. -/
+inductive ColibriOutcome where
+  | ok            (result : Json)
+  | rpcError      (msg : String)
+  /-- Transport-level failure: the persistent UDS conn is unusable. The
+      caller should fall back to HTTP and notify the user that verified
+      reads were disabled. The recovery hook on `VerifyVia` will have
+      already been invoked once before this is returned. -/
+  | transportDead (reason : String)
+  deriving Repr
 
-private def callViaColibri (client : LeanKohaku.Colibri.Persistent.Client)
-    (chainId : Nat) (method : RpcMethod) (params : Json) :
-    IO (Except String Json) := do
-  -- Colibri's eth.proxy expects params as an array; eth_* params are
-  -- already arrays in our Outbound surface, so pass through as-is.
-  let proxyParams : Json := .obj #[
-    ("chainId", .num (Int.ofNat chainId)),
-    ("method", .str method.asString),
-    ("params", params)
-  ]
-  let resp ← LeanKohaku.Colibri.Persistent.call client "eth.proxy" proxyParams
-  match resp with
-  | .ok j => pure (.ok j)
-  | .err code msg _ => pure (.error s!"colibri rpc-error code={code}: {msg}")
-  | .crash reason => pure (.error s!"colibri transport: {reason}")
+/-- Optional verified-read backend. When supplied AND the method is
+    proofable, the request is routed through the Colibri stateless light
+    client over the persistent UDS instead of the configured HTTP
+    endpoint. State is pulled via committee-signed Merkle proofs, so the
+    result is verified against consensus. Non-proofable methods
+    (sendRawTransaction, debug_traceCall) always go over HTTP regardless.
+
+    `runCall` is a closure built per-request by the daemon (`Server.lean`'s
+    `colibriVia`). It owns the policy for transport-crash recovery:
+    auto-respawn once on broken pipe, then surface `.transportDead` so the
+    Outbound layer can fall back to HTTP. The closure is the only place
+    that has both the shared `DaemonState` and the sidecar socket path,
+    so respawn lives there rather than here. -/
+structure VerifyVia where
+  chainId : Nat
+  runCall : RpcMethod → Json → IO ColibriOutcome
 
 /-- Invariant: every daemon call site must pass `cfg.rpcEndpoint` (the
 endpoint resolved at startup from `LEANKOHAKU_RPC_URL` / `daemon.json`).
@@ -206,8 +212,9 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
   -- enabled. Logged through the same network log so audit trails stay
   -- coherent — the entry just shows backend=colibri.
   match via? with
-  | some (client, chainId) =>
+  | some via =>
       if method.proofable then
+        let chainId := via.chainId
         let t0 ← IO.monoMsNow
         let v ← verboseLevel
         if v ≥ 1 then
@@ -219,9 +226,13 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
             ("transport", .str "loopback"),
             ("chainId", .num (Int.ofNat chainId)),
             ("params", params)]
-        let result ← callViaColibri client chainId method params
+        -- Why: `runCall` is responsible for at most one respawn-and-retry
+        -- on transport crashes; it returns `.transportDead` only after that
+        -- attempt has been made and failed (or been refused). Outbound
+        -- then falls through to the HTTP path so the user still gets data.
+        let outcome ← via.runCall method params
         let dt := (← IO.monoMsNow) - t0
-        match result with
+        match outcome with
         | .ok j =>
             if v ≥ 1 then
               let resRender := if v ≥ 2 then s!" result={compact j}" else ""
@@ -233,7 +244,7 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
                 ("ms", .num (Int.ofNat dt)),
                 ("result", j)]
             return .ok j
-        | .error e =>
+        | .rpcError e =>
             if v ≥ 1 then IO.eprintln s!"[rpc✗colibri] {method.asString} {dt}ms {e}"
             logEvent "rpc-error" method.asString
               #[("backend", .str "colibri"),
@@ -242,6 +253,25 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
                 ("ms", .num (Int.ofNat dt)),
                 ("error", .str e)]
             return .error e
+        | .transportDead reason =>
+            -- Verified-read backend is gone for this call. Log the
+            -- transport death, log the explicit colibri-disabled event so
+            -- the audit trail records the policy decision, and fall
+            -- through to the HTTP path below. The terminal event for THIS
+            -- proofable call will be the HTTP response/exception logged
+            -- after the fall-through; the colibri side has already logged
+            -- its own rpc-error / respawn / disabled events.
+            if v ≥ 1 then
+              IO.eprintln s!"[rpc✗colibri] {method.asString} {dt}ms transport-dead: {reason}"
+            logEvent "colibri-disabled" method.asString
+              #[("backend", .str "colibri"),
+                ("host", .str "colibri.uds"),
+                ("transport", .str "loopback"),
+                ("ms", .num (Int.ofNat dt)),
+                ("reason", .str reason),
+                ("fallback", .str "http")]
+            IO.eprintln s!"leankohaku-daemon: colibri verified-reads disabled ({reason}); falling back to HTTP for {method.asString}. Re-enable with `daemon.colibri.toggle` once the sidecar is back."
+            -- fall through
   | none => pure ()
   if endpoint.url.trim.isEmpty then
     return .error "no rpc_url configured: refusing to dial (set LEANKOHAKU_RPC_URL or 'rpc_url' in daemon.json)"

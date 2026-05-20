@@ -277,7 +277,7 @@ def run
     (endpoint : LeanKohaku.RPC.Outbound.Endpoint)
     (chainId : Nat) (fromAddr to valueHex data : String)
     (lookback : Nat) : IO Json := do
-  let via? ← pure ((← state.get).colibri.map (fun c => (c, chainId)))
+  let via? ← LeanKohaku.Daemon.State.buildColibriVia state chainId
   let kind := classify valueHex data
   match kind with
   | .native =>
