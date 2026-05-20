@@ -15,6 +15,8 @@ import CreateWalletPicker, { CreateKind } from "./screens/CreateWalletPicker.js"
 import DecodeIntentFlow from "./screens/DecodeIntentFlow.js";
 import LlmChatFlow from "./screens/LlmChatFlow.js";
 import MasterUnlockGate from "./screens/MasterUnlockGate.js";
+import MasterInitGate from "./screens/MasterInitGate.js";
+import RpcSetupGate from "./screens/RpcSetupGate.js";
 import SendRawFlow from "./screens/SendRawFlow.js";
 import DecodeTypedDataFlow from "./screens/DecodeTypedDataFlow.js";
 import RevealMnemonicFlow from "./screens/RevealMnemonicFlow.js";
@@ -344,27 +346,34 @@ export default function App() {
   }
 }
 
-/** Startup probe → master-unlock-gate-or-pass-through.
+/** Startup gate. On a fresh install three things might be missing, in
+ *  dependency order:
  *
- *  Always prompts when a manifest exists (`initialized === true`), even
- *  if the daemon already holds a live KEK from a prior CLI session.
- *  Rationale: a TUI session is a long-running interactive surface, and
- *  users expect every session to begin with explicit auth — the daemon's
- *  in-memory unlock state is a CLI convenience, not a TUI bypass.
- *  Successful unlock just re-issues `wallet.unlock`, which the daemon
- *  treats idempotently (replaces the slot, restarts the TTL).
+ *   1. RPC URL — the daemon refuses to start without one
+ *      (LeanKohaku/Daemon/Config.lean). If `wallet.master.status` fails
+ *      with a transport error, route to `RpcSetupGate` which writes
+ *      daemon.json directly from Node.
+ *   2. Wallet master KEK — if status says `initialized: false`, route to
+ *      `MasterInitGate` so users don't have to discover
+ *      `kohaku wallet master init` on their own.
+ *   3. Session unlock — initialized but locked → `MasterUnlockGate`. We
+ *      re-prompt every TUI launch on purpose (in-memory unlock is a CLI
+ *      convenience, not a TUI bypass).
  *
- *  Skip only when there is no manifest (legacy install, never ran
- *  `wallet master init`) or when the status probe fails (daemon down,
- *  parser error — per-slot prompts still work as fallback). */
+ *  Esc at any step bails out to MainMenu unblocked; per-slot unlocks still
+ *  work as the fallback. */
 function BootGate({ onDone }: { onDone: () => void }) {
-  const [status, setStatus] = React.useState<
+  type Status =
     | { kind: "probing" }
-    | { kind: "show-gate" }
-    | { kind: "pass-through" }
-  >({ kind: "probing" });
+    | { kind: "needs-rpc" }
+    | { kind: "needs-init" }
+    | { kind: "needs-unlock" }
+    | { kind: "pass-through" };
+
+  const [status, setStatus] = React.useState<Status>({ kind: "probing" });
 
   React.useEffect(() => {
+    if (status.kind !== "probing") return;
     let cancelled = false;
     (async () => {
       const r = await call<{
@@ -372,30 +381,42 @@ function BootGate({ onDone }: { onDone: () => void }) {
         masterUnlocked: boolean;
       }>("wallet.master.status");
       if (cancelled) return;
-      if (r.ok && r.result?.initialized) {
-        setStatus({ kind: "show-gate" });
-      } else {
-        // No manifest, or status probe failed. Per-slot unlock remains
-        // available for individual EOAs; skip the prompt.
-        setStatus({ kind: "pass-through" });
+      if (!r.ok) {
+        // Most common failure on a fresh box is "daemon refuses to start
+        // because no RPC URL is configured". We can't cheaply distinguish
+        // that from a genuinely-down daemon without parsing the error
+        // string, so route to RPC setup either way — writing daemon.json
+        // is harmless when one already exists.
+        setStatus({ kind: "needs-rpc" });
+        return;
       }
+      if (!r.result!.initialized) {
+        setStatus({ kind: "needs-init" });
+        return;
+      }
+      setStatus({ kind: "needs-unlock" });
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [status.kind]);
 
   React.useEffect(() => {
     if (status.kind === "pass-through") onDone();
   }, [status.kind]);
 
-  if (status.kind === "show-gate") {
-    // Esc inside the gate falls through to MainMenu in locked mode; the
-    // per-slot prompts are still available.
+  if (status.kind === "needs-rpc") {
+    return <RpcSetupGate onDone={() => setStatus({ kind: "pass-through" })} />;
+  }
+
+  if (status.kind === "needs-init") {
+    // After init, daemon already holds the KEK in memory, so head
+    // straight to MainMenu (skip the unlock prompt).
+    return <MasterInitGate onDone={() => setStatus({ kind: "pass-through" })} />;
+  }
+
+  if (status.kind === "needs-unlock") {
     return <MasterUnlockGate onDone={onDone} />;
   }
-  // Probing / pass-through: don't paint MainMenu yet (its data fetches
-  // would race with our probe). The pass-through case dispatches onDone
-  // in the effect above; the next render is the parent MainMenu.
   return null;
 }

@@ -132,6 +132,9 @@ Options:
   --no-completion     Skip installing shell-completion files. By default,
                       completion is installed for bash, zsh, AND fish so
                       switching shells later doesn't require re-running.
+  --no-init           Skip the interactive first-run wizard (RPC URL +
+                      wallet master passphrase). Implied when stdin/stdout
+                      is not a TTY (covers `curl ... | bash` and CI).
   --force             Overwrite existing kohaku / kohaku-daemon symlinks
                       that point somewhere else. Default refuses.
   --uninstall         Remove ~/.kohaku/bin/{kohaku,kohaku-daemon,kohakuspawn}
@@ -154,6 +157,7 @@ BUILD_TUI=auto        # auto | always | never
 BUILD_BRIDGES=auto    # auto | always | never
 MODIFY_PATH=1
 INSTALL_COMPLETION=1
+RUN_INIT_WIZARD=1
 FORCE=0
 MODE=install      # install | uninstall
 
@@ -167,6 +171,7 @@ while [[ $# -gt 0 ]]; do
     --rebuild-bridges) BUILD_BRIDGES=always; shift;;
     --no-modify-path) MODIFY_PATH=0; shift;;
     --no-completion) INSTALL_COMPLETION=0; shift;;
+    --no-init) RUN_INIT_WIZARD=0; shift;;
     --force) FORCE=1; shift;;
     --uninstall) MODE=uninstall; shift;;
     -h|--help) usage; exit 0;;
@@ -608,6 +613,143 @@ if [[ $tpm_device_present -eq 1 ]]; then
   fi
 fi
 echo "  After fixing any of the above, verify with: kohaku wallet master status"
+
+# ---- First-run wizard: RPC URL + wallet master passphrase -------------------
+#
+# Two pieces a fresh install otherwise leaves the user to discover:
+#   1. The daemon refuses to start without an RPC URL (see
+#      LeanKohaku/Daemon/Config.lean), so step 1 prompts for one and writes
+#      it to daemon.json via the CLI's `network set-rpc-chain` — no daemon
+#      needed yet because that command edits the JSON file directly.
+#   2. The wallet master KEK (one passphrase wraps every EOA seed + the PP
+#      secret) is the single-credential UX from commit f747398; without it
+#      every EOA needs its own per-slot passphrase. We invoke
+#      `kohaku wallet master init` (which auto-spawns the daemon).
+#
+# Skip rules:
+#   - --no-init flag,
+#   - non-TTY stdin/stdout (covers `curl ... | bash` and CI),
+#   - each piece's check passes (RPC already configured / master.json present).
+
+has_rpc_configured() {
+  local v
+  for v in LEANKOHAKU_RPC_URL LEANKOHAKU_RPC_URL_MAINNET LEANKOHAKU_RPC_URL_SEPOLIA \
+           MAINNET_RPC_URL SEPOLIA_RPC_URL; do
+    if [[ -n "${!v:-}" ]]; then return 0; fi
+  done
+  local cfg="${LEANKOHAKU_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/leankohaku/daemon.json}"
+  if [[ -f "$cfg" ]]; then
+    # rpc_url / rpcUrl / rpc_endpoint / rpcEndpoint as a non-empty string.
+    if grep -qE '"(rpc_url|rpcUrl|rpc_endpoint|rpcEndpoint)"[[:space:]]*:[[:space:]]*"[^"]+' "$cfg" 2>/dev/null; then
+      return 0
+    fi
+    # rpc_urls.<chain> with a non-empty value (string or { url: "..." } object).
+    if grep -qE '"rpc_urls"' "$cfg" 2>/dev/null \
+       && grep -qE '"(mainnet|sepolia|[a-z0-9_-]+)"[[:space:]]*:[[:space:]]*("[^"]+"|\{[^}]*"url"[[:space:]]*:[[:space:]]*"[^"]+)' "$cfg" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+master_init_done() {
+  local data="${XDG_DATA_HOME:-$HOME/.local/share}/leankohaku/wallet/master.json"
+  [[ -f "$data" ]]
+}
+
+prompt_rpc_setup() {
+  echo
+  echo "==> RPC endpoint setup"
+  echo "  The daemon refuses to start without at least one RPC URL. Configure"
+  echo "  mainnet and/or sepolia now (Enter to skip a chain)."
+  echo
+  local mainnet_url sepolia_url
+  read -rp "  Mainnet RPC URL (e.g. https://eth.llamarpc.com): " mainnet_url
+  read -rp "  Sepolia RPC URL (e.g. https://sepolia.drpc.org): " sepolia_url
+
+  if [[ -z "${mainnet_url:-}" && -z "${sepolia_url:-}" ]]; then
+    echo "  (no URLs entered — set later with: kohaku network set-rpc-chain <chain> <url>)"
+    return 1
+  fi
+
+  local ok=1
+  if [[ -n "${mainnet_url:-}" ]]; then
+    if "$LEAN_BIN" network set-rpc-chain mainnet "$mainnet_url" >/dev/null; then
+      echo "  ✓ mainnet RPC saved"
+    else
+      echo "  ✗ failed to save mainnet RPC"; ok=0
+    fi
+  fi
+  if [[ -n "${sepolia_url:-}" ]]; then
+    if "$LEAN_BIN" network set-rpc-chain sepolia "$sepolia_url" >/dev/null; then
+      echo "  ✓ sepolia RPC saved"
+    else
+      echo "  ✗ failed to save sepolia RPC"; ok=0
+    fi
+  fi
+
+  local default_chain=""
+  if [[ -n "${mainnet_url:-}" ]]; then default_chain=mainnet
+  elif [[ -n "${sepolia_url:-}" ]]; then default_chain=sepolia
+  fi
+  if [[ -n "$default_chain" ]]; then
+    "$LEAN_BIN" network set-chain "$default_chain" >/dev/null \
+      && echo "  ✓ default chain set to $default_chain"
+  fi
+
+  [[ $ok -eq 1 ]]
+}
+
+prompt_master_init() {
+  echo
+  echo "==> Wallet master passphrase (encryption-at-rest)"
+  echo "  One passphrase wraps every EOA seed + the privacy-pool secret. Skipping"
+  echo "  means each EOA needs its own per-slot passphrase forever."
+  echo
+  local choice
+  read -rp "  Set up the master passphrase now? [Y/n] " choice
+  case "${choice:-y}" in
+    [Nn]*)
+      echo "  (skipped — set later with: kohaku wallet master init)"
+      return 0
+      ;;
+  esac
+  # `wallet master init` is interactive: prompts the passphrase twice and,
+  # if the TPM is ready, offers an optional TPM PIN (Enter to skip).
+  if ! "$LEAN_BIN" wallet master init; then
+    echo "kohakuspawn: wallet master init failed; retry with \`kohaku wallet master init\`" >&2
+    return 1
+  fi
+}
+
+if [[ $RUN_INIT_WIZARD -eq 1 && -t 0 && -t 1 ]]; then
+  echo
+  echo "==> First-run setup"
+  if has_rpc_configured; then
+    echo "  ✓ RPC endpoint already configured (\`kohaku network show\` to inspect)"
+  else
+    prompt_rpc_setup || true
+  fi
+  if master_init_done; then
+    echo "  ✓ wallet master already initialized"
+  elif has_rpc_configured; then
+    prompt_master_init || true
+  else
+    echo "  (skipping master passphrase: needs at least one RPC URL first."
+    echo "   Run \`kohaku network set-rpc-chain mainnet <url>\` then \`kohaku wallet master init\`.)"
+  fi
+elif [[ $RUN_INIT_WIZARD -eq 0 ]]; then
+  echo
+  echo "==> First-run setup: skipped (--no-init)"
+else
+  # Non-TTY path (curl|bash, CI). Don't fail; just point at the manual commands.
+  echo
+  echo "==> First-run setup: skipped (non-interactive shell)"
+  echo "    Run \`kohakuspawn\` again from a TTY, or configure manually:"
+  echo "      kohaku network set-rpc-chain mainnet <url>"
+  echo "      kohaku network set-rpc-chain sepolia <url>"
+  echo "      kohaku wallet master init"
+fi
 
 echo
 case ":${PATH:-}:" in
