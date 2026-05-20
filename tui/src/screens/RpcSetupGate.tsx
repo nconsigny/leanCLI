@@ -11,9 +11,39 @@ import { theme } from "../theme.js";
 type Phase =
   | { kind: "mainnet"; mainnet: string; sepolia: string; err: string | null }
   | { kind: "sepolia"; mainnet: string; sepolia: string; err: string | null }
+  // Confirm phase: explicitly echo what we captured before writing. Many
+  // first-run failures (paste with trailing newline, terminal eating a
+  // burst, focus loss) end up with empty strings here — making the user
+  // SEE the values before save catches these before the daemon spawns
+  // with a half-empty config.
+  | {
+      kind: "confirm";
+      mainnet: string;
+      sepolia: string;
+      mainnetErr: string | null;
+      sepoliaErr: string | null;
+    }
   | { kind: "saving"; mainnet: string; sepolia: string }
-  | { kind: "done"; saved: string[] }
+  | { kind: "done"; saved: { chain: string; url: string }[] }
   | { kind: "error"; msg: string };
+
+/** Quick syntactic URL validation. Catches empty / pasted-text-only /
+ *  missing-scheme errors. Doesn't make a network call — that's what the
+ *  post-spawn chain.balance probe is for. */
+function validateUrl(url: string): string | null {
+  const u = url.trim();
+  if (u.length === 0) return null; // empty = skip-this-chain, not an error
+  if (!/^https?:\/\//i.test(u)) {
+    return "must start with http:// or https://";
+  }
+  try {
+    const parsed = new URL(u);
+    if (!parsed.hostname) return "missing host";
+    return null;
+  } catch {
+    return "not a valid URL";
+  }
+}
 
 /** Resolve the daemon's config path the same way LeanKohaku/Cli/NetworkConfig
  *  does: `$LEANKOHAKU_CONFIG`, else `$XDG_CONFIG_HOME/leankohaku/daemon.json`,
@@ -85,19 +115,19 @@ export default function RpcSetupGate({ onDone }: { onDone: () => void }) {
   useEffect(() => {
     if (phase.kind !== "saving") return;
     try {
-      const saved: string[] = [];
+      const saved: { chain: string; url: string }[] = [];
       const mt = phase.mainnet.trim();
       const st = phase.sepolia.trim();
       if (mt) {
         writeChainRpc("mainnet", mt);
-        saved.push("mainnet");
+        saved.push({ chain: "mainnet", url: mt });
       }
       if (st) {
         writeChainRpc("sepolia", st);
-        saved.push("sepolia");
+        saved.push({ chain: "sepolia", url: st });
       }
       if (saved.length > 0) {
-        setDefaultChain(saved[0] as "mainnet" | "sepolia");
+        setDefaultChain(saved[0]!.chain as "mainnet" | "sepolia");
       }
       setPhase({ kind: "done", saved });
     } catch (e: any) {
@@ -142,6 +172,15 @@ export default function RpcSetupGate({ onDone }: { onDone: () => void }) {
                   })
                 }
                 onSubmit={(v) => {
+                // Syntactic validation BEFORE leaving the input phase.
+                // Empty is fine (skip-this-chain), but a non-empty value
+                // missing http:// is almost always a paste error — flag
+                // it here rather than letting it land in daemon.json.
+                const err = validateUrl(v);
+                if (err) {
+                  setPhase({ ...phase, err });
+                  return;
+                }
                 if (isMainnet) {
                   setPhase({
                     kind: "sepolia",
@@ -150,11 +189,14 @@ export default function RpcSetupGate({ onDone }: { onDone: () => void }) {
                     err: null,
                   });
                 } else {
-                  // Sepolia entered — save both.
+                  // Both URLs collected — confirm phase echoes them back
+                  // before we touch daemon.json.
                   setPhase({
-                    kind: "saving",
+                    kind: "confirm",
                     mainnet: phase.mainnet,
                     sepolia: v,
+                    mainnetErr: validateUrl(phase.mainnet),
+                    sepoliaErr: validateUrl(v),
                   });
                 }
               }}
@@ -168,6 +210,41 @@ export default function RpcSetupGate({ onDone }: { onDone: () => void }) {
           )}
         </Box>
       </Layout>
+    );
+  }
+
+  if (phase.kind === "confirm") {
+    // Echo what we captured. Users with paste-newline glitches see
+    // empty values here and can Esc back to retype before save lands
+    // a half-broken daemon.json. Refuse to advance when BOTH are
+    // empty — that's the "I pressed Enter twice by accident on a
+    // fresh box" case the previous gate accepted silently.
+    const bothEmpty =
+      phase.mainnet.trim().length === 0 && phase.sepolia.trim().length === 0;
+    return (
+      <ConfirmRpc
+        mainnet={phase.mainnet}
+        sepolia={phase.sepolia}
+        mainnetErr={phase.mainnetErr}
+        sepoliaErr={phase.sepoliaErr}
+        bothEmpty={bothEmpty}
+        onAccept={() => {
+          if (bothEmpty || phase.mainnetErr || phase.sepoliaErr) return;
+          setPhase({
+            kind: "saving",
+            mainnet: phase.mainnet,
+            sepolia: phase.sepolia,
+          });
+        }}
+        onRetype={() =>
+          setPhase({
+            kind: "mainnet",
+            mainnet: phase.mainnet,
+            sepolia: phase.sepolia,
+            err: null,
+          })
+        }
+      />
     );
   }
 
@@ -192,7 +269,9 @@ export default function RpcSetupGate({ onDone }: { onDone: () => void }) {
     );
   }
 
-  // done
+  // done — echo what actually landed in daemon.json so the user can
+  // verify before BootGate moves on. Paste-newline glitches that slip
+  // past validateUrl would surface here as a chain with a truncated URL.
   return (
     <Layout title="RPC saved" hint="enter / esc — continue">
       {phase.saved.length === 0 ? (
@@ -201,20 +280,85 @@ export default function RpcSetupGate({ onDone }: { onDone: () => void }) {
           text="No URLs entered. Set later: kohaku network set-rpc-chain <chain> <url>"
         />
       ) : (
-        <>
+        <Box flexDirection="column">
           <Banner
             kind="ok"
-            text={`Wrote ${phase.saved.join(" + ")} RPC URL${phase.saved.length > 1 ? "s" : ""} to daemon.json.`}
+            text={`Wrote ${phase.saved.length} RPC entr${phase.saved.length > 1 ? "ies" : "y"} to daemon.json:`}
           />
-          <Box marginTop={1}>
-            <Text color={theme.dim}>
-              Restart the daemon to pick up the new config:{" "}
-              <Text color={theme.primary}>kohaku daemon stop &amp;&amp; kohaku daemon ping</Text>
-            </Text>
-          </Box>
-        </>
+          {phase.saved.map((s) => (
+            <Box key={s.chain} marginLeft={2}>
+              <Text color={theme.dim}>
+                {s.chain}: <Text color={theme.primary}>{s.url}</Text>
+              </Text>
+            </Box>
+          ))}
+        </Box>
       )}
       <ContinueOnInput onDone={onDone} />
+    </Layout>
+  );
+}
+
+/** Confirm screen: echo the captured URLs back to the user with any
+ *  validation errors. Enter accepts and proceeds to save; Esc bounces
+ *  back to retype both. Both-empty isn't acceptable — the install would
+ *  otherwise produce a daemon with no usable RPC. */
+function ConfirmRpc({
+  mainnet,
+  sepolia,
+  mainnetErr,
+  sepoliaErr,
+  bothEmpty,
+  onAccept,
+  onRetype,
+}: {
+  mainnet: string;
+  sepolia: string;
+  mainnetErr: string | null;
+  sepoliaErr: string | null;
+  bothEmpty: boolean;
+  onAccept: () => void;
+  onRetype: () => void;
+}) {
+  useInput((_, key) => {
+    if (key.return) onAccept();
+    if (key.escape) onRetype();
+  });
+  const hasErr = bothEmpty || mainnetErr !== null || sepoliaErr !== null;
+  const hint = hasErr ? "esc — retype" : "enter — save · esc — retype";
+  return (
+    <Layout title="Confirm RPC URLs" hint={hint}>
+      <Box flexDirection="column">
+        <Text color={theme.dim}>About to write to daemon.json:</Text>
+        <Box marginTop={1} flexDirection="column">
+          <Text wrap="truncate-end">
+            mainnet:{" "}
+            <Text color={mainnetErr ? theme.err : theme.primary}>
+              {mainnet.trim().length === 0 ? "(blank — chain will be skipped)" : mainnet}
+            </Text>
+          </Text>
+          {mainnetErr && (
+            <Text color={theme.err}>          ↳ {mainnetErr}</Text>
+          )}
+          <Text wrap="truncate-end">
+            sepolia:{" "}
+            <Text color={sepoliaErr ? theme.err : theme.primary}>
+              {sepolia.trim().length === 0 ? "(blank — chain will be skipped)" : sepolia}
+            </Text>
+          </Text>
+          {sepoliaErr && (
+            <Text color={theme.err}>          ↳ {sepoliaErr}</Text>
+          )}
+        </Box>
+        {bothEmpty && (
+          <Box marginTop={1}>
+            <Banner
+              kind="err"
+              text="Both chains are blank. The daemon needs at least one RPC URL — press Esc to retype."
+            />
+          </Box>
+        )}
+      </Box>
     </Layout>
   );
 }

@@ -338,11 +338,17 @@ export default function WalletsHub({
     const key = balanceKey(w.kind, w.name, w.accountIndex);
     const cell = balances[key];
     const fresh = freshness[key];
+    // Show the actual daemon error message instead of a bare "err".
+    // The row is width-constrained so we cap the message at ~60 chars
+    // and prefix with "err: " so it's still easy to scan as a failure.
+    // Common surfaces here: "no rpc_url configured ...", "network policy
+    // denied method=eth_getBalance ...", transport / connect ENOENT —
+    // all of which are actionable; "err" was not.
     const balPart =
       cell?.state === "ok"
         ? formatEth(cell.wei)
         : cell?.state === "err"
-          ? "err"
+          ? `err: ${cell.message.length > 60 ? cell.message.slice(0, 57) + "…" : cell.message}`
           : "…";
     const isSub = (w.accountIndex ?? 0) > 0;
     const tag = isSub ? "  ↳ " : (w.kind === "eoa" ? "[eoa]" : "[tpm]");
