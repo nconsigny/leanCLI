@@ -27,6 +27,7 @@ import LeanKohaku.Ethereum.Intent
 import LeanKohaku.Ethereum.IntentCanonical
 import LeanKohaku.Ethereum.IntentEncode
 import LeanKohaku.Ethereum.IntentJson
+import LeanKohaku.Ethereum.Ownership
 import LeanKohaku.Ethereum.P256Precompile
 import LeanKohaku.Ethereum.Tx
 
@@ -92,6 +93,7 @@ import LeanKohaku.Swap.UniV3
 import LeanKohaku.Invariants.Swap
 
 import LeanKohaku.Invariants.Account
+import LeanKohaku.Invariants.AddressOwnership
 import LeanKohaku.Invariants.Amount
 import LeanKohaku.Invariants.Bridge
 import LeanKohaku.Invariants.Core

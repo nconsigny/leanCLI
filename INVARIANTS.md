@@ -617,6 +617,35 @@ balance for a non-deployed contract and mis-render in the TUI.
 
 ---
 
+## Category 14 — LLM-agent address resolution
+
+### 14.1 `.verified` witnesses are backed by an actual derivation
+
+When the `chat.draft` resolver returns a `Witness` with
+`status = .verified path` for a regex-matched field (`to`, `from`,
+`spender`), the resolver code path provably reached its `.verified`
+constructor by re-deriving an unlocked wallet's seed at `path` and
+structurally comparing the EIP-55 output to the resolved address.
+
+A malicious sidecar, a stale on-disk record, or a tampered wallet
+list cannot synthesize a `.verified` badge — the only branch of the
+abstract resolver that emits `.verified` is gated by an explicit
+equality check against `deriveAddress seed path`.
+
+**Props:**
+- `(checkOwned u key address).status = .verified path → deriveAddress u.seed path = address ∧ u.derivationPath = path`
+- `(resolve key address records unlocked book).status = .verified path → ∃ seed, deriveAddress seed path = address`
+
+**Status:** ✅ proved — `LeanKohaku/Invariants/AddressOwnership.lean::checkOwned_verified_imp`, `::resolve_verified_witnesses_derivation`
+
+The crypto primitive `deriveAddress` is axiomatized at the FFI
+boundary (HMAC-SHA512 → secp256k1 → Keccak-256 → EIP-55 in
+`LeanKohaku.Wallet.HDKey` + `LeanKohaku.Wallet.Address`); see 13.1 /
+13.4. What this category proves is purely structural, against the
+resolver code shape — not the underlying crypto.
+
+---
+
 ## Category 13 — Cryptographic assumptions (axiomatized)
 
 The wallet's end-to-end security cannot be discharged by Lean proofs alone —
