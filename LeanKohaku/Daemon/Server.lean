@@ -1862,14 +1862,30 @@ private partial def executeSphincsUserOp
                               -- 4) Skeleton + estimate gas.
                               let senderAddrBs : ByteArray :=
                                 (LeanKohaku.Crypto.Hex.decode sender).getD ByteArray.empty
+                              -- Initial heuristic gas params for the
+                              -- estimate-request skeleton. Must fit under
+                              -- the bundler's total-gas cap (Candide:
+                              -- 15M for the whole userOp), otherwise the
+                              -- estimate request ITSELF is rejected and
+                              -- the fallback would carry the same
+                              -- too-large values into the send request.
+                              --
+                              -- Real on-chain cost for SPHINCS- C9
+                              -- _validateSignature (verifier staticcall +
+                              -- ECDSA recover + abi.decode of the dual
+                              -- signature): ~250 K. We pad to 800 K to
+                              -- cover the first-send-also-deploy case
+                              -- where the EntryPoint also has to CREATE2
+                              -- the SphincsAccount contract before
+                              -- calling _validateSignature.
                               let opSkeleton : LeanKohaku.Sphincs.UserOp.PackedUserOperation := {
                                 sender             := senderAddrBs,
                                 nonce              := LeanKohaku.Sphincs.UserOp.padLeft32
                                   ((LeanKohaku.Crypto.Hex.decode (Sphincs.Send.natToEvenHex nonceN)).getD ByteArray.empty),
                                 initCode           := initCodeBytes,
                                 callData           := callData,
-                                accountGasLimits   := Sphincs.Send.packTwoHalves 15000000 300000,
-                                preVerificationGas := Sphincs.Send.natToWord32 80000,
+                                accountGasLimits   := Sphincs.Send.packTwoHalves 800000 200000,
+                                preVerificationGas := Sphincs.Send.natToWord32 60000,
                                 gasFees            := Sphincs.Send.packTwoHalves priorityFee maxFee,
                                 paymasterAndData   := ByteArray.empty
                               }
@@ -1892,10 +1908,10 @@ private partial def executeSphincsUserOp
                                     let cgl0 := getNat "callGasLimit"
                                     let pvg0 := getNat "preVerificationGas"
                                     pure
-                                      (if vgl0 = 0 then 15000000 else vgl0,
-                                       if cgl0 = 0 then 300000 else cgl0,
-                                       if pvg0 = 0 then 80000 else pvg0)
-                                | .error _ => pure (15000000, 300000, 80000)
+                                      (if vgl0 = 0 then 800000 else vgl0,
+                                       if cgl0 = 0 then 200000 else cgl0,
+                                       if pvg0 = 0 then 60000 else pvg0)
+                                | .error _ => pure (800000, 200000, 60000)
                               let userOp : LeanKohaku.Sphincs.UserOp.PackedUserOperation :=
                                 { opSkeleton with
                                     accountGasLimits   := Sphincs.Send.packTwoHalves vgl cgl,
