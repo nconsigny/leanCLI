@@ -13,13 +13,16 @@ type Props = { onDone: (success: boolean) => void };
 
 type ParamSet = "SLH-DSA-SHA2-128-24" | "JARDIN-Keccak-128-24" | "C9";
 type EcdsaKind = "existing" | "derived";
+type Chain = { name: "sepolia"; chainId: 11155111 }
+           | { name: "mainnet"; chainId: 1 };
 
 type Stage =
   | { kind: "probing" }
   | { kind: "pick-paramset" }
-  | { kind: "pick-wallet"; paramSet: ParamSet }
-  | { kind: "pick-ecdsa"; paramSet: ParamSet; wallet: EoaListEntry }
-  | { kind: "form"; paramSet: ParamSet; wallet: EoaListEntry; ecdsaKind: EcdsaKind }
+  | { kind: "pick-chain"; paramSet: ParamSet }
+  | { kind: "pick-wallet"; paramSet: ParamSet; chain: Chain }
+  | { kind: "pick-ecdsa"; paramSet: ParamSet; chain: Chain; wallet: EoaListEntry }
+  | { kind: "form"; paramSet: ParamSet; chain: Chain; wallet: EoaListEntry; ecdsaKind: EcdsaKind }
   | { kind: "rpc"; params: Record<string, string | number> };
 
 const SLOT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -102,7 +105,7 @@ export default function CreateSphincsHybridFlow({ onDone }: Props) {
     ];
     return (
       <Layout
-        title="Create SPHINCS- hybrid account · 1/4"
+        title="Create SPHINCS- hybrid account · 1/5"
         subtitle="Choose the post-quantum parameter set."
         hint="↑/↓ move · → / enter select · esc back"
       >
@@ -110,7 +113,34 @@ export default function CreateSphincsHybridFlow({ onDone }: Props) {
           items={items}
           arrowNav
           onBack={() => onDone(false)}
-          onSelect={(it) => setStage({ kind: "pick-wallet", paramSet: it.value })}
+          onSelect={(it) => setStage({ kind: "pick-chain", paramSet: it.value })}
+        />
+      </Layout>
+    );
+  }
+
+  if (stage.kind === "pick-chain") {
+    // Sepolia is the only chain where SPHINCS- factory + verifier are
+    // wired today; mainnet has no deployed factory yet so we keep it
+    // available but warn at the label level. The chain choice is baked
+    // into the slot record at create time and drives every downstream
+    // RPC's (chain, paramSet) lookup against `cfg.sphincsVerifiers` /
+    // `cfg.sphincsFactories` / `cfg.sphincsBundlers`.
+    const items: { label: string; value: Chain }[] = [
+      { label: "Sepolia (recommended — full deploy/send infra)",          value: { name: "sepolia", chainId: 11155111 } },
+      { label: "Mainnet ⚠ no factory deployed yet — slot will be offline", value: { name: "mainnet", chainId: 1 } },
+    ];
+    return (
+      <Layout
+        title="Create SPHINCS- hybrid account · 2/5"
+        subtitle={`Pick the chain for this hybrid. (paramSet: ${stage.paramSet})`}
+        hint="↑/↓ move · → / enter select · esc back"
+      >
+        <Select
+          items={items}
+          arrowNav
+          onBack={() => setStage({ kind: "pick-paramset" })}
+          onSelect={(it) => setStage({ kind: "pick-wallet", paramSet: stage.paramSet, chain: it.value })}
         />
       </Layout>
     );
@@ -123,15 +153,15 @@ export default function CreateSphincsHybridFlow({ onDone }: Props) {
     }));
     return (
       <Layout
-        title="Create SPHINCS- hybrid account · 2/4"
-        subtitle={`Pick the EOA wallet that supplies the ECDSA half. (paramSet: ${stage.paramSet})`}
+        title="Create SPHINCS- hybrid account · 3/5"
+        subtitle={`Pick the EOA wallet that supplies the ECDSA half. (paramSet: ${stage.paramSet} · chain: ${stage.chain.name})`}
         hint="↑/↓ move · → / enter select · esc back"
       >
         <Select
           items={items}
           arrowNav
-          onBack={() => setStage({ kind: "pick-paramset" })}
-          onSelect={(it) => setStage({ kind: "pick-ecdsa", paramSet: stage.paramSet, wallet: it.value })}
+          onBack={() => setStage({ kind: "pick-chain", paramSet: stage.paramSet })}
+          onSelect={(it) => setStage({ kind: "pick-ecdsa", paramSet: stage.paramSet, chain: stage.chain, wallet: it.value })}
         />
       </Layout>
     );
@@ -144,18 +174,19 @@ export default function CreateSphincsHybridFlow({ onDone }: Props) {
     ];
     return (
       <Layout
-        title="Create SPHINCS- hybrid account · 3/4"
+        title="Create SPHINCS- hybrid account · 4/5"
         subtitle={`Where does the ECDSA owner come from? (wallet: ${stage.wallet.name})`}
         hint="↑/↓ move · → / enter select · esc back"
       >
         <Select
           items={items}
           arrowNav
-          onBack={() => setStage({ kind: "pick-wallet", paramSet: stage.paramSet })}
+          onBack={() => setStage({ kind: "pick-wallet", paramSet: stage.paramSet, chain: stage.chain })}
           onSelect={(it) =>
             setStage({
               kind: "form",
               paramSet: stage.paramSet,
+              chain: stage.chain,
               wallet: stage.wallet,
               ecdsaKind: it.value,
             })}
@@ -211,23 +242,24 @@ export default function CreateSphincsHybridFlow({ onDone }: Props) {
     });
     return (
       <Layout
-        title="Create SPHINCS- hybrid account · 4/4"
+        title="Create SPHINCS- hybrid account · 5/5"
         subtitle={
           masterLoaded
-            ? "Master KEK is unlocked — leave the per-slot passphrase blank to enroll under master."
-            : "The SPHINCS- sk will be sealed under your per-slot passphrase."
+            ? `chain: ${stage.chain.name} · Master KEK is unlocked — leave the per-slot passphrase blank to enroll under master.`
+            : `chain: ${stage.chain.name} · The SPHINCS- sk will be sealed under your per-slot passphrase.`
         }
       >
         <Form
           fields={fields}
           onCancel={() =>
-            setStage({ kind: "pick-ecdsa", paramSet: stage.paramSet, wallet: stage.wallet })}
+            setStage({ kind: "pick-ecdsa", paramSet: stage.paramSet, chain: stage.chain, wallet: stage.wallet })}
           onSubmit={(v) => {
             const base: Record<string, string | number> = {
               name: v.name ?? "",
               paramSet: stage.paramSet,
               walletName: stage.wallet.name,
               ecdsaKind: stage.ecdsaKind,
+              chainId: stage.chain.chainId,
             };
             const slotPass = v.slotPassphrase ?? "";
             if (slotPass.length > 0) base.passphrase = slotPass;
@@ -265,11 +297,18 @@ export default function CreateSphincsHybridFlow({ onDone }: Props) {
           <Text color={theme.dim}>
             masterEnrolled: {String(r?.masterEnrolled ?? false)}
           </Text>
-          <Text color={theme.warn}>
-            ⚠ smart-account address pending CREATE2 factory wire-up.
-            Deploy + send flows land in a follow-up; this slot is
-            offline-only for now.
+          <Text color={theme.dim}>
+            smartAccountAddress: {r?.smartAccountAddress ?? "(pending — run Compute Address from the hub)"}
           </Text>
+          {r?.smartAccountAddress
+            ? null
+            : (
+              <Text color={theme.warn}>
+                ⚠ No factory configured for this (chain, paramSet) in daemon.json
+                yet. Use "Deploy the SPHINCS- factory" from the account hub on
+                Sepolia, then "Compute counterfactual address" to populate this.
+              </Text>
+            )}
         </Box>
       )}
       onDone={onDone}
