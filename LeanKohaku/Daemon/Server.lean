@@ -1843,7 +1843,21 @@ private partial def executeSphincsUserOp
                                 | .error _ => 0
                               let gasPriceN := parseHexJ gp
                               let priorityFee := parseHexJ pp
-                              let maxFee := gasPriceN + priorityFee
+                              -- Bundlers (Candide, Pimlico, …) reject userOps
+                              -- whose `maxFeePerGas` < their estimate of the
+                              -- next block's base fee. Our `gasPrice` read can
+                              -- be a few seconds stale (especially when
+                              -- Colibri-verified reads are in the path), so
+                              -- the naive `gasPrice + priorityFee` lands
+                              -- slightly below the bundler's floor on a
+                              -- rising-fee block. Pad to `2*gasPrice +
+                              -- priorityFee` — typical "fast-tx" multiplier
+                              -- shared by viem / ethers — which clears any
+                              -- realistic base-fee bump between read and
+                              -- submit. Sphincs- userOps are gas-heavy
+                              -- enough that paying ~2× base fee is rounding
+                              -- error against the 1.2 M total gas budget.
+                              let maxFee := 2 * gasPriceN + priorityFee
                               let initCodeBytes ← do
                                 match ← LeanKohaku.RPC.Outbound.call cfg.policy ep
                                     .getCode (.arr #[.str sender, .str "latest"]) none with
