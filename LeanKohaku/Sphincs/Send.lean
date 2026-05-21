@@ -133,8 +133,11 @@ def abiEncodeBytesPair (a b : ByteArray) : ByteArray :=
     ++ natToWord32 a.size ++ aPadded
     ++ natToWord32 b.size ++ padR b
 
-/-- Render a single byte field as its `0x`-prefixed hex string. -/
-def hex0x (bs : ByteArray) : String := "0x" ++ Hex.encode bs
+/-- Render a byte array as a `0x`-prefixed hex string. NOTE:
+    `LeanKohaku.Crypto.Hex.encode` already prepends `"0x"`; do NOT
+    concatenate another `"0x"` here or the bundler sees `"0x0x…"` and
+    rejects the userOp with "Invalid address value" / "Invalid hex". -/
+def hex0x (bs : ByteArray) : String := Hex.encode bs
 
 /-- Render a 32-byte big-endian word as a `0x`-prefixed hex string with
     leading zeros stripped (matching `eth_getTransactionCount`-style
