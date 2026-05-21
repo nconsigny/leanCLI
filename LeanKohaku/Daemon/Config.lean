@@ -402,8 +402,16 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
     withVerifierDefault sphincsVerifiers
       "sepolia" .c9 "0xdcC83c41cc0e20560096c0d5199343E834cbE91D"
   let sphincsFactories :=
+    -- Sepolia factory points at a patched `SphincsAccountDev` (the dev
+    -- inline account, not the upstream `SphincsAccount.sol`). The patch
+    -- is the unconditional-prefund payment in `validateUserOp` — without
+    -- it bundlers fail every estimate / send with `AA21 didn't pay
+    -- prefund`. Address changes with `SphincsAccountDev.creationCode`
+    -- because the factory's `getAddress` CREATE2 codeHash includes it;
+    -- the previous factory (0xe1db…2Db0) deployed accounts that early-
+    -- returned on sig-validation failure and is superseded.
     withVerifierDefault sphincsFactories
-      "sepolia" .c9 "0xe1db33A852a0FF005D600f75C76444021C422Db0"
+      "sepolia" .c9 "0x9cdB97628E8B91453C3adBf46709bd97720c2C10"
   let withBundlerDefault (acc : Array (String × String)) (chain url : String) :
       Array (String × String) :=
     if acc.any (fun (c, _) => c = chain) then acc

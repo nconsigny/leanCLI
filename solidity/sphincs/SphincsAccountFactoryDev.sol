@@ -95,33 +95,50 @@ contract SphincsAccountDev {
     ) external returns (uint256 validationData) {
         if (msg.sender != ENTRY_POINT) revert NotEntryPoint();
 
+        // Track validity locally; the prefund-payment step at the end MUST
+        // run regardless of signature outcome. The canonical
+        // `BaseAccount.validateUserOp` pattern from
+        // eth-infinitism/account-abstraction does exactly this — bundlers
+        // run `eth_estimateUserOperationGas` with a DUMMY signature, and
+        // expect the account to still pay prefund so the simulator can
+        // measure verification gas. An early return that skips prefund
+        // surfaces to the bundler as `AA21 didn't pay prefund`, even when
+        // the on-chain failure mode is "bad sig".
+        validationData = 0;
+
         // 1) Decode the hybrid signature: abi.encode(bytes ecdsaSig, bytes sphincsSig).
+        // Wrap in try/catch via low-level call would be ideal; using direct
+        // abi.decode here would revert on a malformed dummy sig. The dummy
+        // shape we expect from estimators is well-formed (just zero-filled),
+        // so a plain decode is safe.
         (bytes memory ecdsaSig, bytes memory sphincsSig) =
             abi.decode(userOp.signature, (bytes, bytes));
 
         // 2) ECDSA recover and equality check against the rotatable owner.
         address recovered = _recover(userOpHash, ecdsaSig);
-        if (recovered != owner) return 1;
+        if (recovered != owner) {
+            validationData = 1;
+        } else {
+            // 3) SPHINCS- via shared verifier (staticcall to avoid storage writes).
+            (bool ok, bytes memory result) = VERIFIER.staticcall(
+                abi.encodeWithSignature(
+                    "verify(bytes32,bytes32,bytes32,bytes)",
+                    pkSeed,
+                    pkRoot,
+                    userOpHash,
+                    sphincsSig
+                )
+            );
+            if (!ok || result.length < 32 || !abi.decode(result, (bool))) {
+                validationData = 1;
+            }
+        }
 
-        // 3) SPHINCS- via shared verifier (staticcall to avoid storage writes).
-        (bool ok, bytes memory result) = VERIFIER.staticcall(
-            abi.encodeWithSignature(
-                "verify(bytes32,bytes32,bytes32,bytes)",
-                pkSeed,
-                pkRoot,
-                userOpHash,
-                sphincsSig
-            )
-        );
-        if (!ok || result.length < 32) return 1;
-        if (!abi.decode(result, (bool))) return 1;
-
-        // 4) Pre-fund the EntryPoint with any missing gas.
+        // 4) Pre-fund the EntryPoint with any missing gas — UNCONDITIONAL.
         if (missingAccountFunds > 0) {
             (bool sent, ) = msg.sender.call{value: missingAccountFunds}("");
             (sent); // ignore — failure here surfaces as out-of-gas downstream
         }
-        return 0;
     }
 
     function execute(address target, uint256 value, bytes calldata data) external {
