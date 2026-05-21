@@ -16,7 +16,7 @@ import TabStrip from "../widgets/TabStrip.js";
 import Select from "../widgets/Select.js";
 import { archiveKey, readArchive } from "../archiveStore.js";
 
-export type WalletsAction = "send" | "swap" | "shield" | "custom";
+export type WalletsAction = "send" | "swap" | "shield" | "manage";
 
 type Props = {
   refreshKey?: number;
@@ -102,9 +102,9 @@ const TABS: { label: string; value: WalletsAction; help: string }[] = [
     help: "Privacy Pools deposit. EOA only — TPM/R1 keys can't sign the deposit transcript yet.",
   },
   {
-    label: "CUSTOM",
-    value: "custom",
-    help: "Wallet management — history, refresh, lock/unlock, reveal, plus advanced calldata.",
+    label: "MANAGE",
+    value: "manage",
+    help: "Per-account admin — EOA: BIP-44 path + cousin sub-accounts. Smart accounts: key rotation / social recovery. Also lists ERC-20 balances from the swap registry.",
   },
 ];
 
@@ -264,63 +264,70 @@ export default function WalletsHub({
       );
       setLoading(false);
 
-      // Sequential balance + freshness fetches per row. Public RPCs
-      // throttle bursts and sometimes return `0x0` instead of an error
-      // under load, so we keep the per-row probes serial. Freshness
-      // runs immediately after the row's balance so a slow getLogs
-      // doesn't delay the next row's balance from rendering.
+      // Parallel balance + freshness fan-out. Previously this ran serially
+      // per row to avoid public-RPC burst throttling, but for users with
+      // a dozen sub-accounts the wall-clock cost (one slow address blocking
+      // the whole list) outweighed the throttle risk. Each row dispatches
+      // its own balance + freshness probe independently, results stream
+      // into setBalances/setFreshness as they land, and a single hanging
+      // row no longer keeps the others in "…" forever.
       for (const w of out) {
-        if (cancelled) return;
         const params: { address: string; chain?: string } = { address: w.address };
         params.chain = w.kind === "tpm" ? "sepolia" : eoaChain;
-        const r = await call<ChainBalance>("chain.balance", params);
-        if (cancelled) return;
         const key = balanceKey(w.kind, w.name, w.accountIndex);
-        if (!r.ok) {
-          setBalances((prev) => ({
-            ...prev,
-            [key]: { state: "err", message: r.error.message },
-          }));
-        } else {
-          const wei = hexToBigInt(r.result?.balance);
-          setBalances((prev) => ({
-            ...prev,
-            [key]: { state: "ok", wei, chain: r.result?.chain },
-          }));
-        }
-        // Freshness probe. Soft signal — failure never falsely marks
-        // a row as "fresh"; we tag it as err and keep the row neutral.
-        const fr = await call<AddressFreshness>("chain.addressFreshness", params);
-        if (cancelled) return;
-        if (!fr.ok) {
-          setFreshness((prev) => ({ ...prev, [key]: { state: "err" } }));
-          continue;
-        }
-        const d = fr.result;
-        if (!d || typeof d.nonce !== "number") {
-          setFreshness((prev) => ({ ...prev, [key]: { state: "err" } }));
-          continue;
-        }
-        const ppFunded = d.ppFunded === true;
-        if (d.available !== true) {
+        // Balance task — fire-and-forget; per-row React state update on
+        // arrival. Cancellation is honored after the await so a stale
+        // hub mount can't overwrite the fresh one's cells.
+        void call<ChainBalance>("chain.balance", params).then((r) => {
+          if (cancelled) return;
+          if (!r.ok) {
+            setBalances((prev) => ({
+              ...prev,
+              [key]: { state: "err", message: r.error.message },
+            }));
+          } else {
+            const wei = hexToBigInt(r.result?.balance);
+            setBalances((prev) => ({
+              ...prev,
+              [key]: { state: "ok", wei, chain: r.result?.chain },
+            }));
+          }
+        });
+        // Freshness probe — independent fan-out, same fire-and-forget
+        // pattern. Soft signal: a failure tags `err` and the row stays
+        // neutral; never falsely marks "fresh".
+        void call<AddressFreshness>("chain.addressFreshness", params).then((fr) => {
+          if (cancelled) return;
+          if (!fr.ok) {
+            setFreshness((prev) => ({ ...prev, [key]: { state: "err" } }));
+            return;
+          }
+          const d = fr.result;
+          if (!d || typeof d.nonce !== "number") {
+            setFreshness((prev) => ({ ...prev, [key]: { state: "err" } }));
+            return;
+          }
+          const ppFunded = d.ppFunded === true;
+          if (d.available !== true) {
+            setFreshness((prev) => ({
+              ...prev,
+              [key]: {
+                state: "ok",
+                nonce: d.nonce,
+                erc20Clean: false,
+                ppFunded,
+                partial: true,
+              },
+            }));
+            return;
+          }
+          const erc20Clean =
+            (d.erc20OutCount ?? 0) === 0 && (d.erc20InCount ?? 0) === 0;
           setFreshness((prev) => ({
             ...prev,
-            [key]: {
-              state: "ok",
-              nonce: d.nonce,
-              erc20Clean: false,
-              ppFunded,
-              partial: true,
-            },
+            [key]: { state: "ok", nonce: d.nonce, erc20Clean, ppFunded },
           }));
-          continue;
-        }
-        const erc20Clean =
-          (d.erc20OutCount ?? 0) === 0 && (d.erc20InCount ?? 0) === 0;
-        setFreshness((prev) => ({
-          ...prev,
-          [key]: { state: "ok", nonce: d.nonce, erc20Clean, ppFunded },
-        }));
+        });
       }
     })();
     return () => {
@@ -519,7 +526,7 @@ function filterWalletsForTab(action: WalletsAction, wallets: Wallet[]): Wallet[]
   switch (action) {
     case "send":
     case "swap":
-    case "custom":
+    case "manage":
       // SwapFlow handles per-wallet eligibility itself (R1 → sepolia
       // only, EOA → mainnet/sepolia), so we don't pre-filter here.
       return wallets;

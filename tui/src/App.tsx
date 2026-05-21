@@ -26,6 +26,7 @@ import CreateEoaFlow from "./screens/CreateEoaFlow.js";
 import CreateR1Flow from "./screens/CreateR1Flow.js";
 import CreateSphincsHybridFlow from "./screens/CreateSphincsHybridFlow.js";
 import SphincsAccountsHub from "./screens/SphincsAccountsHub.js";
+import ManageWalletScreen from "./screens/ManageWalletScreen.js";
 import ImportEoaFlow from "./screens/ImportEoaFlow.js";
 import CreateWalletPicker, { CreateKind } from "./screens/CreateWalletPicker.js";
 import DecodeIntentFlow from "./screens/DecodeIntentFlow.js";
@@ -67,8 +68,17 @@ type Screen =
   | { kind: "master-unlock" }
   | { kind: "wallets" }
   | { kind: "actions"; wallet: Wallet }
-  | { kind: "send"; wallet: Wallet; chain?: string }
+  | {
+      kind: "send";
+      wallet: Wallet;
+      chain?: string;
+      /** When present, SendFlow runs as an ERC-20 transfer for this token
+       *  (calldata = `transfer(to,amount)`, value = 0) instead of a native
+       *  ETH send. Set by ManageWalletScreen's token-row action. */
+      token?: { symbol: string; address: string; decimals: number };
+    }
   | { kind: "swap"; wallet: Wallet }
+  | { kind: "manage"; wallet: Wallet; chain: string }
   | { kind: "shield"; wallet: Wallet }
   | { kind: "lock-toggle"; wallet: Wallet }
   | { kind: "reveal-mnemonic"; wallet: Wallet }
@@ -268,9 +278,11 @@ export default function App() {
   };
 
   /** Hub picked an action+wallet+chain. SEND/SWAP/SHIELD jump straight into
-   *  their flow; CUSTOM lands on the per-wallet ActionPicker so the user
-   *  can drive any of the wallet-management ops. `chain` is the WalletsHub
-   *  toggle (mainnet/sepolia for EOAs, "sepolia" for TPM). */
+   *  their flow; MANAGE lands on the per-wallet management screen
+   *  (BIP-44 + cousins for EOA, admin/rotation for sphincs, plus the
+   *  ERC-20 token list which itself can launch SEND with a token
+   *  preselected). `chain` is the WalletsHub toggle (mainnet/sepolia for
+   *  EOAs, "sepolia" for TPM). */
   const handleHubPick = (a: WalletsAction, w: Wallet, chain: string) => {
     // SPHINCS- hybrid smart accounts route to the dedicated management
     // screen regardless of the WalletsHub action tab — the standard
@@ -285,7 +297,7 @@ export default function App() {
       case "send":   return push({ kind: "send", wallet: w, chain });
       case "swap":   return push({ kind: "swap", wallet: w });
       case "shield": return push({ kind: "shield", wallet: w });
-      case "custom": return push({ kind: "actions", wallet: w });
+      case "manage": return push({ kind: "manage", wallet: w, chain });
     }
   };
 
@@ -343,12 +355,30 @@ export default function App() {
         <SendFlow
           wallet={top.wallet}
           chain={top.chain}
+          token={top.token}
           colibriEnabled={colibriEnabled}
           onDone={finishAction}
         />
       );
     case "swap":
       return <SwapFlow wallet={top.wallet} onDone={finishAction} />;
+    case "manage":
+      return (
+        <ManageWalletScreen
+          wallet={top.wallet}
+          chain={top.chain}
+          onSendToken={(token) =>
+            push({
+              kind: "send",
+              wallet: top.wallet,
+              chain: top.chain,
+              token,
+            })
+          }
+          onAction={(a) => handleWalletAction(top.wallet, a)}
+          onDone={pop}
+        />
+      );
     case "shield":
       return <ShieldFlow wallet={top.wallet} onDone={finishAction} />;
     case "lock-toggle":
