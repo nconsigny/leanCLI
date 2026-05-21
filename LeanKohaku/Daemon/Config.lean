@@ -375,6 +375,44 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
               if t.isEmpty then none else some (chain, t)
           | _ => none
     | _ => #[]
+  -- Built-in defaults for known-deployed SPHINCS- infrastructure on
+  -- Sepolia. Users can override every entry below from daemon.json
+  -- (their entries are parsed first and win the deduplication step); the
+  -- defaults exist so a fresh daemon boots in a usable state without
+  -- the user having to track down magic addresses. NO mainnet defaults
+  -- — no factory or verifier has been deployed there at the time of
+  -- writing, and shipping a placeholder would invite failure-by-typo.
+  --
+  -- Provenance: the C9 verifier and factory below were deployed in
+  -- May 2026 from this repo's `solidity/sphincs/` sources (forge create
+  -- via `./script/sphincs_sepolia.sh deploy`). The verifier source is
+  -- `SphincsC9Asm.sol` vendored from
+  -- `nconsigny/SPHINCS-/src/SPHINCs-C9Asm.sol @ 227788d` (includes the
+  -- big-endian FORS-digest fix); the factory source is the local
+  -- `SphincsAccountFactoryDev.sol`. Earlier deployments are
+  -- intentionally NOT carried over — the pre-fix verifier produced
+  -- signatures incompatible with the patched signer path.
+  let withVerifierDefault
+      (acc : Array LeanKohaku.Daemon.Server.SphincsVerifierEntry)
+      (chain : String) (ps : LeanKohaku.Sphincs.ParamSet) (addr : String)
+      : Array LeanKohaku.Daemon.Server.SphincsVerifierEntry :=
+    if acc.any (fun e => e.chain = chain && e.paramSet = ps) then acc
+    else acc.push { chain := chain, paramSet := ps, address := some addr }
+  let sphincsVerifiers :=
+    withVerifierDefault sphincsVerifiers
+      "sepolia" .c9 "0xdcC83c41cc0e20560096c0d5199343E834cbE91D"
+  let sphincsFactories :=
+    withVerifierDefault sphincsFactories
+      "sepolia" .c9 "0xe1db33A852a0FF005D600f75C76444021C422Db0"
+  let withBundlerDefault (acc : Array (String × String)) (chain url : String) :
+      Array (String × String) :=
+    if acc.any (fun (c, _) => c = chain) then acc
+    else acc.push (chain, url)
+  let sphincsBundlers :=
+    -- Candide's public Sepolia bundler. Users with a Pimlico/Stackup/etc
+    -- account override via daemon.json `sphincs_bundlers.sepolia`.
+    withBundlerDefault sphincsBundlers
+      "sepolia" "https://api.candide.dev/bundler/v3/sepolia"
   -- Why: bootstrap the entry for the daemon's primary chain from the
   -- default `rpc_url` when no per-chain entry covers it. Internally
   -- consistent: if the user said "this URL is the daemon's RPC for

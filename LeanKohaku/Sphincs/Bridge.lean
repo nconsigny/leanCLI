@@ -14,10 +14,13 @@ Three parameter sets are wired in:
     the JARDIN kernel: native keccak256 thash + 32-byte JARDIN ADRS)
   - C9 (WOTS+C / FORS+C, h=20 d=2 a=12 k=11 w=8, 3816-byte sig)
 
-C9 is deployed on Sepolia at
-0x18F005EECd41624644AA364bA8857258FEB3C26D and is the parameter set
-exercised by the SphincsAccount contract at
-0xA941116763AE386a50133c5af40356c9D93b2978 against EntryPoint v0.9.
+C9's current Sepolia deployment is the verifier at
+0xdcC83c41cc0e20560096c0d5199343E834cbE91D (post big-endian FORS-digest
+fix) and the SphincsAccountFactoryDev at
+0xe1db33A852a0FF005D600f75C76444021C422Db0 (constructor args:
+EntryPoint v0.9 singleton + the verifier). These addresses ship as
+built-in defaults in `Daemon/Config.lean::resolve`; users override via
+`daemon.json`'s `sphincs_verifiers` / `sphincs_factories` blocks.
 
 User-facing label is "SPHINCS-" because both variants are non-standard
 relative to NIST SLH-DSA. Internal type names and the on-chain
@@ -33,26 +36,21 @@ the daemon to broadcast a signature the on-chain verifier would reject.
 constants on every call so a wrongly-spawned binary (or a tampered
 `info`) is detected before any signing operation.
 
-## Phase 3 Step 1 — on-chain verify cross-check (passed)
+## On-chain cross-check history
 
-The local C9 verifier was cross-checked against the deployed Yul
-verifier on a real Sepolia handleOps tx
+The original C9 verifier at `0x18F005EECd41624644AA364bA8857258FEB3C26D`
+and SphincsAccount at `0xA941116763AE386a50133c5af40356c9D93b2978` were
+the cross-check targets in an earlier session — a Sepolia handleOps tx
 `0x8366513b096ee53dd1cb105363ab21a52267dd966b822b4bb2cf5492abf1550f`
-(block 10617954). Reading the SphincsAccount at
-`0xA941116763AE386a50133c5af40356c9D93b2978` returned
-`pkSeed = 0x3a8b2936c7b6f018704d736b26bf402d…` and
-`pkRoot = 0x8bf4446db8643e4c149359f364bcca53…` (32-byte words, with the
-meaningful prefix in the high half). Decoding the userOp from
-`handleOps` calldata yielded a `signature` field of
-`abi.encode(bytes ecdsaSig, bytes sphincsSig)` with `len(sphincsSig)
-= 3816` (matching `ParamSet.expectedSigBytes .c9`). Reproducing
-`userOpHash` per EntryPoint v0.9 EIP-712 typed-data hashing (see
-`LeanKohaku/Sphincs/UserOp.lean`) and feeding
-`(pkSeed, pkRoot, userOpHash, sphincsSig)` to the local
-`bin/sphincs-c9 verify` returned `{"ok": true}` — verbatim. So the
-deployed Yul verifier and our Rust port at `vendor-c9/` agree on a
-real-world signature, which is the strongest correctness signal we can
-get without our own Sepolia tx.
+(block 10617954) was used to confirm `(pkSeed, pkRoot, userOpHash,
+sphincsSig)` round-trips through the local Rust port and the on-chain
+Yul agreeing on `{"ok": true}`. Those addresses are SUPERSEDED — the
+old verifier predates the big-endian FORS-digest fix and produces
+signatures that the patched signer side cannot match. The current
+Sepolia deployment above (vendored from `nconsigny/SPHINCS- @ 227788d`,
+deployed May 2026) needs a fresh end-to-end cross-check tx; until that
+lands the "deployed verifier accepts our local signature" claim only
+holds for our internal verify-after-sign path.
 -/
 
 namespace LeanKohaku.Sphincs
