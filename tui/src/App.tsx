@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Box, Text, useApp } from "ink";
+import { Box, Text, useApp, useInput } from "ink";
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
@@ -44,6 +44,7 @@ import PrivacyMenu from "./screens/PrivacyMenu.js";
 import NetworkScreen from "./screens/NetworkScreen.js";
 import NetworkMonitor from "./screens/NetworkMonitor.js";
 import StatusFlow from "./screens/StatusFlow.js";
+import { NavContext, type NavApi } from "./nav.js";
 import {
   LockToggleFlow,
   ResolveFlow,
@@ -112,6 +113,13 @@ export default function App() {
   // `onDone` callback unrolls the stack onto MainMenu, so navigating Back
   // from MainMenu never lands the user on the gate again.
   const [stack, setStack] = useState<Screen[]>([{ kind: "boot" }]);
+  // Browser-style forward history. A `pop()` archives the just-popped
+  // screen here; a subsequent `forward()` replays it. Any new `push()`
+  // discards the forward stack (mirrors the standard "navigating from
+  // an in-history page truncates the forward chain" behaviour). Cleared
+  // on the boot→main transition so the main menu starts with an empty
+  // forward stack rather than a phantom "boot screen" entry.
+  const [forwardStack, setForwardStack] = useState<Screen[]>([]);
   const [walletsRefreshKey, setWalletsRefreshKey] = useState(0);
   // Colibri stateless simulation runs the EVM locally inside a WASM light
   // client with committee-verified state proofs. Toggling here sends
@@ -167,9 +175,46 @@ export default function App() {
   };
 
   const top = stack[stack.length - 1]!;
-  const push = (s: Screen) => setStack((prev) => [...prev, s]);
+  const push = (s: Screen) => {
+    setStack((prev) => [...prev, s]);
+    // Any new navigation truncates the forward chain — standard
+    // browser-history semantics. Without this you could end up in an
+    // inconsistent state where Forward replays a screen that's
+    // unreachable from your current location.
+    setForwardStack([]);
+  };
   const pop = () => {
-    setStack((prev) => (prev.length > 1 ? prev.slice(0, -1) : prev));
+    setStack((prev) => {
+      if (prev.length <= 1) return prev;
+      const popped = prev[prev.length - 1]!;
+      // Archive the popped screen so Forward can replay it. Prepend so
+      // the most-recently-popped lands at index 0 (next forward target).
+      setForwardStack((fs) => [popped, ...fs]);
+      return prev.slice(0, -1);
+    });
+  };
+  const forward = () => {
+    setForwardStack((fs) => {
+      if (fs.length === 0) return fs;
+      const [next, ...rest] = fs;
+      // Re-push without touching forwardStack again — we already drained
+      // the head. (Using `push` here would clear the rest of the chain.)
+      setStack((prev) => [...prev, next]);
+      return rest;
+    });
+  };
+  // Top-level keystroke: `]` advances through the forward chain.
+  // Screens use `←` / `esc` for back (existing convention) and own that
+  // key; we don't shadow them here. `]` is unused anywhere else in the
+  // TUI today (grep: no other useInput handles it).
+  useInput((input) => {
+    if (input === "]") forward();
+  });
+  const navApi: NavApi = {
+    canBack: stack.length > 1,
+    canForward: forwardStack.length > 0,
+    back: pop,
+    forward,
   };
 
   const handleMain = (a: MainAction) => {
@@ -251,7 +296,14 @@ export default function App() {
     pop();
   };
 
-  switch (top.kind) {
+  // Render the current screen, then wrap the result in NavContext so
+  // any Layout-rendered NavBar (and any other consumer) sees the live
+  // back/forward state without having to thread it through every
+  // screen's props. The renderScreen IIFE keeps the original
+  // switch-of-returns idiom intact — refactoring each case to assign
+  // to a variable would have been a much wider diff.
+  const renderScreen = (): React.ReactElement => {
+    switch (top.kind) {
     case "main":
       return (
         <MainMenu
@@ -407,13 +459,27 @@ export default function App() {
     case "boot":
       // Master unlock gate or pass-through. `onDone` replaces the boot
       // screen with MainMenu (not push) so back-out from MainMenu cannot
-      // return here.
+      // return here. Also drop the forward stack — a fresh main-menu
+      // shouldn't have any phantom "forward to boot screen" entry.
       return (
         <BootGate
-          onDone={() => setStack([{ kind: "main" }])}
+          onDone={() => {
+            setStack([{ kind: "main" }]);
+            setForwardStack([]);
+          }}
         />
       );
-  }
+    }
+    // Exhaustiveness: every `Screen` kind handled above. If a new
+    // screen kind is added the type checker flags this line.
+    return null as unknown as React.ReactElement;
+  };
+
+  return (
+    <NavContext.Provider value={navApi}>
+      {renderScreen()}
+    </NavContext.Provider>
+  );
 }
 
 /** Startup gate. Four things might be missing on a fresh install:
