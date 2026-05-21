@@ -7,6 +7,7 @@ import LeanKohaku.Clearsign.Bridge
 import LeanKohaku.Privacy.Bridge
 import LeanKohaku.LlmAgent.Bridge
 import LeanKohaku.Colibri.Persistent
+import LeanKohaku.RPC.Outbound
 
 /-!
 # Daemon `status.snapshot` builder
@@ -279,12 +280,202 @@ private def walletJson (state : LeanKohaku.Daemon.State.Shared) : IO Json := do
     ("unlockedSlots", .arr (unlocked.toArray.map Json.str))
   ]
 
+/-- Extract the host:port portion of a URL and strip the port. Returns
+    `""` if extraction fails. Mirrors `RPC.Outbound.hostOfUrl` then drops
+    the `:port` suffix so the result is suitable for DNS lookup. Bracketed
+    IPv6 literals (`[::1]:8545`) come back as `[::1]`. -/
+private def hostNoPort (url : String) : String := Id.run do
+  let host := LeanKohaku.RPC.Outbound.hostOfUrl url
+  let chars := host.toList
+  if host.startsWith "[" then
+    -- IPv6 in brackets: keep characters through the closing ']'.
+    let mut acc : String := ""
+    for c in chars do
+      acc := acc.push c
+      if c = ']' then return acc
+    return acc
+  -- IPv4 / hostname: stop at first ':' (port separator).
+  let mut acc : String := ""
+  for c in chars do
+    if c = ':' then return acc
+    acc := acc.push c
+  return acc
+
+/-- Best-effort IPv4 resolution for a hostname. Returns `""` on any
+    failure (host empty, DNS unavailable, lookup timed out). Implementation
+    uses `getent ahostsv4` because it honors `/etc/hosts`, NSS, and the
+    system resolver in one shot without pulling a Lean DNS dep. Bounded
+    by a short wait on the child process — if `getent` ever hangs we'd
+    rather show a blank IP than wedge the Status snapshot. Skipped when
+    `host` is already a dotted-quad or bracketed IPv6 literal. -/
+private def resolveIpv4 (host : String) : IO String := do
+  if host.isEmpty then return ""
+  -- Skip lookup if the host already looks like a literal IP.
+  if host.startsWith "[" then return host  -- IPv6 literal in brackets
+  let looksLikeIPv4 :=
+    let parts := host.splitOn "."
+    parts.length = 4 && parts.all (fun p => !p.isEmpty && p.all (·.isDigit))
+  if looksLikeIPv4 then return host
+  try
+    let child ← IO.Process.spawn {
+      cmd := "getent",
+      args := #["ahostsv4", host],
+      stdin := .null,
+      stdout := .piped,
+      stderr := .null
+    }
+    let stdout ← child.stdout.readToEnd
+    let exitCode ← child.wait
+    if exitCode ≠ 0 then return ""
+    -- `getent ahostsv4 example.com` prints lines like:
+    --   "93.184.216.34 STREAM example.com"
+    -- We want the first dotted-quad token of the first line.
+    let firstLine := (stdout.splitOn "\n").headD ""
+    let firstTok  := (firstLine.splitOn " ").headD ""
+    return firstTok.trim
+  catch _ => return ""
+
+/-- Resolve `ip(8)` to an absolute path. Mirrors `Sandbox.detectUnshare`'s
+    approach: try the well-known locations first, fall back to
+    `env which`. Returns `none` if the binary isn't installed. PATH-lookup
+    via bare `cmd := "ip"` is unreliable under `IO.Process.spawn` —
+    daemon's PATH can be sparse (e.g. systemd-launched) — so we resolve
+    explicitly. -/
+private def detectIpBinary : IO (Option String) := do
+  let candidates : Array String := #[
+    "/usr/bin/ip",
+    "/usr/sbin/ip",
+    "/sbin/ip",
+    "/bin/ip",
+    "/run/current-system/sw/bin/ip"
+  ]
+  for c in candidates do
+    if ← System.FilePath.pathExists c then
+      return some c
+  try
+    let out ← IO.Process.output { cmd := "/usr/bin/env", args := #["which", "ip"] }
+    if out.exitCode == 0 then
+      let path := out.stdout.trimAscii.toString
+      if path.isEmpty then return none else return some path
+    else return none
+  catch _ => return none
+
+/-- Local egress for a destination IP. Asks the kernel via `ip -o route
+    get <ip>` which local interface + source address it would pick to
+    reach the endpoint. Pure routing-table lookup — no network call, no
+    leak to a third-party "what's my IP" service. Returns
+    `(src, dev, err)` where `err` is empty on success or carries a short
+    diagnostic on failure (binary missing, exit nonzero, parse empty) —
+    surfaced in the TUI so `<no route>` is never silently mysterious.
+    Privacy note: this is the source address the wallet would actually
+    dial *from*, not the public IP a remote sees — useful for catching
+    split-tunnel/VPN misconfigurations ("am I routing this over the VPN
+    or the LAN?") without phoning home. -/
+private def routeEgress (ip : String) : IO (String × String × String) := do
+  if ip.isEmpty then return ("", "", "no destination IP")
+  let ipBin ← match (← detectIpBinary) with
+    | some p => pure p
+    | none   => return ("", "", "ip(8) not found in PATH or well-known dirs")
+  try
+    let child ← IO.Process.spawn {
+      cmd := ipBin,
+      args := #["-o", "route", "get", ip],
+      stdin := .null,
+      stdout := .piped,
+      stderr := .piped
+    }
+    let out ← child.stdout.readToEnd
+    let err ← child.stderr.readToEnd
+    let exitCode ← child.wait
+    if exitCode ≠ 0 then
+      let snippet :=
+        let raw := err.trimAscii.toString
+        if raw.isEmpty then s!"{ipBin} exited {exitCode}, no stderr"
+        else if raw.length > 120 then s!"{ipBin} exit {exitCode}: {(raw.take 120).toString}…"
+        else s!"{ipBin} exit {exitCode}: {raw}"
+      return ("", "", snippet)
+    -- `-o` collapses to one line. Tokens we care about: "src <addr>" and
+    -- "dev <iface>". Walk pairs.
+    let tokens := (out.splitOn " ").filterMap fun s =>
+      let t := s.trimAscii.toString
+      if t.isEmpty then none else some t
+    let mut src : String := ""
+    let mut dev : String := ""
+    let mut prev : String := ""
+    for tok in tokens do
+      if prev = "src" then src := tok
+      else if prev = "dev" then dev := tok
+      prev := tok
+    if src.isEmpty && dev.isEmpty then
+      return ("", "", s!"parsed empty: {out.take 80}")
+    return (src, dev, "")
+  catch e =>
+    return ("", "", s!"spawn failed: {toString e}")
+
+private def endpointJson (ep : LeanKohaku.RPC.Outbound.Endpoint) : IO Json := do
+  let host := hostNoPort ep.url
+  let ip ← resolveIpv4 host
+  let (egressSrc, egressDev, egressError) ← routeEgress ip
+  let chainIdJson : Json := match ep.chainId with
+    | some n => .num (Int.ofNat n)
+    | none   => .null
+  pure <| .obj #[
+    ("url", .str ep.url),
+    ("transport", .str ep.transport.asString),
+    ("backend", .str ep.backend.asString),
+    ("host", .str host),
+    ("ip", .str ip),
+    ("egressSrc", .str egressSrc),
+    ("egressDev", .str egressDev),
+    ("egressError", .str egressError),
+    ("chainId", chainIdJson)
+  ]
+
+/-- Per-chain endpoint with the `isCurrent` flag set against the active
+    `chainId`. Mirrors the shape rendered in `network.show`'s `perChain`
+    so the TUI can share rendering logic across both surfaces. -/
+private def chainEndpointJson
+    (activeChainId : Nat)
+    (entry : String × LeanKohaku.RPC.Outbound.Endpoint) : IO Json := do
+  let (name, ep) := entry
+  let host := hostNoPort ep.url
+  let ip ← resolveIpv4 host
+  let (egressSrc, egressDev, egressError) ← routeEgress ip
+  let resolvedChainId : Option Nat :=
+    ep.chainId.orElse (fun _ => LeanKohaku.RPC.Outbound.chainNameToId name)
+  let chainIdJson : Json := match resolvedChainId with
+    | some n => .num (Int.ofNat n)
+    | none   => .null
+  let isCurrent : Bool := match resolvedChainId with
+    | some n => n = activeChainId
+    | none   => false
+  pure <| .obj #[
+    ("name", .str name),
+    ("chainId", chainIdJson),
+    ("url", .str ep.url),
+    ("transport", .str ep.transport.asString),
+    ("backend", .str ep.backend.asString),
+    ("host", .str host),
+    ("ip", .str ip),
+    ("egressSrc", .str egressSrc),
+    ("egressDev", .str egressDev),
+    ("egressError", .str egressError),
+    ("isCurrent", .bool isCurrent)
+  ]
+
 /-- Build the full snapshot. `chainId`/`policy` are mirrored from the
     daemon config so the Status page's Network sub-section can render
-    without an extra `network.show` round-trip. -/
+    without an extra `network.show` round-trip. The per-chain endpoint
+    list + active `rpc`/`ens` endpoints are included so the TUI can show
+    the full URL (and resolved IPv4) of every configured RPC at a glance,
+    avoiding the user having to leave the Status page to inspect
+    `network.show`. -/
 def buildSnapshot
     (state : LeanKohaku.Daemon.State.Shared)
-    (chainId : Nat) (policyName : String) (socketPath : String) :
+    (chainId : Nat) (policyName : String) (socketPath : String)
+    (rpcEndpoint : LeanKohaku.RPC.Outbound.Endpoint)
+    (ensRpcEndpoint : Option LeanKohaku.RPC.Outbound.Endpoint)
+    (chainEndpoints : Array (String × LeanKohaku.RPC.Outbound.Endpoint)) :
     IO Json := do
   -- Fan out sidecar pings concurrently. Each task does its own spawn
   -- + read; we join at the end with a single sequential await. With 4
@@ -304,6 +495,11 @@ def buildSnapshot
   let sandbox ← sandboxJson
   let versions ← versionsJson
   let wallet ← walletJson state
+  let rpcJson ← endpointJson rpcEndpoint
+  let ensJson : Json ← match ensRpcEndpoint with
+    | some ep => endpointJson ep
+    | none    => pure .null
+  let chainsJson ← chainEndpoints.mapM (chainEndpointJson chainId)
   pure <| .obj #[
     ("daemon", daemon),
     ("sidecars", .arr sidecarResults),
@@ -313,7 +509,10 @@ def buildSnapshot
     ("network", .obj #[
       ("chainId", .num (Int.ofNat chainId)),
       ("policy", .str policyName),
-      ("socketPath", .str socketPath)
+      ("socketPath", .str socketPath),
+      ("rpc", rpcJson),
+      ("ens", ensJson),
+      ("chains", .arr chainsJson)
     ])
   ]
 

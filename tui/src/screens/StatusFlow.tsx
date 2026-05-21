@@ -38,7 +38,40 @@ type Snapshot = {
     unlockedSlotCount: number;
     unlockedSlots: string[];
   };
-  network: { chainId: number; policy: string; socketPath: string };
+  network: {
+    chainId: number;
+    policy: string;
+    socketPath: string;
+    rpc: EndpointInfo;
+    ens: EndpointInfo | null;
+    chains: ChainEndpoint[];
+  };
+};
+
+type EndpointInfo = {
+  url: string;
+  transport: string;
+  backend: string;
+  host: string;
+  ip: string;
+  egressSrc: string;
+  egressDev: string;
+  egressError: string;
+  chainId: number | null;
+};
+
+type ChainEndpoint = {
+  name: string;
+  chainId: number | null;
+  url: string;
+  transport: string;
+  backend: string;
+  host: string;
+  ip: string;
+  egressSrc: string;
+  egressDev: string;
+  egressError: string;
+  isCurrent: boolean;
 };
 
 type Props = {
@@ -268,13 +301,123 @@ function NetworkPanel({ network }: { network: Snapshot["network"] }) {
       <KV k="chainId" v={`${network.chainId} (${chainLabel(network.chainId)})`} />
       <KV k="policy" v={network.policy} color={theme.ok} />
       <KV k="socket" v={network.socketPath} mono />
-      <Box marginTop={0}>
+      <Box marginTop={1} flexDirection="column">
+        <Text color={theme.primary} bold>active RPC</Text>
+        <Box marginLeft={2} flexDirection="column">
+          <EndpointLines ep={network.rpc} />
+        </Box>
+      </Box>
+      {network.ens && (
+        <Box marginTop={1} flexDirection="column">
+          <Text color={theme.primary} bold>ENS RPC</Text>
+          <Box marginLeft={2} flexDirection="column">
+            <EndpointLines ep={network.ens} />
+          </Box>
+        </Box>
+      )}
+      {network.chains.length > 0 && (
+        <Box marginTop={1} flexDirection="column">
+          <Text color={theme.primary} bold>configured chains ({network.chains.length})</Text>
+          <Box marginLeft={2} flexDirection="column">
+            <ChainsTable chains={network.chains} />
+          </Box>
+        </Box>
+      )}
+      <Box marginTop={1}>
         <Text color={theme.accent}>{"→ "}</Text>
         <Text color={theme.dim}>press </Text>
         <Text color={theme.highlight} bold>m</Text>
         <Text color={theme.dim}> for live RPC monitor (cypherpunk trace)</Text>
       </Box>
     </Section>
+  );
+}
+
+function EndpointLines({ ep }: { ep: EndpointInfo }) {
+  return (
+    <Box flexDirection="column">
+      <Box>
+        <Text color={theme.dim}>{"url       "}</Text>
+        <Text wrap="truncate-end">{ep.url || "<unset>"}</Text>
+      </Box>
+      <Box>
+        <Text color={theme.dim}>{"host / ip "}</Text>
+        <Text color={theme.accent}>{ep.host || "<unknown>"}</Text>
+        {ep.ip && ep.ip !== ep.host && (
+          <>
+            <Text color={theme.dim}>{" → "}</Text>
+            <Text color={theme.highlight}>{ep.ip}</Text>
+          </>
+        )}
+        {!ep.ip && (
+          <Text color={theme.dim}>{"  (DNS not resolved)"}</Text>
+        )}
+      </Box>
+      <Box>
+        <Text color={theme.dim}>{"transport "}</Text>
+        <Text color={theme.accent}>{ep.transport}</Text>
+        <Text color={theme.dim}>{"   backend "}</Text>
+        <Text color={theme.accent}>{ep.backend}</Text>
+        {ep.chainId !== null && (
+          <>
+            <Text color={theme.dim}>{"   chainId "}</Text>
+            <Text color={theme.accent}>{ep.chainId}</Text>
+          </>
+        )}
+      </Box>
+      <Box>
+        <Text color={theme.dim}>{"egress    "}</Text>
+        {ep.egressSrc ? (
+          <>
+            <Text color={theme.highlight}>{ep.egressSrc}</Text>
+            {ep.egressDev && (
+              <>
+                <Text color={theme.dim}>{" on "}</Text>
+                <Text color={theme.accent}>{ep.egressDev}</Text>
+              </>
+            )}
+            <Text color={theme.dim}>{"  (local src · ip route get)"}</Text>
+          </>
+        ) : (
+          <Text color={theme.warn} wrap="truncate-end">
+            {ep.egressError || "<no route>"}
+          </Text>
+        )}
+      </Box>
+    </Box>
+  );
+}
+
+function ChainsTable({ chains }: { chains: ChainEndpoint[] }) {
+  const cell = (s: string, n: number) =>
+    s.length >= n
+      ? s.slice(0, Math.max(0, n - 1)) + "…"
+      : s + " ".repeat(n - s.length);
+  return (
+    <Box flexDirection="column">
+      <Text color={theme.dim} bold wrap="truncate-end">
+        {"  "}
+        {cell("name", 10)} {cell("chainId", 9)} {cell("transport", 10)}{" "}
+        {cell("ip", 16)} {cell("url", 60)}
+      </Text>
+      {chains.map((c) => {
+        const marker = c.isCurrent ? "▶" : " ";
+        const markerColor = c.isCurrent ? theme.ok : theme.dim;
+        const nameColor = c.isCurrent ? theme.highlight : theme.primary;
+        const chainIdStr = c.chainId === null ? "?" : String(c.chainId);
+        const ipStr = c.ip || "—";
+        return (
+          <Text key={c.name} wrap="truncate-end">
+            <Text color={markerColor}>{marker} </Text>
+            <Text color={nameColor}>{cell(c.name, 10)} </Text>
+            <Text color={theme.dim}>{cell(chainIdStr, 9)} </Text>
+            <Text color={theme.accent}>{cell(c.transport, 10)} </Text>
+            <Text color={theme.dim}>{cell(ipStr, 16)} </Text>
+            <Text>{cell(c.url, 60)}</Text>
+          </Text>
+        );
+      })}
+    </Box>
   );
 }
 
