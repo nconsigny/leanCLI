@@ -16,6 +16,34 @@
 #include <sys/un.h>
 #include <unistd.h>
 
+// Linux provides SOCK_CLOEXEC, accept4, and SO_PEERCRED/struct ucred for
+// atomic close-on-exec and peer-uid lookup. macOS (and other BSDs) ship none
+// of these, so we fall back to a post-creation fcntl(FD_CLOEXEC) and
+// getpeereid() for the same effect. The fallback is non-atomic w.r.t. a
+// concurrent fork+exec, which is acceptable here: the daemon is single-process
+// and only forks the bridge sidecars under explicit control.
+static int lk_set_cloexec(int fd) {
+  int flags = fcntl(fd, F_GETFD);
+  if (flags < 0) return -1;
+  return fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+}
+
+static int lk_socket_unix_stream(void) {
+#ifdef __linux__
+  return socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+#else
+  int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0) return fd;
+  if (lk_set_cloexec(fd) != 0) {
+    int saved = errno;
+    close(fd);
+    errno = saved;
+    return -1;
+  }
+  return fd;
+#endif
+}
+
 static lean_object *lk_uds_error(const char *prefix) {
   char buf[512];
   snprintf(buf, sizeof(buf), "%s: %s", prefix, strerror(errno));
@@ -32,7 +60,7 @@ lean_object *lk_uds_bind(lean_object *path_obj) {
     return lk_uds_string_error("UDS path is too long");
   }
 
-  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  int fd = lk_socket_unix_stream();
   if (fd < 0) return lk_uds_error("socket");
 
   struct sockaddr_un addr;
@@ -66,8 +94,19 @@ lean_object *lk_uds_bind(lean_object *path_obj) {
 }
 
 lean_object *lk_uds_accept(uint32_t listener_fd) {
+#ifdef __linux__
   int fd = accept4((int)listener_fd, NULL, NULL, SOCK_CLOEXEC);
   if (fd < 0) return lk_uds_error("accept4");
+#else
+  int fd = accept((int)listener_fd, NULL, NULL);
+  if (fd < 0) return lk_uds_error("accept");
+  if (lk_set_cloexec(fd) != 0) {
+    int saved = errno;
+    close(fd);
+    errno = saved;
+    return lk_uds_error("fcntl(FD_CLOEXEC)");
+  }
+#endif
   return lean_io_result_mk_ok(lean_box_uint32((uint32_t)fd));
 }
 
@@ -77,7 +116,7 @@ lean_object *lk_uds_connect(lean_object *path_obj) {
     return lk_uds_string_error("UDS path is too long");
   }
 
-  int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+  int fd = lk_socket_unix_stream();
   if (fd < 0) return lk_uds_error("socket");
 
   struct sockaddr_un addr;
@@ -133,12 +172,21 @@ lean_object *lk_uds_shutdown(uint32_t fd) {
 }
 
 lean_object *lk_uds_peer_uid(uint32_t fd) {
+#ifdef SO_PEERCRED
   struct ucred cred;
   socklen_t len = sizeof(cred);
   if (getsockopt((int)fd, SOL_SOCKET, SO_PEERCRED, &cred, &len) != 0) {
     return lk_uds_error("getsockopt(SO_PEERCRED)");
   }
   return lean_io_result_mk_ok(lean_box_uint32((uint32_t)cred.uid));
+#else
+  uid_t euid;
+  gid_t egid;
+  if (getpeereid((int)fd, &euid, &egid) != 0) {
+    return lk_uds_error("getpeereid");
+  }
+  return lean_io_result_mk_ok(lean_box_uint32((uint32_t)euid));
+#endif
 }
 
 lean_object *lk_uds_current_uid(void) {
