@@ -625,20 +625,62 @@ link_one() {
 link_one "$LEAN_BIN" "kohaku"
 link_one "$LEAN_DAEMON" "kohaku-daemon"
 
-# SPHINCS- shim symlinks. The daemon's `Sphincs/Bridge.lean::resolveExecutable`
-# checks `LEAN_KOHAKU_SPHINCS_<PARAMSET>` env first, then walks up from cwd
-# looking for `sidecars/sphincs/bin/<basename>`, then falls through to PATH.
-# When `kohaku` is invoked from outside the checkout (the common case after
-# `kohakuspawn`), only the PATH branch hits — so we symlink each shim into
-# `$KOHAKU_BIN` (already on PATH because kohaku itself lives there).
-# Missing-binary case is non-fatal: `link_one` errors out, but the wrapper
-# above continues so the rest of the install still completes.
+# SPHINCS- shim symlinks + daemon.env entries. The daemon's
+# `Sphincs/Bridge.lean::resolveExecutable` checks `LEAN_KOHAKU_SPHINCS_<PARAMSET>`
+# env first, then walks up from cwd looking for `sidecars/sphincs/bin/<basename>`,
+# then falls through to PATH. The PATH branch is unreliable for systemd-
+# managed daemons (the unit's `PATH` typically doesn't include `~/.kohaku/bin`),
+# so we ALSO record each shim's absolute path in `daemon.env` — that's what
+# the bundled bridge wrappers do. Symlinks are kept for shell-launched
+# daemons and for users who put `~/.kohaku/bin` on their own PATH.
+# Missing-binary case is non-fatal: we skip the env var + symlink for that
+# variant; the daemon fails closed at the per-RPC use site with a clear
+# "shim binary not found" message.
+sphincs_env_var_for() {
+  case "$1" in
+    sphincs-slhdsa-128-24)        echo "LEAN_KOHAKU_SPHINCS_SLHDSA";;
+    sphincs-jardin-keccak-128-24) echo "LEAN_KOHAKU_SPHINCS_JARDIN";;
+    sphincs-c9)                   echo "LEAN_KOHAKU_SPHINCS_C9";;
+  esac
+}
 for shim in "${SPHINCS_SHIMS[@]}"; do
   shim_path="$CHECKOUT/.lake/build/bin/$shim"
-  if [[ -x "$shim_path" ]]; then
-    link_one "$shim_path" "$shim"
-  else
+  if [[ ! -x "$shim_path" ]]; then
     echo "kohakuspawn: sphincs shim $shim missing at $shim_path — sphincs.* RPCs will fail closed" >&2
+    continue
+  fi
+  link_one "$shim_path" "$shim"
+  envvar="$(sphincs_env_var_for "$shim")"
+  if [[ -z "$envvar" ]]; then continue; fi
+  # daemon.env may not exist yet — install_bridge_wrappers below pre-creates
+  # it, but we run BEFORE that section so handle creation here too. Same
+  # mode-0600 + add/replace dance install_bridge_wrappers uses.
+  mkdir -p "$KOHAKU_CFG_DIR"
+  if [[ ! -e "$KOHAKU_ENV_FILE" ]]; then
+    {
+      printf '%s\n' "# kohaku-daemon environment file."
+      printf '%s\n' "# Read by the systemd user unit (kohaku-daemon.service) and by"
+      printf '%s\n' "# shell-launched daemons that source it. This file is auxiliary;"
+      printf '%s\n' "# per-chain RPC config lives in daemon.json next to it."
+    } > "$KOHAKU_ENV_FILE"
+    chmod 0600 "$KOHAKU_ENV_FILE" 2>/dev/null || true
+  fi
+  if grep -qE "^${envvar}=" "$KOHAKU_ENV_FILE" 2>/dev/null; then
+    current="$(grep -E "^${envvar}=" "$KOHAKU_ENV_FILE" | head -n1 | cut -d= -f2-)"
+    if [[ "$current" != "$shim_path" ]]; then
+      tmp="$(mktemp "$KOHAKU_ENV_FILE.XXXXXX")"
+      awk -v var="$envvar" -v val="$shim_path" '
+        $0 ~ "^"var"=" { print var"="val; seen=1; next }
+        { print }
+        END { if (!seen) print var"="val }
+      ' "$KOHAKU_ENV_FILE" > "$tmp"
+      chmod 0600 "$tmp" 2>/dev/null || true
+      mv "$tmp" "$KOHAKU_ENV_FILE"
+      echo "==> $KOHAKU_ENV_FILE: updated $envvar (was $current)"
+    fi
+  else
+    printf '%s=%s\n' "$envvar" "$shim_path" >> "$KOHAKU_ENV_FILE"
+    echo "==> $KOHAKU_ENV_FILE: added $envvar"
   fi
 done
 
