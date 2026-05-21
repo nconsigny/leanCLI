@@ -3456,11 +3456,23 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       -- derive, gas estimate, dual-sign, submit) lives in
       -- `executeSphincsUserOp`; this RPC only assembles the `execute(...)`
       -- callData from {to, value, data} before delegating.
-      match paramName req.params,
-            paramString req.params "to",
-            paramString req.params "value" with
-      | .ok name, .ok toStr, .ok valueStr =>
-          let valueWei := (valueStr.toNat?).getD ((parseHexQuantity valueStr).getD 0)
+      --
+      -- `valueEth` (decimal ETH, the canonical human-readable form, e.g.
+      -- "0.001") is preferred when present; `value` (wei — decimal Nat
+      -- or 0x-hex) stays as a fallback for power-users / scripted
+      -- callers. Parser conversion lives in `LeanKohaku.Util.Units` so
+      -- the TUI stays a thin RPC forwarder.
+      match paramName req.params, paramString req.params "to" with
+      | .ok name, .ok toStr =>
+          let valueWei : Nat :=
+            match paramString req.params "valueEth" with
+            | .ok ethStr =>
+                (LeanKohaku.Util.Units.parseUnits ethStr 18).getD 0
+            | .error _ =>
+                match paramString req.params "value" with
+                | .ok valueStr =>
+                    (valueStr.toNat?).getD ((parseHexQuantity valueStr).getD 0)
+                | .error _ => 0
           let dataHex := paramStringD req.params "data" "0x"
           let userData : ByteArray :=
             (LeanKohaku.Crypto.Hex.decode dataHex).getD ByteArray.empty
@@ -3476,7 +3488,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                     | .obj fields => .obj (fields.push ("name", .str name))
                     | _ => j
                   pure (.ok withName)
-      | _, _, _ => pure (.error invalidParams)
+      | _, _ => pure (.error invalidParams)
   | "sphincs.account.rotateOwner" =>
       -- Submit a UserOp that calls `SphincsAccount.rotateOwner(newOwner)`.
       -- The on-chain contract gates this on the EntryPoint OR self-call;

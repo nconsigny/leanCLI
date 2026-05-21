@@ -409,10 +409,12 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
     if acc.any (fun (c, _) => c = chain) then acc
     else acc.push (chain, url)
   let sphincsBundlers :=
-    -- Candide's public Sepolia bundler. Users with a Pimlico/Stackup/etc
-    -- account override via daemon.json `sphincs_bundlers.sepolia`.
+    -- Candide's public Sepolia bundler. The URL path is `/public/v3/...`
+    -- (NOT `/bundler/v3/...` — that route returns 404). Users with a
+    -- Pimlico/Stackup/Alchemy account override via daemon.json
+    -- `sphincs_bundlers.sepolia`.
     withBundlerDefault sphincsBundlers
-      "sepolia" "https://api.candide.dev/bundler/v3/sepolia"
+      "sepolia" "https://api.candide.dev/public/v3/sepolia"
   -- Why: bootstrap the entry for the daemon's primary chain from the
   -- default `rpc_url` when no per-chain entry covers it. Internally
   -- consistent: if the user said "this URL is the daemon's RPC for

@@ -208,7 +208,12 @@ export default function SphincsAccountsHub({ onBack }: Props) {
       { name: "to", label: "Target (address, ENS name, or pick your own)",
         kind: "recipient", excludeAddress: senderAddr,
         validate: (v) => v.trim().length > 0 ? null : "required" },
-      { name: "value", label: "Value in wei (decimal or 0x…)", initial: "0", validate: () => null },
+      { name: "valueEth", label: "Value in ETH (decimal, e.g. 0.001)",
+        initial: "0",
+        // Loose validation — the daemon's LeanKohaku.Util.Units.parseUnits
+        // is the source of truth for "is this a valid decimal-ETH amount".
+        // We just reject the obvious garbage.
+        validate: (v) => /^[0-9]+(\.[0-9]+)?$/.test(v.trim()) ? null : "decimal number expected (e.g. 0 or 0.001)" },
       { name: "data", label: "Calldata hex (optional, blank = pure ETH transfer)",
         validate: (v) => v.length === 0 || HEX_RE.test(v) ? null : "expected hex" },
       { name: "passphrase", label: "Per-slot passphrase (Enter if master KEK is loaded)",
@@ -223,9 +228,13 @@ export default function SphincsAccountsHub({ onBack }: Props) {
           fields={fields}
           onCancel={() => setState({ kind: "detail", row: state.row })}
           onSubmit={(v) => {
+            // Pass `valueEth` straight through — the daemon's send RPC
+            // calls `LeanKohaku.Util.Units.parseUnits ethStr 18` to get
+            // the wei amount. TUI is a thin RPC forwarder; the
+            // decimal-to-wei conversion deliberately stays Lean-side.
             const base: Record<string, unknown> = {
               name: state.row.name,
-              value: v.value ?? "0",
+              valueEth: (v.valueEth ?? "0").trim(),
             };
             if (v.data && v.data.length > 0) base.data = v.data;
             if (v.passphrase && v.passphrase.length > 0) base.passphrase = v.passphrase;
