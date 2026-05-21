@@ -177,7 +177,6 @@ export default function App() {
       case "wallets":          return push({ kind: "wallets" });
       case "le-chat":          return push({ kind: "llm-chat" });
       case "create-wallet":    return push({ kind: "create-wallet" });
-      case "sphincs-accounts": return push({ kind: "sphincs-accounts" });
       case "private":          return push({ kind: "private" });
       case "status":           return push({ kind: "status" });
       case "toggle-colibri":   return void toggleColibri();
@@ -228,6 +227,15 @@ export default function App() {
    *  can drive any of the wallet-management ops. `chain` is the WalletsHub
    *  toggle (mainnet/sepolia for EOAs, "sepolia" for TPM). */
   const handleHubPick = (a: WalletsAction, w: Wallet, chain: string) => {
+    // SPHINCS- hybrid smart accounts route to the dedicated management
+    // screen regardless of the WalletsHub action tab — the standard
+    // Send/Swap/Shield flows haven't been adapted to dual-sign UserOps
+    // yet (that's the upcoming unified-Send rebuild). Until then the
+    // management screen is the single canonical place every SPHINCS
+    // op lives (Compute / Deploy / Send-UserOp / Rotate / Factory).
+    if (w.kind === "sphincs") {
+      return push({ kind: "sphincs-accounts" });
+    }
     switch (a) {
       case "send":   return push({ kind: "send", wallet: w, chain });
       case "swap":   return push({ kind: "swap", wallet: w });

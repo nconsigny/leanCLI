@@ -212,6 +212,30 @@ export default function WalletsHub({
         }
       }
 
+      // SPHINCS- hybrid smart accounts via the unified `account.list` RPC.
+      // The daemon emits one entry per slot with `type: "sphincs"`. The
+      // smart-account address may be empty when the counterfactual hasn't
+      // been computed yet — we surface it as the row's address but the
+      // detail screen will let the user run "Compute" to populate it.
+      const acctRes = await call<{ accounts: { type: string; name: string; address: string }[] }>(
+        "account.list",
+        {},
+      );
+      if (cancelled) return;
+      if (acctRes.ok && Array.isArray(acctRes.result?.accounts)) {
+        for (const a of acctRes.result.accounts) {
+          if (a?.type !== "sphincs" || !a.name) continue;
+          out.push({
+            kind: "sphincs",
+            name: a.name,
+            // Empty string is a deliberate signal: "smart-account address
+            // not yet computed". Renderers should treat that as pending
+            // rather than as a real address.
+            address: a.address ?? "",
+          });
+        }
+      }
+
       if (out.length === 0) {
         const failed = !eoaRes.ok ? eoaRes : !tpmRes.ok ? tpmRes : null;
         setError(
@@ -351,7 +375,10 @@ export default function WalletsHub({
           ? `err: ${cell.message.length > 60 ? cell.message.slice(0, 57) + "…" : cell.message}`
           : "…";
     const isSub = (w.accountIndex ?? 0) > 0;
-    const tag = isSub ? "  ↳ " : (w.kind === "eoa" ? "[eoa]" : "[tpm]");
+    const tag = isSub ? "  ↳ "
+      : w.kind === "eoa" ? "[eoa]"
+      : w.kind === "sphincs" ? "[sphincs]"
+      : "[tpm]";
     const displayName = isSub
       ? (w.accountLabel?.length
           ? `${w.name}/${w.accountLabel}`

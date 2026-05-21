@@ -5,7 +5,22 @@
  * just isn't displayed.
  */
 
-export type SlotKind = "eoa" | "tpm";
+/** Top-level account taxonomy: EOA (single-key, BIP-39 mnemonic) vs.
+ *  smart accounts. The smart-account family currently has two
+ *  variants — `tpm` (R1 / P-256 EIP-7951) and `sphincs` (hybrid
+ *  ECDSA + post-quantum SPHINCS- ERC-4337). Future smart-account
+ *  kinds (JARDIN, etc.) extend this union without touching the
+ *  EOA branch. */
+export type SlotKind = "eoa" | "tpm" | "sphincs";
+
+/** Two-category grouping used for display only. The taxonomy maps:
+ *    eoa     → "eoa"
+ *    tpm     → "smart"
+ *    sphincs → "smart"
+ *  Centralizing the mapping here keeps WalletsHub's section headers
+ *  in sync if a new smart-account kind is added later. */
+export const slotCategory = (k: SlotKind): "eoa" | "smart" =>
+  k === "eoa" ? "eoa" : "smart";
 
 export type EoaListEntry = {
   name: string;

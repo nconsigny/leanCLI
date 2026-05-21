@@ -8,6 +8,7 @@ import RpcRunner from "../widgets/RpcRunner.js";
 import { call } from "../daemon.js";
 import { theme } from "../theme.js";
 import { formatEth, hexToBigInt, shortAddr } from "../format.js";
+import { SlotKind } from "../types.js";
 import { TransfersBlock } from "../widgets/TransfersBlock.js";
 import { ProvenancePanel } from "../widgets/ProvenancePanel.js";
 import UnlockEoaStep from "./UnlockEoaStep.js";
@@ -16,7 +17,7 @@ import UnlockEoaStep from "./UnlockEoaStep.js";
  *  who already know which wallet is active — skips the EOA picker and
  *  routes TPM/R1 wallets to the TPM-PIN path. */
 export type SendRawWallet = {
-  kind: "eoa" | "tpm";
+  kind: SlotKind;
   name: string;
   address: string;
 };

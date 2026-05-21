@@ -2001,6 +2001,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       let (_, _, _, _, policyName) ← LeanKohaku.Cli.NetworkConfig.resolved
       let snap ← LeanKohaku.Daemon.Status.buildSnapshot
         state cfg.chainId policyName cfg.socketPath
+        cfg.rpcEndpoint cfg.ensRpcEndpoint cfg.chainEndpoints
       pure <| .ok snap
   | "network.show" =>
       -- Structured snapshot of the daemon's *currently-active* network
@@ -3007,6 +3008,27 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           ("name",    .str name),
           ("address", .str address)
         ]
+      -- SPHINCS- hybrid smart accounts. Each slot's identity is its
+      -- CREATE2 smart-account address; we surface it as `address` so
+      -- the TUI / CLI can treat it uniformly with EOA / TPM rows. When
+      -- the counterfactual hasn't been computed yet the field stays
+      -- empty — the SphincsAccountsHub detail view exposes "Compute
+      -- counterfactual address" to populate it.
+      try
+        let sphincsNames ← LeanKohaku.Wallet.SphincsHybridStore.listSlotNames
+        for name in sphincsNames do
+          match ← LeanKohaku.Wallet.SphincsHybridStore.readRecord name with
+          | .ok rec =>
+              entries := entries.push <| .obj #[
+                ("type",     .str "sphincs"),
+                ("name",     .str rec.name),
+                ("address",  .str (rec.smartAccountAddress.getD "")),
+                ("paramSet", .str rec.paramSet.toString),
+                ("chainId",  .num (Int.ofNat rec.chainId)),
+                ("owner",    .str rec.ownerAddress)
+              ]
+          | .error _ => pure ()
+      catch _ => pure ()
       pure (.ok (.obj #[("accounts", .arr entries)]))
   | "eoa.show" =>
       match paramName req.params with
