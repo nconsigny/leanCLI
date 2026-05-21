@@ -1,0 +1,3 @@
+[submodule "solidity/sphincs/upstream"]
+	path = solidity/sphincs/upstream
+	url = https://github.com/nconsigny/SPHINCS-.git
