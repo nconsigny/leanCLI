@@ -12,7 +12,9 @@
 #     - Reads SPHINCS_VERIFIER_ADDR (the per-paramSet shared verifier on
 #       Sepolia) from the env, plus SEPOLIA_DEPLOYER_PRIVATE_KEY or
 #       PRIVATE_KEY for the funded deployer EOA, and SEPOLIA_RPC_URL.
-#     - Calls `forge create` on solidity/sphincs/SphincsAccountFactoryDev.sol
+#     - Calls `forge create` on the upstream
+#       lib/sphincs-minus/src/SphincsAccountFactory.sol (canonical
+#       contract that inherits BaseAccount from account-abstraction).
 #       with constructor args (entryPoint=v0.9 singleton, verifier=<env>).
 #     - Saves the resulting factory address to
 #       $XDG_DATA_HOME/leankohaku/sphincs-factories/sepolia-<paramSet>.txt
@@ -71,9 +73,9 @@ cmd="${1:-help}"
 case "$cmd" in
   deploy-verifier)
     # Deploy the upstream Yul C9 verifier (no constructor args). Pulled
-    # from the `solidity/sphincs/upstream/` submodule so bumping the
-    # pinned commit is the source-of-truth update path. Yul is stack-
-    # deep enough that --via-ir is required.
+    # from the `lib/sphincs-minus/` submodule so bumping the pinned
+    # commit is the source-of-truth update path. Yul is stack-deep
+    # enough that --via-ir is required.
     paramSet="${2:-C9}"
     if [[ "$paramSet" != "C9" ]]; then
       echo "deploy-verifier: only C9 supported here (upstream Yul source);" >&2
@@ -83,10 +85,10 @@ case "$cmd" in
     require forge
     need_env SEPOLIA_RPC_URL
     pk="$(deployer_private_key)"
-    src_path="solidity/sphincs/upstream/src/SPHINCs-C9Asm.sol"
+    src_path="lib/sphincs-minus/src/SPHINCs-C9Asm.sol"
     if [[ ! -f "$src_path" ]]; then
       echo "missing $src_path — submodule not initialized?" >&2
-      echo "  fix: git submodule update --init solidity/sphincs/upstream" >&2
+      echo "  fix: git submodule update --init --recursive lib/sphincs-minus" >&2
       exit 2
     fi
     echo "deploying $src_path:SphincsC9Asm on Sepolia (--via-ir, solc 0.8.28)…" >&2
@@ -119,7 +121,7 @@ case "$cmd" in
     need_env SPHINCS_VERIFIER_ADDR
     pk="$(deployer_private_key)"
     cat >&2 <<EOF
-deploying solidity/sphincs/SphincsAccountFactoryDev.sol on Sepolia
+deploying lib/sphincs-minus/src/SphincsAccountFactory.sol on Sepolia
   paramSet: ${paramSet}
   entryPoint (v0.9): ${ENTRY_POINT_V09}
   verifier: ${SPHINCS_VERIFIER_ADDR}
@@ -129,7 +131,7 @@ EOF
       --private-key "$pk" \
       --broadcast \
       --use 0.8.28 \
-      solidity/sphincs/SphincsAccountFactoryDev.sol:SphincsAccountFactoryDev \
+      lib/sphincs-minus/src/SphincsAccountFactory.sol:SphincsAccountFactory \
       --constructor-args "$ENTRY_POINT_V09" "$SPHINCS_VERIFIER_ADDR")"
     echo "$out"
     addr="$(printf '%s\n' "$out" | awk '/Deployed to:/ {print $3}')"
@@ -173,12 +175,13 @@ EOF
     cat <<USAGE
 sphincs_sepolia.sh deploy-verifier [paramSet=C9]
   # Forge-creates the upstream Yul verifier from
-  #   solidity/sphincs/upstream/src/SPHINCs-C9Asm.sol  (submodule)
+  #   lib/sphincs-minus/src/SPHINCs-C9Asm.sol  (submodule)
   # Saves the address to \$XDG_DATA_HOME/leankohaku/sphincs-verifiers/sepolia-<paramSet>.txt
 
 sphincs_sepolia.sh deploy <paramSet>
-  # Forge-creates the local SphincsAccountFactoryDev, wiring
-  # (EntryPoint v0.9 singleton, \$SPHINCS_VERIFIER_ADDR).
+  # Forge-creates the upstream SphincsAccountFactory from
+  #   lib/sphincs-minus/src/SphincsAccountFactory.sol
+  # wiring (EntryPoint v0.9 singleton, \$SPHINCS_VERIFIER_ADDR).
   # Saves to \$XDG_DATA_HOME/leankohaku/sphincs-factories/sepolia-<paramSet>.txt
 
 sphincs_sepolia.sh deploy-all [paramSet=C9]

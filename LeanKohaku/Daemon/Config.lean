@@ -402,16 +402,23 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
     withVerifierDefault sphincsVerifiers
       "sepolia" .c9 "0xdcC83c41cc0e20560096c0d5199343E834cbE91D"
   let sphincsFactories :=
-    -- Sepolia factory points at a patched `SphincsAccountDev` (the dev
-    -- inline account, not the upstream `SphincsAccount.sol`). The patch
-    -- is the unconditional-prefund payment in `validateUserOp` — without
-    -- it bundlers fail every estimate / send with `AA21 didn't pay
-    -- prefund`. Address changes with `SphincsAccountDev.creationCode`
-    -- because the factory's `getAddress` CREATE2 codeHash includes it;
-    -- the previous factory (0xe1db…2Db0) deployed accounts that early-
-    -- returned on sig-validation failure and is superseded.
+    -- Sepolia factory deploys the canonical upstream
+    -- `nconsigny/SPHINCS-/src/SphincsAccount.sol` (which inherits the
+    -- eth-infinitism `BaseAccount` from `lib/account-abstraction @
+    -- v0.9.0` — that base contract pays prefund unconditionally in
+    -- `validateUserOp`, so bundler `eth_estimateUserOperationGas`
+    -- with a dummy signature clears the AA21 path naturally).
+    -- Superseded factories:
+    --   0xe1db33A852a0FF005D600f75C76444021C422Db0 — dev contract,
+    --     buggy validateUserOp (returned early on sig fail, skipped
+    --     prefund) — every send failed `AA21 didn't pay prefund`.
+    --   0x9cdB97628E8B91453C3adBf46709bd97720c2C10 — patched dev
+    --     contract (paid prefund unconditionally) but inlined the
+    --     account semantics rather than tracking upstream.
+    -- Current factory binds to upstream `SphincsAccount` so any future
+    -- contract-level fix lands by bumping the submodule pin.
     withVerifierDefault sphincsFactories
-      "sepolia" .c9 "0x9cdB97628E8B91453C3adBf46709bd97720c2C10"
+      "sepolia" .c9 "0x452B95a7Bf93adb17B9610C315ea7229617a8f21"
   let withBundlerDefault (acc : Array (String × String)) (chain url : String) :
       Array (String × String) :=
     if acc.any (fun (c, _) => c = chain) then acc
