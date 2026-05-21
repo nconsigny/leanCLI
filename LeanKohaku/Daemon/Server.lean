@@ -1963,7 +1963,19 @@ private partial def executeSphincsUserOp
                                         | .ok ecdsaSig =>
                                             let rBs := Sphincs.Send.natToWord32 ecdsaSig.r
                                             let sBs := Sphincs.Send.natToWord32 ecdsaSig.s
-                                            let vBs := ByteArray.empty.push ecdsaSig.v
+                                            -- libsecp256k1 returns v as the
+                                            -- recovery id {0, 1}, but the
+                                            -- Ethereum / OZ ECDSA.recover
+                                            -- convention is {27, 28}. The
+                                            -- upstream `SphincsAccount.sol`
+                                            -- uses OZ's recover which throws
+                                            -- `ECDSAInvalidSignature` for
+                                            -- v < 27 (ecrecover returns 0).
+                                            -- Normalize here.
+                                            let vByte : UInt8 :=
+                                              if ecdsaSig.v < 27 then ecdsaSig.v + 27
+                                              else ecdsaSig.v
+                                            let vBs := ByteArray.empty.push vByte
                                             let ecdsaBytes := rBs ++ sBs ++ vBs
                                             let userOpHashHex := LeanKohaku.Crypto.Hex.encode userOpH
                                             match ← LeanKohaku.Sphincs.signWithVerify rec.paramSet
