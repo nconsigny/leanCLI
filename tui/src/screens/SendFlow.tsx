@@ -9,6 +9,7 @@ import { call } from "../daemon.js";
 import { theme } from "../theme.js";
 import { formatEth, hexToBigInt, shortAddr } from "../format.js";
 import { TransfersBlock } from "../widgets/TransfersBlock.js";
+import { ProvenancePanel } from "../widgets/ProvenancePanel.js";
 import UnlockEoaStep from "./UnlockEoaStep.js";
 
 type Props = {
@@ -445,7 +446,19 @@ function ConfirmGate({
       subtitle={subtitle}
       hint="enter — sign & broadcast · esc — cancel"
     >
-      <Box flexDirection="column" marginBottom={1}>
+      <ProvenancePanel
+        title="intent"
+        tier="local"
+        source={
+          matched
+            ? [
+                "ERC-7730 descriptor from bundled registry — bridge/clearsign/registry/*.json",
+                "calldata decoded against descriptor ABI in the clearsign sidecar (untrusted; UI-render only)",
+                "token decimals/symbol via eth_call(decimals)/eth_call(symbol) — untrusted RPC (cached)",
+              ]
+            : ["native ETH transfer · data = 0x · no descriptor needed (resolved locally)"]
+        }
+      >
         {matched ? (
           <>
             <Text>
@@ -468,10 +481,14 @@ function ConfirmGate({
             no descriptor matched · native ETH transfer (data = 0x)
           </Text>
         )}
-      </Box>
-      <Box flexDirection="column" marginBottom={1}>
+      </ProvenancePanel>
+      <ProvenancePanel
+        title="simulation"
+        tier="remote"
+        source={sendFlowSimSourceLines(sim)}
+      >
         <Text>
-          <Text color={theme.dim}>simulation: </Text>
+          <Text color={theme.dim}>result: </Text>
           {sim?.simRpcError ? (
             <Text color={theme.warn}>(daemon error)</Text>
           ) : okSim ? (
@@ -504,7 +521,7 @@ function ConfirmGate({
           <Text color={theme.dim}>{sim.simRpcError}</Text>
         )}
         <TransfersBlock sim={sim} />
-      </Box>
+      </ProvenancePanel>
       {colibri && <ColibriBlock colibri={colibri} />}
       {!okSim && !sim?.simRpcError && (
         <Text color={theme.warn}>
@@ -524,12 +541,16 @@ function ColibriBlock({ colibri }: { colibri: any }) {
   if (!colibri) return null;
   if (colibri.error) {
     return (
-      <Box flexDirection="column" marginBottom={1}>
+      <ProvenancePanel
+        title="colibri stateless verification"
+        tier="verified"
+        source="LeanKohaku/Colibri/Bridge.lean — stateless light-client EVM (consensus-verified state)"
+      >
         <Text color={theme.dim}>
-          colibri (verified): <Text color={theme.warn}>unavailable</Text>{" "}
+          <Text color={theme.warn}>unavailable</Text>{" "}
           <Text color={theme.dim}>· {String(colibri.error).slice(0, 120)}</Text>
         </Text>
-      </Box>
+      </ProvenancePanel>
     );
   }
   const ok = colibri.status === "0x1";
@@ -542,9 +563,17 @@ function ColibriBlock({ colibri }: { colibri: any }) {
   })();
   const logs: any[] = Array.isArray(colibri.logs) ? colibri.logs : [];
   return (
-    <Box flexDirection="column" marginBottom={1}>
+    <ProvenancePanel
+      title="colibri stateless verification"
+      tier="verified"
+      source={[
+        "LeanKohaku/Colibri/Bridge.lean — stateless light-client EVM",
+        "execution re-run locally under WASM EVM against sync-committee-verified state — independent of the untrusted RPC",
+        "logs pre-decoded with ABIs shipped by the colibri sidecar",
+      ]}
+    >
       <Text>
-        <Text color={theme.dim}>colibri (verified): </Text>
+        <Text color={theme.dim}>result: </Text>
         {ok ? (
           <Text color={theme.ok}>✓ would succeed</Text>
         ) : (
@@ -575,8 +604,26 @@ function ColibriBlock({ colibri }: { colibri: any }) {
           )}
         </Box>
       )}
-    </Box>
+    </ProvenancePanel>
   );
+}
+
+/** Build the `source:` footer lines for the simulation panel in SendFlow.
+ *  Same shape as the SendRawFlow helper but kept local to avoid a
+ *  circular dependency between the two screens. */
+function sendFlowSimSourceLines(sim: any): string[] {
+  const lines: string[] = [
+    "eth_call + eth_estimateGas on the configured RPC endpoint (untrusted execution node)",
+  ];
+  if (sim?.traceUnavailable) {
+    lines.push("debug_traceCall not exposed by this RPC — token-flow trace unavailable");
+  } else if (sim?.trace) {
+    lines.push("debug_traceCall (callTracer + logs) on the same RPC — walked daemon-side to extract ERC-20 Transfer events");
+  }
+  if (sim?.simRpcError) {
+    lines.push("daemon error: " + String(sim.simRpcError).slice(0, 120));
+  }
+  return lines;
 }
 
 function ResolveStep({

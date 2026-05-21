@@ -9,6 +9,7 @@ import { call } from "../daemon.js";
 import { theme } from "../theme.js";
 import { formatEth, hexToBigInt, shortAddr } from "../format.js";
 import { TransfersBlock } from "../widgets/TransfersBlock.js";
+import { ProvenancePanel } from "../widgets/ProvenancePanel.js";
 import UnlockEoaStep from "./UnlockEoaStep.js";
 
 /** A pre-selected signing wallet. Threaded in by callers (e.g. SwapFlow)
@@ -437,14 +438,32 @@ function ConfirmGate({
         </Box>
       )}
       {canonical && (
-        <Box flexDirection="column" marginBottom={1} borderStyle="single" borderColor={theme.dim} paddingX={1}>
-          <Text color={theme.dim} bold>canonical intent (Lean-rendered)</Text>
+        <ProvenancePanel
+          title="canonical intent"
+          tier="local"
+          source="rendered by Lean (LeanKohaku/Intent/*) from the structural Intent ADT — no RPC involved"
+        >
           {canonical.split("\n").map((line, i) => (
             <Text key={i}>{line}</Text>
           ))}
-        </Box>
+        </ProvenancePanel>
       )}
-      <Box flexDirection="column" marginBottom={1}>
+      <ProvenancePanel
+        title="intent"
+        tier="local"
+        source={
+          decoded?.matched
+            ? [
+                "ERC-7730 descriptor from bundled registry — bridge/clearsign/registry/*.json",
+                "calldata decoded against descriptor ABI in the clearsign sidecar (treated as untrusted; UI-render only)",
+                "token decimals/symbol via eth_call(decimals)/eth_call(symbol) — untrusted RPC (cached)",
+              ]
+            : [
+                "no descriptor matched in bridge/clearsign/registry/ — raw calldata only",
+                "4byte fallback registry is local, but no entry covered this selector",
+              ]
+        }
+      >
         {decoded?.matched ? (
           <>
             <Text color={theme.primary} bold>
@@ -465,11 +484,15 @@ function ConfirmGate({
         ) : (
           <Text color={theme.dim}>(no descriptor matched · raw calldata only)</Text>
         )}
-      </Box>
+      </ProvenancePanel>
       <PreflightBlock preflight={preflight} />
-      <Box flexDirection="column" marginBottom={1}>
+      <ProvenancePanel
+        title="simulation"
+        tier="remote"
+        source={simulationSourceLines(sim)}
+      >
         <Text>
-          <Text color={theme.dim}>simulation: </Text>
+          <Text color={theme.dim}>result: </Text>
           {sim?.simRpcError ? (
             <Text color={theme.warn}>(daemon error)</Text>
           ) : okSim ? (
@@ -497,7 +520,7 @@ function ConfirmGate({
           <Text color={theme.err}>revert: {String(sim.revertReason).slice(0, 200)}</Text>
         )}
         <TransfersBlock sim={sim} />
-      </Box>
+      </ProvenancePanel>
       {!okSim && !sim?.simRpcError && (
         <Text color={theme.warn}>
           ⚠ Simulation failed. Pressing Enter will still broadcast — only
@@ -569,8 +592,11 @@ function PreflightBlock({ preflight }: { preflight: any }) {
   }
 
   return (
-    <Box flexDirection="column" marginBottom={1}>
-      <Text color={theme.dim} bold>chain context</Text>
+    <ProvenancePanel
+      title="chain context"
+      tier="remote"
+      source={preflightSourceLines(kind, preflight)}
+    >
       {rows.map((r, i) => (
         <Text key={i}>
           <Text color={theme.dim}>{r.label.padEnd(20)}</Text>{" "}
@@ -580,8 +606,49 @@ function PreflightBlock({ preflight }: { preflight: any }) {
       {preflight.probeError && (
         <Text color={theme.dim}>(probe error: {String(preflight.probeError)})</Text>
       )}
-    </Box>
+    </ProvenancePanel>
   );
+}
+
+/** Build the `source:` footer lines for the simulation panel, accurately
+ *  reflecting which RPC primitives the daemon actually used. The trace
+ *  line only appears when the daemon attempted `debug_traceCall`. */
+function simulationSourceLines(sim: any): string[] {
+  const lines: string[] = [
+    "eth_call + eth_estimateGas on the configured RPC endpoint (untrusted execution node)",
+  ];
+  if (sim?.traceUnavailable) {
+    lines.push("debug_traceCall not exposed by this RPC — token-flow trace unavailable");
+  } else if (sim?.trace) {
+    lines.push("debug_traceCall (callTracer + logs) on the same RPC — walked daemon-side to extract ERC-20 Transfer events");
+  }
+  if (sim?.simRpcError) {
+    lines.push("daemon error: " + String(sim.simRpcError).slice(0, 120));
+  }
+  return lines;
+}
+
+/** Build the `source:` footer lines for the chain-context panel, naming
+ *  the exact JSON-RPC methods the daemon used for this preflight kind. */
+function preflightSourceLines(
+  kind: "approve" | "transfer" | "native",
+  preflight: any,
+): string[] {
+  const lines: string[] = [];
+  if (kind === "approve") {
+    lines.push("eth_call(allowance(owner,spender)) on the token contract — untrusted RPC");
+  } else if (kind === "transfer") {
+    lines.push("eth_call(balanceOf(owner)) on the token contract — untrusted RPC");
+  } else if (kind === "native") {
+    lines.push("eth_getBalance — untrusted RPC");
+  }
+  const prior = preflight?.priorInteractions;
+  if (prior && prior.available === true) {
+    lines.push("prior interactions: eth_getLogs over a fixed block window — untrusted RPC, best-effort");
+  } else if (prior && prior.available === false && prior.reason) {
+    lines.push("prior interactions: eth_getLogs not available (" + String(prior.reason).slice(0, 80) + ")");
+  }
+  return lines;
 }
 
 function RawResult({ result }: { result: any }) {

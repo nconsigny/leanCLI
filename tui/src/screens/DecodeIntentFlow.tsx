@@ -6,6 +6,7 @@ import Form, { Field } from "../widgets/Form.js";
 import { call } from "../daemon.js";
 import { theme } from "../theme.js";
 import { TransfersBlock } from "../widgets/TransfersBlock.js";
+import { ProvenancePanel } from "../widgets/ProvenancePanel.js";
 
 type Props = { onDone: (s: boolean) => void };
 
@@ -99,11 +100,53 @@ export default function DecodeIntentFlow({ onDone }: Props) {
 
   return (
     <Layout title="Transaction intent" hint="enter / esc — back">
-      <DecodedView result={phase.decoded} />
-      <SimulationView sim={phase.sim} />
+      <ProvenancePanel
+        title="intent"
+        tier="local"
+        source={
+          phase.decoded?.matched === false
+            ? [
+                "selector not found in bundled registry — bridge/clearsign/registry/*.json",
+                "4byte fallback registry is local but did not cover this selector either",
+              ]
+            : [
+                "ERC-7730 descriptor from bundled registry — bridge/clearsign/registry/*.json",
+                "calldata decoded against descriptor ABI in the clearsign sidecar (untrusted; UI-render only)",
+                "token decimals/symbol via eth_call(decimals)/eth_call(symbol) — untrusted RPC (cached)",
+              ]
+        }
+      >
+        <DecodedView result={phase.decoded} />
+      </ProvenancePanel>
+      <ProvenancePanel
+        title="simulation"
+        tier="remote"
+        source={decodeIntentSimSourceLines(phase.sim)}
+      >
+        <SimulationView sim={phase.sim} />
+      </ProvenancePanel>
       <BackOnInput onDone={() => onDone(false)} />
     </Layout>
   );
+}
+
+/** Footer-source lines for the simulation panel of the standalone
+ *  DecodeIntent screen. Same provenance as SendRawFlow's simulation
+ *  panel — the daemon RPC is identical (`tx.simulate` → eth_call +
+ *  eth_estimateGas + optional debug_traceCall on the untrusted RPC). */
+function decodeIntentSimSourceLines(sim: any): string[] {
+  const lines: string[] = [
+    "eth_call + eth_estimateGas on the configured RPC endpoint (untrusted execution node)",
+  ];
+  if (sim?.traceUnavailable) {
+    lines.push("debug_traceCall not exposed by this RPC — token-flow trace unavailable");
+  } else if (sim?.trace) {
+    lines.push("debug_traceCall (callTracer + logs) on the same RPC — walked daemon-side");
+  }
+  if (sim?.simRpcError) {
+    lines.push("daemon error: " + String(sim.simRpcError).slice(0, 120));
+  }
+  return lines;
 }
 
 function Runner({
