@@ -462,10 +462,20 @@ export default function SphincsAccountsHub({ onBack }: Props) {
       </Layout>
     );
   }
-  const items = state.rows.map((r) => ({
-    label: `${r.name} — ${r.paramSet} — owner ${r.ownerAddress.slice(0, 10)}…${r.ownerAddress.slice(-6)}`,
-    value: r,
-  }));
+  // A smart-account's identity is its CREATE2 contract address (the
+  // `sender` field every UserOp targets). Fall back to the ECDSA owner
+  // only when the counterfactual hasn't been computed yet — that row
+  // visibly prompts the user to run "Compute counterfactual address".
+  const items = state.rows.map((r) => {
+    const id = r.smartAccountAddress;
+    const idStr = id
+      ? `${id.slice(0, 10)}…${id.slice(-6)}`
+      : `(pending — owner ${r.ownerAddress.slice(0, 10)}…${r.ownerAddress.slice(-6)})`;
+    return {
+      label: `${r.name} — ${r.paramSet} — ${idStr}`,
+      value: r,
+    };
+  });
   return (
     <Layout
       title="SPHINCS- hybrid accounts"

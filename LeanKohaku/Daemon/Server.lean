@@ -1724,14 +1724,17 @@ private def tryComputeSmartAccountAddress (cfg : Config)
           (LeanKohaku.Crypto.Hex.encode "getAddress(address,bytes32,bytes32)".toByteArray) with
       | .error _ => pure none
       | .ok kh =>
-          let sel := LeanKohaku.Crypto.Hex.encode (kh.extract 0 4)
+          -- Build the calldata in ByteArray space and hex-encode once at
+          -- the end. `Hex.encode` always prepends "0x", so the previous
+          -- `"0x" ++ Hex.encode a ++ Hex.encode b ++ ...` pattern emitted
+          -- strings with embedded "0x" substrings — Sepolia geth/erigon
+          -- rejects them as "invalid hex string into hexutil.Bytes".
+          let selBytes := kh.extract 0 4
           let ownerB := (LeanKohaku.Sphincs.UserOp.hexToWord32? rec.ownerAddress).getD ByteArray.empty
           let pkSeedB := (LeanKohaku.Sphincs.UserOp.hexToWord32? rec.pkSeed).getD ByteArray.empty
           let pkRootB := (LeanKohaku.Sphincs.UserOp.hexToWord32? rec.pkRoot).getD ByteArray.empty
-          let dataHex := "0x" ++ sel
-            ++ LeanKohaku.Crypto.Hex.encode ownerB
-            ++ LeanKohaku.Crypto.Hex.encode pkSeedB
-            ++ LeanKohaku.Crypto.Hex.encode pkRootB
+          let dataHex := LeanKohaku.Crypto.Hex.encode
+            (selBytes ++ ownerB ++ pkSeedB ++ pkRootB)
           match ← LeanKohaku.RPC.Outbound.ethCall cfg.policy ep factory dataHex "latest" none with
           | .error _ => pure none
           | .ok ret =>
@@ -1812,10 +1815,21 @@ private partial def executeSphincsUserOp
                           match ← derivePrivateKeyFromSeed wSlot.seed path with
                           | .error e => pure <| .error { code := -32012, message := "ecdsa key derive failed", data := some (.str e) }
                           | .ok privKey =>
-                              -- 3) Nonce, gas, initCode.
-                              let nonceCalldata := "0x" ++ Sphincs.Send.entryPointGetNonceSelector
-                                ++ LeanKohaku.Crypto.Hex.encode ((LeanKohaku.Sphincs.UserOp.hexToWord32? sender).getD ByteArray.empty)
-                                ++ LeanKohaku.Crypto.Hex.encode (LeanKohaku.Sphincs.UserOp.padLeft32 ByteArray.empty)
+                              -- 3) Nonce, gas, initCode. The nonce calldata is
+                              -- entryPoint.getNonce(sender, key=0): selector ‖
+                              -- pad32(sender) ‖ pad32(0). Build in ByteArray
+                              -- and hex-encode once (Hex.encode always
+                              -- prepends "0x", so a "++" of two
+                              -- already-encoded strings would yield an
+                              -- embedded-"0x" hex blob that the RPC rejects).
+                              let nonceSelBytes :=
+                                (LeanKohaku.Crypto.Hex.decode
+                                  Sphincs.Send.entryPointGetNonceSelector).getD ByteArray.empty
+                              let nonceCalldata :=
+                                LeanKohaku.Crypto.Hex.encode
+                                  (nonceSelBytes
+                                    ++ (LeanKohaku.Sphincs.UserOp.hexToWord32? sender).getD ByteArray.empty
+                                    ++ LeanKohaku.Sphincs.UserOp.padLeft32 ByteArray.empty)
                               let nonceN : Nat ← do
                                 match ← LeanKohaku.RPC.Outbound.ethCall cfg.policy ep
                                     Sphincs.Send.entryPointV09Address nonceCalldata "latest" none with
@@ -3305,17 +3319,18 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                       (LeanKohaku.Crypto.Hex.encode "getAddress(address,bytes32,bytes32)".toByteArray) with
                   | .error e => pure <| .error { code := -32031, message := "keccak failed", data := some (.str e) }
                   | .ok kh =>
-                      let sel := LeanKohaku.Crypto.Hex.encode (kh.extract 0 4)
+                      -- Concat in ByteArray space then hex-encode once;
+                      -- see `tryComputeSmartAccountAddress` for the
+                      -- "Hex.encode always prepends 0x" rationale.
+                      let selBytes := kh.extract 0 4
                       let ownerBytes : ByteArray :=
                         (LeanKohaku.Sphincs.UserOp.hexToWord32? rec.ownerAddress).getD ByteArray.empty
                       let pkSeedB : ByteArray :=
                         (LeanKohaku.Sphincs.UserOp.hexToWord32? rec.pkSeed).getD ByteArray.empty
                       let pkRootB : ByteArray :=
                         (LeanKohaku.Sphincs.UserOp.hexToWord32? rec.pkRoot).getD ByteArray.empty
-                      let dataHex := "0x" ++ sel
-                        ++ LeanKohaku.Crypto.Hex.encode ownerBytes
-                        ++ LeanKohaku.Crypto.Hex.encode pkSeedB
-                        ++ LeanKohaku.Crypto.Hex.encode pkRootB
+                      let dataHex := LeanKohaku.Crypto.Hex.encode
+                        (selBytes ++ ownerBytes ++ pkSeedB ++ pkRootB)
                       match ← LeanKohaku.RPC.Outbound.ethCall cfg.policy ep factory dataHex "latest" none with
                       | .error e =>
                           pure <| .error { code := -32020, message := "eth_call failed", data := some (.str e) }
