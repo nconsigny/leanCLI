@@ -6,12 +6,13 @@ import { theme } from "../theme.js";
 import { EoaListEntry, TpmListEntry } from "../types.js";
 
 type OwnAccount = {
-  kind: "eoa" | "tpm";
+  kind: "eoa" | "tpm" | "sphincs";
   name: string;
   /** lowercased address — comparisons elsewhere are case-insensitive. */
   address: string;
-  /** BIP-32 account index for EOA sub-accounts (0 = primary). TPM
-   *  wallets have no sub-accounts so this stays `undefined`. */
+  /** BIP-32 account index for EOA sub-accounts (0 = primary). TPM and
+   *  SPHINCS- hybrid wallets have no sub-accounts so this stays
+   *  `undefined`. */
   accountIndex?: number;
   /** Derivation path, when known (e.g. "m/44'/60'/0'/0/0"). */
   path?: string;
@@ -88,6 +89,23 @@ export default function RecipientInput({
           out.push({ kind: "tpm", name: t.name, address: t.address.toLowerCase() });
         }
       }
+      // SPHINCS- hybrid smart accounts. The unified `account.list` RPC
+      // already emits them; we pull only the ones that already have a
+      // smart-account address computed (the on-chain identity of the
+      // sphincs slot). Slots in the "pending compute" state are skipped
+      // — sending to a zero-address counterfactual would be a bug, not
+      // a feature, so we don't surface them as cycle targets.
+      const acct = await call<{ accounts: { type: string; name: string; address: string }[] }>(
+        "account.list",
+        {},
+      );
+      if (cancelled) return;
+      if (acct.ok && Array.isArray(acct.result?.accounts)) {
+        for (const a of acct.result.accounts) {
+          if (a?.type !== "sphincs" || !a.name || !a.address) continue;
+          out.push({ kind: "sphincs", name: a.name, address: a.address.toLowerCase() });
+        }
+      }
       setAccounts(out);
     })();
     return () => {
@@ -142,7 +160,9 @@ export default function RecipientInput({
         {isOwn && matched && (
           <Text color={theme.ok}>
             {"  ← "}
-            {matched.kind === "eoa" ? "[eoa] " : "[tpm] "}
+            {matched.kind === "eoa" ? "[eoa] "
+              : matched.kind === "sphincs" ? "[sphincs] "
+              : "[tpm] "}
             {matched.name}
             {matched.kind === "eoa" && matched.accountIndex !== undefined
               ? `/${matched.accountIndex}`

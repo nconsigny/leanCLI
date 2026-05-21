@@ -136,21 +136,70 @@ def abiEncodeBytesPair (a b : ByteArray) : ByteArray :=
 /-- Render a single byte field as its `0x`-prefixed hex string. -/
 def hex0x (bs : ByteArray) : String := "0x" ++ Hex.encode bs
 
-/-- JSON shape of a PackedUserOperation as the bundler expects it. The
-    `signature` field is supplied separately so the same op can be hashed
-    first and signed second. -/
+/-- Render a 32-byte big-endian word as a `0x`-prefixed hex string with
+    leading zeros stripped (matching `eth_getTransactionCount`-style
+    quantity encoding the JSON-RPC spec requires for `uint256` fields).
+    A truly-zero word becomes `"0x0"` — bundlers reject `"0x"`. -/
+private def quantity0x (bs : ByteArray) : String :=
+  let raw := Hex.encode bs
+  let body := if raw.startsWith "0x" then (raw.drop 2).toString else raw
+  -- Drop leading zero nibbles, but keep at least one digit.
+  let trimmed := body.dropWhile (· = '0') |>.toString
+  if trimmed.isEmpty then "0x0" else "0x" ++ trimmed
+
+/-- Extract the high or low 16 bytes from a packed 32-byte word.
+    `accountGasLimits` and `gasFees` are stored packed for the on-chain
+    struct but the bundler JSON-RPC v3 API wants the two halves as
+    separate uint128 quantity fields. -/
+private def hiHalf16 (bs : ByteArray) : ByteArray :=
+  if bs.size ≥ 32 then bs.extract 0 16 else bs.extract 0 (min bs.size 16)
+
+private def loHalf16 (bs : ByteArray) : ByteArray :=
+  if bs.size ≥ 32 then bs.extract 16 32 else bs
+
+/-- JSON shape of a PackedUserOperation as ERC-4337 v3 bundlers expect
+    it. The on-chain struct is PACKED (`accountGasLimits` is one bytes32
+    holding verificationGasLimit‖callGasLimit) but every spec-compliant
+    bundler — including Candide on `/public/v3/...` — wants the
+    UNPACKED JSON form with separate quantity fields. Sending the packed
+    shape returns `{"code":-32602,"message":"UserOperation missing
+    callGasLimit field"}`.
+
+    Split rules (PackedUserOperation v0.7+):
+      accountGasLimits[ 0..16] → verificationGasLimit
+      accountGasLimits[16..32] → callGasLimit
+      gasFees       [ 0..16] → maxPriorityFeePerGas
+      gasFees       [16..32] → maxFeePerGas
+      initCode[ 0..20]       → factory      (when initCode non-empty)
+      initCode[20..]         → factoryData  (when initCode non-empty)
+      paymasterAndData[…]    → paymaster + paymaster*GasLimit + paymasterData
+        (we don't support paymasters yet — `paymasterAndData` is always
+         empty and the optional paymaster fields are omitted)
+
+    Empty `initCode` → omit factory/factoryData so the bundler doesn't
+    think the account needs deploying. Otherwise the first 20 bytes are
+    the factory address and the remainder is the factory calldata. -/
 def packedUserOpToJson (op : UserOp.PackedUserOperation) (signature : ByteArray) : Json :=
-  .obj #[
-    ("sender",             .str (hex0x op.sender)),
-    ("nonce",              .str (hex0x op.nonce)),
-    ("initCode",           .str (hex0x op.initCode)),
-    ("callData",           .str (hex0x op.callData)),
-    ("accountGasLimits",   .str (hex0x op.accountGasLimits)),
-    ("preVerificationGas", .str (hex0x op.preVerificationGas)),
-    ("gasFees",            .str (hex0x op.gasFees)),
-    ("paymasterAndData",   .str (hex0x op.paymasterAndData)),
-    ("signature",          .str (hex0x signature))
+  let baseFields : Array (String × Json) := #[
+    ("sender",                .str (hex0x op.sender)),
+    ("nonce",                 .str (quantity0x op.nonce)),
+    ("callData",              .str (hex0x op.callData)),
+    ("callGasLimit",          .str (quantity0x (loHalf16 op.accountGasLimits))),
+    ("verificationGasLimit",  .str (quantity0x (hiHalf16 op.accountGasLimits))),
+    ("preVerificationGas",    .str (quantity0x op.preVerificationGas)),
+    ("maxFeePerGas",          .str (quantity0x (loHalf16 op.gasFees))),
+    ("maxPriorityFeePerGas",  .str (quantity0x (hiHalf16 op.gasFees))),
+    ("signature",             .str (hex0x signature))
   ]
+  let withFactory : Array (String × Json) :=
+    if op.initCode.size ≥ 20 then
+      let factoryBs := op.initCode.extract 0 20
+      let factoryData := op.initCode.extract 20 op.initCode.size
+      baseFields
+        |>.push ("factory",     .str (hex0x factoryBs))
+        |>.push ("factoryData", .str (hex0x factoryData))
+    else baseFields
+  .obj withFactory
 
 /-- Pack two 16-byte halves into one 32-byte word (high half ‖ low half).
     Used for `accountGasLimits` (verificationGasLimit‖callGasLimit) and
