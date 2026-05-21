@@ -335,51 +335,58 @@ private def resolveIpv4 (host : String) : IO String := do
     return firstTok.trim
   catch _ => return ""
 
-/-- Resolve `ip(8)` to an absolute path. Mirrors `Sandbox.detectUnshare`'s
-    approach: try the well-known locations first, fall back to
-    `env which`. Returns `none` if the binary isn't installed. PATH-lookup
-    via bare `cmd := "ip"` is unreliable under `IO.Process.spawn` —
+/-- Resolve a binary by trying well-known absolute paths, then falling
+    back to `env which`. Returns `none` if not installed. PATH-lookup
+    via bare `cmd := "name"` is unreliable under `IO.Process.spawn` —
     daemon's PATH can be sparse (e.g. systemd-launched) — so we resolve
     explicitly. -/
-private def detectIpBinary : IO (Option String) := do
-  let candidates : Array String := #[
-    "/usr/bin/ip",
-    "/usr/sbin/ip",
-    "/sbin/ip",
-    "/bin/ip",
-    "/run/current-system/sw/bin/ip"
-  ]
+private def detectBinary (name : String) (candidates : Array String) :
+    IO (Option String) := do
   for c in candidates do
     if ← System.FilePath.pathExists c then
       return some c
   try
-    let out ← IO.Process.output { cmd := "/usr/bin/env", args := #["which", "ip"] }
+    let out ← IO.Process.output { cmd := "/usr/bin/env", args := #["which", name] }
     if out.exitCode == 0 then
       let path := out.stdout.trimAscii.toString
       if path.isEmpty then return none else return some path
     else return none
   catch _ => return none
 
-/-- Local egress for a destination IP. Asks the kernel via `ip -o route
-    get <ip>` which local interface + source address it would pick to
-    reach the endpoint. Pure routing-table lookup — no network call, no
-    leak to a third-party "what's my IP" service. Returns
-    `(src, dev, err)` where `err` is empty on success or carries a short
-    diagnostic on failure (binary missing, exit nonzero, parse empty) —
-    surfaced in the TUI so `<no route>` is never silently mysterious.
-    Privacy note: this is the source address the wallet would actually
-    dial *from*, not the public IP a remote sees — useful for catching
-    split-tunnel/VPN misconfigurations ("am I routing this over the VPN
-    or the LAN?") without phoning home. -/
-private def routeEgress (ip : String) : IO (String × String × String) := do
-  if ip.isEmpty then return ("", "", "no destination IP")
-  let ipBin ← match (← detectIpBinary) with
-    | some p => pure p
-    | none   => return ("", "", "ip(8) not found in PATH or well-known dirs")
+private def detectIpBinary : IO (Option String) :=
+  detectBinary "ip" #[
+    "/usr/bin/ip", "/usr/sbin/ip", "/sbin/ip", "/bin/ip",
+    "/run/current-system/sw/bin/ip"
+  ]
+
+private def detectPython3 : IO (Option String) :=
+  detectBinary "python3" #[
+    "/usr/bin/python3", "/usr/local/bin/python3", "/bin/python3",
+    "/run/current-system/sw/bin/python3"
+  ]
+
+/-- Python-based fallback for `routeEgress` when `ip(8)` can't open a
+    netlink socket (sandboxes that restrict AF_NETLINK — common under
+    systemd `RestrictAddressFamilies=`, some nspawn configs, etc.).
+    Opens a UDP socket, `connect()`s to the destination, and reads back
+    `getsockname()` — the kernel resolves the route and assigns a source
+    address *without sending any packets*. Pure AF_INET, no netlink, no
+    network traffic. Returns `(src, dev, err)` where `dev` is always
+    `""` because `getsockname()` doesn't expose the interface name. -/
+private def routeEgressViaPython
+    (py : String) (ip : String) : IO (String × String × String) := do
+  let script :=
+    "import socket,sys\n" ++
+    "try:\n" ++
+    "    s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)\n" ++
+    "    s.connect((sys.argv[1],443))\n" ++
+    "    print(s.getsockname()[0])\n" ++
+    "except Exception as e:\n" ++
+    "    sys.stderr.write(str(e)); sys.exit(1)\n"
   try
     let child ← IO.Process.spawn {
-      cmd := ipBin,
-      args := #["-o", "route", "get", ip],
+      cmd := py,
+      args := #["-c", script, ip],
       stdin := .null,
       stdout := .piped,
       stderr := .piped
@@ -388,29 +395,78 @@ private def routeEgress (ip : String) : IO (String × String × String) := do
     let err ← child.stderr.readToEnd
     let exitCode ← child.wait
     if exitCode ≠ 0 then
-      let snippet :=
-        let raw := err.trimAscii.toString
-        if raw.isEmpty then s!"{ipBin} exited {exitCode}, no stderr"
-        else if raw.length > 120 then s!"{ipBin} exit {exitCode}: {(raw.take 120).toString}…"
-        else s!"{ipBin} exit {exitCode}: {raw}"
-      return ("", "", snippet)
-    -- `-o` collapses to one line. Tokens we care about: "src <addr>" and
-    -- "dev <iface>". Walk pairs.
-    let tokens := (out.splitOn " ").filterMap fun s =>
-      let t := s.trimAscii.toString
-      if t.isEmpty then none else some t
-    let mut src : String := ""
-    let mut dev : String := ""
-    let mut prev : String := ""
-    for tok in tokens do
-      if prev = "src" then src := tok
-      else if prev = "dev" then dev := tok
-      prev := tok
-    if src.isEmpty && dev.isEmpty then
-      return ("", "", s!"parsed empty: {out.take 80}")
-    return (src, dev, "")
+      let raw := err.trimAscii.toString
+      return ("", "", s!"python fallback exit {exitCode}: {raw}")
+    let src := out.trimAscii.toString
+    if src.isEmpty then return ("", "", "python fallback: empty stdout")
+    return (src, "", "")
   catch e =>
-    return ("", "", s!"spawn failed: {toString e}")
+    return ("", "", s!"python fallback spawn failed: {toString e}")
+
+/-- Local egress for a destination IP. Pure routing-table lookup — no
+    packets sent, no third-party IP-echo service. Tries `ip -o route get
+    <ip>` first; on failure (binary missing, AF_NETLINK denied by the
+    sandbox, parse miss) falls back to an AF_INET UDP-connect +
+    `getsockname()` trick via python3 — `connect()` on a UDP socket does
+    not send any datagram, the kernel just consults the routing table to
+    pick a source address. Returns `(src, dev, err)`; `dev` is set to
+    `"udp-connect"` when the fallback path is used (getsockname doesn't
+    expose the interface name). Privacy note: `src` is the address the
+    wallet would dial *from*, useful for catching split-tunnel/VPN
+    misconfigurations without phoning home. -/
+private def routeEgress (ip : String) : IO (String × String × String) := do
+  if ip.isEmpty then return ("", "", "no destination IP")
+  -- First try `ip(8)`.
+  let ipResult : IO (String × String × String) := do
+    let ipBin ← match (← detectIpBinary) with
+      | some p => pure p
+      | none   => return ("", "", "ip(8) not found")
+    try
+      let child ← IO.Process.spawn {
+        cmd := ipBin,
+        args := #["-o", "route", "get", ip],
+        stdin := .null,
+        stdout := .piped,
+        stderr := .piped
+      }
+      let out ← child.stdout.readToEnd
+      let err ← child.stderr.readToEnd
+      let exitCode ← child.wait
+      if exitCode ≠ 0 then
+        let raw := err.trimAscii.toString
+        let snippet :=
+          if raw.isEmpty then s!"{ipBin} exited {exitCode}"
+          else if raw.length > 120 then s!"{ipBin} exit {exitCode}: {(raw.take 120).toString}…"
+          else s!"{ipBin} exit {exitCode}: {raw}"
+        return ("", "", snippet)
+      let tokens := (out.splitOn " ").filterMap fun s =>
+        let t := s.trimAscii.toString
+        if t.isEmpty then none else some t
+      let mut src : String := ""
+      let mut dev : String := ""
+      let mut prev : String := ""
+      for tok in tokens do
+        if prev = "src" then src := tok
+        else if prev = "dev" then dev := tok
+        prev := tok
+      if src.isEmpty && dev.isEmpty then
+        return ("", "", s!"parsed empty: {out.take 80}")
+      return (src, dev, "")
+    catch e =>
+      return ("", "", s!"spawn failed: {toString e}")
+  let (src, dev, err) ← ipResult
+  if !src.isEmpty || !dev.isEmpty then return (src, dev, "")
+  -- `ip` failed. Try the python AF_INET fallback if available.
+  match (← detectPython3) with
+  | none => return ("", "", s!"{err}; python3 fallback unavailable")
+  | some py =>
+      let (psrc, _pdev, perr) ← routeEgressViaPython py ip
+      if !psrc.isEmpty then
+        -- Tag the dev slot so the TUI can label "via UDP-connect" vs
+        -- "via netlink". No real interface name from getsockname().
+        return (psrc, "udp-connect", "")
+      else
+        return ("", "", s!"{err}; {perr}")
 
 private def endpointJson (ep : LeanKohaku.RPC.Outbound.Endpoint) : IO Json := do
   let host := hostNoPort ep.url
