@@ -33,6 +33,11 @@ type State =
   | { kind: "deploy-pick-eoa"; row: Account; eoas: EoaListEntry[] }
   | { kind: "deploy-run"; row: Account; params: Record<string, unknown> }
   | { kind: "send-form"; row: Account }
+  // Intermediate ENS-resolve step between send-form and send-run. We
+  // hit `chain.resolveName` once and then advance to send-run with the
+  // raw form values overridden by the resolved 0x address. Same
+  // pattern (form → resolve → run) for rotateOwner.
+  | { kind: "resolve-target"; row: Account; raw: string; nextKind: "send-run" | "rotate-owner-run"; pendingParams: Record<string, unknown>; field: "to" | "newOwner" }
   | { kind: "send-run"; row: Account; params: Record<string, unknown> }
   | { kind: "poll-run"; row: Account; userOpHash: string }
   | { kind: "rotate-owner-form"; row: Account }
@@ -165,8 +170,20 @@ export default function SphincsAccountsHub({ onBack }: Props) {
   }
 
   if (state.kind === "send-form") {
+    // The `to` field uses `kind: "recipient"` so the user can cycle
+    // through their own wallets with ↑/↓ and the RecipientInput widget
+    // tags self-matches. `excludeAddress` is the smart-account address
+    // (the sender of every UserOp from this slot); falls back to the
+    // ECDSA owner when the counterfactual hasn't been computed yet.
+    // Validation is intentionally loose — any non-empty string is
+    // accepted at form-submit time; ENS names like "vitalik.eth" get
+    // resolved via `chain.resolveName` in the interstitial
+    // `resolve-target` stage before the send RPC fires.
+    const senderAddr = state.row.smartAccountAddress ?? state.row.ownerAddress;
     const fields: Field[] = [
-      { name: "to", label: "Target address (to)", validate: (v) => ADDR_RE.test(v) ? null : "expected 0x-prefixed 20-byte address" },
+      { name: "to", label: "Target (address, ENS name, or pick your own)",
+        kind: "recipient", excludeAddress: senderAddr,
+        validate: (v) => v.trim().length > 0 ? null : "required" },
       { name: "value", label: "Value in wei (decimal or 0x…)", initial: "0", validate: () => null },
       { name: "data", label: "Calldata hex (optional, blank = pure ETH transfer)",
         validate: (v) => v.length === 0 || HEX_RE.test(v) ? null : "expected hex" },
@@ -184,15 +201,44 @@ export default function SphincsAccountsHub({ onBack }: Props) {
           onSubmit={(v) => {
             const base: Record<string, unknown> = {
               name: state.row.name,
-              to: v.to ?? "",
               value: v.value ?? "0",
             };
             if (v.data && v.data.length > 0) base.data = v.data;
             if (v.passphrase && v.passphrase.length > 0) base.passphrase = v.passphrase;
-            setState({ kind: "send-run", row: state.row, params: base });
+            const raw = (v.to ?? "").trim();
+            if (ADDR_RE.test(raw)) {
+              // Already a 0x address — skip resolution.
+              setState({ kind: "send-run", row: state.row, params: { ...base, to: raw } });
+            } else {
+              setState({
+                kind: "resolve-target",
+                row: state.row,
+                raw,
+                field: "to",
+                nextKind: "send-run",
+                pendingParams: base,
+              });
+            }
           }}
         />
       </Layout>
+    );
+  }
+
+  if (state.kind === "resolve-target") {
+    // Synchronous useEffect-style resolver inside a stage by chaining
+    // an immediately-fired call from a tiny inline component. Reusing
+    // the same chain.resolveName RPC SendFlow's ResolveStep calls.
+    return (
+      <ResolveStep
+        raw={state.raw}
+        onResolved={(addr) => {
+          const merged = { ...state.pendingParams, [state.field]: addr };
+          if (state.nextKind === "send-run") setState({ kind: "send-run", row: state.row, params: merged });
+          else setState({ kind: "rotate-owner-run", row: state.row, params: merged });
+        }}
+        onError={(msg) => setState({ kind: "err", message: msg })}
+      />
     );
   }
 
@@ -324,8 +370,14 @@ export default function SphincsAccountsHub({ onBack }: Props) {
   }
 
   if (state.kind === "rotate-owner-form") {
+    // Same ENS-friendly pattern as the send form: pick from own
+    // wallets via RecipientInput, fall through to resolve-target when
+    // the input isn't already a 0x address.
+    const senderAddr = state.row.smartAccountAddress ?? state.row.ownerAddress;
     const fields: Field[] = [
-      { name: "newOwner", label: "New ECDSA owner address", validate: (v) => ADDR_RE.test(v) ? null : "expected 0x-prefixed 20-byte address" },
+      { name: "newOwner", label: "New ECDSA owner (address, ENS, or your own)",
+        kind: "recipient", excludeAddress: senderAddr,
+        validate: (v) => v.trim().length > 0 ? null : "required" },
       { name: "passphrase", label: "Per-slot passphrase (Enter if master KEK is loaded)",
         secret: true, validate: () => null },
     ];
@@ -340,10 +392,21 @@ export default function SphincsAccountsHub({ onBack }: Props) {
           onSubmit={(v) => {
             const base: Record<string, unknown> = {
               name: state.row.name,
-              newOwner: v.newOwner ?? "",
             };
             if (v.passphrase && v.passphrase.length > 0) base.passphrase = v.passphrase;
-            setState({ kind: "rotate-owner-run", row: state.row, params: base });
+            const raw = (v.newOwner ?? "").trim();
+            if (ADDR_RE.test(raw)) {
+              setState({ kind: "rotate-owner-run", row: state.row, params: { ...base, newOwner: raw } });
+            } else {
+              setState({
+                kind: "resolve-target",
+                row: state.row,
+                raw,
+                field: "newOwner",
+                nextKind: "rotate-owner-run",
+                pendingParams: base,
+              });
+            }
           }}
         />
       </Layout>
@@ -488,6 +551,43 @@ export default function SphincsAccountsHub({ onBack }: Props) {
         onBack={onBack}
         onSelect={(it) => setState({ kind: "detail", row: it.value })}
       />
+    </Layout>
+  );
+}
+
+/** Resolves an ENS-like input via the daemon's `chain.resolveName` RPC
+ *  and forwards the resulting 0x address to the caller. Mirrors the
+ *  inline ResolveStep helper in `SendFlow.tsx` so the SPHINCS path
+ *  surfaces ENS errors with the same shape. */
+function ResolveStep({
+  raw,
+  onResolved,
+  onError,
+}: {
+  raw: string;
+  onResolved: (addr: string) => void;
+  onError: (msg: string) => void;
+}) {
+  useEffect(() => {
+    let cancelled = false;
+    call<{ address?: string }>("chain.resolveName", { name: raw }).then((r) => {
+      if (cancelled) return;
+      if (!r.ok) return onError(`ENS resolve failed: ${r.error?.message ?? "unknown"}`);
+      const addr = r.result?.address;
+      const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
+      if (!addr || !ADDR_RE.test(addr)) {
+        return onError(`'${raw}' did not resolve to a 0x address`);
+      }
+      onResolved(addr);
+    });
+    return () => { cancelled = true; };
+  }, []);
+  return (
+    <Layout title={`Resolving ${raw}…`}>
+      <Text>
+        <Text color={theme.primary}><Spinner type="dots" /></Text>{" "}
+        <Text color={theme.dim}>chain.resolveName</Text>
+      </Text>
     </Layout>
   );
 }
