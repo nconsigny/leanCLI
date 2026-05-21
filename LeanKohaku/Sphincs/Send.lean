@@ -38,7 +38,13 @@ def executeSelector : String := "b61d27f6"
     EntryPoint. Same rationale as `executeSelector`. -/
 def entryPointGetNonceSelector : String := "35567e1a"
 
-/-- 4-byte selector for `getDomainSeparatorV4()` (OZ EIP712). -/
+/-- 4-byte selector for `getDomainSeparatorV4()` (OZ EIP712).
+
+    Note: kept for legacy callers / tests. v0.9 EntryPoint does NOT
+    expose this method publicly (OZ EIP712 has only an internal
+    `_domainSeparatorV4`), so calling it via `eth_call` reverts with
+    "execution reverted, 0x". Compute the domain separator with
+    `computeDomainSeparator` instead. -/
 def domainSeparatorSelector : String := "20606b06"
 
 /-- Encode a `Nat` as an even-length, lower-case hex string (no `0x`),
@@ -51,6 +57,44 @@ def natToEvenHex (n : Nat) : String :=
     32 bytes. Used for ABI uint256 fields. -/
 def natToWord32 (n : Nat) : ByteArray :=
   UserOp.padLeft32 ((Hex.decode (natToEvenHex n)).getD ByteArray.empty)
+
+/-- Compute the EntryPoint v0.9 EIP-712 domain separator locally,
+    matching `EIP712("ERC4337", "1")` baked into the upstream
+    constructor. Spec:
+      DS = keccak256(abi.encode(
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+        keccak256("ERC4337"),
+        keccak256("1"),
+        uint256(chainId),
+        address(entryPoint)
+      ))
+    Avoids an eth_call to a method that doesn't exist on v0.9.
+
+    On the off chance that a future EntryPoint rev rotates the name
+    or version string, this constant becomes wrong and signatures
+    will be rejected on chain. We deliberately do NOT fall back to
+    eth_call'ing OZ's `eip712Domain()` (the EIP-5267 multi-tuple
+    return) because parsing that here would dwarf this helper.
+    Refresh the constants in lockstep with EntryPoint upgrades. -/
+def computeDomainSeparator (chainId : Nat) : IO (Except String ByteArray) := do
+  let typeStr := "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"
+  match ← LeanKohaku.Crypto.Hacl.keccak256EthereumIO
+      (LeanKohaku.Crypto.Hex.encode typeStr.toByteArray) with
+  | .error e => pure (.error s!"typehash keccak: {e}")
+  | .ok typehash =>
+      match ← LeanKohaku.Crypto.Hacl.keccak256EthereumIO
+          (LeanKohaku.Crypto.Hex.encode "ERC4337".toByteArray) with
+      | .error e => pure (.error s!"name keccak: {e}")
+      | .ok nameHash =>
+          match ← LeanKohaku.Crypto.Hacl.keccak256EthereumIO
+              (LeanKohaku.Crypto.Hex.encode "1".toByteArray) with
+          | .error e => pure (.error s!"version keccak: {e}")
+          | .ok versionHash =>
+              let chainIdW := natToWord32 chainId
+              let epBytes := (LeanKohaku.Crypto.Hex.decode entryPointV09Address).getD ByteArray.empty
+              let epW := UserOp.padLeft32 epBytes
+              let payload := typehash ++ nameHash ++ versionHash ++ chainIdW ++ epW
+              LeanKohaku.Crypto.Hacl.keccak256EthereumIO (LeanKohaku.Crypto.Hex.encode payload)
 
 /-- Build the `callData` field of a PackedUserOperation that targets
     `BaseAccount.execute(to, value, data)`. ABI encoding for the

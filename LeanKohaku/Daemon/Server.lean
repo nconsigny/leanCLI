@@ -1900,15 +1900,17 @@ private partial def executeSphincsUserOp
                                 { opSkeleton with
                                     accountGasLimits   := Sphincs.Send.packTwoHalves vgl cgl,
                                     preVerificationGas := Sphincs.Send.natToWord32 pvg }
-                              -- 5) Domain separator + userOpHash.
-                              let dsCalldata := "0x" ++ Sphincs.Send.domainSeparatorSelector
-                              match ← LeanKohaku.RPC.Outbound.ethCall cfg.policy ep
-                                  Sphincs.Send.entryPointV09Address dsCalldata "latest" none with
-                              | .error e => pure <| .error { code := -32020, message := "entryPoint.getDomainSeparator failed", data := some (.str e) }
-                              | .ok dsJ =>
-                                  let dsHex := (asString dsJ).getD ""
-                                  let ds : ByteArray :=
-                                    (LeanKohaku.Crypto.Hex.decode dsHex).getD ByteArray.empty
+                              -- 5) Domain separator + userOpHash. We compute the
+                              -- EIP-712 domain separator locally instead of
+                              -- eth_call'ing `getDomainSeparatorV4()` — that
+                              -- method isn't public on EntryPoint v0.9 (OZ
+                              -- EIP712 only exposes `_domainSeparatorV4()`
+                              -- internally), so the call reverts. The local
+                              -- compute matches EntryPoint v0.9's
+                              -- `EIP712("ERC4337", "1")` constructor.
+                              match ← Sphincs.Send.computeDomainSeparator rec.chainId with
+                              | .error e => pure <| .error { code := -32020, message := "domain separator computation failed", data := some (.str e) }
+                              | .ok ds =>
                                   if ds.size ≠ 32 then
                                     pure <| .error { code := -32034, message := s!"unexpected domain separator size {ds.size}", data := none }
                                   else
@@ -3506,6 +3508,46 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                             | _ => j
                           pure (.ok withFields)
       | _, _ => pure (.error invalidParams)
+  | "sphincs.account.deployStatus" =>
+      -- Probe eth_getCode at the slot's smart-account address. Empty
+      -- bytecode → not deployed (factory.createAccount hasn't run, or
+      -- first-send-also-deploy initCode hasn't been bundled yet). Used
+      -- by the TUI to gate the "Deploy" action once the account is
+      -- already on chain.
+      match paramName req.params with
+      | .error err => pure (.error err)
+      | .ok name =>
+          match ← LeanKohaku.Wallet.SphincsHybridStore.readRecord name with
+          | .error err =>
+              pure <| .error { code := -32010, message := "sphincs slot not found", data := some (.str err) }
+          | .ok rec =>
+              match rec.smartAccountAddress with
+              | none =>
+                  -- No counterfactual computed yet → certainly not deployed.
+                  pure <| .ok <| .obj #[
+                    ("name",                .str name),
+                    ("smartAccountAddress", .null),
+                    ("deployed",            .bool false),
+                    ("codeLen",             .num 0)
+                  ]
+              | some sender =>
+                  let chainName := paramStringD req.params "chain" (chainNameGuess rec.chainId)
+                  match endpointForChain cfg (some chainName) with
+                  | .error e => pure <| .error { code := -32021, message := "unknown chain", data := some (.str e) }
+                  | .ok ep =>
+                      match ← LeanKohaku.RPC.Outbound.call cfg.policy ep
+                          .getCode (.arr #[.str sender, .str "latest"]) none with
+                      | .error e => pure <| .error { code := -32020, message := "eth_getCode failed", data := some (.str e) }
+                      | .ok r =>
+                          let codeHex := (asString r).getD "0x"
+                          let stripped := if codeHex.startsWith "0x" then (codeHex.drop 2).toString else codeHex
+                          let codeLen := stripped.length / 2
+                          pure <| .ok <| .obj #[
+                            ("name",                .str name),
+                            ("smartAccountAddress", .str sender),
+                            ("deployed",            .bool (codeLen > 0)),
+                            ("codeLen",             .num (Int.ofNat codeLen))
+                          ]
   | "sphincs.factory.deploy" =>
       -- Sepolia-only one-shot factory deploy via the bundled shell.
       -- Params:

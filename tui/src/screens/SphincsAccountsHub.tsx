@@ -57,6 +57,12 @@ const HEX_RE  = /^(0x)?[0-9a-fA-F]*$/;
  *  TUI. Read-only fields and write actions share one record state. */
 export default function SphincsAccountsHub({ onBack }: Props) {
   const [state, setState] = useState<State>({ kind: "loading" });
+  // Lazily-populated per-slot deploy status, keyed by slot name. Probed
+  // on entering the detail view (one eth_getCode per visit) so we can
+  // grey out the "Deploy smart account" action when the contract is
+  // already on chain. `undefined` = not probed yet; `null` = probe in
+  // flight; concrete value = ready.
+  const [deployStatus, setDeployStatus] = useState<Record<string, boolean | null | undefined>>({});
 
   const reload = async () => {
     setState({ kind: "loading" });
@@ -69,6 +75,24 @@ export default function SphincsAccountsHub({ onBack }: Props) {
   };
 
   useEffect(() => { void reload(); }, []);
+
+  // On entering the detail view for a slot, fire a single deployStatus
+  // probe. Cached in `deployStatus[name]` so re-entering the same slot
+  // doesn't re-hit the RPC unless the user explicitly triggers a
+  // refresh (via re-entering from the list, which calls reload above).
+  useEffect(() => {
+    if (state.kind !== "detail") return;
+    const name = state.row.name;
+    if (deployStatus[name] !== undefined) return;
+    setDeployStatus((prev) => ({ ...prev, [name]: null }));
+    void (async () => {
+      const r = await call<{ deployed?: boolean }>("sphincs.account.deployStatus", { name });
+      setDeployStatus((prev) => ({
+        ...prev,
+        [name]: r.ok ? (r.result?.deployed === true) : false,
+      }));
+    })();
+  }, [state.kind === "detail" ? state.row.name : null]);
 
   useInput((input, key) => {
     if (key.escape || input === "q") {
@@ -455,14 +479,28 @@ export default function SphincsAccountsHub({ onBack }: Props) {
         ? `existing ${r.ecdsaAttachment.walletName} (#${r.ecdsaAttachment.accountIndex})`
         : `derived ${r.ecdsaAttachment.walletName} (${r.ecdsaAttachment.path})`;
     type Action = "compute" | "deploy" | "send" | "rotate-owner" | "factory-deploy" | "back";
-    const actions: { label: string; value: Action; description?: string }[] = [
-      { label: "Compute counterfactual address (eth_call factory.getAddress)", value: "compute" },
-      { label: "Deploy smart account via factory.createAccount", value: "deploy" },
-      { label: "Send UserOperation via configured bundler", value: "send" },
-      { label: "Rotate on-chain ECDSA owner (rotateOwner UserOp)", value: "rotate-owner" },
-      { label: "Deploy the SPHINCS- factory (one-time, Sepolia)", value: "factory-deploy" },
-      { label: "← Back", value: "back" },
-    ];
+    const status = deployStatus[r.name];
+    const isDeployed = status === true;
+    const probePending = status === null;
+    // Build the action list dynamically: when the smart-account is
+    // already on-chain we hide "Deploy smart account" outright (it
+    // would always revert at first-send-also-deploy initCode anyway).
+    // While the probe is in flight we show the action but tag it
+    // "(checking…)" so the user knows the gate is being computed.
+    const actions: { label: string; value: Action }[] = [];
+    actions.push({ label: "Compute counterfactual address (eth_call factory.getAddress)", value: "compute" });
+    if (!isDeployed) {
+      actions.push({
+        label: probePending
+          ? "Deploy smart account via factory.createAccount (checking…)"
+          : "Deploy smart account via factory.createAccount",
+        value: "deploy",
+      });
+    }
+    actions.push({ label: "Send UserOperation via configured bundler", value: "send" });
+    actions.push({ label: "Rotate on-chain ECDSA owner (rotateOwner UserOp)", value: "rotate-owner" });
+    actions.push({ label: "Deploy the SPHINCS- factory (one-time, Sepolia)", value: "factory-deploy" });
+    actions.push({ label: "← Back", value: "back" });
     return (
       <Layout
         title={`SPHINCS- account · ${r.name}`}
@@ -478,6 +516,14 @@ export default function SphincsAccountsHub({ onBack }: Props) {
           <Text color={theme.dim}>custom passphrase: {r.customPassphrase ? "yes" : "no"}</Text>
           <Text color={theme.dim}>
             smart-account addr: {r.smartAccountAddress ?? "(pending compute)"}
+          </Text>
+          <Text color={theme.dim}>
+            on-chain status:{" "}
+            {status === undefined || status === null
+              ? <Text color={theme.dim}>checking…</Text>
+              : status
+                ? <Text color={theme.ok}>deployed</Text>
+                : <Text color={theme.warn}>not deployed</Text>}
           </Text>
           <Text color={theme.dim}>created: {new Date(r.createdAt * 1000).toISOString()}</Text>
           <Box marginTop={1}>
