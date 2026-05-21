@@ -1878,6 +1878,17 @@ private partial def executeSphincsUserOp
                               -- where the EntryPoint also has to CREATE2
                               -- the SphincsAccount contract before
                               -- calling _validateSignature.
+                              -- preVerificationGas covers the EntryPoint's
+                              -- per-byte calldata cost. A SPHINCS-C9 signature
+                              -- alone is ~3816 bytes, and the abi.encode of
+                              -- (bytes ecdsaSig, bytes sphincsSig) pushes the
+                              -- full userOp calldata to ~9 KB. Candide's
+                              -- bundler computes a per-userOp minimum from
+                              -- that and rejects estimate requests that
+                              -- under-shoot (typical observed minimum on
+                              -- C9 sends: ~0x15f00 ≈ 90 K). 200 K gives
+                              -- comfortable margin without re-tripping the
+                              -- 15 M total-gas cap.
                               let opSkeleton : LeanKohaku.Sphincs.UserOp.PackedUserOperation := {
                                 sender             := senderAddrBs,
                                 nonce              := LeanKohaku.Sphincs.UserOp.padLeft32
@@ -1885,7 +1896,7 @@ private partial def executeSphincsUserOp
                                 initCode           := initCodeBytes,
                                 callData           := callData,
                                 accountGasLimits   := Sphincs.Send.packTwoHalves 800000 200000,
-                                preVerificationGas := Sphincs.Send.natToWord32 60000,
+                                preVerificationGas := Sphincs.Send.natToWord32 200000,
                                 gasFees            := Sphincs.Send.packTwoHalves priorityFee maxFee,
                                 paymasterAndData   := ByteArray.empty
                               }
@@ -1910,8 +1921,8 @@ private partial def executeSphincsUserOp
                                     pure
                                       (if vgl0 = 0 then 800000 else vgl0,
                                        if cgl0 = 0 then 200000 else cgl0,
-                                       if pvg0 = 0 then 60000 else pvg0)
-                                | .error _ => pure (800000, 200000, 60000)
+                                       if pvg0 = 0 then 200000 else pvg0)
+                                | .error _ => pure (800000, 200000, 200000)
                               let userOp : LeanKohaku.Sphincs.UserOp.PackedUserOperation :=
                                 { opSkeleton with
                                     accountGasLimits   := Sphincs.Send.packTwoHalves vgl cgl,
