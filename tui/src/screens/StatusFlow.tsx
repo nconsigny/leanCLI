@@ -1,7 +1,13 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import { Box, Text, useInput } from "ink";
 import Spinner from "ink-spinner";
+import { spawn, type ChildProcessByStdio } from "node:child_process";
+import type { Readable } from "node:stream";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { Layout, Banner } from "../widgets/Layout.js";
+import Select from "../widgets/Select.js";
 import { call } from "../daemon.js";
 import { theme } from "../theme.js";
 
@@ -88,6 +94,11 @@ export default function StatusFlow({ onLiveMonitor, onBack }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
+  // While an action is mid-confirm or mid-run, the ActionsPanel owns
+  // useInput — page-level shortcuts (r/m/q) would steal keys otherwise.
+  // Boolean is fine because we don't need to know which phase, only
+  // "is something else listening?".
+  const [actionBusy, setActionBusy] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -109,6 +120,7 @@ export default function StatusFlow({ onLiveMonitor, onBack }: Props) {
   }, [refreshKey]);
 
   useInput((input, key) => {
+    if (actionBusy) return;
     if (key.escape || key.leftArrow || input === "q") {
       onBack();
       return;
@@ -151,9 +163,42 @@ export default function StatusFlow({ onLiveMonitor, onBack }: Props) {
           <NetworkPanel network={snap.network} />
           <VersionsPanel versions={snap.versions} />
           <WalletPanel wallet={snap.wallet} />
+          <ActionsHost
+            snap={snap}
+            onActionDone={() => setRefreshKey((k) => k + 1)}
+            setActionBusy={setActionBusy}
+          />
         </Box>
       )}
     </Layout>
+  );
+}
+
+/** Thin wrapper that signals to the parent whenever ActionsPanel
+ *  transitions between idle and non-idle, so the parent can suspend
+ *  its own useInput handlers. The signal is keyed off a render-side
+ *  prop (`actionBusy` boolean held by parent), which is enough because
+ *  ActionsPanel mounts only when the snapshot is loaded. */
+function ActionsHost({
+  snap,
+  onActionDone,
+  setActionBusy,
+}: {
+  snap: Snapshot;
+  onActionDone: () => void;
+  setActionBusy: (busy: boolean) => void;
+}) {
+  // ActionsPanel's `phase` lives inside its own state; we observe it
+  // through a ref by re-rendering. Simpler approach: lift the busy
+  // signal into a callback prop ActionsPanel can call when phase
+  // transitions. Doing that without a major refactor: pass a setter
+  // that ActionsPanel invokes at the start of confirm/run/done.
+  return (
+    <ActionsPanel
+      snap={snap}
+      onActionDone={onActionDone}
+      onPhaseChange={(busy) => setActionBusy(busy)}
+    />
   );
 }
 
@@ -538,4 +583,416 @@ function chainLabel(chainId: number): string {
 function truncateLeft(s: string, n: number): string {
   if (s.length <= n) return s;
   return "…" + s.slice(s.length - n + 1);
+}
+
+/* ================================================================== *
+ * Actions
+ *
+ * Write-side surface for the Status page. Each action ships a confirm
+ * prompt with the exact shell command we'll run, then streams stdout +
+ * stderr live as the runner executes. No daemon-side RPC for these —
+ * shelling out from the TUI keeps the action observable (you can see
+ * the literal command) and works even when the daemon is in a degraded
+ * state (e.g. the entire point of "restart daemon" is that the daemon
+ * itself is broken). The trade-off is the TUI process needs file +
+ * process permissions; in practice we're already the same UID as the
+ * daemon, so this doesn't widen the trust surface.
+ * ================================================================== */
+
+type ActionId = "restart-daemon" | "toggle-sandbox" | "pull-updates";
+
+type SandboxMode = "auto" | "off" | "require";
+
+/** Cycle order is intentional: from a healthy host you go OFF only
+ *  to confirm a degradation; from a degraded host (auto+probe failed)
+ *  toggling to OFF silences the warning while accepting the risk;
+ *  REQUIRE is the strict-prod stance. */
+const SANDBOX_CYCLE: Record<SandboxMode, SandboxMode> = {
+  auto: "off",
+  off: "require",
+  require: "auto",
+};
+
+type ActionPhase =
+  | { kind: "idle" }
+  | { kind: "confirm"; id: ActionId; preview: string }
+  | { kind: "running"; id: ActionId; lines: string[]; exitCode: number | null }
+  | { kind: "done"; id: ActionId; ok: boolean; lines: string[] };
+
+/** Where the daemon reads its environment file from. Mirrors the
+ *  resolution in `script/kohakuspawn` so the TUI writes to the same
+ *  path the systemd unit's `EnvironmentFile=` line reads. */
+function daemonEnvPath(): string {
+  const cfg =
+    process.env.XDG_CONFIG_HOME ??
+    join(homedir(), ".config");
+  return join(cfg, "leankohaku", "daemon.env");
+}
+
+/** Read the current `LEAN_KOHAKU_SANDBOX=` value, defaulting to "auto"
+ *  when unset (matches `LeanKohaku.Util.Sandbox.parseMode`). */
+function readSandboxMode(): SandboxMode {
+  const path = daemonEnvPath();
+  if (!existsSync(path)) return "auto";
+  const raw = readFileSync(path, "utf8");
+  for (const line of raw.split("\n")) {
+    const m = line.match(/^LEAN_KOHAKU_SANDBOX\s*=\s*(\S+)/);
+    if (m) {
+      const v = m[1].toLowerCase();
+      if (v === "off" || v === "require" || v === "auto") return v;
+    }
+  }
+  return "auto";
+}
+
+/** Idempotent in-place write of `LEAN_KOHAKU_SANDBOX=<mode>`. Preserves
+ *  every other line; replaces the sandbox line if present, appends if
+ *  not. Creates the parent dir + file with 0600 perms when missing. */
+function writeSandboxMode(mode: SandboxMode): void {
+  const path = daemonEnvPath();
+  const parent = path.replace(/\/[^/]+$/, "");
+  if (!existsSync(parent)) {
+    mkdirSync(parent, { recursive: true, mode: 0o700 });
+  }
+  const existing = existsSync(path) ? readFileSync(path, "utf8") : "";
+  const lines = existing ? existing.split("\n") : [];
+  let replaced = false;
+  const out = lines.map((line) => {
+    if (/^LEAN_KOHAKU_SANDBOX\s*=/.test(line)) {
+      replaced = true;
+      return `LEAN_KOHAKU_SANDBOX=${mode}`;
+    }
+    return line;
+  });
+  if (!replaced) {
+    // Trim trailing empty line before appending so we don't grow blank
+    // lines on every write.
+    while (out.length > 0 && out[out.length - 1] === "") out.pop();
+    out.push(`LEAN_KOHAKU_SANDBOX=${mode}`);
+    out.push("");
+  }
+  writeFileSync(path, out.join("\n"), { mode: 0o600 });
+}
+
+/** Build the confirm-prompt preview text shown before the user commits
+ *  to running an action. Includes the literal shell command so the user
+ *  knows exactly what we'll execute. */
+function previewFor(id: ActionId, snap: Snapshot): string {
+  switch (id) {
+    case "restart-daemon":
+      return "systemctl --user restart kohaku-daemon\n\nStops the running daemon (pid " +
+        snap.daemon.pid +
+        ") and re-spawns it via the systemd user unit. Any in-flight RPCs from other clients drop with a transport error. Takes 1–2 seconds.";
+    case "toggle-sandbox": {
+      const current = readSandboxMode();
+      const next = SANDBOX_CYCLE[current];
+      return (
+        `Write LEAN_KOHAKU_SANDBOX=${next} to ${daemonEnvPath()}\n` +
+        `then: systemctl --user restart kohaku-daemon\n\n` +
+        `Current mode: ${current}  →  Next mode: ${next}\n\n` +
+        `auto: wrap sidecars with unshare(1) when usable, degrade gracefully if not.\n` +
+        `off:  no wrapping. Use only when AppArmor blocks userns and you've accepted the trade-off.\n` +
+        `require: refuse to spawn sidecars if unshare is not usable. Strict-prod stance.`
+      );
+    }
+    case "pull-updates":
+      return (
+        `cd ${snap.versions.checkoutRoot ?? "<unknown>"} && git pull --ff-only origin master\n` +
+        `then: ./script/kohakuspawn --pull --no-init  (rebuild lake + TUI)\n` +
+        `then: systemctl --user restart kohaku-daemon\n\n` +
+        `Skips first-run wizard. Fails fast (non-ff) instead of merging — your local commits would block the pull and you'd want to handle them manually.`
+      );
+  }
+}
+
+/** Run a child process, stream stdout+stderr line by line into
+ *  `onLine`. Resolves with the exit code (or -1 on spawn failure). */
+function streamSpawn(
+  cmd: string,
+  args: string[],
+  cwd: string | undefined,
+  onLine: (line: string) => void,
+): Promise<number> {
+  return new Promise((resolve) => {
+    let child: ChildProcessByStdio<null, Readable, Readable>;
+    try {
+      child = spawn(cmd, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+        cwd,
+      });
+    } catch (e) {
+      onLine(`spawn failed: ${(e as Error).message}`);
+      resolve(-1);
+      return;
+    }
+    let outBuf = "";
+    let errBuf = "";
+    const drain = (buf: string, prefix: string): string => {
+      let nl;
+      while ((nl = buf.indexOf("\n")) !== -1) {
+        const line = buf.slice(0, nl);
+        buf = buf.slice(nl + 1);
+        if (line.length > 0) onLine(prefix + line);
+      }
+      return buf;
+    };
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+    child.stdout.on("data", (c: string) => {
+      outBuf += c;
+      outBuf = drain(outBuf, "");
+    });
+    child.stderr.on("data", (c: string) => {
+      errBuf += c;
+      // err prefix lets the user distinguish stderr without colour — most
+      // shells flush stderr through this path for warnings (git, lake
+      // build all chatter on stderr by convention).
+      errBuf = drain(errBuf, "");
+    });
+    child.on("error", (e) => {
+      onLine(`process error: ${e.message}`);
+      resolve(-1);
+    });
+    child.on("exit", (code) => {
+      // Flush any residual partial line.
+      if (outBuf.length > 0) onLine(outBuf);
+      if (errBuf.length > 0) onLine(errBuf);
+      resolve(code ?? -1);
+    });
+  });
+}
+
+/** Execute an action and stream its output into `onLine`. Returns the
+ *  final exit code (-1 if any setup step threw). Multi-step actions
+ *  short-circuit on the first non-zero exit. */
+async function runAction(
+  id: ActionId,
+  snap: Snapshot,
+  onLine: (line: string) => void,
+): Promise<number> {
+  switch (id) {
+    case "restart-daemon": {
+      onLine("$ systemctl --user restart kohaku-daemon");
+      return await streamSpawn(
+        "systemctl",
+        ["--user", "restart", "kohaku-daemon"],
+        undefined,
+        onLine,
+      );
+    }
+    case "toggle-sandbox": {
+      const current = readSandboxMode();
+      const next = SANDBOX_CYCLE[current];
+      onLine(`# writing LEAN_KOHAKU_SANDBOX=${next} to ${daemonEnvPath()}`);
+      try {
+        writeSandboxMode(next);
+        onLine(`# daemon.env updated (${current} → ${next})`);
+      } catch (e) {
+        onLine(`write failed: ${(e as Error).message}`);
+        return -1;
+      }
+      onLine("$ systemctl --user restart kohaku-daemon");
+      return await streamSpawn(
+        "systemctl",
+        ["--user", "restart", "kohaku-daemon"],
+        undefined,
+        onLine,
+      );
+    }
+    case "pull-updates": {
+      const root = snap.versions.checkoutRoot;
+      if (!root) {
+        onLine("checkoutRoot is unknown — cannot pull updates from here.");
+        onLine("Run kohakuspawn from inside your local clone manually.");
+        return -1;
+      }
+      onLine(`$ git -C ${root} pull --ff-only origin master`);
+      const gitCode = await streamSpawn(
+        "git",
+        ["-C", root, "pull", "--ff-only", "origin", "master"],
+        undefined,
+        onLine,
+      );
+      if (gitCode !== 0) {
+        onLine(`(git exited ${gitCode}; not rebuilding)`);
+        return gitCode;
+      }
+      const spawnScript = `${root}/script/kohakuspawn`;
+      onLine(`$ ${spawnScript} --pull --no-init`);
+      const installCode = await streamSpawn(
+        spawnScript,
+        ["--pull", "--no-init"],
+        root,
+        onLine,
+      );
+      return installCode;
+    }
+  }
+}
+
+/** Action select panel + lifecycle overlay. Renders the available
+ *  actions inline (Select) when idle; takes over the panel area when
+ *  confirming / running / done. */
+function ActionsPanel({
+  snap,
+  onActionDone,
+  onPhaseChange,
+}: {
+  snap: Snapshot;
+  /** Called after action completes (regardless of success). Triggers a
+   *  status snapshot re-fetch so the page reflects the new daemon
+   *  state. */
+  onActionDone: () => void;
+  /** Tell the parent whether we're holding the input focus. When true,
+   *  the parent suspends its page-level `r` / `m` / `q` chord so we
+   *  don't double-handle keys during confirm / run / done. */
+  onPhaseChange?: (busy: boolean) => void;
+}) {
+  const [phase, setPhase] = useState<ActionPhase>({ kind: "idle" });
+  // Mirror phase changes into the parent's busy flag so its
+  // page-level useInput knows to step out of our way.
+  useEffect(() => {
+    onPhaseChange?.(phase.kind !== "idle");
+  }, [phase.kind, onPhaseChange]);
+  // Holds in-flight output as the action runs. We mirror into state
+  // (lines) for rendering and into a ref (linesRef) so the closure
+  // inside `runAction` can append without stale-state issues from React
+  // batching.
+  const linesRef = useRef<string[]>([]);
+
+  const start = (id: ActionId) => {
+    setPhase({ kind: "confirm", id, preview: previewFor(id, snap) });
+  };
+
+  const cancel = () => {
+    setPhase({ kind: "idle" });
+  };
+
+  const proceed = async () => {
+    if (phase.kind !== "confirm") return;
+    const id = phase.id;
+    linesRef.current = [];
+    setPhase({ kind: "running", id, lines: [], exitCode: null });
+    const code = await runAction(id, snap, (line) => {
+      linesRef.current = [...linesRef.current, line];
+      setPhase({
+        kind: "running",
+        id,
+        lines: linesRef.current,
+        exitCode: null,
+      });
+    });
+    setPhase({
+      kind: "done",
+      id,
+      ok: code === 0,
+      lines: linesRef.current,
+    });
+    // Re-snap so the page reflects the post-action world. We do this
+    // even on failure — the user wants to see "did it really fail?
+    // what's the daemon state now?" without manually pressing R.
+    onActionDone();
+  };
+
+  useInput((input, key) => {
+    if (phase.kind === "confirm") {
+      if (key.return) proceed();
+      if (key.escape) cancel();
+      return;
+    }
+    if (phase.kind === "done") {
+      // Enter or Esc dismisses the result and returns to the action picker.
+      if (key.return || key.escape) setPhase({ kind: "idle" });
+      return;
+    }
+    // While running we intentionally ignore input so the user can't
+    // half-kill an in-flight subprocess. They can still close the TUI.
+  });
+
+  if (phase.kind === "confirm") {
+    return (
+      <Section title="◆ Confirm action">
+        <Box flexDirection="column">
+          {phase.preview.split("\n").map((line, i) => (
+            <Text key={i} color={i === 0 || i === 1 ? theme.highlight : theme.dim} wrap="wrap">
+              {line || " "}
+            </Text>
+          ))}
+        </Box>
+        <Box marginTop={1}>
+          <Text color={theme.ok} bold>[Enter]</Text>
+          <Text color={theme.dim}> proceed  ·  </Text>
+          <Text color={theme.warn} bold>[Esc]</Text>
+          <Text color={theme.dim}> cancel</Text>
+        </Box>
+      </Section>
+    );
+  }
+
+  if (phase.kind === "running" || phase.kind === "done") {
+    const running = phase.kind === "running";
+    const ok = phase.kind === "done" && phase.ok;
+    const failed = phase.kind === "done" && !phase.ok;
+    return (
+      <Section title={`◆ ${labelFor(phase.id)}`}>
+        <Box flexDirection="column">
+          {phase.lines.slice(-20).map((line, i) => (
+            <Text key={i} wrap="truncate-end" color={theme.dim}>
+              {line.length > 200 ? line.slice(0, 200) + "…" : line}
+            </Text>
+          ))}
+        </Box>
+        <Box marginTop={1}>
+          {running && (
+            <Text>
+              <Text color={theme.primary}>
+                <Spinner type="dots" />
+              </Text>{" "}
+              <Text color={theme.dim}>running…</Text>
+            </Text>
+          )}
+          {ok && (
+            <>
+              <Text color={theme.ok} bold>✓ done</Text>
+              <Text color={theme.dim}>  ·  press Enter or Esc to dismiss</Text>
+            </>
+          )}
+          {failed && (
+            <>
+              <Text color={theme.err} bold>✗ failed (exit nonzero)</Text>
+              <Text color={theme.dim}>  ·  Enter / Esc to dismiss · check output above</Text>
+            </>
+          )}
+        </Box>
+      </Section>
+    );
+  }
+
+  // idle
+  const items = [
+    { label: "↻  Restart daemon", value: "restart-daemon" as ActionId },
+    { label: "⊕  Toggle sandbox mode (auto → off → require → auto)", value: "toggle-sandbox" as ActionId },
+    { label: "⬇  Pull updates from origin + rebuild", value: "pull-updates" as ActionId },
+  ];
+  return (
+    <Section title="Actions">
+      <Select
+        items={items}
+        onSelect={(it) => start(it.value)}
+      />
+      <Box marginTop={1}>
+        <Text color={theme.dim}>
+          ↑/↓ choose · enter confirm · destructive actions show a preview before running
+        </Text>
+      </Box>
+    </Section>
+  );
+}
+
+function labelFor(id: ActionId): string {
+  switch (id) {
+    case "restart-daemon": return "Restart daemon";
+    case "toggle-sandbox": return "Toggle sandbox";
+    case "pull-updates":   return "Pull updates";
+  }
 }
