@@ -26,3 +26,6 @@ code_*
 # copied into .lake/build/bin/ by the lake hook). Source stays tracked.
 /sidecars/sphincs/bin/
 /sidecars/sphincs/vendor-c9/target/
+
+# Local scratch planning docs.
+/simplification.md
