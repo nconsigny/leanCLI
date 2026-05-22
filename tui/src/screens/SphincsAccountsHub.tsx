@@ -94,25 +94,18 @@ type State =
   // Intermediate ENS-resolve step. For "send", the form's free-text
   // `to` becomes a 0x address before we hand off to SendRawFlow's
   // ConfirmGate (the gate needs a real address to simulate against).
-  // Same pattern for rotateOwner.
-  | { kind: "resolve-target"; row: Account; raw: string; nextKind: "send-confirm" | "rotate-owner-run"; pendingParams: Record<string, unknown>; field: "to" | "newOwner" }
-  // SPHINCS sends now route through SendRawFlow so the user passes
-  // through tx.decodeIntent → tx.simulate → ConfirmGate before any
-  // userOp is submitted. Required by CLAUDE.md: every calldata
-  // producer must hit the gate. SendRawFlow's sphincs branch then
-  // dispatches `sphincs.account.send` for the final broadcast.
-  | { kind: "send-confirm"; row: Account; tx: { to: string; value: string; data: string } }
-  // `pendingCommit` is set when the rotation's newOwner is a locally-
-  // derivable key (we proved it via `eoa.account.findByAddress`); once
-  // the rotateOwner userOp lands successfully on-chain, the poll
-  // screen auto-runs `sphincs.account.commitRotation` with these
-  // values so the user never has to manually re-point the slot.
-  | { kind: "poll-run"; row: Account; userOpHash: string; tick?: number;
-      pendingCommit?: { newOwner: string; newWalletName: string; newAccountIndex: number };
-      autoCommitted?: boolean }
+  // For "rotate", the resolved address is fed into the daemon's
+  // sphincs.account.encodeRotateOwner RPC, then the resulting
+  // calldata feeds send-confirm — rotation reuses the send gate.
+  | { kind: "resolve-target"; row: Account; raw: string; nextKind: "send-confirm" | "rotate-confirm"; pendingParams: Record<string, unknown>; field: "to" | "newOwner" }
+  // Every smart-account-originated tx (plain send, rotateOwner, …)
+  // routes through SendRawFlow so the user passes through
+  // tx.decodeIntent → tx.simulate → ConfirmGate before any userOp is
+  // submitted. Required by CLAUDE.md: every calldata producer must hit
+  // the gate. SendRawFlow's sphincs branch dispatches
+  // `sphincs.account.send` for the final broadcast.
+  | { kind: "send-confirm"; row: Account; tx: { to: string; value: string; data: string; rationale?: string } }
   | { kind: "rotate-owner-form"; row: Account }
-  | { kind: "rotate-owner-run"; row: Account; params: Record<string, unknown>;
-      pendingCommit?: { newOwner: string; newWalletName: string; newAccountIndex: number } }
   | { kind: "factory-deploy-pick-eoa"; row: Account; eoas: EoaListEntry[] }
   | { kind: "factory-deploy-pick-account"; row: Account; eoa: EoaListEntry; accounts: EoaAccount[] }
   | { kind: "factory-deploy-run"; row: Account; params: Record<string, unknown> }
@@ -142,6 +135,50 @@ type Props = {
 
 const ADDR_RE = /^0x[0-9a-fA-F]{40}$/;
 const HEX_RE  = /^(0x)?[0-9a-fA-F]*$/;
+
+/** Encode rotateOwner(newOwner) calldata via the daemon and transition
+ *  the hub state to send-confirm so the user passes through ConfirmGate
+ *  before broadcast. Probes findByAddress for a friendlier rationale —
+ *  "locally derivable" vs the unusable-after-rotation warning — but
+ *  doesn't block on it. */
+async function prepareRotateTx(
+  row: Account,
+  newOwner: string,
+  setState: React.Dispatch<React.SetStateAction<State>>,
+): Promise<void> {
+  const enc = await call<{ calldata?: string; smartAccountAddress?: string }>(
+    "sphincs.account.encodeRotateOwner",
+    { name: row.name, newOwner },
+  );
+  if (!enc.ok) {
+    setState({ kind: "err", message: enc.error.message });
+    return;
+  }
+  const calldata = enc.result?.calldata;
+  const sender = enc.result?.smartAccountAddress;
+  if (!calldata || !sender) {
+    setState({ kind: "err", message: "daemon returned no rotateOwner calldata" });
+    return;
+  }
+  const localProbe = await call<{ found?: boolean; walletName?: string; accountIndex?: number }>(
+    "eoa.account.findByAddress",
+    { address: newOwner },
+  );
+  const localTag =
+    localProbe.ok && localProbe.result?.found
+      ? `locally derivable via ${localProbe.result.walletName}#${localProbe.result.accountIndex ?? 0}`
+      : "⚠ NOT locally derivable — slot will be unsendable until the new key is added locally";
+  setState({
+    kind: "send-confirm",
+    row,
+    tx: {
+      to: sender,
+      value: "0x0",
+      data: calldata,
+      rationale: `Rotate ECDSA owner to ${newOwner} (${localTag})`,
+    },
+  });
+}
 
 /** List + detail screen for SPHINCS- hybrid ERC-4337 accounts.
  *  Detail view exposes Compute-address / Deploy / Send actions, each
@@ -365,13 +402,10 @@ export default function SphincsAccountsHub({
   // `sphincs.account.resyncOwner` daemon RPC: it reads on-chain
   // `owner()`, compares to the slot's stored `ownerAddress`, and (when
   // the new owner is locally derivable + master KEK loaded) rewraps
-  // the SPHINCS sk under the new AAD atomically. Replaces the old
-  // TUI-side auto-commit that only fired when the user happened to be
-  // on the poll-run screen at the moment the bundler reported
-  // inclusion — if a rotateOwner UserOp landed while the user was
-  // anywhere else (or the bundler's receipt query was slow), the
-  // local slot stayed out of sync. With the daemon-side reconciler the
-  // next visit to detail picks it up.
+  // the SPHINCS sk under the new AAD atomically. Together with routing
+  // rotation through the ConfirmGate-based send-confirm path, this
+  // gives rotations a deterministic "submit → wait → re-enter detail
+  // → state syncs" UX with no fragile poll-screen residency required.
   //
   // Deliberately uncached: a single eth_call + file read is cheap, and
   // a stale cache would defeat the point. Status `resynced` triggers
@@ -628,31 +662,19 @@ export default function SphincsAccountsHub({
       <ResolveStep
         raw={state.raw}
         onResolved={async (addr) => {
-          const merged = { ...state.pendingParams, [state.field]: addr };
           if (state.nextKind === "send-confirm") {
             // pendingParams for the send path is { value, data } — splice
             // the resolved address in as `to` and hand off to ConfirmGate.
+            const merged = { ...state.pendingParams, [state.field]: addr };
             setState({
               kind: "send-confirm",
               row: state.row,
               tx: { to: addr, value: String(merged.value), data: String(merged.data) },
             });
           } else {
-            // Same local-key probe as the rotate-owner-form direct path,
-            // so ENS-resolved addresses also benefit from auto-commit.
-            const f = await call<{ found?: boolean; walletName?: string; accountIndex?: number }>(
-              "eoa.account.findByAddress",
-              { address: addr }
-            );
-            const pendingCommit =
-              f.ok && f.result?.found
-                ? {
-                    newOwner: addr,
-                    newWalletName: f.result.walletName!,
-                    newAccountIndex: f.result.accountIndex ?? 0,
-                  }
-                : undefined;
-            setState({ kind: "rotate-owner-run", row: state.row, params: merged, pendingCommit });
+            // rotate-confirm: encode the rotateOwner calldata daemon-side
+            // and route through send-confirm just like a plain send.
+            await prepareRotateTx(state.row, addr, setState);
           }
         }}
         onError={(msg) => setState({ kind: "err", message: msg })}
@@ -688,96 +710,6 @@ export default function SphincsAccountsHub({
           if (deeplinkMode) onBack();
           else setState({ kind: "detail", row: r });
         }}
-      />
-    );
-  }
-
-  if (state.kind === "poll-run") {
-    // `key` forces a fresh RpcRunner mount on every "Poll again" tick,
-    // because RpcRunner's fetch effect has an empty dependency array
-    // and won't re-run on prop changes alone.
-    const tick = state.tick ?? 0;
-    return (
-      <RpcRunner
-        key={`poll-${state.userOpHash}-${tick}`}
-        title="Polling bundler for inclusion…"
-        subtitle={`userOpHash: ${state.userOpHash}`}
-        method="sphincs.account.getUserOp"
-        params={{ userOpHash: state.userOpHash, name: state.row.name }}
-        renderResult={(r: any) => {
-          const receipt = r?.receipt ?? null;
-          const byHash = r?.info ?? null;
-          const txHash = receipt?.receipt?.transactionHash ?? byHash?.transactionHash ?? null;
-          const success = receipt?.success;
-          const pendingCommit = state.pendingCommit;
-          // Auto-commit a pending rotation once the on-chain side
-          // succeeded. Guarded by `autoCommitted` so a "Poll again"
-          // press doesn't re-fire commitRotation. The actual writeRecord
-          // is idempotent on the daemon side, but skipping the second
-          // call keeps the UI tidy.
-          if (
-            r?.included &&
-            success !== false &&
-            pendingCommit &&
-            !state.autoCommitted
-          ) {
-            void (async () => {
-              await call("sphincs.account.commitRotation", {
-                name: state.row.name,
-                newOwner: pendingCommit.newOwner,
-                newWalletName: pendingCommit.newWalletName,
-                newAccountIndex: pendingCommit.newAccountIndex,
-              });
-              setState((prev: State) =>
-                prev.kind === "poll-run"
-                  ? { ...prev, autoCommitted: true }
-                  : prev
-              );
-            })();
-          }
-          return (
-            <Box flexDirection="column">
-              <Text color={theme.dim} wrap="truncate-middle">
-                userOpHash: <Text color={theme.primary}>{r?.userOpHash}</Text>
-              </Text>
-              {r?.included ? (
-                <>
-                  <Text color={success === false ? theme.warn : theme.ok}>
-                    {success === false ? "⚠ included, but reverted on-chain" : "✓ included on-chain"}
-                  </Text>
-                  {txHash && (
-                    <Text color={theme.dim} wrap="truncate-middle">
-                      tx: <Text color={theme.primary}>{txHash}</Text>
-                    </Text>
-                  )}
-                  {pendingCommit && success !== false && (
-                    state.autoCommitted ? (
-                      <Text color={theme.ok}>
-                        ✓ local slot updated to {pendingCommit.newWalletName}#{pendingCommit.newAccountIndex}
-                      </Text>
-                    ) : (
-                      <Text color={theme.dim}>committing rotation to local store…</Text>
-                    )
-                  )}
-                </>
-              ) : (
-                <Text color={theme.warn}>⏳ still pending — poll again in a few seconds</Text>
-              )}
-            </Box>
-          );
-        }}
-        successActions={[
-          { label: "Poll again", onSelect: () => setState({
-              kind: "poll-run",
-              row: state.row,
-              userOpHash: state.userOpHash,
-              tick: tick + 1,
-              pendingCommit: state.pendingCommit,
-              autoCommitted: state.autoCommitted,
-            }) },
-          { label: "Back to account", onSelect: () => setState({ kind: "detail", row: state.row }) },
-        ]}
-        onDone={() => setState({ kind: "detail", row: state.row })}
       />
     );
   }
@@ -885,125 +817,44 @@ export default function SphincsAccountsHub({
   if (state.kind === "rotate-owner-form") {
     // Same ENS-friendly pattern as the send form: pick from own
     // wallets via RecipientInput, fall through to resolve-target when
-    // the input isn't already a 0x address.
+    // the input isn't already a 0x address. Rotation now routes
+    // through SendRawFlow's ConfirmGate by encoding the rotateOwner
+    // calldata daemon-side then handing off the {to:self, value:0,
+    // data:rotateCalldata} tx to the same send-confirm state as plain
+    // sends. The auto-resync on detail-panel entry picks up the new
+    // ownerAddress after the userOp lands; no separate poll screen
+    // needed.
     const senderAddr = state.row.smartAccountAddress ?? state.row.ownerAddress;
     const fields: Field[] = [
       { name: "newOwner", label: "New ECDSA owner (address, ENS, or your own)",
         kind: "recipient", excludeAddress: senderAddr,
         validate: (v) => v.trim().length > 0 ? null : "required" },
-      { name: "passphrase", label: "Per-slot passphrase (Enter if master KEK is loaded)",
-        secret: true, validate: () => null },
     ];
     return (
       <Layout
         title={`Rotate owner · ${state.row.name}`}
-        subtitle="On-chain ECDSA owner swap. If the new owner is locally derivable, the slot auto-updates after the userOp lands."
+        subtitle="On-chain ECDSA owner swap. Daemon syncs local store on the next detail-panel visit once the rotateOwner userOp lands."
       >
         <Form
           fields={fields}
           onCancel={() => setState({ kind: "detail", row: state.row })}
           onSubmit={async (v) => {
-            const base: Record<string, unknown> = {
-              name: state.row.name,
-            };
-            if (v.passphrase && v.passphrase.length > 0) base.passphrase = v.passphrase;
             const raw = (v.newOwner ?? "").trim();
-            // Resolve ENS → address before we ask the daemon if it's a
-            // local key (findByAddress matches on 0x form only).
-            const resolved: string | null = ADDR_RE.test(raw) ? raw : null;
-            if (resolved === null) {
+            if (!ADDR_RE.test(raw)) {
               setState({
                 kind: "resolve-target",
                 row: state.row,
                 raw,
                 field: "newOwner",
-                nextKind: "rotate-owner-run",
-                pendingParams: base,
+                nextKind: "rotate-confirm",
+                pendingParams: {},
               });
               return;
             }
-            // Probe local seeds: if the address is derivable from one
-            // of our wallets, stash the (walletName, accountIndex) so
-            // the poll screen can auto-commit on success. If not, the
-            // user is rotating to an external key — we still submit
-            // but the slot will be unusable for sends afterward unless
-            // the new key is later added to a local wallet (at which
-            // point the daemon's owner-resync picks it up on the next
-            // detail-panel visit).
-            const f = await call<{ found?: boolean; walletName?: string; accountIndex?: number }>(
-              "eoa.account.findByAddress",
-              { address: resolved }
-            );
-            const pendingCommit =
-              f.ok && f.result?.found
-                ? {
-                    newOwner: resolved,
-                    newWalletName: f.result.walletName!,
-                    newAccountIndex: f.result.accountIndex ?? 0,
-                  }
-                : undefined;
-            setState({
-              kind: "rotate-owner-run",
-              row: state.row,
-              params: { ...base, newOwner: resolved },
-              pendingCommit,
-            });
+            await prepareRotateTx(state.row, raw, setState);
           }}
         />
       </Layout>
-    );
-  }
-
-  if (state.kind === "rotate-owner-run") {
-    let submittedHash: string | null = null;
-    const pendingCommit = state.pendingCommit;
-    return (
-      <RpcRunner
-        title="Rotating on-chain ECDSA owner…"
-        subtitle={`slot: ${state.row.name} · new: ${(state.params as any).newOwner}`}
-        method="sphincs.account.rotateOwner"
-        params={state.params}
-        timeoutMs={15 * 60 * 1000}
-        renderResult={(r: any) => {
-          submittedHash = r?.userOpHash ?? null;
-          return (
-            <Box flexDirection="column">
-              <Text color={theme.ok}>✓ rotateOwner userOp submitted</Text>
-              <Text color={theme.dim}>userOpHash: <Text color={theme.primary}>{r?.userOpHash}</Text></Text>
-              <Text color={theme.dim}>newOwner: {r?.newOwner}</Text>
-              {pendingCommit ? (
-                <Text color={theme.ok}>
-                  → new owner is locally derivable ({pendingCommit.newWalletName}#{pendingCommit.newAccountIndex});
-                  slot will auto-update once the userOp is included.
-                </Text>
-              ) : (
-                <Text color={theme.warn}>
-                  ⚠ new owner is NOT locally derivable — after this lands, the slot
-                  will be unusable for sends until you re-attach a local key.
-                </Text>
-              )}
-            </Box>
-          );
-        }}
-        successActions={[
-          {
-            label: "Poll bundler for inclusion",
-            onSelect: () => {
-              if (submittedHash) {
-                setState({
-                  kind: "poll-run",
-                  row: state.row,
-                  userOpHash: submittedHash,
-                  pendingCommit,
-                });
-              }
-              else setState({ kind: "detail", row: state.row });
-            },
-          },
-          { label: "Back to account", onSelect: () => setState({ kind: "detail", row: state.row }) },
-        ]}
-        onDone={() => setState({ kind: "detail", row: state.row })}
-      />
     );
   }
 

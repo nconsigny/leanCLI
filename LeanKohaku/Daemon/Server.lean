@@ -3680,6 +3680,31 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                             | _ => j
                           pure (.ok withFields)
       | _, _ => pure (.error invalidParams)
+  | "sphincs.account.encodeRotateOwner" =>
+      -- Returns the raw rotateOwner(address) ABI calldata plus the
+      -- slot's smart-account address. Lets the TUI route rotations
+      -- through SendRawFlow's ConfirmGate before broadcast: the gate
+      -- needs the to/value/data shape that the simulator can eth_call.
+      -- The daemon's sphincs.account.send then wraps this calldata in
+      -- execute(self, 0, calldata) at signing time, identical to what
+      -- the older sphincs.account.rotateOwner RPC did internally.
+      match paramName req.params, paramString req.params "newOwner" with
+      | .ok name, .ok newOwner =>
+          match ← LeanKohaku.Wallet.SphincsHybridStore.readRecord name with
+          | .error e => pure <| .error { code := -32010, message := "sphincs slot not found", data := some (.str e) }
+          | .ok rec =>
+              match rec.smartAccountAddress with
+              | none => pure <| .error { code := -32033, message := "smartAccountAddress unset", data := none }
+              | some sender =>
+                  match ← Sphincs.Send.buildRotateOwnerCalldata newOwner with
+                  | .error e => pure <| .error { code := -32035, message := "rotateOwner calldata build failed", data := some (.str e) }
+                  | .ok rotateData =>
+                      pure <| .ok <| .obj #[
+                        ("name", .str name),
+                        ("newOwner", .str newOwner),
+                        ("smartAccountAddress", .str sender),
+                        ("calldata", .str (LeanKohaku.Crypto.Hex.encode rotateData)) ]
+      | _, _ => pure (.error invalidParams)
   | "sphincs.bundler.show" =>
       -- Returns the bundler URL the daemon will use for sphincs userOps,
       -- with the same chain-resolution priority as the poll RPC:
@@ -6708,6 +6733,12 @@ def handleConn (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
             match parsed with
             | .error err => pure (compact <| errorResponse .null err)
             | .ok req => do
+                -- Idle-TTL refresh: any well-formed RPC counts as user
+                -- activity, so the master KEK + per-slot unlocks behave
+                -- as an idle timeout (lock after `ttlMs` of true
+                -- silence) rather than an absolute timeout from
+                -- unlock. See `State.touchActivity` for rationale.
+                LeanKohaku.Daemon.State.touchActivity state
                 let json ← LeanKohaku.RPC.Server.dispatch (methodHandler cfg state notify) req
                 pure (compact json)
           discard <| LeanKohaku.Daemon.Uds.write conn (response ++ "\n").toByteArray
