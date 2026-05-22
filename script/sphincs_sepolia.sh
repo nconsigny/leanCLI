@@ -33,8 +33,11 @@ if [[ -f .env ]]; then
   set +a
 fi
 
-# v0.9 EntryPoint deterministic deployment — same address on every EVM chain.
-ENTRY_POINT_V09="0x4337084D9E255Ff0702461CF8895CE9E3b5Ff108"
+# v0.9 EntryPoint, per the eth-infinitism v0.9.0 release notes
+# (https://github.com/eth-infinitism/account-abstraction/releases/tag/v0.9.0).
+# The submodule's deployments/ethereum/EntryPoint.json still lists the
+# pre-v0.9 address (which is v0.8); that file is stale and not authoritative.
+ENTRY_POINT_V09="0x433709009B8330FDa32311DF1C2AFA402eD8D009"
 
 require() {
   if ! command -v "$1" >/dev/null 2>&1; then

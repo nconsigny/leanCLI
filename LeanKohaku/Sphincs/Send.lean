@@ -25,9 +25,13 @@ namespace LeanKohaku.Sphincs.Send
 open LeanKohaku.Encoding.Json
 open LeanKohaku.Crypto
 
-/-- v0.9 EntryPoint singleton (deterministic deploy, same on every chain). -/
+/-- v0.9 EntryPoint singleton, per the eth-infinitism v0.9.0 release
+    notes (https://github.com/eth-infinitism/account-abstraction/releases/tag/v0.9.0).
+    NOTE: `lib/sphincs-minus/lib/account-abstraction/deployments/ethereum/EntryPoint.json`
+    still lists the pre-v0.9 address `0x4337084D…F108` (which is v0.8) —
+    that file is stale relative to the v0.9.0 tag. -/
 def entryPointV09Address : String :=
-  "0x4337084D9E255Ff0702461CF8895CE9E3b5Ff108"
+  "0x433709009B8330FDa32311DF1C2AFA402eD8D009"
 
 /-- 4-byte selector for the standard `execute(address,uint256,bytes)`
     BaseAccount entrypoint. Equals `keccak256[..4]`; pinned as a
