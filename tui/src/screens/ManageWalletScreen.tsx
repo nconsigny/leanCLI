@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import Spinner from "ink-spinner";
 import { call } from "../daemon.js";
-import { Wallet } from "../types.js";
+import { AddressFreshness, ChainBalance, Wallet } from "../types.js";
 import { Layout, Banner } from "../widgets/Layout.js";
 import Select from "../widgets/Select.js";
 import { theme } from "../theme.js";
@@ -43,6 +43,51 @@ type SubAcctsCell =
   | { state: "ok"; primaryPath: string; accounts: SubAccount[] }
   | { state: "err"; message: string };
 
+type EthCell =
+  | { state: "loading" }
+  | { state: "ok"; wei: bigint }
+  | { state: "err"; message: string };
+
+/** Local TxJournal entry as returned by `chain.history`. Fields are
+ *  best-effort: blockNumber/status/gasUsed are only set after a
+ *  successful receipt poll; the array is newest-last per slot. */
+type JournalEntry = {
+  timestamp: number;
+  txHash: string;
+  from: string;
+  to: string;
+  valueWei: string;
+  kind: string;
+  status?: string;
+  blockNumber?: string;
+};
+
+type HistoryCell =
+  | { state: "loading" }
+  | { state: "ok"; entries: JournalEntry[] }
+  | { state: "err"; message: string };
+
+/** Cap the right-panel render. The daemon keeps the full ndjson on
+ *  disk; pressing `h` jumps to the dedicated HistoryScreen for the
+ *  longer list. */
+const HISTORY_PANEL_LIMIT = 8;
+
+/** Privacy score derived from `chain.addressFreshness` + native balance.
+ *  Rule (matches WalletsHub's `isZeroLink`): the address scores 1° iff
+ *  pending nonce = 0 AND no ERC-20 Transfer events involving it in the
+ *  lookback window AND (balance = 0 OR this daemon previously
+ *  unshielded to it). Any link drops the score to 0°. */
+type PrivacyCell =
+  | { state: "loading" }
+  | { state: "err" }
+  | {
+      state: "ok";
+      score: 0 | 1;
+      /** Why the score landed where it did — surfaced as a sub-line so
+       *  the user can audit. "PP-funded" reuses Privacy-Pools language. */
+      reason: string;
+    };
+
 type Props = {
   wallet: Wallet;
   /** The chain selected in WalletsHub (mainnet/sepolia for EOAs; sepolia
@@ -76,6 +121,113 @@ export default function ManageWalletScreen({
 }: Props) {
   const [tokens, setTokens] = useState<TokensCell>({ state: "loading" });
   const [subs, setSubs] = useState<SubAcctsCell>({ state: "loading" });
+  const [eth, setEth] = useState<EthCell>({ state: "loading" });
+  const [privacy, setPrivacy] = useState<PrivacyCell>({ state: "loading" });
+  const [history, setHistory] = useState<HistoryCell>({ state: "loading" });
+
+  // Native ETH balance + freshness fan-out. Run in parallel with the
+  // token + sub-account fetches above so the header repaints as soon
+  // as the cheapest call lands. The freshness probe drives the privacy
+  // score; it needs the eth-balance result to disambiguate "0-link
+  // PP-funded" from "0-link with on-chain balance" — so the privacy
+  // computation waits on BOTH and runs once they're in.
+  useEffect(() => {
+    let cancelled = false;
+    const params = { address: wallet.address, chain };
+    // ETH balance — fire and forget; result lands in `eth`.
+    void call<ChainBalance>("chain.balance", params).then((r) => {
+      if (cancelled) return;
+      if (!r.ok) {
+        setEth({ state: "err", message: r.error.message });
+        return;
+      }
+      setEth({ state: "ok", wei: hexToBigInt(r.result?.balance) });
+    });
+    // Freshness — independent. Combined with `eth` below to produce
+    // the final score.
+    void call<AddressFreshness>("chain.addressFreshness", params).then((fr) => {
+      if (cancelled) return;
+      if (!fr.ok) {
+        setPrivacy({ state: "err" });
+        return;
+      }
+      const d = fr.result;
+      if (!d || typeof d.nonce !== "number") {
+        setPrivacy({ state: "err" });
+        return;
+      }
+      // Stash the freshness fields on a closure-local marker; the
+      // settling effect below joins them with the eth result. We model
+      // this as a transient "loading w/ partial data" by reusing the
+      // state shape — store the partial-evaluated score now and let
+      // the eth-arrival effect finalize the "balance=0" branch.
+      const ppFunded = d.ppFunded === true;
+      const nonce = d.nonce;
+      const erc20Clean =
+        d.available === true &&
+        (d.erc20OutCount ?? 0) === 0 &&
+        (d.erc20InCount ?? 0) === 0;
+      // We need eth to finalize the score. Set a sentinel; the
+      // joining effect below picks this up.
+      setPrivacyFreshness({ nonce, erc20Clean, ppFunded, available: d.available === true });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [wallet.address, chain]);
+
+  // Freshness fields landed but score is finalized only once we also
+  // have the ETH balance (the "0-link" rule folds in balance=0 OR
+  // PP-funded). Kept in its own state cell rather than threaded
+  // through `privacy` so the freshness probe can return without
+  // blocking the eth call.
+  const [privacyFreshness, setPrivacyFreshness] = useState<
+    | null
+    | { nonce: number; erc20Clean: boolean; ppFunded: boolean; available: boolean }
+  >(null);
+
+  useEffect(() => {
+    if (!privacyFreshness) return;
+    if (eth.state === "loading") return;
+    // Compute final score. Mirrors WalletsHub's `isZeroLink`:
+    //   nonce=0 AND erc20Clean AND (balance=0 OR ppFunded) ⇒ 1° (0-link).
+    //   Any link OR freshness unavailable ⇒ 0° (or err if eth errored).
+    if (eth.state === "err") {
+      setPrivacy({ state: "err" });
+      return;
+    }
+    if (!privacyFreshness.available) {
+      setPrivacy({
+        state: "ok",
+        score: 0,
+        reason: "freshness scan unavailable — RPC capped getLogs",
+      });
+      return;
+    }
+    const { nonce, erc20Clean, ppFunded } = privacyFreshness;
+    const balZero = eth.wei === 0n;
+    if (nonce === 0 && erc20Clean && (balZero || ppFunded)) {
+      setPrivacy({
+        state: "ok",
+        score: 1,
+        reason: ppFunded && !balZero
+          ? "0-link · PP-funded receiver"
+          : "0-link · fresh address (no on-chain history)",
+      });
+    } else {
+      // Spell out which condition tripped so the user knows what to do
+      // about it (rotate, unshield, etc.).
+      const reasons: string[] = [];
+      if (nonce !== 0) reasons.push(`nonce=${nonce}`);
+      if (!erc20Clean) reasons.push("ERC-20 transfers in window");
+      if (!balZero && !ppFunded) reasons.push("non-zero ETH balance");
+      setPrivacy({
+        state: "ok",
+        score: 0,
+        reason: `linked · ${reasons.join(" · ") || "see freshness probe"}`,
+      });
+    }
+  }, [privacyFreshness, eth]);
 
   // Sub-account fan-out (EOA only). Runs in parallel with the token
   // fan-out below — neither blocks the other, so a slow swap.balances
@@ -111,6 +263,30 @@ export default function ManageWalletScreen({
       cancelled = true;
     };
   }, [wallet.kind, wallet.name]);
+
+  // Local TxJournal fan-out. Slot-scoped (`name` is the slot), so a
+  // sub-account view shows the whole slot's actions — same shape as
+  // the dedicated HistoryScreen behind the `h` shortcut. Newest-last in
+  // the file; we reverse for display so the freshest action is on top.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const r = await call<JournalEntry[]>("chain.history", {
+        name: wallet.name,
+        limit: HISTORY_PANEL_LIMIT,
+      });
+      if (cancelled) return;
+      if (!r.ok) {
+        setHistory({ state: "err", message: r.error.message });
+        return;
+      }
+      const arr = Array.isArray(r.result) ? r.result : [];
+      setHistory({ state: "ok", entries: [...arr].reverse() });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [wallet.name]);
 
   // Token discovery via `swap.balances`. The daemon already fans out
   // ERC-20 balanceOf + native eth_getBalance in parallel (one IO.asTask
@@ -175,10 +351,17 @@ export default function ManageWalletScreen({
     else if (input === "a" && wallet.kind === "eoa") onAction("add-account");
   });
 
+  // Header subtitle prefers our locally-loaded eth balance; falls back
+  // to the wallet.balanceWei the hub may have already populated; finally
+  // to a pending tick. This way landing on the manage screen always
+  // reflects the freshest read, even if WalletsHub's parallel fan-out
+  // was still in flight when the user pressed enter.
   const balanceLine =
-    wallet.balanceWei !== undefined
-      ? formatEth(wallet.balanceWei)
-      : "(balance pending)";
+    eth.state === "ok"
+      ? formatEth(eth.wei)
+      : wallet.balanceWei !== undefined
+        ? formatEth(wallet.balanceWei)
+        : "(balance pending)";
 
   const tokenItems = buildTokenItems(tokens);
 
@@ -188,47 +371,165 @@ export default function ManageWalletScreen({
       subtitle={`${shortAddr(wallet.address)} · ${balanceLine} · ${chain}`}
       hint="↑/↓ token · enter — send token · h history · d details · r refresh · l lock · a add-account · esc back"
     >
-      {wallet.kind === "eoa" && <EoaBlock wallet={wallet} subs={subs} />}
-      {wallet.kind === "tpm" && <TpmBlock wallet={wallet} />}
-      <Box marginTop={1} flexDirection="column">
-        <Text color={theme.primary} bold>
-          Tokens (swap registry)
-        </Text>
-        {tokens.state === "loading" && (
-          <Text>
-            <Text color={theme.primary}>
-              <Spinner type="dots" />
-            </Text>{" "}
-            <Text color={theme.dim}>
-              fanning out balanceOf across the swap registry…
+      <Box flexDirection="row">
+        <Box flexDirection="column" flexGrow={1} flexBasis={0} minWidth={0}>
+          {wallet.kind === "eoa" && <EoaBlock wallet={wallet} subs={subs} />}
+          {wallet.kind === "tpm" && <TpmBlock wallet={wallet} />}
+          <Box marginTop={1} flexDirection="column">
+            <Text color={theme.primary} bold>
+              Native balance + privacy
             </Text>
-          </Text>
-        )}
-        {tokens.state === "err" && (
-          <Banner kind="err" text={`swap.balances failed: ${tokens.message}`} />
-        )}
-        {tokens.state === "ok" && tokens.tokens.length === 0 && (
-          <Text color={theme.dim}>
-            no ERC-20 balances detected on the swap registry for this wallet on{" "}
-            {chain}.
-          </Text>
-        )}
-        {tokens.state === "ok" && tokens.tokens.length > 0 && (
-          <Select
-            items={tokenItems}
-            onSelect={(it) => {
-              const cast = it as (typeof tokenItems)[number];
-              if (!cast.__token) return;
-              onSendToken({
-                symbol: cast.__token.symbol,
-                address: cast.__token.address!,
-                decimals: cast.__token.decimals,
-              });
-            }}
-          />
-        )}
+            <NativeRow eth={eth} chain={chain} />
+            <PrivacyRow privacy={privacy} />
+          </Box>
+          <Box marginTop={1} flexDirection="column">
+            <Text color={theme.primary} bold>
+              Tokens (swap registry)
+            </Text>
+            {tokens.state === "loading" && (
+              <Text>
+                <Text color={theme.primary}>
+                  <Spinner type="dots" />
+                </Text>{" "}
+                <Text color={theme.dim}>
+                  fanning out balanceOf across the swap registry…
+                </Text>
+              </Text>
+            )}
+            {tokens.state === "err" && (
+              <Banner kind="err" text={`swap.balances failed: ${tokens.message}`} />
+            )}
+            {tokens.state === "ok" && tokens.tokens.length === 0 && (
+              <Text color={theme.dim}>
+                no ERC-20 balances detected on the swap registry for this wallet on{" "}
+                {chain}.
+              </Text>
+            )}
+            {tokens.state === "ok" && tokens.tokens.length > 0 && (
+              <Select
+                items={tokenItems}
+                onSelect={(it) => {
+                  const cast = it as (typeof tokenItems)[number];
+                  if (!cast.__token) return;
+                  onSendToken({
+                    symbol: cast.__token.symbol,
+                    address: cast.__token.address!,
+                    decimals: cast.__token.decimals,
+                  });
+                }}
+              />
+            )}
+          </Box>
+        </Box>
+        <Box
+          marginLeft={2}
+          flexDirection="column"
+          flexGrow={1}
+          flexBasis={0}
+          minWidth={0}
+        >
+          <HistoryPanel history={history} />
+        </Box>
       </Box>
     </Layout>
+  );
+}
+
+/** Right-side recent-actions panel. Sources from `chain.history` (the
+ *  local TxJournal — every send/sphincs-userop/shielded prepare appends
+ *  one row), so this surfaces actions taken through *this* daemon
+ *  rather than a full on-chain transfer scan. Press `h` for the
+ *  full-length HistoryScreen. */
+function HistoryPanel({ history }: { history: HistoryCell }) {
+  return (
+    <Box flexDirection="column">
+      <Text color={theme.primary} bold>
+        Recent actions
+      </Text>
+      <Text color={theme.dim}>(local journal · press `h` for full view)</Text>
+      {history.state === "loading" && (
+        <Box marginTop={1}>
+          <Text color={theme.primary}>
+            <Spinner type="dots" />
+          </Text>
+          <Text color={theme.dim}>{" reading journal…"}</Text>
+        </Box>
+      )}
+      {history.state === "err" && (
+        <Box marginTop={1}>
+          <Banner kind="err" text={`chain.history failed: ${history.message}`} />
+        </Box>
+      )}
+      {history.state === "ok" && history.entries.length === 0 && (
+        <Box marginTop={1}>
+          <Text color={theme.dim}>no journal entries for this slot yet.</Text>
+        </Box>
+      )}
+      {history.state === "ok" && history.entries.length > 0 && (
+        <Box flexDirection="column" marginTop={1}>
+          {history.entries.map((e, i) => (
+            <CompactHistoryRow key={i} entry={e} />
+          ))}
+        </Box>
+      )}
+    </Box>
+  );
+}
+
+/** Three-line compact row: status+kind+value · short to · short tx.
+ *  Tighter than HistoryScreen's `HistoryRow` so several entries fit
+ *  in the side panel without crowding out the left column. */
+function CompactHistoryRow({ entry }: { entry: JournalEntry }) {
+  const status = entry.status ?? "?";
+  const glyph = status === "success" ? "✓" : status === "revert" ? "✗" : "·";
+  const glyphColor =
+    status === "success" ? theme.ok : status === "revert" ? theme.err : theme.warn;
+  let valueWei = 0n;
+  try {
+    valueWei = entry.valueWei ? BigInt(entry.valueWei) : 0n;
+  } catch {}
+  const when =
+    entry.timestamp > 0
+      ? new Date(entry.timestamp * 1000).toISOString().slice(0, 16).replace("T", " ")
+      : "";
+  return (
+    <Box flexDirection="column" marginBottom={1}>
+      <Box>
+        <Text color={glyphColor} bold>
+          {glyph}
+        </Text>
+        <Text> </Text>
+        <Text color={theme.accent}>{entry.kind || "?"}</Text>
+        {valueWei > 0n && (
+          <>
+            <Text>{"  "}</Text>
+            <Text bold color={theme.primary}>
+              {formatEth(valueWei)}
+            </Text>
+          </>
+        )}
+        {when && (
+          <>
+            <Text>{"  "}</Text>
+            <Text color={theme.dim}>{when}</Text>
+          </>
+        )}
+      </Box>
+      {entry.to && (
+        <Box>
+          <Text color={theme.dim}>{"  to "}</Text>
+          <Text>{shortAddr(entry.to)}</Text>
+        </Box>
+      )}
+      {entry.txHash && (
+        <Box>
+          <Text color={theme.dim}>{"  tx "}</Text>
+          <Text color={theme.dim}>
+            {entry.txHash.slice(0, 10)}…{entry.txHash.slice(-8)}
+          </Text>
+        </Box>
+      )}
+    </Box>
   );
 }
 
@@ -285,6 +586,71 @@ function EoaBlock({
         </Box>
       )}
     </Box>
+  );
+}
+
+function NativeRow({ eth, chain }: { eth: EthCell; chain: string }) {
+  if (eth.state === "loading") {
+    return (
+      <Text>
+        <Text color={theme.dim}>{`${chain.padEnd(8)} `}</Text>
+        <Text color={theme.primary}>
+          <Spinner type="dots" />
+        </Text>{" "}
+        <Text color={theme.dim}>loading ETH balance…</Text>
+      </Text>
+    );
+  }
+  if (eth.state === "err") {
+    return (
+      <Text>
+        <Text color={theme.dim}>{`${chain.padEnd(8)} `}</Text>
+        <Text color={theme.err}>err: {eth.message.slice(0, 80)}</Text>
+      </Text>
+    );
+  }
+  return (
+    <Text>
+      <Text color={theme.dim}>{`${chain.padEnd(8)} `}</Text>
+      <Text>{formatEth(eth.wei)}</Text>
+    </Text>
+  );
+}
+
+/** Render the privacy score as `N°` plus a one-line reason. 1° == fully
+ *  unlinked (0-link in the rest of the TUI's language); 0° == any
+ *  on-chain link from this address. Errors render as "?°" so the user
+ *  can tell "probe failed" apart from "we know it's linked". */
+function PrivacyRow({ privacy }: { privacy: PrivacyCell }) {
+  if (privacy.state === "loading") {
+    return (
+      <Text>
+        <Text color={theme.dim}>privacy </Text>
+        <Text color={theme.primary}>
+          <Spinner type="dots" />
+        </Text>{" "}
+        <Text color={theme.dim}>scoring address…</Text>
+      </Text>
+    );
+  }
+  if (privacy.state === "err") {
+    return (
+      <Text>
+        <Text color={theme.dim}>privacy </Text>
+        <Text color={theme.warn}>?°</Text>
+        <Text color={theme.dim}> (freshness probe failed)</Text>
+      </Text>
+    );
+  }
+  const color = privacy.score === 1 ? theme.ok : theme.dim;
+  return (
+    <Text>
+      <Text color={theme.dim}>privacy </Text>
+      <Text color={color} bold>
+        {privacy.score}°
+      </Text>
+      <Text color={theme.dim}> · {privacy.reason}</Text>
+    </Text>
   );
 }
 
