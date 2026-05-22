@@ -399,8 +399,30 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
     if acc.any (fun e => e.chain = chain && e.paramSet = ps) then acc
     else acc.push { chain := chain, paramSet := ps, address := some addr }
   let sphincsVerifiers :=
+    -- C9 verifier — our own redeploy from `script/sphincs_sepolia.sh
+    -- deploy-verifier C9`. Upstream's canonical C9 verifier is at
+    -- 0x18F005EECd41624644AA364bA8857258FEB3C26D (per `lib/sphincs-minus/
+    -- README.md`); we use our own because we want bytecode hash control
+    -- and the redeploy is cheap.
     withVerifierDefault sphincsVerifiers
       "sepolia" .c9 "0xdcC83c41cc0e20560096c0d5199343E834cbE91D"
+  let sphincsVerifiers :=
+    -- SLH-DSA-SHA2-128-24 verifier — upstream Sepolia deployment per
+    -- `lib/sphincs-minus/README.md`. NOTE: only the verifier is
+    -- deployed; upstream explicitly labels it "standalone verifier, no
+    -- account wired yet". `SphincsAccountFactory.sol` in the submodule
+    -- only emits C-series-shaped userOps (different sig size, different
+    -- ADRS layout), so deploying a factory pointing here would build
+    -- and deploy fine but verifyUserOp would reject every signature.
+    -- The factory contract has to be ported before SLH-DSA accounts
+    -- can land on chain.
+    withVerifierDefault sphincsVerifiers
+      "sepolia" .slhDsaSha2_128_24 "0x9Fe41769395BC9fefb7e0d340064ed29F4a4Af91"
+  let sphincsVerifiers :=
+    -- JARDIN-Keccak-128-24 verifier — same caveat as SLH-DSA-SHA2: only
+    -- the standalone verifier exists upstream; no account contract.
+    withVerifierDefault sphincsVerifiers
+      "sepolia" .jardinKeccak128_24 "0x2Ac9Ec4a2A062aFc1be718e77ec3300D087E6205"
   let sphincsFactories :=
     -- Sepolia factory deploys the canonical upstream
     -- `nconsigny/SPHINCS-/src/SphincsAccount.sol` (which inherits the
@@ -415,10 +437,34 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
     --   0x9cdB97628E8B91453C3adBf46709bd97720c2C10 — patched dev
     --     contract (paid prefund unconditionally) but inlined the
     --     account semantics rather than tracking upstream.
-    -- Current factory binds to upstream `SphincsAccount` so any future
-    -- contract-level fix lands by bumping the submodule pin.
+    --   0x452B95a7Bf93adb17B9610C315ea7229617a8f21 — upstream factory
+    --     but bound to the WRONG EntryPoint (0x4337084D…F108 = v0.8).
+    --     userOp sends worked but on the wrong chain singleton.
+    -- Current factory binds to upstream `SphincsAccount` against the
+    -- canonical v0.9 EntryPoint per the eth-infinitism v0.9.0 release
+    -- notes; any future contract-level fix lands by bumping the
+    -- submodule pin.
     withVerifierDefault sphincsFactories
-      "sepolia" .c9 "0x452B95a7Bf93adb17B9610C315ea7229617a8f21"
+      "sepolia" .c9 "0xE1494133cd610478956F4cC79C713FAE29e6541C"
+  let sphincsFactories :=
+    -- SLH-DSA-SHA2-128-24 factory — same `SphincsAccountFactory.sol` as
+    -- C9, just wired to the SLH-DSA verifier
+    -- (`0x9Fe41769395BC9fefb7e0d340064ed29F4a4Af91`). The factory
+    -- contract is paramSet-agnostic at the constructor level
+    -- (`verifier` is just an immutable address it staticcalls), so the
+    -- bytecode is identical to the C9 factory; only the wired verifier
+    -- changes. Whether sends actually validate depends on the signer
+    -- side emitting SLH-DSA-shaped signatures (Lean shim:
+    -- LEAN_KOHAKU_SPHINCS_SLHDSA env var); end-to-end is untested.
+    withVerifierDefault sphincsFactories
+      "sepolia" .slhDsaSha2_128_24 "0xb0448151d26EE375473cD69De9E29591aF892821"
+  let sphincsFactories :=
+    -- JARDIN-Keccak-128-24 factory — same caveat as SLH-DSA-SHA2 above;
+    -- factory bytecode identical, verifier
+    -- (`0x2Ac9Ec4a2A062aFc1be718e77ec3300D087E6205`) is the JARDIN
+    -- Keccak twin.
+    withVerifierDefault sphincsFactories
+      "sepolia" .jardinKeccak128_24 "0x2632DE797Fd09d24ca9931072879ddDE9630F04B"
   let withBundlerDefault (acc : Array (String × String)) (chain url : String) :
       Array (String × String) :=
     if acc.any (fun (c, _) => c = chain) then acc
