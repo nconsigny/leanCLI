@@ -153,14 +153,14 @@ def structHash (op : PackedUserOperation) : IO (Except String ByteArray) := do
   | .ok hashPmd =>
     let abiEncoded :=
       typeHash
-        |> cat (padLeft32 op.sender)
-        |> cat (padLeft32 op.nonce)
-        |> cat hashInitCode
-        |> cat hashCallData
-        |> cat (padLeft32 op.accountGasLimits)
-        |> cat (padLeft32 op.preVerificationGas)
-        |> cat (padLeft32 op.gasFees)
-        |> cat hashPmd
+        ++ padLeft32 op.sender
+        ++ padLeft32 op.nonce
+        ++ hashInitCode
+        ++ hashCallData
+        ++ padLeft32 op.accountGasLimits
+        ++ padLeft32 op.preVerificationGas
+        ++ padLeft32 op.gasFees
+        ++ hashPmd
     match ← Hacl.keccak256EthereumIO (Hex.encode abiEncoded) with
     | .error e => pure (.error s!"keccak(structHash) failed: {e}")
     | .ok h => pure (.ok h)
@@ -179,7 +179,7 @@ def userOpHash (op : PackedUserOperation) (domainSeparator : ByteArray) :
   match ← structHash op with
   | .error e => pure (.error e)
   | .ok sh =>
-    let preimage := eip712Prefix |> cat (padLeft32 domainSeparator) |> cat sh
+    let preimage := eip712Prefix ++ padLeft32 domainSeparator ++ sh
     match ← Hacl.keccak256EthereumIO (Hex.encode preimage) with
     | .error e => pure (.error s!"keccak(userOpHash) failed: {e}")
     | .ok h => pure (.ok h)
