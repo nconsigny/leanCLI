@@ -58,3 +58,22 @@ export function hexToBigInt(hex: unknown): bigint {
 export function shortAddr(addr: string): string {
   return addr;
 }
+
+/** Parse a decimal-ETH string ("0", "0.001") to wei (bigint). Returns
+ *  null on bad input. Mirrors the daemon's `LeanKohaku.Util.Units.parseUnits`
+ *  so the TUI can compute value-hex for `tx.simulate` before any signing
+ *  RPC round-trips. */
+export function parseEthToWei(s: string): bigint | null {
+  const t = s.trim();
+  if (!/^[0-9]+(\.[0-9]+)?$/.test(t)) return null;
+  const [whole, frac = ""] = t.split(".");
+  if (frac.length > 18) return null;
+  const padded = (frac + "0".repeat(18)).slice(0, 18);
+  try { return BigInt(whole) * 10n ** 18n + BigInt(padded || "0"); }
+  catch { return null; }
+}
+
+/** bigint → '0x'-prefixed hex (no leading zeros, '0x0' for zero). */
+export function bigIntToHex(n: bigint): string {
+  return "0x" + n.toString(16);
+}

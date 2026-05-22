@@ -10,7 +10,7 @@ import SwapFlow from "./SwapFlow.js";
 import { call } from "../daemon.js";
 import { theme } from "../theme.js";
 import { EoaListEntry, ChainBalance } from "../types.js";
-import { formatEth, hexToBigInt, shortAddr } from "../format.js";
+import { bigIntToHex, formatEth, hexToBigInt, parseEthToWei, shortAddr } from "../format.js";
 
 /** Local TxJournal entry as returned by `chain.history`. Shape mirrors
  *  ManageWalletScreen's plus the SPHINCS+-specific timing fields the
@@ -91,12 +91,17 @@ type State =
   | { kind: "deploy-pick-account"; row: Account; eoa: EoaListEntry; accounts: EoaAccount[] }
   | { kind: "deploy-run"; row: Account; params: Record<string, unknown> }
   | { kind: "send-form"; row: Account }
-  // Intermediate ENS-resolve step between send-form and send-run. We
-  // hit `chain.resolveName` once and then advance to send-run with the
-  // raw form values overridden by the resolved 0x address. Same
-  // pattern (form → resolve → run) for rotateOwner.
-  | { kind: "resolve-target"; row: Account; raw: string; nextKind: "send-run" | "rotate-owner-run"; pendingParams: Record<string, unknown>; field: "to" | "newOwner" }
-  | { kind: "send-run"; row: Account; params: Record<string, unknown> }
+  // Intermediate ENS-resolve step. For "send", the form's free-text
+  // `to` becomes a 0x address before we hand off to SendRawFlow's
+  // ConfirmGate (the gate needs a real address to simulate against).
+  // Same pattern for rotateOwner.
+  | { kind: "resolve-target"; row: Account; raw: string; nextKind: "send-confirm" | "rotate-owner-run"; pendingParams: Record<string, unknown>; field: "to" | "newOwner" }
+  // SPHINCS sends now route through SendRawFlow so the user passes
+  // through tx.decodeIntent → tx.simulate → ConfirmGate before any
+  // userOp is submitted. Required by CLAUDE.md: every calldata
+  // producer must hit the gate. SendRawFlow's sphincs branch then
+  // dispatches `sphincs.account.send` for the final broadcast.
+  | { kind: "send-confirm"; row: Account; tx: { to: string; value: string; data: string } }
   // `pendingCommit` is set when the rotation's newOwner is a locally-
   // derivable key (we proved it via `eoa.account.findByAddress`); once
   // the rotateOwner userOp lands successfully on-chain, the poll
@@ -564,46 +569,49 @@ export default function SphincsAccountsHub({
         validate: (v) => v.trim().length > 0 ? null : "required" },
       { name: "valueEth", label: "Value in ETH (decimal, e.g. 0.001)",
         initial: "0",
-        // Loose validation — the daemon's LeanKohaku.Util.Units.parseUnits
-        // is the source of truth for "is this a valid decimal-ETH amount".
-        // We just reject the obvious garbage.
-        validate: (v) => /^[0-9]+(\.[0-9]+)?$/.test(v.trim()) ? null : "decimal number expected (e.g. 0 or 0.001)" },
+        // Strict-on-shape validation — `parseEthToWei` will reject the
+        // exact same set of inputs at submit time, so anything we accept
+        // here will round-trip through wei without throwing.
+        validate: (v) => parseEthToWei(v.trim()) !== null ? null : "decimal number expected (e.g. 0 or 0.001)" },
       { name: "data", label: "Calldata hex (optional, blank = pure ETH transfer)",
         validate: (v) => v.length === 0 || HEX_RE.test(v) ? null : "expected hex" },
-      { name: "passphrase", label: "Per-slot passphrase (Enter if master KEK is loaded)",
-        secret: true, validate: () => null },
     ];
     return (
       <Layout
         title={`Send UserOp · ${state.row.name}`}
-        subtitle="Dual-signs (ECDSA owner + SPHINCS-) and submits via the configured bundler."
+        subtitle="Simulates first, then dual-signs (ECDSA owner + SPHINCS-) via the configured bundler after the ConfirmGate."
       >
         <Form
           fields={fields}
           onCancel={() => setState({ kind: "detail", row: state.row })}
           onSubmit={(v) => {
-            // Pass `valueEth` straight through — the daemon's send RPC
-            // calls `LeanKohaku.Util.Units.parseUnits ethStr 18` to get
-            // the wei amount. TUI is a thin RPC forwarder; the
-            // decimal-to-wei conversion deliberately stays Lean-side.
-            const base: Record<string, unknown> = {
-              name: state.row.name,
-              valueEth: (v.valueEth ?? "0").trim(),
-            };
-            if (v.data && v.data.length > 0) base.data = v.data;
-            if (v.passphrase && v.passphrase.length > 0) base.passphrase = v.passphrase;
+            // Convert decimal ETH → hex wei here. SendRawFlow's tx.value
+            // is a 0x-hex string; the daemon-side `sphincs.account.send`
+            // re-parses it on the broadcast side. We can't lazily defer
+            // to the daemon any more because `tx.simulate` (inside
+            // SendRawFlow) needs the wei amount up front to do the
+            // eth_call simulation that drives ConfirmGate.
+            const weiOrNull = parseEthToWei((v.valueEth ?? "0").trim());
+            if (weiOrNull === null) {
+              setState({ kind: "err", message: `bad ETH amount: ${v.valueEth}` });
+              return;
+            }
+            const dataIn = (v.data ?? "").trim();
+            const data = dataIn.length === 0
+              ? "0x"
+              : (dataIn.startsWith("0x") ? dataIn : "0x" + dataIn);
+            const baseTx = { value: bigIntToHex(weiOrNull), data };
             const raw = (v.to ?? "").trim();
             if (ADDR_RE.test(raw)) {
-              // Already a 0x address — skip resolution.
-              setState({ kind: "send-run", row: state.row, params: { ...base, to: raw } });
+              setState({ kind: "send-confirm", row: state.row, tx: { ...baseTx, to: raw } });
             } else {
               setState({
                 kind: "resolve-target",
                 row: state.row,
                 raw,
                 field: "to",
-                nextKind: "send-run",
-                pendingParams: base,
+                nextKind: "send-confirm",
+                pendingParams: baseTx,
               });
             }
           }}
@@ -621,8 +629,15 @@ export default function SphincsAccountsHub({
         raw={state.raw}
         onResolved={async (addr) => {
           const merged = { ...state.pendingParams, [state.field]: addr };
-          if (state.nextKind === "send-run") setState({ kind: "send-run", row: state.row, params: merged });
-          else {
+          if (state.nextKind === "send-confirm") {
+            // pendingParams for the send path is { value, data } — splice
+            // the resolved address in as `to` and hand off to ConfirmGate.
+            setState({
+              kind: "send-confirm",
+              row: state.row,
+              tx: { to: addr, value: String(merged.value), data: String(merged.data) },
+            });
+          } else {
             // Same local-key probe as the rotate-owner-form direct path,
             // so ENS-resolved addresses also benefit from auto-commit.
             const f = await call<{ found?: boolean; walletName?: string; accountIndex?: number }>(
@@ -645,42 +660,34 @@ export default function SphincsAccountsHub({
     );
   }
 
-  if (state.kind === "send-run") {
-    // Stash the submitted hash on the RpcRunner result so the user can
-    // immediately follow up with the poll action via "successActions".
-    let submittedHash: string | null = null;
+  if (state.kind === "send-confirm") {
+    // SendRawFlow drives tx.decodeIntent → tx.simulate → ConfirmGate →
+    // sphincs.account.send. The sphincs branch in SendRawFlow skips
+    // the EOA passphrase / TPM PIN steps (the daemon-side
+    // sphincs.account.send handles dual-sign auth via the master KEK),
+    // so this hands off cleanly without any extra prompts. On success,
+    // we lose the inclusion-poll affordance the old send-run had — for
+    // now the user gets the new owner / inclusion status via the
+    // detail panel's history overlay + daemon-side getUserOp probes.
+    const r = state.row;
     return (
-      <RpcRunner
-        title="Submitting UserOperation…"
-        subtitle={`slot: ${state.row.name} · to: ${(state.params as any).to}`}
-        method="sphincs.account.send"
-        params={state.params}
-        timeoutMs={15 * 60 * 1000}
-        renderResult={(r: any) => {
-          submittedHash = r?.userOpHash ?? null;
-          return (
-            <Box flexDirection="column">
-              <Text color={theme.ok}>✓ userOp submitted</Text>
-              <Text color={theme.dim} wrap="truncate-middle">
-                userOpHash: <Text color={theme.primary}>{r?.userOpHash}</Text>
-              </Text>
-              <Text color={theme.dim} wrap="truncate-middle">sender: {r?.sender}</Text>
-              <Text color={theme.dim} wrap="truncate-end">bundler: {r?.bundler}</Text>
-              <Text color={theme.dim}>Enter to poll inclusion · Esc to dismiss</Text>
-            </Box>
-          );
+      <SendRawFlow
+        chainId={r.chainId}
+        wallet={{
+          kind: "sphincs",
+          name: r.name,
+          address: r.smartAccountAddress ?? r.ownerAddress,
         }}
-        successActions={[
-          {
-            label: "Poll bundler for inclusion (eth_getUserOperationByHash)",
-            onSelect: () => {
-              if (submittedHash) setState({ kind: "poll-run", row: state.row, userOpHash: submittedHash });
-              else setState({ kind: "detail", row: state.row });
-            },
-          },
-          { label: "Back to account", onSelect: () => setState({ kind: "detail", row: state.row }) },
-        ]}
-        onDone={() => setState({ kind: "detail", row: state.row })}
+        tx={{
+          to: state.tx.to,
+          value: state.tx.value,
+          data: state.tx.data,
+          rationale: `SPHINCS- userOp from ${r.name}`,
+        }}
+        onDone={() => {
+          if (deeplinkMode) onBack();
+          else setState({ kind: "detail", row: r });
+        }}
       />
     );
   }
