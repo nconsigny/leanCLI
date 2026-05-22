@@ -89,7 +89,15 @@ type Screen =
   | { kind: "create-eoa" }
   | { kind: "create-r1" }
   | { kind: "create-sphincs-hybrid" }
-  | { kind: "sphincs-accounts" }
+  | {
+      kind: "sphincs-accounts";
+      /** When set, SphincsAccountsHub skips the list + detail screens and
+       *  lands directly on the named slot's send-form / swap-form. Used by
+       *  the WalletsHub SEND/SWAP routing so SPHINCS picks don't bounce
+       *  the user through the admin action menu. */
+      initialAction?: "send" | "swap";
+      initialName?: string;
+    }
   | { kind: "add-account" }
   | { kind: "import-eoa" }
   | { kind: "private" }
@@ -284,13 +292,21 @@ export default function App() {
    *  preselected). `chain` is the WalletsHub toggle (mainnet/sepolia for
    *  EOAs, "sepolia" for TPM). */
   const handleHubPick = (a: WalletsAction, w: Wallet, chain: string) => {
-    // SPHINCS- hybrid smart accounts route to the dedicated management
-    // screen regardless of the WalletsHub action tab — the standard
-    // Send/Swap/Shield flows haven't been adapted to dual-sign UserOps
-    // yet (that's the upcoming unified-Send rebuild). Until then the
-    // management screen is the single canonical place every SPHINCS
-    // op lives (Compute / Deploy / Send-UserOp / Rotate / Factory).
+    // SPHINCS- hybrid smart accounts all dispatch through the same hub
+    // (the only place dual-sign UserOps live), but we deep-link the
+    // SEND/SWAP picks past the admin menu so the user lands directly on
+    // the relevant form. MANAGE keeps the original "list → detail" shape
+    // so the admin actions (Compute / Deploy / Rotate / Factory) remain
+    // discoverable. Shield is filtered to EOA-only upstream — never
+    // reached here.
     if (w.kind === "sphincs") {
+      if (a === "send" || a === "swap") {
+        return push({
+          kind: "sphincs-accounts",
+          initialAction: a,
+          initialName: w.name,
+        });
+      }
       return push({ kind: "sphincs-accounts" });
     }
     switch (a) {
@@ -400,7 +416,13 @@ export default function App() {
     case "create-sphincs-hybrid":
       return <CreateSphincsHybridFlow onDone={finishAction} />;
     case "sphincs-accounts":
-      return <SphincsAccountsHub onBack={pop} />;
+      return (
+        <SphincsAccountsHub
+          onBack={pop}
+          initialAction={top.initialAction}
+          initialName={top.initialName}
+        />
+      );
     case "add-account":
       return <AddAccountFlow onDone={finishAction} />;
     case "import-eoa":

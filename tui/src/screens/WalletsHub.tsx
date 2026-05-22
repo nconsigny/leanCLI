@@ -87,6 +87,11 @@ type EoaAccount = {
 
 const TABS: { label: string; value: WalletsAction; help: string }[] = [
   {
+    label: "MANAGE",
+    value: "manage",
+    help: "Per-account admin — EOA: BIP-44 path + cousin sub-accounts. Smart accounts: key rotation / social recovery. Also lists ERC-20 balances from the swap registry.",
+  },
+  {
     label: "SEND",
     value: "send",
     help: "Move ETH (or signed calldata) from a wallet to a recipient.",
@@ -100,11 +105,6 @@ const TABS: { label: string; value: WalletsAction; help: string }[] = [
     label: "SHIELD",
     value: "shield",
     help: "Privacy Pools deposit. EOA only — TPM/R1 keys can't sign the deposit transcript yet.",
-  },
-  {
-    label: "MANAGE",
-    value: "manage",
-    help: "Per-account admin — EOA: BIP-44 path + cousin sub-accounts. Smart accounts: key rotation / social recovery. Also lists ERC-20 balances from the swap registry.",
   },
 ];
 
@@ -138,6 +138,11 @@ export default function WalletsHub({
   // toggles to the other chain and back. TPM rows stay pinned to
   // sepolia (their only supported network today).
   const [eoaChain, setEoaChain] = useState<"mainnet" | "sepolia">("mainnet");
+  // Local refresh counter — `r` bumps this to force the discovery
+  // useEffect to re-run without needing the parent to bump `refreshKey`.
+  // Useful when a row landed `err: chain RPC failed` and the user wants
+  // to retry without backing out of the screen.
+  const [localRefresh, setLocalRefresh] = useState(0);
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -159,125 +164,32 @@ export default function WalletsHub({
     setError(null);
     setArchived(readArchive());
     (async () => {
-      const eoaRes = await call<EoaListEntry[]>("eoa.list");
-      const tpmRes = await call<TpmListEntry[]>("tpm.listSepoliaAddresses");
+      // Phase 1: enumerate every wallet kind in parallel. Three independent
+      // daemon round-trips collapse to one wall-clock RTT, so primaries
+      // render almost immediately instead of after a chain of awaits.
+      const [eoaRes, tpmRes, acctRes] = await Promise.all([
+        call<EoaListEntry[]>("eoa.list"),
+        call<TpmListEntry[]>("tpm.listSepoliaAddresses"),
+        // SPHINCS+ hybrid smart accounts via the unified `account.list` RPC.
+        // The daemon emits one entry per slot with `type: "sphincs"`. The
+        // smart-account address may be empty when the counterfactual hasn't
+        // been computed yet — we surface it as the row's address but the
+        // detail screen will let the user run "Compute" to populate it.
+        call<{ accounts: { type: string; name: string; address: string }[] }>(
+          "account.list",
+          {},
+        ),
+      ]);
       if (cancelled) return;
 
-      const out: Wallet[] = [];
-
-      if (eoaRes.ok && Array.isArray(eoaRes.result)) {
-        for (const e of eoaRes.result) {
-          if (!e?.name || !e?.address) continue;
-          // Push the slot's primary account first.
-          out.push({
-            kind: "eoa",
-            name: e.name,
-            address: e.address,
-            unlocked: e.unlocked === true,
-            accountIndex: 0,
-          });
-          // Then ask the daemon for any derived sub-accounts on this
-          // slot (`eoa.account.add` lands here). Failures are non-fatal
-          // — if the call fails we just don't surface sub-accounts for
-          // that slot, matching the daemon's "primary always works"
-          // contract.
-          const sub = await call<{ accounts: EoaAccount[] }>(
-            "eoa.account.list",
-            { name: e.name },
-          );
-          if (cancelled) return;
-          if (sub.ok && Array.isArray(sub.result?.accounts)) {
-            for (const a of sub.result.accounts) {
-              if (!a || typeof a.index !== "number") continue;
-              if (a.index === 0) continue; // primary already added
-              if (!a.address) continue;
-              out.push({
-                kind: "eoa",
-                name: e.name,
-                address: a.address,
-                unlocked: e.unlocked === true,
-                accountIndex: a.index,
-                accountLabel: a.label ?? undefined,
-                accountPath: a.path,
-              });
-            }
-          }
-        }
-      }
-
-      if (tpmRes.ok && Array.isArray(tpmRes.result)) {
-        for (const t of tpmRes.result) {
-          if (!t?.name || !t?.address) continue;
-          out.push({ kind: "tpm", name: t.name, address: t.address });
-        }
-      }
-
-      // SPHINCS- hybrid smart accounts via the unified `account.list` RPC.
-      // The daemon emits one entry per slot with `type: "sphincs"`. The
-      // smart-account address may be empty when the counterfactual hasn't
-      // been computed yet — we surface it as the row's address but the
-      // detail screen will let the user run "Compute" to populate it.
-      const acctRes = await call<{ accounts: { type: string; name: string; address: string }[] }>(
-        "account.list",
-        {},
-      );
-      if (cancelled) return;
-      if (acctRes.ok && Array.isArray(acctRes.result?.accounts)) {
-        for (const a of acctRes.result.accounts) {
-          if (a?.type !== "sphincs" || !a.name) continue;
-          out.push({
-            kind: "sphincs",
-            name: a.name,
-            // Empty string is a deliberate signal: "smart-account address
-            // not yet computed". Renderers should treat that as pending
-            // rather than as a real address.
-            address: a.address ?? "",
-          });
-        }
-      }
-
-      if (out.length === 0) {
-        const failed = !eoaRes.ok ? eoaRes : !tpmRes.ok ? tpmRes : null;
-        setError(
-          failed && !failed.ok
-            ? failed.error.message
-            : "no wallets configured — run `kohaku wallet create eoa <name>` or `wallet create r1 <name>`",
-        );
-      }
-
-      setWallets(out);
-      setBalances(
-        Object.fromEntries(
-          out.map((w) => [
-            balanceKey(w.kind, w.name, w.accountIndex),
-            { state: "pending" } as BalanceCell,
-          ]),
-        ),
-      );
-      setFreshness(
-        Object.fromEntries(
-          out.map((w) => [
-            balanceKey(w.kind, w.name, w.accountIndex),
-            { state: "pending" } as FreshnessCell,
-          ]),
-        ),
-      );
-      setLoading(false);
-
-      // Parallel balance + freshness fan-out. Previously this ran serially
-      // per row to avoid public-RPC burst throttling, but for users with
-      // a dozen sub-accounts the wall-clock cost (one slow address blocking
-      // the whole list) outweighed the throttle risk. Each row dispatches
-      // its own balance + freshness probe independently, results stream
-      // into setBalances/setFreshness as they land, and a single hanging
-      // row no longer keeps the others in "…" forever.
-      for (const w of out) {
+      // Per-row probe — used for primaries (right after Phase 1) and for
+      // cousins as each `eoa.account.list` lands in Phase 2. Balance and
+      // freshness fire independently; a single slow row no longer holds
+      // the rest of the list back.
+      const fanout = (w: Wallet) => {
         const params: { address: string; chain?: string } = { address: w.address };
         params.chain = w.kind === "tpm" ? "sepolia" : eoaChain;
         const key = balanceKey(w.kind, w.name, w.accountIndex);
-        // Balance task — fire-and-forget; per-row React state update on
-        // arrival. Cancellation is honored after the await so a stale
-        // hub mount can't overwrite the fresh one's cells.
         void call<ChainBalance>("chain.balance", params).then((r) => {
           if (cancelled) return;
           if (!r.ok) {
@@ -293,9 +205,8 @@ export default function WalletsHub({
             }));
           }
         });
-        // Freshness probe — independent fan-out, same fire-and-forget
-        // pattern. Soft signal: a failure tags `err` and the row stays
-        // neutral; never falsely marks "fresh".
+        // Freshness probe — soft signal: a failure tags `err` and the
+        // row stays neutral; never falsely marks "fresh".
         void call<AddressFreshness>("chain.addressFreshness", params).then((fr) => {
           if (cancelled) return;
           if (!fr.ok) {
@@ -328,22 +239,176 @@ export default function WalletsHub({
             [key]: { state: "ok", nonce: d.nonce, erc20Clean, ppFunded },
           }));
         });
+      };
+
+      // Build the primaries-only list: one row per EOA slot, every TPM
+      // address, every SPHINCS slot. Cousins get spliced in beneath their
+      // primary in Phase 2 as each `eoa.account.list` resolves.
+      const eoaSlots =
+        eoaRes.ok && Array.isArray(eoaRes.result)
+          ? eoaRes.result.filter((e) => !!(e?.name && e?.address))
+          : [];
+
+      const primaries: Wallet[] = [];
+      for (const e of eoaSlots) {
+        primaries.push({
+          kind: "eoa",
+          name: e.name,
+          address: e.address,
+          unlocked: e.unlocked === true,
+          accountIndex: 0,
+        });
+      }
+      if (tpmRes.ok && Array.isArray(tpmRes.result)) {
+        for (const t of tpmRes.result) {
+          if (!t?.name || !t?.address) continue;
+          primaries.push({ kind: "tpm", name: t.name, address: t.address });
+        }
+      }
+      if (acctRes.ok && Array.isArray(acctRes.result?.accounts)) {
+        for (const a of acctRes.result.accounts) {
+          if (a?.type !== "sphincs" || !a.name) continue;
+          primaries.push({
+            kind: "sphincs",
+            name: a.name,
+            address: a.address ?? "",
+          });
+        }
+      }
+
+      if (primaries.length === 0) {
+        const failed = !eoaRes.ok
+          ? eoaRes
+          : !tpmRes.ok
+            ? tpmRes
+            : !acctRes.ok
+              ? acctRes
+              : null;
+        setError(
+          failed && !failed.ok
+            ? failed.error.message
+            : "no wallets configured — run `kohaku wallet create eoa <name>` or `wallet create r1 <name>`",
+        );
+      }
+
+      setWallets(primaries);
+      setBalances(
+        Object.fromEntries(
+          primaries.map((w) => [
+            balanceKey(w.kind, w.name, w.accountIndex),
+            { state: "pending" } as BalanceCell,
+          ]),
+        ),
+      );
+      setFreshness(
+        Object.fromEntries(
+          primaries.map((w) => [
+            balanceKey(w.kind, w.name, w.accountIndex),
+            { state: "pending" } as FreshnessCell,
+          ]),
+        ),
+      );
+      setLoading(false);
+      for (const w of primaries) fanout(w);
+
+      // Phase 2: per-slot sub-account discovery, all in flight at once.
+      // Failures are non-fatal — if a slot's `eoa.account.list` fails we
+      // just don't surface its cousins, matching the daemon's "primary
+      // always works" contract. Each slot's cousins splice in directly
+      // under their primary as the call resolves, so the BIP-44 hierarchy
+      // stays visually grouped.
+      for (const e of eoaSlots) {
+        void (async () => {
+          const sub = await call<{ accounts: EoaAccount[] }>(
+            "eoa.account.list",
+            { name: e.name },
+          );
+          if (cancelled) return;
+          if (!sub.ok || !Array.isArray(sub.result?.accounts)) return;
+          const cousins: Wallet[] = [];
+          for (const a of sub.result.accounts) {
+            if (!a || typeof a.index !== "number") continue;
+            if (a.index === 0) continue; // primary already shown
+            if (!a.address) continue;
+            cousins.push({
+              kind: "eoa",
+              name: e.name,
+              address: a.address,
+              unlocked: e.unlocked === true,
+              accountIndex: a.index,
+              accountLabel: a.label ?? undefined,
+              accountPath: a.path,
+            });
+          }
+          if (cousins.length === 0) return;
+          setWallets((prev) => {
+            const result = [...prev];
+            let primaryIdx = -1;
+            for (let i = 0; i < result.length; i++) {
+              const w = result[i]!;
+              if (
+                w.kind === "eoa" &&
+                (w.accountIndex ?? 0) === 0 &&
+                w.name === e.name
+              ) {
+                primaryIdx = i;
+                break;
+              }
+            }
+            if (primaryIdx === -1) return result;
+            // Skip past any cousins already inserted for this slot, so
+            // re-renders (or duplicate appends) stay idempotent.
+            let insertAt = primaryIdx + 1;
+            while (
+              insertAt < result.length &&
+              result[insertAt]!.kind === "eoa" &&
+              result[insertAt]!.name === e.name &&
+              (result[insertAt]!.accountIndex ?? 0) > 0
+            ) {
+              insertAt++;
+            }
+            result.splice(insertAt, 0, ...cousins);
+            return result;
+          });
+          setBalances((prev) => {
+            const next = { ...prev };
+            for (const w of cousins) {
+              next[balanceKey(w.kind, w.name, w.accountIndex)] = {
+                state: "pending",
+              };
+            }
+            return next;
+          });
+          setFreshness((prev) => {
+            const next = { ...prev };
+            for (const w of cousins) {
+              next[balanceKey(w.kind, w.name, w.accountIndex)] = {
+                state: "pending",
+              };
+            }
+            return next;
+          });
+          for (const w of cousins) fanout(w);
+        })();
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [refreshKey, eoaChain]);
+  }, [refreshKey, eoaChain, localRefresh]);
 
   // Esc / q falls back to the main menu. ←/→ are owned by the TabStrip,
   // ↑/↓/Enter by the Select below — letting Ink dispatch each key to the
   // right consumer keeps the navigation predictable. `n` flips the EOA
-  // chain between mainnet and sepolia; the useEffect dep above triggers
-  // a re-fetch of every row's balance on the new chain.
+  // chain between mainnet and sepolia; `r` re-runs discovery + balance
+  // fanout (useful when a row landed in `err: chain RPC failed`). Both
+  // bump a dep on the useEffect above.
   useInput((input, key) => {
     if (key.escape || input === "q") onBack();
     else if (input === "n") {
       setEoaChain((c) => (c === "mainnet" ? "sepolia" : "mainnet"));
+    } else if (input === "r") {
+      setLocalRefresh((k) => k + 1);
     }
   });
 
@@ -422,7 +487,7 @@ export default function WalletsHub({
     <Layout
       title="Wallets"
       subtitle={`${tab.label} — ${tab.help}`}
-      hint="←/→ action · ↑/↓ wallet · enter run · n chain · esc back"
+      hint="←/→ action · ↑/↓ wallet · enter run · n chain · r refresh · esc back"
     >
       <Text color={theme.koiCream} backgroundColor={theme.koiInk} bold>
         {" leanKohaku · wallets "}
