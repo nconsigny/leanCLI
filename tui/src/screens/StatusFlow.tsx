@@ -219,6 +219,7 @@ function HealthBar({ snap }: { snap: Snapshot }) {
       borderColor={theme.koiRed}
       paddingX={1}
       marginBottom={1}
+      alignSelf="flex-start"
     >
       <Text wrap="truncate-end">
         <Text color={theme.koiCream} bold>{"▶ READY    "}</Text>

@@ -75,10 +75,14 @@ export default function RpcRunner({
 
   return (
     <Box flexDirection="column" paddingX={1}>
-      <Text color={theme.primary} bold>
+      <Text color={theme.primary} bold wrap="truncate-end">
         {title}
       </Text>
-      {subtitle && <Text color={theme.dim}>{subtitle}</Text>}
+      {subtitle && (
+        <Text color={theme.dim} wrap="truncate-middle">
+          {subtitle}
+        </Text>
+      )}
       <Box marginTop={1} flexDirection="column">
         <KoiFrame>
           {events.map((n, i) => (
