@@ -1844,7 +1844,7 @@ private partial def executeSphincsUserOp
               | .ok wRec =>
                   let pathExc : Except String String := match attach with
                     | .existing _ idx =>
-                        match wRec.accounts[idx]? with
+                        match wRec.accounts.find? (fun a => a.index == idx) with
                         | some a => .ok a.path
                         | none => .error s!"wallet has no account #{idx}"
                     | .derived _ dp => .ok dp.asString
@@ -3295,7 +3295,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                     match ecdsaKind with
                     | "existing" =>
                         let idx := paramNatD req.params "accountIndex" 0
-                        match walletRec.accounts[idx]? with
+                        match walletRec.accounts.find? (fun a => a.index == idx) with
                         | none =>
                             pure (.error s!"wallet '{walletName}' has no account at index {idx}")
                         | some acct =>
@@ -3573,7 +3573,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                       match ← LeanKohaku.Wallet.EoaStore.load deployer with
                       | .error e => pure <| .error { code := -32010, message := "deployer wallet not found", data := some (.str e) }
                       | .ok dRec =>
-                          match dRec.accounts[deployerIdx]? with
+                          match dRec.accounts.find? (fun a => a.index == deployerIdx) with
                           | none => pure <| .error { code := -32011, message := s!"deployer has no account #{deployerIdx}", data := none }
                           | some dAcct =>
                               match ← derivePrivateKeyFromSeed dslot.seed dAcct.path with
@@ -3738,7 +3738,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
               | .error e =>
                   pure <| .error { code := -32010, message := "newWalletName not found", data := some (.str e) }
               | .ok wRec =>
-                  match wRec.accounts[newIdx]? with
+                  match wRec.accounts.find? (fun a => a.index == newIdx) with
                   | none =>
                       pure <| .error { code := -32602, message := s!"wallet has no account #{newIdx}", data := none }
                   | some acct =>
@@ -3748,7 +3748,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                         pure <| .error
                           { code := -32602,
                             message := "newWalletName/newAccountIndex does not own newOwner",
-                            data := some (.str s!"wallet[{newIdx}]={walletAddr} but newOwner={claimedAddr}") }
+                            data := some (.str s!"wallet[#{newIdx}]={walletAddr} but newOwner={claimedAddr}") }
                       else
                         -- Verify on-chain owner matches.
                         match rec.smartAccountAddress with
@@ -4074,7 +4074,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                   | .error e => pure <| .error { code := -32010, message := "deployer wallet not found", data := some (.str e) }
                   | .ok dRec =>
                       let idx := paramNatD req.params "deployerAccountIndex" 0
-                      match dRec.accounts[idx]? with
+                      match dRec.accounts.find? (fun a => a.index == idx) with
                       | none => pure <| .error { code := -32011, message := s!"deployer has no account #{idx}", data := none }
                       | some dAcct =>
                           let seedExc : IO (Except String ByteArray) := do
