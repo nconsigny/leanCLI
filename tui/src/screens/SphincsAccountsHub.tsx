@@ -108,8 +108,6 @@ type State =
   | { kind: "rotate-owner-form"; row: Account }
   | { kind: "rotate-owner-run"; row: Account; params: Record<string, unknown>;
       pendingCommit?: { newOwner: string; newWalletName: string; newAccountIndex: number } }
-  | { kind: "commit-rotation-form"; row: Account }
-  | { kind: "commit-rotation-run"; row: Account; params: Record<string, unknown> }
   | { kind: "factory-deploy-pick-eoa"; row: Account; eoas: EoaListEntry[] }
   | { kind: "factory-deploy-pick-account"; row: Account; eoa: EoaListEntry; accounts: EoaAccount[] }
   | { kind: "factory-deploy-run"; row: Account; params: Record<string, unknown> }
@@ -921,8 +919,10 @@ export default function SphincsAccountsHub({
             // of our wallets, stash the (walletName, accountIndex) so
             // the poll screen can auto-commit on success. If not, the
             // user is rotating to an external key — we still submit
-            // but the slot will be unusable for sends afterward
-            // (commit-rotation can fix it later if they re-attach).
+            // but the slot will be unusable for sends afterward unless
+            // the new key is later added to a local wallet (at which
+            // point the daemon's owner-resync picks it up on the next
+            // detail-panel visit).
             const f = await call<{ found?: boolean; walletName?: string; accountIndex?: number }>(
               "eoa.account.findByAddress",
               { address: resolved }
@@ -1000,80 +1000,6 @@ export default function SphincsAccountsHub({
     );
   }
 
-  if (state.kind === "commit-rotation-form") {
-    // Rewrites the slot's ecdsaAttachment so subsequent userOps sign
-    // ECDSA-half with the new owner key. The daemon verifies the
-    // on-chain owner() before writing, so this fails closed if the
-    // rotateOwner userOp didn't actually land.
-    const fields: Field[] = [
-      { name: "newOwner", label: "New ECDSA owner address (must match on-chain owner())",
-        validate: (v) => ADDR_RE.test(v.trim()) ? null : "must be a 0x… address" },
-      { name: "newWalletName", label: "Local EOA wallet that owns the new key",
-        validate: (v) => v.trim().length > 0 ? null : "required" },
-      { name: "newAccountIndex", label: "Account index in that wallet (default 0)",
-        validate: () => null },
-      // Recovery-only: leave blank for normal use. Set to the slot's
-      // ORIGINAL owner address if an earlier commit-rotation attempt
-      // rewrote `ownerAddress` on disk without re-wrapping the SPHINCS
-      // sk (the wrap is still keyed to the original owner). The daemon
-      // uses this as the AAD when unwrapping, then re-seals under the
-      // current ownerAddress on success.
-      { name: "oldOwner", label: "[recovery] original owner before any prior commit-rotation (blank if first commit)",
-        validate: (v) => {
-          const t = v.trim();
-          if (t.length === 0) return null;
-          return ADDR_RE.test(t) ? null : "must be a 0x… address or blank";
-        } },
-    ];
-    return (
-      <Layout
-        title={`Commit owner rotation · ${state.row.name}`}
-        subtitle="Atomic local-store update. Daemon verifies on-chain owner() before writing."
-      >
-        <Form
-          fields={fields}
-          onCancel={() => setState({ kind: "detail", row: state.row })}
-          onSubmit={(v) => {
-            const idxRaw = (v.newAccountIndex ?? "").trim();
-            const idx = idxRaw === "" ? 0 : Number.parseInt(idxRaw, 10);
-            const oldOwner = (v.oldOwner ?? "").trim();
-            const params: Record<string, unknown> = {
-              name: state.row.name,
-              newOwner: (v.newOwner ?? "").trim(),
-              newWalletName: (v.newWalletName ?? "").trim(),
-              newAccountIndex: Number.isFinite(idx) ? idx : 0,
-            };
-            if (oldOwner.length > 0) params.oldOwner = oldOwner;
-            setState({ kind: "commit-rotation-run", row: state.row, params });
-          }}
-        />
-      </Layout>
-    );
-  }
-
-  if (state.kind === "commit-rotation-run") {
-    return (
-      <RpcRunner
-        title="Committing rotation to local store…"
-        subtitle={`slot: ${state.row.name}`}
-        method="sphincs.account.commitRotation"
-        params={state.params}
-        renderResult={(r: any) => (
-          <Box flexDirection="column">
-            <Text color={theme.ok}>✓ slot updated</Text>
-            <Text color={theme.dim}>newOwner: <Text color={theme.primary}>{r?.newOwner}</Text></Text>
-            <Text color={theme.dim}>newWalletName: {r?.newWalletName} (#{r?.newAccountIndex ?? 0})</Text>
-            <Text color={theme.dim}>on-chain owner() verified: {r?.onChainOwnerVerified ? "yes" : "no"}</Text>
-          </Box>
-        )}
-        successActions={[
-          { label: "Back to account", onSelect: () => setState({ kind: "detail", row: state.row }) },
-        ]}
-        onDone={() => setState({ kind: "detail", row: state.row })}
-      />
-    );
-  }
-
   // --- Swap pipeline: delegated entirely to SwapFlow ---
   //
   // SwapFlow owns chain selection, token pickers (tokenIn / tokenOut),
@@ -1105,7 +1031,7 @@ export default function SphincsAccountsHub({
       r.ecdsaAttachment.kind === "existing"
         ? `existing ${r.ecdsaAttachment.walletName} (#${r.ecdsaAttachment.accountIndex})`
         : `derived ${r.ecdsaAttachment.walletName} (${r.ecdsaAttachment.path})`;
-    type Action = "compute" | "deploy" | "send" | "swap" | "rotate-owner" | "commit-rotation" | "factory-deploy" | "back";
+    type Action = "compute" | "deploy" | "send" | "swap" | "rotate-owner" | "factory-deploy" | "back";
     const status = deployStatus[r.name];
     const isDeployed = status === true;
     const probePending = status === null;
@@ -1127,7 +1053,6 @@ export default function SphincsAccountsHub({
     actions.push({ label: "Send UserOperation via configured bundler", value: "send" });
     actions.push({ label: "Swap via Uniswap V3 (token + recipient picker)", value: "swap" });
     actions.push({ label: "Rotate on-chain ECDSA owner (rotateOwner UserOp)", value: "rotate-owner" });
-    actions.push({ label: "Commit owner rotation in local store (point slot at new EOA)", value: "commit-rotation" });
     actions.push({ label: "Deploy the SPHINCS- factory (one-time, Sepolia)", value: "factory-deploy" });
     actions.push({ label: "← Back", value: "back" });
     return (
@@ -1185,7 +1110,6 @@ export default function SphincsAccountsHub({
                   } else if (it.value === "send") setState({ kind: "send-form", row: r });
                   else if (it.value === "swap") setState({ kind: "swap-flow", row: r });
                   else if (it.value === "rotate-owner") setState({ kind: "rotate-owner-form", row: r });
-                  else if (it.value === "commit-rotation") setState({ kind: "commit-rotation-form", row: r });
                   else {
                     const er = await call<EoaListEntry[]>("eoa.list", {});
                     setState({
