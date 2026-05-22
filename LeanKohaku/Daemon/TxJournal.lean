@@ -29,6 +29,21 @@ structure Entry where
   status?       : Option String := none
   blockNumber?  : Option String := none
   gasUsed?      : Option String := none
+  /-- Wall-clock duration of the SPHINCS+ `signWithVerify` shim call, in
+      milliseconds. Recorded only for `kind = "sphincs.userOp"`; lets the
+      TUI HistoryPanel render "sign 4231ms · C9" so users can see how
+      heavy the post-quantum grind was at signing time. Optional so EOA /
+      R1 / shielded entries don't need to carry a meaningless zero. -/
+  signMs?       : Option Nat := none
+  /-- SPHINCS+ parameter set as a human string ("C9", "JARDIN-Keccak-128-
+      24", "SLH-DSA-SHA2-128-24"). Same scope as `signMs?` — present on
+      sphincs.userOp entries, absent elsewhere. -/
+  paramSet?     : Option String := none
+  /-- Bundler-returned userOp hash. Only set for sphincs.userOp entries;
+      stored separately from `txHash` because a UserOp's bundler hash and
+      its inclusion txHash are distinct identifiers — at submission time
+      the inclusion hash is not yet known. -/
+  userOpHash?   : Option String := none
   deriving Repr
 
 private def fileMode : IO.FileRight :=
@@ -83,7 +98,21 @@ def Entry.toJson (e : Entry) : Json :=
     match e.gasUsed? with
     | none => withBlock
     | some g => withBlock.push ("gasUsed", .str g)
-  .obj withGas
+  -- SPHINCS+-specific timing + parameter-set tag. None for EOA / R1 /
+  -- shielded entries; downstream readers must tolerate the absence.
+  let withSignMs :=
+    match e.signMs? with
+    | none => withGas
+    | some n => withGas.push ("signMs", .num (Int.ofNat n))
+  let withParamSet :=
+    match e.paramSet? with
+    | none => withSignMs
+    | some s => withSignMs.push ("paramSet", .str s)
+  let withUserOp :=
+    match e.userOpHash? with
+    | none => withParamSet
+    | some s => withParamSet.push ("userOpHash", .str s)
+  .obj withUserOp
 
 private def ensureDir : IO Unit := do
   let dir ← journalDir
@@ -103,6 +132,41 @@ def append (slotName : String) (entry : Entry) : IO Unit := do
     (do try IO.setAccessRights path fileMode catch _ => pure ())
   catch e =>
     IO.eprintln s!"[journal] append failed for slot={slotName}: {e.toString}"
+
+/-- Append an inclusion record mapping a SPHINCS userOpHash to the L1
+    transaction hash that bundled it. The reader (`chain.history`)
+    overlays `inclusionTxHash` onto matching entries by `userOpHash`,
+    so the UI can show an Etherscan-lookupable L1 hash instead of the
+    raw userOpHash (which is a 4337-level identifier only). -/
+def appendInclusion (slotName userOpHash inclusionTxHash : String)
+    (blockNumber? : Option String := none) (success? : Option Bool := none) :
+    IO Unit := do
+  try
+    ensureDir
+    let path ← journalPath slotName
+    let nowMs ← IO.monoMsNow
+    let nowSec : Nat := nowMs / 1000
+    let base : Array (String × Json) := #[
+      ("timestamp", .num (Int.ofNat nowSec)),
+      ("kind", .str "sphincs.inclusion"),
+      ("userOpHash", .str userOpHash),
+      ("inclusionTxHash", .str inclusionTxHash),
+      ("slotName", .str slotName)
+    ]
+    let withBlock :=
+      match blockNumber? with
+      | none => base
+      | some b => base.push ("blockNumber", .str b)
+    let withSuccess :=
+      match success? with
+      | none => withBlock
+      | some b => withBlock.push ("success", .bool b)
+    let h ← IO.FS.Handle.mk path .append
+    h.putStr (compact (.obj withSuccess) ++ "\n")
+    h.flush
+    (do try IO.setAccessRights path fileMode catch _ => pure ())
+  catch e =>
+    IO.eprintln s!"[journal] appendInclusion failed for slot={slotName}: {e.toString}"
 
 /-- Append a status-update record. Reader reconciles by txHash. -/
 def appendStatus (slotName txHash status : String)
