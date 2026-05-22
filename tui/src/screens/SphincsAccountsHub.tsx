@@ -67,6 +67,15 @@ type Account = {
   createdAt: number;
 };
 
+/** Sub-account ("cousin") within an EOA wallet, as returned by
+ *  `eoa.account.list`. Mirrors `LeanKohaku.Wallet.EoaStore.Account.toJson`. */
+type EoaAccount = {
+  index: number;
+  path: string;
+  address: string;
+  label?: string;
+};
+
 /** A built {to,value,data} blob coming out of `swap.uniV3.build`,
  *  normalized to the shape SendRawFlow expects (value as 0x-prefixed
  *  hex). The daemon emits `value` as either a JSON number or a string;
@@ -79,6 +88,7 @@ type State =
   | { kind: "detail"; row: Account }
   | { kind: "compute-addr"; row: Account }
   | { kind: "deploy-pick-eoa"; row: Account; eoas: EoaListEntry[] }
+  | { kind: "deploy-pick-account"; row: Account; eoa: EoaListEntry; accounts: EoaAccount[] }
   | { kind: "deploy-run"; row: Account; params: Record<string, unknown> }
   | { kind: "send-form"; row: Account }
   // Intermediate ENS-resolve step between send-form and send-run. We
@@ -101,6 +111,7 @@ type State =
   | { kind: "commit-rotation-form"; row: Account }
   | { kind: "commit-rotation-run"; row: Account; params: Record<string, unknown> }
   | { kind: "factory-deploy-pick-eoa"; row: Account; eoas: EoaListEntry[] }
+  | { kind: "factory-deploy-pick-account"; row: Account; eoa: EoaListEntry; accounts: EoaAccount[] }
   | { kind: "factory-deploy-run"; row: Account; params: Record<string, unknown> }
   // Swap pipeline: form → prepare (quote+build) → approve (SendRawFlow,
   // when needed) → exec (SendRawFlow) → done. Each leg is handed to
@@ -347,6 +358,51 @@ export default function SphincsAccountsHub({
     })();
   }, [state.kind === "detail" ? state.row.name : null]);
 
+  // Owner-drift resync. On every detail-panel entry, fire the
+  // `sphincs.account.resyncOwner` daemon RPC: it reads on-chain
+  // `owner()`, compares to the slot's stored `ownerAddress`, and (when
+  // the new owner is locally derivable + master KEK loaded) rewraps
+  // the SPHINCS sk under the new AAD atomically. Replaces the old
+  // TUI-side auto-commit that only fired when the user happened to be
+  // on the poll-run screen at the moment the bundler reported
+  // inclusion — if a rotateOwner UserOp landed while the user was
+  // anywhere else (or the bundler's receipt query was slow), the
+  // local slot stayed out of sync. With the daemon-side reconciler the
+  // next visit to detail picks it up.
+  //
+  // Deliberately uncached: a single eth_call + file read is cheap, and
+  // a stale cache would defeat the point. Status `resynced` triggers
+  // a slot-list refetch so the panel shows the new owner / attachment
+  // without bouncing the user back to the list.
+  useEffect(() => {
+    if (state.kind !== "detail") return;
+    const name = state.row.name;
+    void (async () => {
+      const r = await call<{
+        status?: string;
+        newOwner?: string;
+        newWalletName?: string;
+        newAccountIndex?: number;
+      }>("sphincs.account.resyncOwner", { name });
+      if (!r.ok) return;
+      if (r.result?.status !== "resynced") return;
+      const list = await call<{ accounts: Account[] }>("sphincs.account.list", {});
+      if (!list.ok || !Array.isArray(list.result?.accounts)) return;
+      const updated = list.result.accounts.find((a) => a.name === name);
+      if (updated) {
+        // Re-fetch the row to pick up the new ownerAddress + attachment.
+        // Stay on detail; the useEffects keyed on state.row.name see the
+        // same name so they don't re-fire (we'd lose deployStatus /
+        // bundler / balance / history caches otherwise).
+        setState((prev) =>
+          prev.kind === "detail" && prev.row.name === name
+            ? { kind: "detail", row: updated }
+            : prev,
+        );
+      }
+    })();
+  }, [state.kind === "detail" ? state.row.name : null]);
+
   useInput((input, key) => {
     if (key.escape || input === "q") {
       // Any sub-state → detail; detail or list → back/exit. When we
@@ -412,23 +468,61 @@ export default function SphincsAccountsHub({
       );
     }
     const items = state.eoas.map((e) => ({
-      label: `${e.name} — ${e.address.slice(0, 10)}…${e.address.slice(-6)}`,
+      label: `${e.name} — ${e.address}`,
       value: e,
     }));
     return (
       <Layout
         title="Deploy SPHINCS- account"
-        subtitle={`Pick the EOA that funds the factory.createAccount tx (slot: ${state.row.name})`}
+        subtitle={`Pick the EOA wallet that funds the factory.createAccount tx (slot: ${state.row.name})`}
         hint="↑/↓ move · → / enter select · esc back"
       >
         <Select
           items={items}
           arrowNav
           onBack={() => setState({ kind: "detail", row: state.row })}
+          onSelect={async (it) => {
+            const r = await call<{ accounts: EoaAccount[] }>("eoa.account.list", { name: it.value.name });
+            const accounts = r.ok && r.result?.accounts ? r.result.accounts : [];
+            if (accounts.length <= 1) {
+              const idx = accounts[0]?.index ?? 0;
+              setState({
+                kind: "deploy-run",
+                row: state.row,
+                params: { name: state.row.name, deployerWallet: it.value.name, deployerAccountIndex: idx },
+              });
+            } else {
+              setState({ kind: "deploy-pick-account", row: state.row, eoa: it.value, accounts });
+            }
+          }}
+        />
+      </Layout>
+    );
+  }
+
+  if (state.kind === "deploy-pick-account") {
+    const items = state.accounts.map((a) => ({
+      label: `#${a.index}${a.label ? ` ${a.label}` : ""}  ${a.path}  ${a.address}`,
+      value: a,
+    }));
+    return (
+      <Layout
+        title="Deploy SPHINCS- account"
+        subtitle={`Pick the funding account inside ${state.eoa.name} (slot: ${state.row.name})`}
+        hint="↑/↓ move · → / enter select · esc back"
+      >
+        <Select
+          items={items}
+          arrowNav
+          onBack={() => setState({ kind: "deploy-pick-eoa", row: state.row, eoas: [state.eoa] })}
           onSelect={(it) => setState({
             kind: "deploy-run",
             row: state.row,
-            params: { name: state.row.name, deployerWallet: it.value.name },
+            params: {
+              name: state.row.name,
+              deployerWallet: state.eoa.name,
+              deployerAccountIndex: it.value.index,
+            },
           })}
         />
       </Layout>
@@ -439,7 +533,7 @@ export default function SphincsAccountsHub({
     return (
       <RpcRunner
         title="Deploying hybrid smart account…"
-        subtitle={`slot: ${state.row.name} · funded by: ${(state.params as any).deployerWallet}`}
+        subtitle={`slot: ${state.row.name} · funded by: ${(state.params as any).deployerWallet}#${(state.params as any).deployerAccountIndex ?? 0}`}
         method="sphincs.account.deploy"
         params={state.params}
         renderResult={(r: any) => (
@@ -693,25 +787,65 @@ export default function SphincsAccountsHub({
       );
     }
     const items = state.eoas.map((e) => ({
-      label: `${e.name} — ${e.address.slice(0, 10)}…${e.address.slice(-6)}`,
+      label: `${e.name} — ${e.address}`,
       value: e,
     }));
     return (
       <Layout
         title="Deploy SPHINCS- factory (Sepolia)"
-        subtitle={`paramSet: ${state.row.paramSet}. Pick the EOA that funds the deploy.`}
+        subtitle={`paramSet: ${state.row.paramSet}. Pick the EOA wallet that funds the deploy.`}
         hint="↑/↓ move · → / enter select · esc back"
       >
         <Select
           items={items}
           arrowNav
           onBack={() => setState({ kind: "detail", row: state.row })}
+          onSelect={async (it) => {
+            const r = await call<{ accounts: EoaAccount[] }>("eoa.account.list", { name: it.value.name });
+            const accounts = r.ok && r.result?.accounts ? r.result.accounts : [];
+            if (accounts.length <= 1) {
+              const idx = accounts[0]?.index ?? 0;
+              setState({
+                kind: "factory-deploy-run",
+                row: state.row,
+                params: {
+                  paramSet: state.row.paramSet,
+                  deployerWallet: it.value.name,
+                  deployerAccountIndex: idx,
+                  chain: "sepolia",
+                },
+              });
+            } else {
+              setState({ kind: "factory-deploy-pick-account", row: state.row, eoa: it.value, accounts });
+            }
+          }}
+        />
+      </Layout>
+    );
+  }
+
+  if (state.kind === "factory-deploy-pick-account") {
+    const items = state.accounts.map((a) => ({
+      label: `#${a.index}${a.label ? ` ${a.label}` : ""}  ${a.path}  ${a.address}`,
+      value: a,
+    }));
+    return (
+      <Layout
+        title="Deploy SPHINCS- factory (Sepolia)"
+        subtitle={`Pick the funding account inside ${state.eoa.name} (paramSet: ${state.row.paramSet})`}
+        hint="↑/↓ move · → / enter select · esc back"
+      >
+        <Select
+          items={items}
+          arrowNav
+          onBack={() => setState({ kind: "factory-deploy-pick-eoa", row: state.row, eoas: [state.eoa] })}
           onSelect={(it) => setState({
             kind: "factory-deploy-run",
             row: state.row,
             params: {
               paramSet: state.row.paramSet,
-              deployerWallet: it.value.name,
+              deployerWallet: state.eoa.name,
+              deployerAccountIndex: it.value.index,
               chain: "sepolia",
             },
           })}
@@ -724,7 +858,7 @@ export default function SphincsAccountsHub({
     return (
       <RpcRunner
         title="Deploying SPHINCS- factory…"
-        subtitle={`paramSet: ${(state.params as any).paramSet} · funded by: ${(state.params as any).deployerWallet}`}
+        subtitle={`paramSet: ${(state.params as any).paramSet} · funded by: ${(state.params as any).deployerWallet}#${(state.params as any).deployerAccountIndex ?? 0}`}
         method="sphincs.factory.deploy"
         params={state.params}
         timeoutMs={5 * 60 * 1000}

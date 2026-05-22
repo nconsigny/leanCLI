@@ -1227,6 +1227,15 @@ private def broadcastAndAwait
       | _ =>
           pure <| .error { code := -32020, message := "chain RPC failed", data := some (.str "eth_sendRawTransaction returned non-string result") }
 
+/-- Sepolia's `eth_maxPriorityFeePerGas` reports values as low as
+    0x15f900 (1.44 mwei ≈ 0.00144 gwei) because validators see almost no
+    real fee demand. Submitting that as the tip strands txns: most
+    Sepolia nodes drop them from the mempool, and even when broadcast
+    they sit indefinitely behind their own nonce. 1 gwei is the de-facto
+    floor every public Sepolia faucet/relayer uses and is rounding error
+    against real costs on mainnet too. -/
+private def minPriorityFeeWei : Nat := 1_000_000_000
+
 /-- Build, sign, and broadcast a single EIP-1559 transaction from an
     unlocked slot. If `nonceOverride?` is `some n`, that nonce is used
     instead of querying `eth_getTransactionCount` — needed when
@@ -1242,7 +1251,8 @@ private def buildSignBroadcastTx
     (privateKey : ByteArray) (to : String) (toAddress : LeanKohaku.Ethereum.Address.Address)
     (value : Nat) (data : ByteArray) (nonceOverride? : Option Nat)
     (notify? : Option LeanKohaku.Keystore.Tpm2Runtime.Notifier := none)
-    (via? : Option LeanKohaku.RPC.Outbound.VerifyVia := none) :
+    (via? : Option LeanKohaku.RPC.Outbound.VerifyVia := none)
+    (priorityFeeOverride? : Option Nat := none) :
     IO (Except RpcError Json) := do
   try
     let nonce ←
@@ -1253,7 +1263,14 @@ private def buildSignBroadcastTx
           jsonHexNatIO nonceJson "nonce"
     let priorityJson ← expectExcept <| (← LeanKohaku.RPC.Outbound.maxPriorityFeePerGas cfg.policy cfg.rpcEndpoint via?)
     let gasPriceJson ← expectExcept <| (← LeanKohaku.RPC.Outbound.gasPrice cfg.policy cfg.rpcEndpoint via?)
-    let maxPriorityFeePerGas ← jsonHexNatIO priorityJson "maxPriorityFeePerGas"
+    let rpcPriorityFee ← jsonHexNatIO priorityJson "maxPriorityFeePerGas"
+    -- Explicit override wins (used by `eoa.dropNonce`, where the caller has
+    -- picked an aggressive tip to outbid the stuck pending tx). Otherwise
+    -- apply the floor so the silly-low Sepolia RPC value doesn't strand us.
+    let maxPriorityFeePerGas :=
+      match priorityFeeOverride? with
+      | some t => t
+      | none   => Nat.max rpcPriorityFee minPriorityFeeWei
     let gasPrice ← jsonHexNatIO gasPriceJson "gasPrice"
     -- 2× basefee headroom: `eth_gasPrice` is a moment-in-time snapshot
     -- (basefee + suggested tip). Submitting at exactly that cap means
@@ -1867,7 +1884,7 @@ private partial def executeSphincsUserOp
                                 | .ok jj => (parseHexQuantity ((asString jj).getD "0x0")).getD 0
                                 | .error _ => 0
                               let gasPriceN := parseHexJ gp
-                              let priorityFee := parseHexJ pp
+                              let priorityFee := Nat.max (parseHexJ pp) minPriorityFeeWei
                               -- Bundlers (Candide, Pimlico, …) reject userOps
                               -- whose `maxFeePerGas` < their estimate of the
                               -- next block's base fee. Our `gasPrice` read can
@@ -2506,8 +2523,21 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           | none => pure (.error invalidParams)
           | some _ =>
               let block := paramStringD req.params "block" "pending"
-              let via? ← colibriVia state cfg.chainId
-              match ← LeanKohaku.RPC.Outbound.getTransactionCount cfg.policy cfg.rpcEndpoint address block via? with
+              -- Per-call chain override mirrors `eoa.send`. The TUI's
+              -- unstick flow queries `latest` + `pending` nonces on a
+              -- specific chain, which may differ from daemon default.
+              let chainName? := getField "chain" req.params >>= asString
+              let cfgEff : Config :=
+                match chainName? with
+                | none => cfg
+                | some name =>
+                    match endpointForChain cfg (some name) with
+                    | .error _ => cfg
+                    | .ok ep =>
+                        let cid := (LeanKohaku.RPC.Outbound.chainNameToId name).getD cfg.chainId
+                        { cfg with rpcEndpoint := ep, chainId := cid }
+              let via? ← colibriVia state cfgEff.chainId
+              match ← LeanKohaku.RPC.Outbound.getTransactionCount cfgEff.policy cfgEff.rpcEndpoint address block via? with
               | .ok nonce =>
                   pure <| .ok <| .obj #[
                     ("address", .str address),
@@ -3846,6 +3876,134 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                                                 ("onChainOwnerVerified", .bool true),
                                                 ("rewrappedMaster", .bool newMasterWrap?.isSome) ]
       | _, _, _ => pure (.error invalidParams)
+  | "sphincs.account.resyncOwner" =>
+      -- Idempotent owner reconciliation. Reads on-chain `owner()` and
+      -- compares to the slot's local `rec.ownerAddress`. If they differ
+      -- AND the on-chain owner is one of our local EOA accounts AND
+      -- master KEK is loaded, rewraps the SPHINCS sk under the new AAD
+      -- and writes the updated slot atomically. Otherwise no-op with a
+      -- descriptive status code.
+      --
+      -- Replaces the brittle TUI-side auto-commit (which only fired when
+      -- the user happened to be on the poll-run screen at the moment
+      -- the bundler reported inclusion). The TUI now calls this on
+      -- every detail-panel entry — if a rotation lands while the user
+      -- is anywhere else in the app, the next visit picks it up.
+      --
+      -- customPassphrase slots return `drift-master-locked` because we
+      -- can't open them without the per-slot passphrase; those users
+      -- have to call `sphincs.account.commitRotation` manually.
+      match paramName req.params with
+      | .error e => pure (.error e)
+      | .ok name =>
+          match ← LeanKohaku.Wallet.SphincsHybridStore.readRecord name with
+          | .error e =>
+              pure <| .error { code := -32010, message := "sphincs slot not found", data := some (.str e) }
+          | .ok rec =>
+              match rec.smartAccountAddress with
+              | none =>
+                  pure <| .ok <| .obj #[
+                    ("name", .str name),
+                    ("status", .str "no-smart-account-address") ]
+              | some sender =>
+                  let chainName := paramStringD req.params "chain" (chainNameGuess rec.chainId)
+                  match endpointForChain cfg (some chainName) with
+                  | .error e =>
+                      pure <| .error { code := -32021, message := "unknown chain", data := some (.str e) }
+                  | .ok ep =>
+                      -- owner() selector = keccak256("owner()")[:4] = 0x8da5cb5b
+                      match ← LeanKohaku.RPC.Outbound.call cfg.policy ep
+                          .call (.arr #[.obj #[("to", .str sender), ("data", .str "0x8da5cb5b")], .str "latest"]) none with
+                      | .error e =>
+                          pure <| .error { code := -32020, message := "owner() call failed", data := some (.str e) }
+                      | .ok r =>
+                          let onChainHex := (asString r).getD "0x"
+                          let stripped := if onChainHex.startsWith "0x" then onChainHex.drop 2 else onChainHex.toSlice
+                          let raw := stripped.toString.toLower
+                          let onChainOwner :=
+                            if raw.length >= 40 then "0x" ++ (raw.drop (raw.length - 40)) else ""
+                          if onChainOwner = "" then
+                            pure <| .ok <| .obj #[
+                              ("name", .str name),
+                              ("status", .str "owner-call-empty") ]
+                          else if onChainOwner = rec.ownerAddress.toLower then
+                            pure <| .ok <| .obj #[
+                              ("name", .str name),
+                              ("status", .str "in-sync"),
+                              ("owner", .str rec.ownerAddress) ]
+                          else
+                            -- Drift detected. Look up the on-chain owner in our local EOA slots.
+                            let target := onChainOwner
+                            let names ← LeanKohaku.Wallet.EoaStore.list
+                            let rec scanForOwner : List String → IO (Option (String × Nat))
+                              | [] => pure none
+                              | n :: rest => do
+                                  match ← LeanKohaku.Wallet.EoaStore.load n with
+                                  | .error _ => scanForOwner rest
+                                  | .ok wr =>
+                                      let accts := recordAccounts wr
+                                      match accts.find? (fun a => a.address.toLower = target) with
+                                      | some a => pure (some (n, a.index))
+                                      | none => scanForOwner rest
+                            match ← scanForOwner names with
+                            | none =>
+                                pure <| .ok <| .obj #[
+                                  ("name", .str name),
+                                  ("status", .str "drift-no-local-key"),
+                                  ("onChainOwner", .str onChainOwner),
+                                  ("localOwner", .str rec.ownerAddress) ]
+                            | some (walletName, idx) =>
+                                -- We have a local key for the new on-chain owner. Try to rewrap.
+                                let masterSlot? ← LeanKohaku.Daemon.State.getMasterKek? state
+                                match masterSlot? with
+                                | none =>
+                                    pure <| .ok <| .obj #[
+                                      ("name", .str name),
+                                      ("status", .str "drift-master-locked"),
+                                      ("onChainOwner", .str onChainOwner),
+                                      ("newWalletName", .str walletName),
+                                      ("newAccountIndex", .num (Int.ofNat idx)),
+                                      ("hint", .str "unlock master keystore and retry, or call sphincs.account.commitRotation with passphrase") ]
+                                | some mslot =>
+                                    match ← LeanKohaku.Wallet.SphincsHybridStore.openWithMaster mslot.kek rec with
+                                    | .error err =>
+                                        pure <| .ok <| .obj #[
+                                          ("name", .str name),
+                                          ("status", .str "drift-unwrap-failed"),
+                                          ("onChainOwner", .str onChainOwner),
+                                          ("error", .str err) ]
+                                    | .ok skHex =>
+                                        let newPpBytes ← LeanKohaku.Crypto.Random.getRandomBytes 32
+                                        let newPp := LeanKohaku.Crypto.Hex.encode newPpBytes
+                                        let newKdfSalt ← LeanKohaku.Crypto.Random.getRandomBytes 16
+                                        let newIters := LeanKohaku.Wallet.SphincsHybridStore.defaultKdfIters
+                                        match ← LeanKohaku.Wallet.SphincsHybridStore.sealSk
+                                            rec.name rec.paramSet onChainOwner newPp skHex
+                                            newKdfSalt newIters with
+                                        | .error err =>
+                                            pure <| .error { code := -32041, message := "sphincs sk re-seal failed", data := some (.str err) }
+                                        | .ok newPpCt =>
+                                            match ← LeanKohaku.Wallet.SphincsHybridStore.sealUnderMaster
+                                                mslot.kek rec.name rec.paramSet onChainOwner skHex with
+                                            | .error err =>
+                                                pure <| .error { code := -32041, message := "master re-seal failed", data := some (.str err) }
+                                            | .ok newMasterWrap =>
+                                                let updated : LeanKohaku.Wallet.SphincsHybridStore.Record :=
+                                                  { rec with
+                                                      ownerAddress := onChainOwner,
+                                                      ecdsaAttachment :=
+                                                        LeanKohaku.Wallet.Account.EcdsaAttachment.existing walletName idx,
+                                                      kdfSalt := newKdfSalt,
+                                                      kdfIters := newIters,
+                                                      passphraseCiphertext := newPpCt,
+                                                      masterWrap := some newMasterWrap }
+                                                LeanKohaku.Wallet.SphincsHybridStore.writeRecord updated
+                                                pure <| .ok <| .obj #[
+                                                  ("name", .str name),
+                                                  ("status", .str "resynced"),
+                                                  ("newOwner", .str onChainOwner),
+                                                  ("newWalletName", .str walletName),
+                                                  ("newAccountIndex", .num (Int.ofNat idx)) ]
   | "sphincs.account.deployStatus" =>
       -- Probe eth_getCode at the slot's smart-account address. Empty
       -- bytecode → not deployed (factory.createAccount hasn't run, or
@@ -4409,6 +4567,64 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                               | .error _ => pure ()
                               pure r
               | _, _ => pure (.error invalidParams)
+  | "eoa.dropNonce" =>
+      -- Replace a stuck pending nonce with a 0-value self-transfer at a
+      -- forced priority tip. Frees the mempool slot so downstream nonces
+      -- can land. Params:
+      --   name            : EOA slot
+      --   nonce           : the exact nonce to drop (no auto-pick — caller
+      --                     must read it from `eth_getTransactionCount` first)
+      --   account         : optional sub-account index (defaults to primary)
+      --   priorityFeeGwei : optional tip in gwei (default 3 — enough to
+      --                     outbid the typical Sepolia `eth_maxPriorityFeePerGas`
+      --                     report of 0x15f900 ≈ 0.00144 gwei)
+      --   chain           : optional chain override; honors `cfg.chainEndpoints`
+      match paramName req.params, paramNat req.params "nonce" with
+      | .ok name, .ok nonce =>
+          match ← unlockedSlot state name with
+          | .error err => pure (.error err)
+          | .ok slot =>
+              match ← resolveSigningTarget name slot req.params with
+              | .error err => pure (.error err)
+              | .ok (path, fromAddr) =>
+                  match ← derivePrivateKeyFromSeed slot.seed path with
+                  | .error err =>
+                      pure <| .error { invalidParams with data := some (.str err) }
+                  | .ok privateKey =>
+                      let slot' := { slot with address := fromAddr, derivationPath := path }
+                      let chainName? := getField "chain" req.params >>= asString
+                      let cfgEff : Config :=
+                        match chainName? with
+                        | none => cfg
+                        | some name =>
+                            match endpointForChain cfg (some name) with
+                            | .error _ => cfg
+                            | .ok ep =>
+                                let cid := (LeanKohaku.RPC.Outbound.chainNameToId name).getD cfg.chainId
+                                { cfg with rpcEndpoint := ep, chainId := cid }
+                      let tipGwei := paramNatD req.params "priorityFeeGwei" 3
+                      let tipWei := tipGwei * 1_000_000_000
+                      match LeanKohaku.Ethereum.Address.fromHex fromAddr with
+                      | none => pure (.error invalidParams)
+                      | some selfAddr =>
+                          let via? ← colibriVia state cfgEff.chainId
+                          let r ← buildSignBroadcastTx cfgEff slot' privateKey fromAddr selfAddr 0
+                            ByteArray.empty (some nonce) (some notify) via? (some tipWei)
+                          match r with
+                          | .ok j =>
+                              let getStr (k : String) : String :=
+                                (getField k j >>= asString).getD ""
+                              let txHash := getStr "txHash"
+                              let acc? := getField "account" req.params >>= asNat
+                              let status? := if (getStr "status").isEmpty then none else some (getStr "status")
+                              let block? := if (getStr "blockNumber").isEmpty then none else some (getStr "blockNumber")
+                              let gas? := if (getStr "gasUsed").isEmpty then none else some (getStr "gasUsed")
+                              if !txHash.isEmpty then
+                                journalRecord slot.name fromAddr fromAddr txHash "" "eoa.dropNonce"
+                                  0 nonce cfgEff.chainId acc? status? block? gas?
+                          | .error _ => pure ()
+                          pure r
+      | _, _ => pure (.error invalidParams)
   | "eoa.delete" =>
       match paramName req.params with
       | .error err => pure (.error err)
