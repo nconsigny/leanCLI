@@ -55,15 +55,41 @@ def operationalRules (cfg : AgentConfig) : String :=
 /-- Build the full system prompt: persona + operational rules + a
     bullet list of available tools and their descriptions. -/
 def buildSystemPrompt (cfg : AgentConfig) (tools : List ToolDoc) : String :=
-  let toolHeader := "TOOLS AVAILABLE (call by name; do not invent tool names):"
-  let toolBlock :=
-    if tools.isEmpty then
-      "  (no tools enabled for this invocation; you are answer-only)"
-    else
-      String.intercalate "\n" (tools.map renderTool)
-  String.intercalate "\n\n"
-    [ kohakuPersona
-    , operationalRules cfg
-    , toolHeader ++ "\n" ++ toolBlock ]
+  buildSystemPromptWithSkills cfg tools [] []
+where
+  /-- Build the system prompt with explicit always-on and
+      trigger-matched skill bodies. The order is
+      `persona → always-on skills → trigger skills → operational
+      rules → tool docs`, mirroring the spec in `docs/PHASE1B_PLAN.md`.
+      Empty lists collapse to no extra blocks. -/
+  buildSystemPromptWithSkills
+      (cfg : AgentConfig) (tools : List ToolDoc)
+      (alwaysOnSkills triggerSkills : List String) : String :=
+    let toolHeader := "TOOLS AVAILABLE (call by name; do not invent tool names):"
+    let toolBlock :=
+      if tools.isEmpty then
+        "  (no tools enabled for this invocation; you are answer-only)"
+      else
+        String.intercalate "\n" (tools.map renderTool)
+    let alwaysOnBlock :=
+      if alwaysOnSkills.isEmpty then []
+      else [String.intercalate "\n\n" alwaysOnSkills]
+    let triggerBlock :=
+      if triggerSkills.isEmpty then []
+      else [String.intercalate "\n\n" triggerSkills]
+    String.intercalate "\n\n"
+      ([ kohakuPersona ]
+       ++ alwaysOnBlock
+       ++ triggerBlock
+       ++ [ operationalRules cfg
+          , toolHeader ++ "\n" ++ toolBlock ])
+
+/-- Convenience exporter so callers can use the inner builder without
+    going through the no-skills entrypoint. -/
+def buildSystemPromptWithSkills
+    (cfg : AgentConfig) (tools : List ToolDoc)
+    (alwaysOnSkills triggerSkills : List String) : String :=
+  buildSystemPrompt.buildSystemPromptWithSkills
+    cfg tools alwaysOnSkills triggerSkills
 
 end LeanKohaku.Agent.Prompt

@@ -4,6 +4,8 @@ import LeanKohaku.Agent.Tools
 import LeanKohaku.Agent.Registry
 import LeanKohaku.Agent.Loop
 import LeanKohaku.Agent.Session
+import LeanKohaku.Agent.Skills
+import LeanKohaku.Agent.ToolDefs.Protocols
 import LeanKohaku.Encoding.Json
 import LeanKohaku.Transport.Uds
 
@@ -122,10 +124,13 @@ private def chmodSessionDb (path : String) : IO Unit := do
 
 /-- Per-process state. `dbRef` holds the opened session handle for
     the entire daemon lifetime; `inFlight` is a simple list of
-    session ids currently running a turn, guarded by an `IO.Mutex`. -/
+    session ids currently running a turn; `skills` is the live
+    skills registry (Phase 1b), swapped under all readers by the
+    `reload` op without restart. -/
 private structure DaemonState where
   db       : Session.Handle
   inFlight : IO.Ref (List Session.SessionId)
+  skills   : ToolDefs.Protocols.RegistryRef
 
 /-- Mark `sid` busy if it isn't already. Returns `true` when the
     caller has acquired the per-session lock; `false` if another
@@ -151,8 +156,8 @@ private def errResp (kind msg : String) : Json :=
   ]
 
 private def buildCfg (llmUrl model walletSocket : String)
-    (params : Json) : AgentConfig :=
-  let defaultAllow : List String := Registry.default.map (·.name)
+    (regRef : ToolDefs.Protocols.RegistryRef) (params : Json) : AgentConfig :=
+  let defaultAllow : List String := (Registry.defaultWithSkills regRef).map (·.name)
   let allowlist : List String :=
     match getField "toolAllowlist" params with
     | some (.arr arr) => arr.toList.filterMap (fun j => asString j)
@@ -164,15 +169,67 @@ private def buildCfg (llmUrl model walletSocket : String)
     toolAllowlist := allowlist
   }
 
+/-- Cap on trigger-matched skills per turn. Always-on skills are
+    unbounded (there are only two). -/
+private def maxTriggerSkills : Nat := 4
+
+/-- Collect text relevant to skill trigger matching: the latest user
+    message plus any tool-result tool messages in the transcript.
+    Older user messages are intentionally excluded — they describe
+    earlier subgoals and would over-eagerly activate skills. -/
+private def collectMatchContext (msgs : Array AgentMessage) : String :=
+  -- Latest user content + every tool-result content, joined by space.
+  let toolBlobs : List String :=
+    (msgs.toList.filter (fun m => m.role = .tool)).filterMap (fun m => m.content)
+  let lastUser : String :=
+    match (msgs.toList.filter (fun m => m.role = .user)).getLast? with
+    | some m => m.content.getD ""
+    | none => ""
+  String.intercalate " " (lastUser :: toolBlobs)
+
+/-- Build the rebuild callback that produces the next system prompt.
+    Reads the live registry off `regRef` so a `reload` between turns
+    propagates immediately. -/
+private def mkRebuildSystem
+    (regRef : ToolDefs.Protocols.RegistryRef) :
+    AgentState → IO String := fun s => do
+  let reg ← regRef.get
+  let visibleTools : List Prompt.ToolDoc :=
+    Tools.toToolDocs (filterByAllowlist (Registry.defaultWithSkills regRef) s.cfg.toolAllowlist)
+  let alwaysOn := Skills.alwaysOn reg
+  let ctx := collectMatchContext s.messages
+  let triggered := (Skills.matchTriggers reg ctx).toList.take maxTriggerSkills
+  let alwaysOnRendered := alwaysOn.toList.map Skills.renderForPrompt
+  let triggeredRendered := triggered.map Skills.renderForPrompt
+  -- Optional one-line stderr trace so operators can see what fired.
+  -- Gated behind KOHAKU_LOG_PROMPT so the daemon log does not blow up
+  -- on every turn.
+  match ← IO.getEnv "KOHAKU_LOG_PROMPT" with
+  | some v =>
+      if v != "" && v != "0" then
+        let names := (alwaysOn.toList.map (fun s => s.frontmatter.name)) ++
+                     (triggered.map (fun s => s.frontmatter.name))
+        IO.eprintln s!"[skills] active: {String.intercalate "," names}"
+  | none => pure ()
+  pure (Prompt.buildSystemPromptWithSkills s.cfg visibleTools
+          alwaysOnRendered triggeredRendered)
+
 /-- Build a prompt transcript by loading session history and appending
     the new user prompt. Returns the message array plus the
     just-appended user `AgentMessage` (caller persists it before the
-    loop runs). -/
+    loop runs). The system message is a *placeholder* — `runOneShot`'s
+    rebuild callback replaces its content before each LLM call with
+    the live always-on + trigger-matched skills. -/
 private def buildTranscript
+    (regRef : ToolDefs.Protocols.RegistryRef)
     (cfg : AgentConfig) (history : Array AgentMessage)
     (prompt : String) : Array AgentMessage × AgentMessage :=
   let visibleTools : List Prompt.ToolDoc :=
-    Tools.toToolDocs (filterByAllowlist Registry.default cfg.toolAllowlist)
+    Tools.toToolDocs (filterByAllowlist (Registry.defaultWithSkills regRef) cfg.toolAllowlist)
+  -- Placeholder: actual content is computed per-turn by the rebuild
+  -- callback in `runOneShotWithRebuild`. Keeping a non-empty initial
+  -- value means a Phase-0-style runner without the callback still
+  -- gets a functioning prompt.
   let sys := Prompt.buildSystemPrompt cfg visibleTools
   let user := AgentMessage.user prompt
   -- System prompt always leads. If the history already contains one
@@ -202,14 +259,16 @@ private def opRunTurn (st : DaemonState) (params : Json) : IO Json := do
        let walletSocket ← resolveWalletSocket
        let llmUrl ← resolveLlmUrl
        let model  ← resolveModel
-       let cfg := buildCfg llmUrl model walletSocket params
+       let cfg := buildCfg llmUrl model walletSocket st.skills params
        let history ← Session.loadSession st.db sid
-       let (transcript, userMsg) := buildTranscript cfg history prompt
+       let (transcript, userMsg) := buildTranscript st.skills cfg history prompt
        -- Persist the user turn FIRST so a crash mid-loop leaves a
        -- replayable record on disk.
        Session.appendMessage st.db sid userMsg
        let s₀ : AgentState := { messages := transcript, cfg := cfg }
-       match ← Loop.runOneShot s₀ Registry.default with
+       let rebuild := mkRebuildSystem st.skills
+       let toolReg := Registry.defaultWithSkills st.skills
+       match ← Loop.runOneShotWithRebuild s₀ toolReg (some rebuild) with
        | .error e => pure (errResp "agent" e)
        | .ok finalMsg => do
            try Session.appendMessage st.db sid finalMsg
@@ -270,6 +329,22 @@ private def opSearch (st : DaemonState) (params : Json) : IO Json := do
   catch e =>
     return errResp "io" (toString e)
 
+/-- Handle `reload`. Re-walks the on-disk skills directory and swaps
+    the `IO.Ref` under all active readers. SIGHUP-equivalent — Lean
+    4 v4.29.1 lacks POSIX signal APIs, so operators trigger this
+    over the socket instead. -/
+private def opReload (st : DaemonState) (_req : Json) : IO Json := do
+  try
+    let oldReg ← st.skills.get
+    let newReg ← Skills.reload oldReg
+    st.skills.set newReg
+    return okResp <| .obj #[
+      ("ok",     .bool true),
+      ("skills", .num (Int.ofNat newReg.skills.size))
+    ]
+  catch e =>
+    return errResp "io" (toString e)
+
 /-- Dispatch a single request `op` value to its handler. -/
 def dispatch (st : DaemonState) (req : Json) : IO Json := do
   let opStr := (getField "op" req >>= asString).getD ""
@@ -287,6 +362,8 @@ def dispatch (st : DaemonState) (req : Json) : IO Json := do
       opRunTurn st req
   | "search" =>
       opSearch st req
+  | "reload" =>
+      opReload st req
   | "" =>
       pure (errResp "bad_request" "missing op")
   | other =>
@@ -358,10 +435,33 @@ partial def acceptLoop (st : DaemonState) (listener : Listener)
 private def setupShutdown : IO (IO.Ref Bool) := do
   IO.mkRef false
 
+/-- Resolve the on-disk skills root. Preference order:
+    `KOHAKU_AGENT_SKILLS_DIR` env override → `$XDG_DATA_HOME/leankohaku/skills`
+    if present → `/usr/share/leankohaku/skills` (installed location) →
+    `<cwd>/skills` (dev mode).  This mirrors the data-home fallback
+    `Daemon/SkillsStore.lean` uses for action-skills. -/
+private def resolveSkillsDir : IO System.FilePath := do
+  match ← IO.getEnv "KOHAKU_AGENT_SKILLS_DIR" with
+  | some d => pure d
+  | none =>
+      let dataHome ← match ← IO.getEnv "XDG_DATA_HOME" with
+        | some d => pure (System.FilePath.mk d)
+        | none =>
+            match ← IO.getEnv "HOME" with
+            | some h => pure ((System.FilePath.mk h) / ".local" / "share")
+            | none => pure (System.FilePath.mk "/tmp")
+      let userDir := dataHome / "leankohaku" / "skills"
+      if (← userDir.pathExists) then pure userDir
+      else
+        let sysDir : System.FilePath := "/usr/share/leankohaku/skills"
+        if (← sysDir.pathExists) then pure sysDir
+        else pure ((← IO.currentDir) / "skills")
+
 def main (args : List String) : IO UInt32 := do
   let _ := args
   let dbPath ← resolveDbPath
   let socket ← resolveAgentSocket
+  let skillsDir ← resolveSkillsDir
   ensureParentDir dbPath
   ensureParentDir socket
 
@@ -369,10 +469,16 @@ def main (args : List String) : IO UInt32 := do
   let db ← Session.openDb dbPath
   chmodSessionDb dbPath
 
+  let initialSkills ← Skills.loadRegistry skillsDir
+  let skillsRef ← IO.mkRef initialSkills
+
   let inFlight ← IO.mkRef ([] : List Session.SessionId)
-  let st : DaemonState := { db := db, inFlight := inFlight }
+  let st : DaemonState := {
+    db := db, inFlight := inFlight, skills := skillsRef
+  }
 
   IO.eprintln s!"kohaku-agentd: db at {dbPath}"
+  IO.eprintln s!"kohaku-agentd: skills at {skillsDir} ({initialSkills.skills.size} loaded)"
   IO.eprintln s!"kohaku-agentd: listening on {socket}"
 
   let listener ← bind socket
