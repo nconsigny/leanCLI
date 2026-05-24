@@ -84,6 +84,20 @@ package() {
   if [ -f tui/dist/index.mjs ]; then
     install -Dm644 "tui/dist/index.mjs" "${pkgdir}/usr/share/leankohaku/tui/index.mjs"
   fi
+
+  # Phase 1b skills pack. The agent daemon resolves the skills dir in
+  # this order (see resolveSkillsDir in LeanKohaku/App/AgentDaemonMain.lean):
+  #   KOHAKU_AGENT_SKILLS_DIR env override
+  #   → $XDG_DATA_HOME/leankohaku/skills (user override)
+  #   → /usr/share/leankohaku/skills (this path)
+  #   → <cwd>/skills (dev fallback)
+  # We install every file under skills/ verbatim so the curator's
+  # follow-up edits propagate cleanly.
+  if [ -d skills ]; then
+    find skills -type f | while read -r f; do
+      install -Dm644 "$f" "${pkgdir}/usr/share/leankohaku/$f"
+    done
+  fi
   install -Dm644 "README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"
   install -Dm644 "INVARIANTS.md" "${pkgdir}/usr/share/doc/${pkgname}/INVARIANTS.md"
   install -Dm644 "SECURITY.md" "${pkgdir}/usr/share/doc/${pkgname}/SECURITY.md"

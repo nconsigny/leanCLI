@@ -4,7 +4,7 @@ A map of the repository as it actually exists, complementing `README.md`
 (goals & user-visible behavior), `INVARIANTS.md` (proof obligations & status),
 and `CLAUDE.md` (build & contributor workflow).
 
-The codebase is **132 Lean source files** plus C/Rust FFI helpers. There
+The codebase is **134 Lean source files** plus C/Rust FFI helpers. There
 are **no `sorry`s** in proofs and no `axiom`s outside the explicit FFI
 boundary (opaque `Hacl` / `Tpm2` primitives, plus the `@[extern]`
 declarations in `Daemon/Uds.lean`, `Agent/Http.lean`, and the Phase 1a
@@ -150,6 +150,18 @@ the abstract models defined alongside it (not about runtime IO).
   gated. Used by `kohaku-agentd`; one-shot `kohaku-agent` does
   not touch it. No signing or key-material imports — the DB
   carries conversation history only.
+- `Skills.lean` — Phase-1b in-process skill registry. Walks
+  `skills/<name>/` one level deep at startup, parses YAML
+  frontmatter (`name`, `triggers`, `alwaysOn`, `ofacFlagged`),
+  and exposes trigger matching + compact prompt rendering. The
+  registry is held behind an `IO.Ref` so the daemon's `reload`
+  op can hot-swap content without restart (Lean 4 v4.29.1 has
+  no POSIX signal API, so `reload` is wired as a socket op,
+  not a SIGHUP). Pure file IO and string manipulation — same
+  forbidden-import gate as the rest of `Agent/`.
+- `ToolDefs/Protocols.lean` — `protocol_lookup` and
+  `protocol_function_lookup`. Both read-only, both bound to a
+  `Skills.RegistryRef` at construction time.
 
 The full trust contract: nothing in `Agent/` imports
 `Crypto.Secp256k1Native`, `Crypto.Random`, `Wallet.{EOA,HDKey,
@@ -250,6 +262,38 @@ and routes every read through the daemon's `chain.ethCall` /
 `chain.nonce` / `chain.gasPrice` RPCs under the standard
 `Privacy.NetworkPolicy` gate — same trust model as the legacy sidecar's
 `daemon-callback.mjs`, but no Node process involved.
+
+### Skills pack (`skills/`)
+
+Two parallel skills layers share the `skills/` root:
+
+* **Action skills** (verb-named: `send-native`, `approve-erc20`,
+  `swap-uniswap-v3`, etc.) belong to `LeanKohaku/Daemon/SkillsStore.lean`
+  and are exposed via the daemon RPCs `skills.list` and
+  `skills.get`. They were the pre-Phase-1b layer.
+* **Protocol + meta skills** (`uniswap`, `aave`, `railgun`,
+  `tornado-cash`, `cowswap`, `morpho`, `fxusd`, `bold-liquity`,
+  `privacy-pool`, plus `kohaku-wallet` and `web3-security`) belong
+  to `LeanKohaku/Agent/Skills.lean` and are consumed at LLM-prompt
+  assembly time. The two meta-skills are always-on; protocol
+  skills activate by trigger-keyword match against the latest user
+  message + tool outputs.
+
+Both layers read from the same directory tree; their parsers tolerate
+each other's frontmatter (the action-skill parser ignores
+`triggers`/`alwaysOn`/`ofacFlagged`; the Phase-1b parser ignores
+`category`/`risk`). See `docs/PHASE1B_PLAN.md` for the divergence
+record.
+
+The agent daemon resolves the skills directory in this order:
+
+1. `KOHAKU_AGENT_SKILLS_DIR` env override.
+2. `$XDG_DATA_HOME/leankohaku/skills` if present (user override).
+3. `/usr/share/leankohaku/skills` (PKGBUILD-installed location).
+4. `<cwd>/skills` (dev fallback — the in-tree path).
+
+`reload` over the daemon socket re-walks the resolved path and
+swaps the in-memory registry atomically under all active readers.
 
 ### Terminal UI (`tui/`)
 
