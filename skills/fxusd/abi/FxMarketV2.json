@@ -1,0 +1,186 @@
+{
+  "_source": "https://raw.githubusercontent.com/AladdinDAO/aladdin-v3-contracts/main/contracts/interfaces/f(x)/IFxMarketV2.sol",
+  "_contractName": "FxMarketV2",
+  "abi": [
+    {
+      "type": "function",
+      "name": "treasury",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "baseToken",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "fToken",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "xToken",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "fxUSD",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "stabilityRatio",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "mintFToken",
+      "inputs": [
+        {
+          "name": "baseIn",
+          "type": "uint256"
+        },
+        {
+          "name": "recipient",
+          "type": "address"
+        },
+        {
+          "name": "minFTokenMinted",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "fTokenMinted",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "mintXToken",
+      "inputs": [
+        {
+          "name": "baseIn",
+          "type": "uint256"
+        },
+        {
+          "name": "recipient",
+          "type": "address"
+        },
+        {
+          "name": "minXTokenMinted",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "xTokenMinted",
+          "type": "uint256"
+        },
+        {
+          "name": "bonus",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "redeemFToken",
+      "inputs": [
+        {
+          "name": "fTokenIn",
+          "type": "uint256"
+        },
+        {
+          "name": "recipient",
+          "type": "address"
+        },
+        {
+          "name": "minBaseOut",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "baseOut",
+          "type": "uint256"
+        },
+        {
+          "name": "bonus",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "redeemXToken",
+      "inputs": [
+        {
+          "name": "xTokenIn",
+          "type": "uint256"
+        },
+        {
+          "name": "recipient",
+          "type": "address"
+        },
+        {
+          "name": "minBaseOut",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "baseOut",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    }
+  ]
+}

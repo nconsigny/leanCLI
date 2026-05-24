@@ -1,12 +1,105 @@
 {
   "mainnet": {
-    "fxUSD": {
+    "FxUSD": {
       "address": "0x085780639CC2cACd35E474e71f4d000e2405d8f6",
-      "abi": "abi/fxUSD.json",
       "verified": true,
-      "source": "https://docs.aladdin.club/fx-protocol/fx-protocol-overview"
+      "source": "https://github.com/AladdinDAO/aladdin-v3-contracts/blob/main/deployments/mainnet/Fx.FxUSD.json",
+      "abi": "abi/fxUSD.json"
+    },
+    "FxUSDImplementation": {
+      "address": "0x6C338c0bFB67970231109d4b33047A6e6BC685e5",
+      "verified": true,
+      "source": "https://github.com/AladdinDAO/aladdin-v3-contracts/blob/main/deployments/mainnet/Fx.FxUSD.json"
+    },
+    "FxUSDRebalancer": {
+      "address": "0x78c3aF23A4DeA2F630C130d2E42717587584BF05",
+      "verified": true,
+      "source": "https://github.com/AladdinDAO/aladdin-v3-contracts/blob/main/deployments/mainnet/Fx.FxUSD.json"
+    },
+    "wstETH_Treasury": {
+      "address": "0xED803540037B0ae069c93420F89Cd653B6e3Df1f",
+      "verified": true,
+      "source": "https://github.com/AladdinDAO/aladdin-v3-contracts/blob/main/deployments/mainnet/Fx.FxUSD.json",
+      "abi": "abi/FxTreasuryV2.json"
+    },
+    "wstETH_Market": {
+      "address": "0xAD9A0E7C08bc9F747dF97a3E7E7f620632CB6155",
+      "verified": true,
+      "source": "https://github.com/AladdinDAO/aladdin-v3-contracts/blob/main/deployments/mainnet/Fx.FxUSD.json",
+      "abi": "abi/FxMarketV2.json"
+    },
+    "wstETH_FractionalToken": {
+      "address": "0xD6B8162e2fb9F3EFf09bb8598ca0C8958E33A23D",
+      "verified": true,
+      "source": "https://github.com/AladdinDAO/aladdin-v3-contracts/blob/main/deployments/mainnet/Fx.FxUSD.json",
+      "abi": "abi/FxFractionalTokenV2.json"
+    },
+    "wstETH_LeveragedToken": {
+      "address": "0x5a097b014C547718e79030a077A91Ae37679EfF5",
+      "verified": true,
+      "source": "https://github.com/AladdinDAO/aladdin-v3-contracts/blob/main/deployments/mainnet/Fx.FxUSD.json",
+      "abi": "abi/FxLeveragedTokenV2.json"
+    },
+    "sfrxETH_Treasury": {
+      "address": "0xcfEEfF214b256063110d3236ea12Db49d2dF2359",
+      "verified": true,
+      "source": "https://github.com/AladdinDAO/aladdin-v3-contracts/blob/main/deployments/mainnet/Fx.FxUSD.json",
+      "abi": "abi/FxTreasuryV2.json"
+    },
+    "sfrxETH_Market": {
+      "address": "0x714B853b3bA73E439c652CfE79660F329E6ebB42",
+      "verified": true,
+      "source": "https://github.com/AladdinDAO/aladdin-v3-contracts/blob/main/deployments/mainnet/Fx.FxUSD.json",
+      "abi": "abi/FxMarketV2.json"
+    },
+    "sfrxETH_FractionalToken": {
+      "address": "0xa87F04c9743Fd1933F82bdDec9692e9D97673769",
+      "verified": true,
+      "source": "https://github.com/AladdinDAO/aladdin-v3-contracts/blob/main/deployments/mainnet/Fx.FxUSD.json",
+      "abi": "abi/FxFractionalTokenV2.json"
+    },
+    "sfrxETH_LeveragedToken": {
+      "address": "0x2bb0C32101456F5960d4e994Bac183Fe0dc6C82c",
+      "verified": true,
+      "source": "https://github.com/AladdinDAO/aladdin-v3-contracts/blob/main/deployments/mainnet/Fx.FxUSD.json",
+      "abi": "abi/FxLeveragedTokenV2.json"
+    },
+    "weETH_Treasury": {
+      "address": "0x781BA968d5cc0b40EB592D5c8a9a3A4000063885",
+      "verified": true,
+      "source": "https://github.com/AladdinDAO/aladdin-v3-contracts/blob/main/deployments/mainnet/Fx.FxUSD.json",
+      "abi": "abi/FxTreasuryV2.json"
+    },
+    "weETH_Market": {
+      "address": "0x267C6A96Db7422faA60Aa7198FfEeeC4169CD65f",
+      "verified": true,
+      "source": "https://github.com/AladdinDAO/aladdin-v3-contracts/blob/main/deployments/mainnet/Fx.FxUSD.json",
+      "abi": "abi/FxMarketV2.json"
+    },
+    "weETH_FractionalToken": {
+      "address": "0x9216272158F563488FfC36AFB877acA2F265C560",
+      "verified": true,
+      "source": "https://github.com/AladdinDAO/aladdin-v3-contracts/blob/main/deployments/mainnet/Fx.FxUSD.json",
+      "abi": "abi/FxFractionalTokenV2.json"
+    },
+    "weETH_LeveragedToken": {
+      "address": "0xACB3604AaDF26e6C0bb8c720420380629A328d2C",
+      "verified": true,
+      "source": "https://github.com/AladdinDAO/aladdin-v3-contracts/blob/main/deployments/mainnet/Fx.FxUSD.json",
+      "abi": "abi/FxLeveragedTokenV2.json"
+    },
+    "ezETH_Treasury": {
+      "address": "0xC0c3700A8A5b5e6783C50EA93Ce47c337bE3e73d",
+      "verified": true,
+      "source": "https://github.com/AladdinDAO/aladdin-v3-contracts/blob/main/deployments/mainnet/Fx.FxUSD.json"
+    },
+    "ezETH_Market": {
+      "address": "0xe7b9c7c9cA85340b8c06fb805f7775e3015108dB",
+      "verified": true,
+      "source": "https://github.com/AladdinDAO/aladdin-v3-contracts/blob/main/deployments/mainnet/Fx.FxUSD.json"
     }
   },
   "sepolia": {},
-  "_sepolia_note": "fxUSD has no Sepolia deployment."
+  "_sepolia_note": "fx Protocol / fxUSD does not have a Sepolia deployment per https://docs.aladdin.club/fx-protocol/.",
+  "_source_note": "All addresses sourced from AladdinDAO/aladdin-v3-contracts:deployments/mainnet/Fx.FxUSD.json. The fxUSD token at 0x085780639CC2cACd35E474e71f4d000e2405d8f6 matches the Phase 1b scaffold value (no correction needed); the per-market Treasury/Market/FT/XT contracts are added in this curation pass."
 }

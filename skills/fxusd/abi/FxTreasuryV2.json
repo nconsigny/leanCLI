@@ -1,0 +1,430 @@
+{
+  "_source": "https://raw.githubusercontent.com/AladdinDAO/aladdin-v3-contracts/main/contracts/interfaces/f(x)/IFxTreasuryV2.sol",
+  "_contractName": "FxTreasuryV2",
+  "abi": [
+    {
+      "type": "function",
+      "name": "priceOracle",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "baseToken",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "fToken",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "xToken",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "referenceBaseTokenPrice",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "currentBaseTokenPrice",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "isBaseTokenPriceValid",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "totalBaseToken",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "strategy",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "strategyUnderlying",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "collateralRatio",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "isUnderCollateral",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "maxMintableFToken",
+      "inputs": [
+        {
+          "name": "newCollateralRatio",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "maxBaseIn",
+          "type": "uint256"
+        },
+        {
+          "name": "maxFTokenMintable",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "maxMintableXToken",
+      "inputs": [
+        {
+          "name": "newCollateralRatio",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "maxBaseIn",
+          "type": "uint256"
+        },
+        {
+          "name": "maxXTokenMintable",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "maxRedeemableFToken",
+      "inputs": [
+        {
+          "name": "newCollateralRatio",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "maxBaseOut",
+          "type": "uint256"
+        },
+        {
+          "name": "maxFTokenRedeemable",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "maxRedeemableXToken",
+      "inputs": [
+        {
+          "name": "newCollateralRatio",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "maxBaseOut",
+          "type": "uint256"
+        },
+        {
+          "name": "maxXTokenRedeemable",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "leverageRatio",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getWrapppedValue",
+      "inputs": [
+        {
+          "name": "amount",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getUnderlyingValue",
+      "inputs": [
+        {
+          "name": "amount",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getRebalancePoolRatio",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getHarvesterRatio",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "initializeProtocol",
+      "inputs": [
+        {
+          "name": "baseIn",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "fTokenOut",
+          "type": "uint256"
+        },
+        {
+          "name": "xTokenOut",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "mintFToken",
+      "inputs": [
+        {
+          "name": "baseIn",
+          "type": "uint256"
+        },
+        {
+          "name": "recipient",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "fTokenOut",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "mintXToken",
+      "inputs": [
+        {
+          "name": "baseIn",
+          "type": "uint256"
+        },
+        {
+          "name": "recipient",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "xTokenOut",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "redeem",
+      "inputs": [
+        {
+          "name": "fTokenIn",
+          "type": "uint256"
+        },
+        {
+          "name": "xTokenIn",
+          "type": "uint256"
+        },
+        {
+          "name": "owner",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "baseOut",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "settle",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "transferToStrategy",
+      "inputs": [
+        {
+          "name": "amount",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "notifyStrategyProfit",
+      "inputs": [
+        {
+          "name": "amount",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "harvest",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    }
+  ]
+}
