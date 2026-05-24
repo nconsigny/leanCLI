@@ -65,12 +65,26 @@ where
   buildSystemPromptWithSkills
       (cfg : AgentConfig) (tools : List ToolDoc)
       (alwaysOnSkills triggerSkills : List String) : String :=
+    buildSystemPromptFull cfg tools "" alwaysOnSkills triggerSkills
+  /-- Build the system prompt with an optional rendered memory
+      block. The order is
+      `persona → memory → always-on skills → trigger skills →
+       operational rules → tool docs`. The `memoryRendered` string
+      is included verbatim when non-empty and omitted entirely
+      (no header, no marker) when empty — keeps the prompt clean
+      for fresh installs. -/
+  buildSystemPromptFull
+      (cfg : AgentConfig) (tools : List ToolDoc)
+      (memoryRendered : String)
+      (alwaysOnSkills triggerSkills : List String) : String :=
     let toolHeader := "TOOLS AVAILABLE (call by name; do not invent tool names):"
     let toolBlock :=
       if tools.isEmpty then
         "  (no tools enabled for this invocation; you are answer-only)"
       else
         String.intercalate "\n" (tools.map renderTool)
+    let memoryBlock :=
+      if memoryRendered.trimAscii.toString.isEmpty then [] else [memoryRendered]
     let alwaysOnBlock :=
       if alwaysOnSkills.isEmpty then []
       else [String.intercalate "\n\n" alwaysOnSkills]
@@ -79,6 +93,7 @@ where
       else [String.intercalate "\n\n" triggerSkills]
     String.intercalate "\n\n"
       ([ kohakuPersona ]
+       ++ memoryBlock
        ++ alwaysOnBlock
        ++ triggerBlock
        ++ [ operationalRules cfg
@@ -91,5 +106,16 @@ def buildSystemPromptWithSkills
     (alwaysOnSkills triggerSkills : List String) : String :=
   buildSystemPrompt.buildSystemPromptWithSkills
     cfg tools alwaysOnSkills triggerSkills
+
+/-- Convenience exporter for the full variant including memory.
+    The Phase-1c agent daemon uses this directly; Phase 0 / 1a / 1b
+    callers can keep using the no-memory entrypoint and pass
+    `""` here is equivalent to the older entrypoints. -/
+def buildSystemPromptFull
+    (cfg : AgentConfig) (tools : List ToolDoc)
+    (memoryRendered : String)
+    (alwaysOnSkills triggerSkills : List String) : String :=
+  buildSystemPrompt.buildSystemPromptFull
+    cfg tools memoryRendered alwaysOnSkills triggerSkills
 
 end LeanKohaku.Agent.Prompt

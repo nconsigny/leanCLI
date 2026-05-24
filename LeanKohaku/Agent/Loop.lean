@@ -1,6 +1,7 @@
 import LeanKohaku.Agent.State
 import LeanKohaku.Agent.Tools
 import LeanKohaku.Agent.Llm
+import LeanKohaku.Agent.Compression
 
 /-!
 # Bounded agent loop
@@ -68,8 +69,27 @@ where
       (rebuildSystem : Option (AgentState → IO String)) :
       IO (Except String AgentMessage) := do
     let mut s := s₀
+    let compressionPolicy : Compression.Policy := {}
     while s.steps < s.cfg.maxSteps do
       let tools := filterByAllowlist registry s.cfg.toolAllowlist
+      -- Token-budget compression. Graceful no-op on failure so a
+      -- compression error never crashes the agent — at worst the
+      -- model hits its own context window. Only the rebuild-callback
+      -- mode (`kohaku-agentd`) uses compression; one-shot
+      -- (`kohaku-agent`) skips it because its loops are bounded
+      -- short by `maxSteps`.
+      if rebuildSystem.isSome then
+        match ← Compression.maybeCompress s.cfg compressionPolicy s.messages with
+        | .error e => IO.eprintln s!"[compression] skipped: {e}"
+        | .ok msgs' =>
+            if msgs'.size ≠ s.messages.size then
+              match ← IO.getEnv "KOHAKU_LOG_PROMPT" with
+              | some v =>
+                  if v ≠ "" && v ≠ "0" then
+                    IO.eprintln s!"[compression] compressed transcript: \
+{s.messages.size} → {msgs'.size} messages"
+              | none => pure ()
+              s := { s with messages := msgs' }
       match rebuildSystem with
       | none => pure ()
       | some f =>
