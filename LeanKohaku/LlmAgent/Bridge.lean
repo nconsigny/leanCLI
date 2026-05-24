@@ -254,10 +254,22 @@ private def callPersistent (req : Request) : IO Response := do
         (getField "prompt" req.params >>= asString).getD ""
       if prompt.isEmpty then
         return Response.crash "llm.parseIntent: missing prompt" 0
-      let metadataJson : Json :=
+      -- Phase 1c: propagate the incognito flag from the caller's
+      -- env into the agent daemon's create_session metadata. When
+      -- the agent daemon sees `incognito:true`, it skips session
+      -- DB writes AND the auto memory extraction on close.
+      let incognito : Bool ← do
+        match ← IO.getEnv "LEAN_KOHAKU_INCOGNITO" with
+        | none => pure false
+        | some v =>
+            let t := v.trimAscii.toString
+            pure (t ≠ "" && t ≠ "0")
+      let baseMeta : Array (String × Json) :=
         match getField "chainId" req.params with
-        | some j => .obj #[("chainId", j)]
-        | none   => .obj #[]
+        | some j => #[("chainId", j)]
+        | none   => #[]
+      let metadataJson : Json :=
+        .obj (baseMeta ++ (if incognito then #[("incognito", .bool true)] else #[]))
       let createFrame : String :=
         compact <| .obj #[
           ("op", .str "create_session"),

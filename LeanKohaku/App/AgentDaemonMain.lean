@@ -5,6 +5,7 @@ import LeanKohaku.Agent.Registry
 import LeanKohaku.Agent.Loop
 import LeanKohaku.Agent.Session
 import LeanKohaku.Agent.Skills
+import LeanKohaku.Agent.Memory
 import LeanKohaku.Agent.ToolDefs.Protocols
 import LeanKohaku.Encoding.Json
 import LeanKohaku.Transport.Uds
@@ -126,11 +127,17 @@ private def chmodSessionDb (path : String) : IO Unit := do
     the entire daemon lifetime; `inFlight` is a simple list of
     session ids currently running a turn; `skills` is the live
     skills registry (Phase 1b), swapped under all readers by the
-    `reload` op without restart. -/
+    `reload` op without restart; `memoryRef` holds the parsed
+    MEMORY.md content (Phase 1c) so every turn can include it in
+    the system prompt without a per-turn file read; `incognito` is
+    the set of session ids that opted into incognito mode at
+    `create_session` time. -/
 private structure DaemonState where
-  db       : Session.Handle
-  inFlight : IO.Ref (List Session.SessionId)
-  skills   : ToolDefs.Protocols.RegistryRef
+  db        : Session.Handle
+  inFlight  : IO.Ref (List Session.SessionId)
+  skills    : ToolDefs.Protocols.RegistryRef
+  memoryRef : IO.Ref Memory.Memory
+  incognito : IO.Ref (List Session.SessionId)
 
 /-- Mark `sid` busy if it isn't already. Returns `true` when the
     caller has acquired the per-session lock; `false` if another
@@ -142,6 +149,25 @@ private def tryAcquireSession (st : DaemonState) (sid : Session.SessionId) : IO 
 
 private def releaseSession (st : DaemonState) (sid : Session.SessionId) : IO Unit :=
   st.inFlight.modify fun ids => ids.filter (· ≠ sid)
+
+/-- Mark `sid` as incognito. Idempotent. -/
+private def markIncognito (st : DaemonState) (sid : Session.SessionId) : IO Unit :=
+  st.incognito.modify fun ids => if ids.contains sid then ids else sid :: ids
+
+/-- True iff `sid` was registered as incognito at `create_session`
+    time. -/
+private def isIncognito (st : DaemonState) (sid : Session.SessionId) : IO Bool := do
+  let ids ← st.incognito.get
+  pure (ids.contains sid)
+
+/-- Persist a message to the session DB unless the session is
+    marked incognito. Incognito sessions are in-memory only — the
+    DB row was created so `session_id` has meaning, but no
+    `messages` rows are ever written. -/
+private def appendIfNotIncognito
+    (st : DaemonState) (sid : Session.SessionId) (m : AgentMessage) : IO Unit := do
+  if ← isIncognito st sid then pure ()
+  else Session.appendMessage st.db sid m
 
 private def okResp (result : Json) : Json :=
   .obj #[("ok", .bool true), ("result", result)]
@@ -188,12 +214,14 @@ private def collectMatchContext (msgs : Array AgentMessage) : String :=
   String.intercalate " " (lastUser :: toolBlobs)
 
 /-- Build the rebuild callback that produces the next system prompt.
-    Reads the live registry off `regRef` so a `reload` between turns
-    propagates immediately. -/
+    Reads the live registry and memory ref off `st` so a `reload`
+    or `update_memory` between turns propagates immediately. -/
 private def mkRebuildSystem
-    (regRef : ToolDefs.Protocols.RegistryRef) :
+    (regRef : ToolDefs.Protocols.RegistryRef)
+    (memRef : IO.Ref Memory.Memory) :
     AgentState → IO String := fun s => do
   let reg ← regRef.get
+  let mem ← memRef.get
   let visibleTools : List Prompt.ToolDoc :=
     Tools.toToolDocs (filterByAllowlist (Registry.defaultWithSkills regRef) s.cfg.toolAllowlist)
   let alwaysOn := Skills.alwaysOn reg
@@ -201,6 +229,7 @@ private def mkRebuildSystem
   let triggered := (Skills.matchTriggers reg ctx).toList.take maxTriggerSkills
   let alwaysOnRendered := alwaysOn.toList.map Skills.renderForPrompt
   let triggeredRendered := triggered.map Skills.renderForPrompt
+  let memoryRendered := Memory.renderForPrompt mem 1024
   -- Optional one-line stderr trace so operators can see what fired.
   -- Gated behind KOHAKU_LOG_PROMPT so the daemon log does not blow up
   -- on every turn.
@@ -209,10 +238,11 @@ private def mkRebuildSystem
       if v != "" && v != "0" then
         let names := (alwaysOn.toList.map (fun s => s.frontmatter.name)) ++
                      (triggered.map (fun s => s.frontmatter.name))
-        IO.eprintln s!"[skills] active: {String.intercalate "," names}"
+        let memTag := if memoryRendered.isEmpty then "no" else "yes"
+        IO.eprintln s!"[skills] active: {String.intercalate "," names} memory={memTag}"
   | none => pure ()
-  pure (Prompt.buildSystemPromptWithSkills s.cfg visibleTools
-          alwaysOnRendered triggeredRendered)
+  pure (Prompt.buildSystemPromptFull s.cfg visibleTools
+          memoryRendered alwaysOnRendered triggeredRendered)
 
 /-- Build a prompt transcript by loading session history and appending
     the new user prompt. Returns the message array plus the
@@ -263,15 +293,17 @@ private def opRunTurn (st : DaemonState) (params : Json) : IO Json := do
        let history ← Session.loadSession st.db sid
        let (transcript, userMsg) := buildTranscript st.skills cfg history prompt
        -- Persist the user turn FIRST so a crash mid-loop leaves a
-       -- replayable record on disk.
-       Session.appendMessage st.db sid userMsg
+       -- replayable record on disk. Incognito sessions skip the
+       -- write but still run the turn — see appendIfNotIncognito.
+       appendIfNotIncognito st sid userMsg
        let s₀ : AgentState := { messages := transcript, cfg := cfg }
-       let rebuild := mkRebuildSystem st.skills
+       let rebuild := mkRebuildSystem st.skills st.memoryRef
        let toolReg := Registry.defaultWithSkills st.skills
+       let incog ← isIncognito st sid
        match ← Loop.runOneShotWithRebuild s₀ toolReg (some rebuild) with
        | .error e => pure (errResp "agent" e)
        | .ok finalMsg => do
-           try Session.appendMessage st.db sid finalMsg
+           try appendIfNotIncognito st sid finalMsg
            catch _ => pure ()
            let raw := finalMsg.content.getD ""
            pure (okResp <| .obj #[
@@ -279,6 +311,7 @@ private def opRunTurn (st : DaemonState) (params : Json) : IO Json := do
              ("raw",        .str raw),
              ("backend",    .str "lean-agent"),
              ("model",      .str cfg.model),
+             ("incognito",  .bool incog),
              ("toolTurns",  .num (Int.ofNat finalMsg.toolCalls.length))
            ])
      catch e =>
@@ -287,18 +320,60 @@ private def opRunTurn (st : DaemonState) (params : Json) : IO Json := do
   releaseSession st sid
   pure result
 
-/-- Handle `create_session`. -/
+/-- Handle `create_session`. If the metadata carries
+    `{"incognito": true}`, the session id is registered in the
+    incognito set so subsequent `appendMessage` calls become
+    no-ops and `close_session` skips memory extraction. -/
 private def opCreateSession (st : DaemonState) (params : Json) : IO Json := do
   let metadata := (getField "metadata" params).getD (.obj #[])
   try
     let sid ← Session.createSession st.db metadata
+    -- Inspect incognito flag — it lives inside the metadata object.
+    let incog := (getField "incognito" metadata >>= asBool).getD false
+    if incog then markIncognito st sid
     return okResp <| .obj #[
-      ("session_id", .num (Int.ofNat sid))
+      ("session_id", .num (Int.ofNat sid)),
+      ("incognito",  .bool incog)
     ]
   catch e =>
     return errResp "io" (toString e)
 
-/-- Handle `close_session`. -/
+/-- Minimum message count below which auto-extraction is skipped.
+    Short sessions (single-shot lookups, errors) are rarely worth
+    summarising and the extraction round-trip adds latency. -/
+private def autoExtractMinMessages : Nat := 6
+
+/-- Run the memory extraction pipeline for `sid` against the
+    daemon's live memory ref. Returns a `Bool` indicating whether
+    the memory was updated. Failure is logged but not propagated —
+    the caller's response should still succeed. -/
+private def runExtraction (st : DaemonState) (sid : Session.SessionId) : IO Bool := do
+  try
+    let history ← Session.loadSession st.db sid
+    if history.size < autoExtractMinMessages then return false
+    let walletSocket ← resolveWalletSocket
+    let llmUrl ← resolveLlmUrl
+    let model  ← resolveModel
+    let cfg := buildCfg llmUrl model walletSocket st.skills (.obj #[])
+    let existing ← st.memoryRef.get
+    match ← Memory.extract cfg existing history with
+    | .error e =>
+        IO.eprintln s!"[memory] extraction failed for session {sid}: {e}"
+        pure false
+    | .ok newMem =>
+        Memory.save newMem
+        st.memoryRef.set newMem
+        IO.eprintln s!"[memory] extraction updated MEMORY.md for session {sid} \
+({newMem.raw.utf8ByteSize} bytes)"
+        pure true
+  catch e =>
+    IO.eprintln s!"[memory] extraction raised for session {sid}: {toString e}"
+    pure false
+
+/-- Handle `close_session`. Auto-triggers memory extraction on
+    non-incognito sessions of at least `autoExtractMinMessages`
+    messages. Extraction failure does NOT fail the close — it's a
+    graceful no-op. -/
 private def opCloseSession (st : DaemonState) (params : Json) : IO Json := do
   let some sidJ := getField "session_id" params
     | return errResp "bad_request" "close_session requires session_id"
@@ -306,9 +381,72 @@ private def opCloseSession (st : DaemonState) (params : Json) : IO Json := do
     | return errResp "bad_request" "session_id must be a non-negative integer"
   try
     Session.closeSessionRow st.db sidN
-    return okResp <| .obj #[("ok", .bool true)]
+    let incog ← isIncognito st sidN
+    let updated ←
+      if incog then pure false
+      else runExtraction st sidN
+    -- Drop the sid from the incognito set on close (no-op if not
+    -- present) so re-using the same numeric id never carries a
+    -- stale flag.
+    st.incognito.modify fun ids => ids.filter (· ≠ sidN)
+    return okResp <| .obj #[
+      ("ok",             .bool true),
+      ("memoryUpdated",  .bool updated),
+      ("incognito",      .bool incog)
+    ]
   catch e =>
     return errResp "io" (toString e)
+
+/-- Handle `extract_memory`. Forces an extraction round for the
+    given session id (or the latest closed session when omitted).
+    Refuses to extract from an incognito session. -/
+private def opExtractMemory (st : DaemonState) (params : Json) : IO Json := do
+  let some sidJ := getField "session_id" params
+    | return errResp "bad_request" "extract_memory requires session_id"
+  let some sidN := asNat sidJ
+    | return errResp "bad_request" "session_id must be a non-negative integer"
+  let incog ← isIncognito st sidN
+  if incog then
+    return errResp "incognito" "refusing to extract memory from an incognito session"
+  let updated ← runExtraction st sidN
+  let mem ← st.memoryRef.get
+  return okResp <| .obj #[
+    ("updated", .bool updated),
+    ("bytes",   .num (Int.ofNat mem.raw.utf8ByteSize))
+  ]
+
+/-- Handle `update_memory`. Used by `kohaku memory edit` and
+    `kohaku memory forget` — the CLI assembles the new content
+    locally and POSTs it; the daemon is the sole writer of
+    MEMORY.md. -/
+private def opUpdateMemory (st : DaemonState) (params : Json) : IO Json := do
+  let some contentJ := getField "content" params
+    | return errResp "bad_request" "update_memory requires content"
+  let some content := asString contentJ
+    | return errResp "bad_request" "content must be a string"
+  try
+    let mem ← st.memoryRef.get
+    let (filtered, dropped) := Memory.postFilter content
+    let newMem : Memory.Memory := { mem with raw := filtered }
+    Memory.save newMem
+    st.memoryRef.set newMem
+    return okResp <| .obj #[
+      ("bytes",   .num (Int.ofNat newMem.raw.utf8ByteSize)),
+      ("dropped", .num (Int.ofNat dropped))
+    ]
+  catch e =>
+    return errResp "io" (toString e)
+
+/-- Handle `show_memory`. Reads from the in-memory ref rather than
+    the file so the response is consistent with what the next
+    `run_turn` will see. -/
+private def opShowMemory (st : DaemonState) (_params : Json) : IO Json := do
+  let mem ← st.memoryRef.get
+  return okResp <| .obj #[
+    ("path",  .str mem.path.toString),
+    ("bytes", .num (Int.ofNat mem.raw.utf8ByteSize)),
+    ("raw",   .str mem.raw)
+  ]
 
 /-- Handle `search`. -/
 private def opSearch (st : DaemonState) (params : Json) : IO Json := do
@@ -364,6 +502,12 @@ def dispatch (st : DaemonState) (req : Json) : IO Json := do
       opSearch st req
   | "reload" =>
       opReload st req
+  | "extract_memory" =>
+      opExtractMemory st req
+  | "update_memory" =>
+      opUpdateMemory st req
+  | "show_memory" =>
+      opShowMemory st req
   | "" =>
       pure (errResp "bad_request" "missing op")
   | other =>
@@ -472,13 +616,20 @@ def main (args : List String) : IO UInt32 := do
   let initialSkills ← Skills.loadRegistry skillsDir
   let skillsRef ← IO.mkRef initialSkills
 
+  let memoryPath ← Memory.defaultPath
+  let initialMemory ← Memory.load memoryPath
+  let memoryRef ← IO.mkRef initialMemory
+
   let inFlight ← IO.mkRef ([] : List Session.SessionId)
+  let incognito ← IO.mkRef ([] : List Session.SessionId)
   let st : DaemonState := {
-    db := db, inFlight := inFlight, skills := skillsRef
+    db := db, inFlight := inFlight, skills := skillsRef,
+    memoryRef := memoryRef, incognito := incognito
   }
 
   IO.eprintln s!"kohaku-agentd: db at {dbPath}"
   IO.eprintln s!"kohaku-agentd: skills at {skillsDir} ({initialSkills.skills.size} loaded)"
+  IO.eprintln s!"kohaku-agentd: memory at {memoryPath} ({initialMemory.raw.utf8ByteSize} bytes)"
   IO.eprintln s!"kohaku-agentd: listening on {socket}"
 
   let listener ← bind socket
