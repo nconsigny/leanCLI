@@ -1,0 +1,62 @@
+[Unit]
+# kohaku-agentd — user-mode systemd unit for the persistent Lean-native
+# LLM agent daemon (Phase 1a). Stays up for the user's session and
+# serves session-scoped chat turns over
+# $XDG_RUNTIME_DIR/leankohaku/agent.sock, backed by an SQLite session
+# store at $XDG_DATA_HOME/leankohaku/sessions.db.
+#
+# Trust contract carry-forward from Phase 0:
+#   * No signing path; the agent proposes, the wallet daemon signs.
+#   * Tool dispatch is allowlist-gated in Lean (Agent.Tools.dispatch).
+#   * HTTP egress is loopback-only at the C layer (c/lean_http).
+#
+# kohaku-agentd does NOT depend on systemd activation. The companion
+# LlmAgent.Bridge auto-detects the socket; absent the daemon, the
+# wallet daemon's chat.draft path falls back to the Phase 0 one-shot
+# kohaku-agent binary. So this unit is optional convenience: it lets
+# the agent keep session history across calls instead of starting
+# from scratch every time.
+#
+# Unlike kohaku-daemon, this unit DOES carry an [Install] section
+# because persistent sessions only make sense if the daemon is up
+# whenever the user is logged in.
+Description=Kohaku Agent Daemon (persistent LLM sessions)
+After=kohaku-daemon.service
+# Soft dependency: agentd is useful without the wallet daemon (it can
+# still create / search sessions), so use Wants= rather than Requires=
+# to keep the agent reachable for read-only ops even if the wallet
+# daemon is intentionally stopped.
+Wants=kohaku-daemon.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/kohaku-agentd
+
+# Picks up KOHAKU_AGENT_LLM_URL, KOHAKU_AGENT_MODEL, etc. The leading
+# `-` makes the unit tolerant of a missing file.
+EnvironmentFile=-%h/.config/leankohaku/agent.env
+
+Restart=on-failure
+RestartSec=2
+
+StandardOutput=journal
+StandardError=journal
+
+# Hardening — broader than kohaku-daemon's because the agent does NOT
+# need to touch the user's wallet state. It only writes
+# %h/.local/share/leankohaku and reads %t/leankohaku.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=true
+LockPersonality=yes
+# Allow writes to the XDG state dir + the UDS runtime dir only.
+ReadWritePaths=%h/.local/share/leankohaku %t/leankohaku
+# UDS + loopback HTTP only — no raw sockets, no IPC besides Unix.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+KillMode=control-group
+TimeoutStopSec=10
+
+[Install]
+WantedBy=default.target
