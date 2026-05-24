@@ -197,38 +197,36 @@ private def opRunTurn (st : DaemonState) (params : Json) : IO Json := do
   let acquired ← tryAcquireSession st sid
   if !acquired then
     return errResp "busy" s!"session {sid} already has a run_turn in flight"
-  try
-    let walletSocket ← resolveWalletSocket
-    let llmUrl ← resolveLlmUrl
-    let model  ← resolveModel
-    let cfg := buildCfg llmUrl model walletSocket params
-
-    -- Load history. If the session doesn't exist we surface a
-    -- structured error rather than letting the upstream UNIQUE check
-    -- fail on insert later.
-    let history ← Session.loadSession st.db sid
-    let (transcript, userMsg) := buildTranscript cfg history prompt
-
-    -- Persist the user turn FIRST so a crash mid-loop leaves a
-    -- replayable record on disk.
-    Session.appendMessage st.db sid userMsg
-
-    let s₀ : AgentState := { messages := transcript, cfg := cfg }
-    match ← Loop.runOneShot s₀ Registry.default with
-    | .error e =>
-        return errResp "agent" e
-    | .ok finalMsg =>
-        Session.appendMessage st.db sid finalMsg
-        let raw := finalMsg.content.getD ""
-        return okResp <| .obj #[
-          ("session_id", .num (Int.ofNat sid)),
-          ("raw",        .str raw),
-          ("backend",    .str "lean-agent"),
-          ("model",      .str cfg.model),
-          ("toolTurns",  .num (Int.ofNat finalMsg.toolCalls.length))
-        ]
-  finally
-    releaseSession st sid
+  let result ←
+    (try
+       let walletSocket ← resolveWalletSocket
+       let llmUrl ← resolveLlmUrl
+       let model  ← resolveModel
+       let cfg := buildCfg llmUrl model walletSocket params
+       let history ← Session.loadSession st.db sid
+       let (transcript, userMsg) := buildTranscript cfg history prompt
+       -- Persist the user turn FIRST so a crash mid-loop leaves a
+       -- replayable record on disk.
+       Session.appendMessage st.db sid userMsg
+       let s₀ : AgentState := { messages := transcript, cfg := cfg }
+       match ← Loop.runOneShot s₀ Registry.default with
+       | .error e => pure (errResp "agent" e)
+       | .ok finalMsg => do
+           try Session.appendMessage st.db sid finalMsg
+           catch _ => pure ()
+           let raw := finalMsg.content.getD ""
+           pure (okResp <| .obj #[
+             ("session_id", .num (Int.ofNat sid)),
+             ("raw",        .str raw),
+             ("backend",    .str "lean-agent"),
+             ("model",      .str cfg.model),
+             ("toolTurns",  .num (Int.ofNat finalMsg.toolCalls.length))
+           ])
+     catch e =>
+       pure (errResp "io" s!"run_turn raised: {toString e}")
+    : IO Json)
+  releaseSession st sid
+  pure result
 
 /-- Handle `create_session`. -/
 private def opCreateSession (st : DaemonState) (params : Json) : IO Json := do
@@ -333,14 +331,22 @@ def handleConn (st : DaemonState) (conn : Conn) : IO Unit := do
 -- ref flips). The wallet daemon's acceptLoop has the same shape;
 -- a termination proof would have to lift the runtime ref into the
 -- type system. Tagged PHASE_N like the wallet daemon's.
+--
+-- Connections are handled SERIALLY in Phase 1a, not on `IO.asTask`,
+-- because (a) the SQLite handle is shared, and serialising at the
+-- accept loop is a simpler concurrency story than per-connection
+-- locking; (b) `Loop.runOneShot` and its downstream libcurl calls
+-- have been observed to misbehave under `IO.asTask` in this build,
+-- and serial dispatch avoids the issue without adding new
+-- dependencies. The single-flight per session guard
+-- (`tryAcquireSession`) is kept because parallel turns are still a
+-- 1b/1d roadmap item.
 partial def acceptLoop (st : DaemonState) (listener : Listener)
     (shutdownRef : IO.Ref Bool) : IO Unit := do
   if (← shutdownRef.get) then
     return
   let conn ← accept listener
-  -- One-request-per-conn: a misbehaving client cannot starve other
-  -- sessions. handleConn closes the conn in a finally.
-  discard <| IO.asTask (handleConn st conn)
+  handleConn st conn
   acceptLoop st listener shutdownRef
 
 /-- Trap SIGTERM / SIGINT into the shutdown ref so the accept loop
