@@ -1,26 +1,23 @@
-# `exactInput(tuple)`
+# exactInput
 
-Multi-hop exact-input V3 swap. The `path` is a packed bytes
-sequence `tokenA || fee1 || tokenB || fee2 || tokenC` etc. Use this
-only when the pair has no good direct pool — multi-hop adds gas and
-risk for marginal price improvement.
+**Signature**: `exactInput((bytes path,address recipient,uint256 amountIn,uint256 amountOutMinimum) params)`
 
-`params` tuple fields:
+**Selector**: `0xb858183f`
 
-| Field | Type | Notes |
-|---|---|---|
-| `path` | bytes | Packed `(address,uint24)*` ending in a `address`. |
-| `recipient` | address | |
-| `amountIn` | uint256 | |
-| `amountOutMinimum` | uint256 | **Must be > 0.** |
+**Mutability**: payable
 
-Agent must surface the full hop sequence in the ConfirmGate. A
-multi-hop swap whose hops the agent cannot enumerate is a refusal.
+**Contract**: `SwapRouter02` (Uniswap)
 
-## ABI
+## Inputs
+- `params` (`(bytes path,address recipient,uint256 amountIn,uint256 amountOutMinimum)`): TODO(curator): describe
 
-* stateMutability: `payable`
-* inputs:
-  - `params` : `tuple`
-* outputs:
-  - `amountOut` : `uint256`
+## Outputs
+- `amountOut` (`uint256`): TODO(curator): describe
+
+## What it does
+
+See `bridge/clearsign/registry/uniswap-v3-swap-router-02.json` for the canonical ERC-7730 decoded view shown to the user at signing time.
+
+## Security notes
+
+TODO(curator): approval surface, slippage, recipient checks, callbacks, multicall framing.

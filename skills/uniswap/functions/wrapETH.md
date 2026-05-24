@@ -1,11 +1,23 @@
-# `wrapETH(uint256)`
+# wrapETH
 
-Wraps `value` ETH from the call's `msg.value` into WETH held by
-the router. Used as the head of a V3 swap whose input is ETH and
-the user wants to combine the wrap + swap in one tx via `multicall`.
+**Signature**: `wrapETH(uint256 value)`
 
-## ABI
+**Selector**: `0x1c58db4f`
 
-* stateMutability: `payable`
-* inputs:
-  - `value` : `uint256`
+**Mutability**: payable
+
+**Contract**: `SwapRouter02` (Uniswap)
+
+## Inputs
+- `value` (`uint256`): TODO(curator): describe
+
+## Outputs
+- (none)
+
+## What it does
+
+TODO(curator): operational semantics for `SwapRouter02.wrapETH` — see <https://docs.uniswap.org/contracts/v3/reference/periphery/SwapRouter>.
+
+## Security notes
+
+TODO(curator): approval surface, slippage, recipient checks, callbacks, multicall framing.

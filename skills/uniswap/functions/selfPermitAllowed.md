@@ -1,19 +1,28 @@
-# `selfPermitAllowed(address,uint256,uint256,uint8,bytes32,bytes32)`
+# selfPermitAllowed
 
-`selfPermitAllowed(address,uint256,uint256,uint8,bytes32,bytes32)`
+**Signature**: `selfPermitAllowed(address token,uint256 nonce,uint256 expiry,uint8 v,bytes32 r,bytes32 s)`
 
-TODO(curator): document semantics, argument constraints, agent
-refusals, and any cross-references to other functions in this skill.
+**Selector**: `0x4659a494`
 
-Source: `abi/SwapRouter02.json`.
+**Mutability**: payable
 
-## ABI
+**Contract**: `SwapRouter02` (Uniswap)
 
-* stateMutability: `payable`
-* inputs:
-  - `token` : `address`
-  - `nonce` : `uint256`
-  - `expiry` : `uint256`
-  - `v` : `uint8`
-  - `r` : `bytes32`
-  - `s` : `bytes32`
+## Inputs
+- `token` (`address`): TODO(curator): describe
+- `nonce` (`uint256`): TODO(curator): describe
+- `expiry` (`uint256`): TODO(curator): describe
+- `v` (`uint8`): TODO(curator): describe
+- `r` (`bytes32`): TODO(curator): describe
+- `s` (`bytes32`): TODO(curator): describe
+
+## Outputs
+- (none)
+
+## What it does
+
+TODO(curator): operational semantics for `SwapRouter02.selfPermitAllowed` — see <https://docs.uniswap.org/contracts/v3/reference/periphery/SwapRouter>.
+
+## Security notes
+
+TODO(curator): approval surface, slippage, recipient checks, callbacks, multicall framing.

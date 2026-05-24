@@ -1,14 +1,23 @@
-# `approveZeroThenMax(address)`
+# approveZeroThenMax
 
-`approveZeroThenMax(address)`
+**Signature**: `approveZeroThenMax(address token)`
 
-TODO(curator): document semantics, argument constraints, agent
-refusals, and any cross-references to other functions in this skill.
+**Selector**: `0x639d71a9`
 
-Source: `abi/SwapRouter02.json`.
+**Mutability**: payable
 
-## ABI
+**Contract**: `SwapRouter02` (Uniswap)
 
-* stateMutability: `payable`
-* inputs:
-  - `token` : `address`
+## Inputs
+- `token` (`address`): TODO(curator): describe
+
+## Outputs
+- (none)
+
+## What it does
+
+TODO(curator): operational semantics for `SwapRouter02.approveZeroThenMax` — see <https://docs.uniswap.org/contracts/v3/reference/periphery/SwapRouter>.
+
+## Security notes
+
+TODO(curator): approval surface, slippage, recipient checks, callbacks, multicall framing.

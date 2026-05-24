@@ -1,16 +1,23 @@
-# `increaseLiquidity(tuple)`
+# increaseLiquidity
 
-`increaseLiquidity(tuple)`
+**Signature**: `increaseLiquidity((address token0,address token1,uint256 tokenId,uint256 amount0Min,uint256 amount1Min) params)`
 
-TODO(curator): document semantics, argument constraints, agent
-refusals, and any cross-references to other functions in this skill.
+**Selector**: `0xf100b205`
 
-Source: `abi/SwapRouter02.json`.
+**Mutability**: payable
 
-## ABI
+**Contract**: `SwapRouter02` (Uniswap)
 
-* stateMutability: `payable`
-* inputs:
-  - `params` : `tuple`
-* outputs:
-  - `result` : `bytes`
+## Inputs
+- `params` (`(address token0,address token1,uint256 tokenId,uint256 amount0Min,uint256 amount1Min)`): TODO(curator): describe
+
+## Outputs
+- `result` (`bytes`): TODO(curator): describe
+
+## What it does
+
+TODO(curator): operational semantics for `SwapRouter02.increaseLiquidity` — see <https://docs.uniswap.org/contracts/v3/reference/periphery/SwapRouter>.
+
+## Security notes
+
+TODO(curator): approval surface, slippage, recipient checks, callbacks, multicall framing.

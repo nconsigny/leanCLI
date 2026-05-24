@@ -1,16 +1,25 @@
-# `uniswapV3SwapCallback(int256,int256,bytes)`
+# uniswapV3SwapCallback
 
-`uniswapV3SwapCallback(int256,int256,bytes)`
+**Signature**: `uniswapV3SwapCallback(int256 amount0Delta,int256 amount1Delta,bytes _data)`
 
-TODO(curator): document semantics, argument constraints, agent
-refusals, and any cross-references to other functions in this skill.
+**Selector**: `0xfa461e33`
 
-Source: `abi/SwapRouter02.json`.
+**Mutability**: nonpayable
 
-## ABI
+**Contract**: `SwapRouter02` (Uniswap)
 
-* stateMutability: `nonpayable`
-* inputs:
-  - `amount0Delta` : `int256`
-  - `amount1Delta` : `int256`
-  - `_data` : `bytes`
+## Inputs
+- `amount0Delta` (`int256`): TODO(curator): describe
+- `amount1Delta` (`int256`): TODO(curator): describe
+- `_data` (`bytes`): TODO(curator): describe
+
+## Outputs
+- (none)
+
+## What it does
+
+TODO(curator): operational semantics for `SwapRouter02.uniswapV3SwapCallback` — see <https://docs.uniswap.org/contracts/v3/reference/periphery/SwapRouter>.
+
+## Security notes
+
+TODO(curator): approval surface, slippage, recipient checks, callbacks, multicall framing.

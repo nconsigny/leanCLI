@@ -1,19 +1,26 @@
-# `swapTokensForExactTokens(uint256,uint256,address[],address)`
+# swapTokensForExactTokens
 
-`swapTokensForExactTokens(uint256,uint256,address[],address)`
+**Signature**: `swapTokensForExactTokens(uint256 amountOut,uint256 amountInMax,address[] path,address to)`
 
-TODO(curator): document semantics, argument constraints, agent
-refusals, and any cross-references to other functions in this skill.
+**Selector**: `0x42712a67`
 
-Source: `abi/SwapRouter02.json`.
+**Mutability**: payable
 
-## ABI
+**Contract**: `SwapRouter02` (Uniswap)
 
-* stateMutability: `payable`
-* inputs:
-  - `amountOut` : `uint256`
-  - `amountInMax` : `uint256`
-  - `path` : `address[]`
-  - `to` : `address`
-* outputs:
-  - `amountIn` : `uint256`
+## Inputs
+- `amountOut` (`uint256`): TODO(curator): describe
+- `amountInMax` (`uint256`): TODO(curator): describe
+- `path` (`address[]`): TODO(curator): describe
+- `to` (`address`): TODO(curator): describe
+
+## Outputs
+- `amountIn` (`uint256`): TODO(curator): describe
+
+## What it does
+
+TODO(curator): operational semantics for `SwapRouter02.swapTokensForExactTokens` — see <https://docs.uniswap.org/contracts/v3/reference/periphery/SwapRouter>.
+
+## Security notes
+
+TODO(curator): approval surface, slippage, recipient checks, callbacks, multicall framing.

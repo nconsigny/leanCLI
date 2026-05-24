@@ -1,34 +1,23 @@
-# `exactOutputSingle(tuple)`
+# exactOutputSingle
 
-Single-pool exact-output V3 swap. The user wants *exactly*
-`amountOut` of `tokenOut` and is willing to spend up to
-`amountInMaximum` of `tokenIn`. Use when the user phrases the trade
-in terms of the output ("I need 1000 USDC").
+**Signature**: `exactOutputSingle((address tokenIn,address tokenOut,uint24 fee,address recipient,uint256 amountOut,uint256 amountInMaximum,uint160 sqrtPriceLimitX96) params)`
 
-`params` tuple fields:
+**Selector**: `0x5023b4df`
 
-| Field | Type | Notes |
-|---|---|---|
-| `tokenIn` | address | |
-| `tokenOut` | address | |
-| `fee` | uint24 | One of 100/500/3000/10000. |
-| `recipient` | address | |
-| `amountOut` | uint256 | Exact output. |
-| `amountInMaximum` | uint256 | Cap. **Must be > 0 and finite.** |
-| `sqrtPriceLimitX96` | uint160 | 0 unless explicitly requested. |
+**Mutability**: payable
 
-Any unused `tokenIn` allowance returns to `msg.sender` after the
-swap. Pair with `refundETH()` inside `multicall` for ETH-in.
+**Contract**: `SwapRouter02` (Uniswap)
 
-Agent refusals:
+## Inputs
+- `params` (`(address tokenIn,address tokenOut,uint24 fee,address recipient,uint256 amountOut,uint256 amountInMaximum,uint160 sqrtPriceLimitX96)`): TODO(curator): describe
 
-* `amountInMaximum` left at `uint256.max`. Always require a real
-  cap.
+## Outputs
+- `amountIn` (`uint256`): TODO(curator): describe
 
-## ABI
+## What it does
 
-* stateMutability: `payable`
-* inputs:
-  - `params` : `tuple`
-* outputs:
-  - `amountIn` : `uint256`
+TODO(curator): operational semantics for `SwapRouter02.exactOutputSingle` — see <https://docs.uniswap.org/contracts/v3/reference/periphery/SwapRouter>.
+
+## Security notes
+
+TODO(curator): approval surface, slippage, recipient checks, callbacks, multicall framing.

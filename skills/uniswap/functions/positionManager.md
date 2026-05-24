@@ -1,14 +1,23 @@
-# `positionManager()`
+# positionManager
 
-`positionManager()`
+**Signature**: `positionManager()`
 
-TODO(curator): document semantics, argument constraints, agent
-refusals, and any cross-references to other functions in this skill.
+**Selector**: `0x791b98bc`
 
-Source: `abi/SwapRouter02.json`.
+**Mutability**: view
 
-## ABI
+**Contract**: `SwapRouter02` (Uniswap)
 
-* stateMutability: `view`
-* outputs:
-  - `` : `address`
+## Inputs
+- (none)
+
+## Outputs
+- `(unnamed)` (`address`): TODO(curator): describe
+
+## What it does
+
+TODO(curator): operational semantics for `SwapRouter02.positionManager` — see <https://docs.uniswap.org/contracts/v3/reference/periphery/SwapRouter>.
+
+## Security notes
+
+TODO(curator): approval surface, slippage, recipient checks, callbacks, multicall framing.

@@ -1,15 +1,24 @@
-# `pull(address,uint256)`
+# pull
 
-`pull(address,uint256)`
+**Signature**: `pull(address token,uint256 value)`
 
-TODO(curator): document semantics, argument constraints, agent
-refusals, and any cross-references to other functions in this skill.
+**Selector**: `0xf2d5d56b`
 
-Source: `abi/SwapRouter02.json`.
+**Mutability**: payable
 
-## ABI
+**Contract**: `SwapRouter02` (Uniswap)
 
-* stateMutability: `payable`
-* inputs:
-  - `token` : `address`
-  - `value` : `uint256`
+## Inputs
+- `token` (`address`): TODO(curator): describe
+- `value` (`uint256`): TODO(curator): describe
+
+## Outputs
+- (none)
+
+## What it does
+
+TODO(curator): operational semantics for `SwapRouter02.pull` — see <https://docs.uniswap.org/contracts/v3/reference/periphery/SwapRouter>.
+
+## Security notes
+
+TODO(curator): approval surface, slippage, recipient checks, callbacks, multicall framing.

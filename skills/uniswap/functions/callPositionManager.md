@@ -1,16 +1,23 @@
-# `callPositionManager(bytes)`
+# callPositionManager
 
-`callPositionManager(bytes)`
+**Signature**: `callPositionManager(bytes data)`
 
-TODO(curator): document semantics, argument constraints, agent
-refusals, and any cross-references to other functions in this skill.
+**Selector**: `0xb3a2af13`
 
-Source: `abi/SwapRouter02.json`.
+**Mutability**: payable
 
-## ABI
+**Contract**: `SwapRouter02` (Uniswap)
 
-* stateMutability: `payable`
-* inputs:
-  - `data` : `bytes`
-* outputs:
-  - `result` : `bytes`
+## Inputs
+- `data` (`bytes`): TODO(curator): describe
+
+## Outputs
+- `result` (`bytes`): TODO(curator): describe
+
+## What it does
+
+TODO(curator): operational semantics for `SwapRouter02.callPositionManager` — see <https://docs.uniswap.org/contracts/v3/reference/periphery/SwapRouter>.
+
+## Security notes
+
+TODO(curator): approval surface, slippage, recipient checks, callbacks, multicall framing.

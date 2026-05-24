@@ -1,17 +1,24 @@
-# `getApprovalType(address,uint256)`
+# getApprovalType
 
-`getApprovalType(address,uint256)`
+**Signature**: `getApprovalType(address token,uint256 amount)`
 
-TODO(curator): document semantics, argument constraints, agent
-refusals, and any cross-references to other functions in this skill.
+**Selector**: `0xdee00f35`
 
-Source: `abi/SwapRouter02.json`.
+**Mutability**: nonpayable
 
-## ABI
+**Contract**: `SwapRouter02` (Uniswap)
 
-* stateMutability: `nonpayable`
-* inputs:
-  - `token` : `address`
-  - `amount` : `uint256`
-* outputs:
-  - `` : `uint8`
+## Inputs
+- `token` (`address`): TODO(curator): describe
+- `amount` (`uint256`): TODO(curator): describe
+
+## Outputs
+- `(unnamed)` (`uint8`): TODO(curator): describe
+
+## What it does
+
+TODO(curator): operational semantics for `SwapRouter02.getApprovalType` — see <https://docs.uniswap.org/contracts/v3/reference/periphery/SwapRouter>.
+
+## Security notes
+
+TODO(curator): approval surface, slippage, recipient checks, callbacks, multicall framing.
