@@ -122,6 +122,17 @@ lean_exe agent_session_test where
   root := `LeanKohaku.Agent.SessionTest
   supportInterpreter := true
 
+/--
+Long-running persistent agent daemon (Phase 1a). Listens on
+`$XDG_RUNTIME_DIR/leankohaku/agent.sock` and serves session-scoped
+chat turns backed by `LeanKohaku/Agent/Session.lean`. Mode resolution
+in `LlmAgent.Bridge.lean` auto-detects this socket and falls back to
+the Phase 0 one-shot path when it is missing.
+-/
+lean_exe kohaku_agentd where
+  root := `LeanKohaku.App.AgentDaemonMain
+  supportInterpreter := true
+
 lean_exe «leankohaku-eip712-check» where
   root := `LeanKohaku.App.Eip712Check
   supportInterpreter := true
