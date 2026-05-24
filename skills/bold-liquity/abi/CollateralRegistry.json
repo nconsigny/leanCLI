@@ -1,0 +1,184 @@
+{
+  "_source": "https://raw.githubusercontent.com/liquity/bold/main/contracts/src/Interfaces/ICollateralRegistry.sol",
+  "_contractName": "CollateralRegistry",
+  "_note": "ABI extracted from the Solidity interface; tuple expansion follows the struct definitions in the same file. Liquity Bold contracts are NOT published as compiled artifacts to npm; the canonical source is the GitHub repo.",
+  "abi": [
+    {
+      "type": "function",
+      "name": "baseRate",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "lastFeeOperationTime",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "redeemCollateral",
+      "inputs": [
+        {
+          "name": "_boldamount",
+          "type": "uint256"
+        },
+        {
+          "name": "_maxIterations",
+          "type": "uint256"
+        },
+        {
+          "name": "_maxFeePercentage",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "totalCollaterals",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getToken",
+      "inputs": [
+        {
+          "name": "_index",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "IERC20Metadata"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getTroveManager",
+      "inputs": [
+        {
+          "name": "_index",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "ITroveManager"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "boldToken",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "IBoldToken"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getRedemptionRate",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getRedemptionRateWithDecay",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getRedemptionRateForRedeemedAmount",
+      "inputs": [
+        {
+          "name": "_redeemAmount",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getRedemptionFeeWithDecay",
+      "inputs": [
+        {
+          "name": "_ETHDrawn",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getEffectiveRedemptionFeeInBold",
+      "inputs": [
+        {
+          "name": "_redeemAmount",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    }
+  ]
+}

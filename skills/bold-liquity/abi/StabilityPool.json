@@ -1,0 +1,306 @@
+{
+  "_source": "https://raw.githubusercontent.com/liquity/bold/main/contracts/src/Interfaces/IStabilityPool.sol",
+  "_contractName": "StabilityPool",
+  "_note": "ABI extracted from the Solidity interface; tuple expansion follows the struct definitions in the same file. Liquity Bold contracts are NOT published as compiled artifacts to npm; the canonical source is the GitHub repo.",
+  "abi": [
+    {
+      "type": "function",
+      "name": "boldToken",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "IBoldToken"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "troveManager",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "ITroveManager"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "provideToSP",
+      "inputs": [
+        {
+          "name": "_amount",
+          "type": "uint256"
+        },
+        {
+          "name": "_doClaim",
+          "type": "bool"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "withdrawFromSP",
+      "inputs": [
+        {
+          "name": "_amount",
+          "type": "uint256"
+        },
+        {
+          "name": "doClaim",
+          "type": "bool"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "claimAllCollGains",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "offset",
+      "inputs": [
+        {
+          "name": "_debt",
+          "type": "uint256"
+        },
+        {
+          "name": "_coll",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "deposits",
+      "inputs": [
+        {
+          "name": "_depositor",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "initialValue",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "stashedColl",
+      "inputs": [
+        {
+          "name": "_depositor",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getCollBalance",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getTotalBoldDeposits",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getYieldGainsOwed",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getYieldGainsPending",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getDepositorCollGain",
+      "inputs": [
+        {
+          "name": "_depositor",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getDepositorYieldGain",
+      "inputs": [
+        {
+          "name": "_depositor",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getDepositorYieldGainWithPending",
+      "inputs": [
+        {
+          "name": "_depositor",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getCompoundedBoldDeposit",
+      "inputs": [
+        {
+          "name": "_depositor",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "scaleToS",
+      "inputs": [
+        {
+          "name": "_scale",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "scaleToB",
+      "inputs": [
+        {
+          "name": "_scale",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "P",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "currentScale",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "P_PRECISION",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    }
+  ]
+}

@@ -1,0 +1,740 @@
+{
+  "_source": "https://raw.githubusercontent.com/liquity/bold/main/contracts/src/Interfaces/IBorrowerOperations.sol",
+  "_contractName": "BorrowerOperations",
+  "_note": "ABI extracted from the Solidity interface; tuple expansion follows the struct definitions in the same file. Liquity Bold contracts are NOT published as compiled artifacts to npm; the canonical source is the GitHub repo.",
+  "abi": [
+    {
+      "type": "function",
+      "name": "CCR",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "MCR",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "SCR",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "openTrove",
+      "inputs": [
+        {
+          "name": "_owner",
+          "type": "address"
+        },
+        {
+          "name": "_ownerIndex",
+          "type": "uint256"
+        },
+        {
+          "name": "_ETHAmount",
+          "type": "uint256"
+        },
+        {
+          "name": "_boldAmount",
+          "type": "uint256"
+        },
+        {
+          "name": "_upperHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_lowerHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_annualInterestRate",
+          "type": "uint256"
+        },
+        {
+          "name": "_maxUpfrontFee",
+          "type": "uint256"
+        },
+        {
+          "name": "_addManager",
+          "type": "address"
+        },
+        {
+          "name": "_removeManager",
+          "type": "address"
+        },
+        {
+          "name": "_receiver",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "openTroveAndJoinInterestBatchManager",
+      "inputs": [
+        {
+          "name": "_params",
+          "type": "tuple",
+          "components": [
+            {
+              "name": "owner",
+              "type": "address"
+            },
+            {
+              "name": "ownerIndex",
+              "type": "uint256"
+            },
+            {
+              "name": "collAmount",
+              "type": "uint256"
+            },
+            {
+              "name": "boldAmount",
+              "type": "uint256"
+            },
+            {
+              "name": "upperHint",
+              "type": "uint256"
+            },
+            {
+              "name": "lowerHint",
+              "type": "uint256"
+            },
+            {
+              "name": "interestBatchManager",
+              "type": "address"
+            },
+            {
+              "name": "maxUpfrontFee",
+              "type": "uint256"
+            },
+            {
+              "name": "addManager",
+              "type": "address"
+            },
+            {
+              "name": "removeManager",
+              "type": "address"
+            },
+            {
+              "name": "receiver",
+              "type": "address"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "addColl",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        },
+        {
+          "name": "_ETHAmount",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "withdrawColl",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        },
+        {
+          "name": "_amount",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "withdrawBold",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        },
+        {
+          "name": "_amount",
+          "type": "uint256"
+        },
+        {
+          "name": "_maxUpfrontFee",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "repayBold",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        },
+        {
+          "name": "_amount",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "closeTrove",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "adjustTrove",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        },
+        {
+          "name": "_collChange",
+          "type": "uint256"
+        },
+        {
+          "name": "_isCollIncrease",
+          "type": "bool"
+        },
+        {
+          "name": "_debtChange",
+          "type": "uint256"
+        },
+        {
+          "name": "isDebtIncrease",
+          "type": "bool"
+        },
+        {
+          "name": "_maxUpfrontFee",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "adjustZombieTrove",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        },
+        {
+          "name": "_collChange",
+          "type": "uint256"
+        },
+        {
+          "name": "_isCollIncrease",
+          "type": "bool"
+        },
+        {
+          "name": "_boldChange",
+          "type": "uint256"
+        },
+        {
+          "name": "_isDebtIncrease",
+          "type": "bool"
+        },
+        {
+          "name": "_upperHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_lowerHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_maxUpfrontFee",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "adjustTroveInterestRate",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        },
+        {
+          "name": "_newAnnualInterestRate",
+          "type": "uint256"
+        },
+        {
+          "name": "_upperHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_lowerHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_maxUpfrontFee",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "applyPendingDebt",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        },
+        {
+          "name": "_lowerHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_upperHint",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "onLiquidateTrove",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "claimCollateral",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "hasBeenShutDown",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "shutdown",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "shutdownFromOracleFailure",
+      "inputs": [],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "checkBatchManagerExists",
+      "inputs": [
+        {
+          "name": "_batchMananger",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getInterestIndividualDelegateOf",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "tuple",
+          "components": [
+            {
+              "name": "account",
+              "type": "address"
+            },
+            {
+              "name": "minInterestRate",
+              "type": "uint128"
+            },
+            {
+              "name": "maxInterestRate",
+              "type": "uint128"
+            },
+            {
+              "name": "minInterestRateChangePeriod",
+              "type": "uint256"
+            }
+          ]
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "setInterestIndividualDelegate",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        },
+        {
+          "name": "_delegate",
+          "type": "address"
+        },
+        {
+          "name": "_minInterestRate",
+          "type": "uint128"
+        },
+        {
+          "name": "_maxInterestRate",
+          "type": "uint128"
+        },
+        {
+          "name": "_newAnnualInterestRate",
+          "type": "uint256"
+        },
+        {
+          "name": "_upperHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_lowerHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_maxUpfrontFee",
+          "type": "uint256"
+        },
+        {
+          "name": "_minInterestRateChangePeriod",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "removeInterestIndividualDelegate",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "registerBatchManager",
+      "inputs": [
+        {
+          "name": "minInterestRate",
+          "type": "uint128"
+        },
+        {
+          "name": "maxInterestRate",
+          "type": "uint128"
+        },
+        {
+          "name": "currentInterestRate",
+          "type": "uint128"
+        },
+        {
+          "name": "fee",
+          "type": "uint128"
+        },
+        {
+          "name": "minInterestRateChangePeriod",
+          "type": "uint128"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "lowerBatchManagementFee",
+      "inputs": [
+        {
+          "name": "_newAnnualFee",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "setBatchManagerAnnualInterestRate",
+      "inputs": [
+        {
+          "name": "_newAnnualInterestRate",
+          "type": "uint128"
+        },
+        {
+          "name": "_upperHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_lowerHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_maxUpfrontFee",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "interestBatchManagerOf",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "getInterestBatchManager",
+      "inputs": [
+        {
+          "name": "_account",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "tuple",
+          "components": [
+            {
+              "name": "minInterestRate",
+              "type": "uint128"
+            },
+            {
+              "name": "maxInterestRate",
+              "type": "uint128"
+            },
+            {
+              "name": "minInterestRateChangePeriod",
+              "type": "uint256"
+            }
+          ]
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "setInterestBatchManager",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        },
+        {
+          "name": "_newBatchManager",
+          "type": "address"
+        },
+        {
+          "name": "_upperHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_lowerHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_maxUpfrontFee",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "kickFromBatch",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        },
+        {
+          "name": "_upperHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_lowerHint",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "removeFromBatch",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        },
+        {
+          "name": "_newAnnualInterestRate",
+          "type": "uint256"
+        },
+        {
+          "name": "_upperHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_lowerHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_maxUpfrontFee",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "switchBatchManager",
+      "inputs": [
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        },
+        {
+          "name": "_removeUpperHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_removeLowerHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_newBatchManager",
+          "type": "address"
+        },
+        {
+          "name": "_addUpperHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_addLowerHint",
+          "type": "uint256"
+        },
+        {
+          "name": "_maxUpfrontFee",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    }
+  ]
+}

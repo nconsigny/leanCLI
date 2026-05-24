@@ -1,0 +1,194 @@
+{
+  "_source": "https://raw.githubusercontent.com/liquity/bold/main/contracts/src/Interfaces/IHintHelpers.sol",
+  "_contractName": "HintHelpers",
+  "_note": "ABI extracted from the Solidity interface; tuple expansion follows the struct definitions in the same file. Liquity Bold contracts are NOT published as compiled artifacts to npm; the canonical source is the GitHub repo.",
+  "abi": [
+    {
+      "type": "function",
+      "name": "getApproxHint",
+      "inputs": [
+        {
+          "name": "_collIndex",
+          "type": "uint256"
+        },
+        {
+          "name": "_interestRate",
+          "type": "uint256"
+        },
+        {
+          "name": "_numTrials",
+          "type": "uint256"
+        },
+        {
+          "name": "_inputRandomSeed",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "hintId",
+          "type": "uint256"
+        },
+        {
+          "name": "diff",
+          "type": "uint256"
+        },
+        {
+          "name": "latestRandomSeed",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "predictOpenTroveUpfrontFee",
+      "inputs": [
+        {
+          "name": "_collIndex",
+          "type": "uint256"
+        },
+        {
+          "name": "_borrowedAmount",
+          "type": "uint256"
+        },
+        {
+          "name": "_interestRate",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "predictAdjustInterestRateUpfrontFee",
+      "inputs": [
+        {
+          "name": "_collIndex",
+          "type": "uint256"
+        },
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        },
+        {
+          "name": "_newInterestRate",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "forcePredictAdjustInterestRateUpfrontFee",
+      "inputs": [
+        {
+          "name": "_collIndex",
+          "type": "uint256"
+        },
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        },
+        {
+          "name": "_newInterestRate",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "predictAdjustTroveUpfrontFee",
+      "inputs": [
+        {
+          "name": "_collIndex",
+          "type": "uint256"
+        },
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        },
+        {
+          "name": "_debtIncrease",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "predictAdjustBatchInterestRateUpfrontFee",
+      "inputs": [
+        {
+          "name": "_collIndex",
+          "type": "uint256"
+        },
+        {
+          "name": "_batchAddress",
+          "type": "address"
+        },
+        {
+          "name": "_newInterestRate",
+          "type": "uint256"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "predictJoinBatchInterestRateUpfrontFee",
+      "inputs": [
+        {
+          "name": "_collIndex",
+          "type": "uint256"
+        },
+        {
+          "name": "_troveId",
+          "type": "uint256"
+        },
+        {
+          "name": "_batchAddress",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "view"
+    }
+  ]
+}

@@ -1,12 +1,250 @@
 {
   "mainnet": {
     "BoldToken": {
-      "address": "0xb01dd87B29d187F3E3a4Bf6cdAebfb97F3D9aB98",
-      "abi": "abi/BoldToken.json",
+      "address": "0x6440f144b7e50D6a8439336510312d2F54beB01D",
       "verified": true,
-      "source": "https://github.com/liquity/bold"
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/BoldToken.json"
+    },
+    "CollateralRegistry": {
+      "address": "0xf949982B91C8c61e952B3bA942cbbfaef5386684",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/CollateralRegistry.json"
+    },
+    "DebtInFrontHelper": {
+      "address": "0x4bb5E28FDB12891369b560f2Fab3C032600677c6",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "ExchangeHelpers": {
+      "address": "0x2f60bAb0072AbeC7058017f48D7256EC288c8686",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "ExchangeHelpersV2": {
+      "address": "0xe453B864d3841469763BDA2437E3DD0E38dcA222",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "Governance": {
+      "address": "0x807DEf5E7d057DF05C796F4bc75C3Fe82Bd6EeE1",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "HintHelpers": {
+      "address": "0xF0caE19C96E572234398d6665cC1147A16cBe657",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/HintHelpers.json"
+    },
+    "MultiTroveGetter": {
+      "address": "0xFA61dB085510C64B83056Db3A7Acf3b6f631D235",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "RedemptionHelper": {
+      "address": "0xb366256d033aE7e4f7BDDEc822a5ADEC9DF07b80",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "ETH_ActivePool": {
+      "address": "0xeB5A8C825582965f1d84606E078620a84ab16AfE",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/ActivePool.json"
+    },
+    "ETH_AddressesRegistry": {
+      "address": "0x20F7C9ad66983F6523a0881d0f82406541417526",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/AddressesRegistry.json"
+    },
+    "ETH_BorrowerOperations": {
+      "address": "0x372ABD1810eAF23Cb9D941BbE7596DFb2c46BC65",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/BorrowerOperations.json"
+    },
+    "ETH_CollSurplusPool": {
+      "address": "0xedbE2509E502c0320D2e7f8b6746a49b4B50E2bF",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "ETH_CollToken": {
+      "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "ETH_DefaultPool": {
+      "address": "0xD4558240d50C2E219a21c9d25afD513Bb6e5B1A0",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "ETH_LeverageZapper": {
+      "address": "0xdCcBD7A365aeE086aa3b4EDe8afe895B20770AE3",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "ETH_PriceFeed": {
+      "address": "0xCC5F8102eb670c89a4a3c567C13851260303c24F",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "ETH_SortedTroves": {
+      "address": "0xA25269E41BD072513849F2E64Ad221e84f3063F4",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "ETH_StabilityPool": {
+      "address": "0x5721cbbd64fc7Ae3Ef44A0A3F9a790A9264Cf9BF",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/StabilityPool.json"
+    },
+    "ETH_TroveManager": {
+      "address": "0x7bcb64B2c9206a5B699eD43363f6F98D4776Cf5A",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/TroveManager.json"
+    },
+    "ETH_TroveNFT": {
+      "address": "0x1A0FC0b843aFD9140267D25d4E575Cb37a838013",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "WSTETH_ActivePool": {
+      "address": "0x531a8f99c70D6A56A7CEe02d6B4281650d7919a0",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/ActivePool.json"
+    },
+    "WSTETH_AddressesRegistry": {
+      "address": "0x8d733F7ea7c23Cbea7C613B6eBd845d46d3aAc54",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/AddressesRegistry.json"
+    },
+    "WSTETH_BorrowerOperations": {
+      "address": "0xa741A32f9dcFe6aDBa088fD0f97e90742d7d5DA3",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/BorrowerOperations.json"
+    },
+    "WSTETH_CollSurplusPool": {
+      "address": "0x36e6CBdf68f64CF00fC3a6c634A25be32Dd0A235",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "WSTETH_CollToken": {
+      "address": "0x7f39C581F595B53c5cb19bD0b3f8dA6c935E2Ca0",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "WSTETH_DefaultPool": {
+      "address": "0xD796e1648526400386CC4d12FA05E5F11e6a22A1",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "WSTETH_LeverageZapper": {
+      "address": "0xe85230dE04147C4Ea363B21cdb801c1C19DF0A56",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "WSTETH_PriceFeed": {
+      "address": "0xe7Aa2Ba9E086A379d3beb224098bC634a46e314E",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "WSTETH_SortedTroves": {
+      "address": "0x84eb85a8C25049255614F0536Bea8F31682e86F1",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "WSTETH_StabilityPool": {
+      "address": "0x9502b7c397E9aa22FE9dB7EF7DAF21cD2AEBe56B",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/StabilityPool.json"
+    },
+    "WSTETH_TroveManager": {
+      "address": "0xA2895d6A3bf110561Dfe4b71cA539d84e1928B22",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/TroveManager.json"
+    },
+    "WSTETH_TroveNFT": {
+      "address": "0x857aECeBF75f1012DC18E15020C97096aeA31b04",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "RETH_ActivePool": {
+      "address": "0x9074D72cc82DaD1e13E454755Aa8f144c479532F",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/ActivePool.json"
+    },
+    "RETH_AddressesRegistry": {
+      "address": "0x6106046F031a22713697e04C08B330dDaf3e8789",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/AddressesRegistry.json"
+    },
+    "RETH_BorrowerOperations": {
+      "address": "0xe8119fC02953B27a1b48D2573855738485A17329",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/BorrowerOperations.json"
+    },
+    "RETH_CollSurplusPool": {
+      "address": "0xba4A2bD8b76DF84CaC98eBa3f4b967D8423192bF",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "RETH_CollToken": {
+      "address": "0xae78736Cd615f374D3085123A210448E74Fc6393",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "RETH_DefaultPool": {
+      "address": "0x5cc5ceFD034Fdc4728D487a72Ca58A410CDdCD6b",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "RETH_LeverageZapper": {
+      "address": "0x75036b1D6DE5665c60F5C33BB4a64e8E123211A2",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "RETH_PriceFeed": {
+      "address": "0x34F1E9c7dcc279ec70d3c4488EB2D80FBa8B7b2B",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "RETH_SortedTroves": {
+      "address": "0x14d8d8011dF2b396Ed2bbC4959bb73250324F386",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
+    },
+    "RETH_StabilityPool": {
+      "address": "0xd442E41019B7F5C4dD78F50dc03726C446148695",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/StabilityPool.json"
+    },
+    "RETH_TroveManager": {
+      "address": "0xb2B2ABEb5C357a234363FF5D180912D319e3e19e",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env",
+      "abi": "abi/TroveManager.json"
+    },
+    "RETH_TroveNFT": {
+      "address": "0x7ae430E25b67f19B431e1D1Dc048a5BCF24C0873",
+      "verified": true,
+      "source": "https://github.com/liquity/bold/blob/main/frontend/app/.env"
     }
   },
   "sepolia": {},
-  "_sepolia_note": "TODO(curator): confirm Liquity V2 BOLD Sepolia deployment status (may exist; pin address from GitHub deployment table)."
+  "_sepolia_note": "Liquity V2 (BOLD) does not have an official Sepolia deployment. The repo carries a commented-out testnet block (frontend/app/.env, lines beginning '# NEXT_PUBLIC_COLL_0\u2026') from a prior testnet, but those addresses are not maintained and the wallet should not target them.",
+  "_source_note": "All addresses sourced from liquity/bold:frontend/app/.env (canonical mainnet deployment table). Phase 1b scaffold used BoldToken=0xb01dd87b\u2026fb98 \u2014 that is wrong; the correct mainnet BoldToken is 0x6440f144\u2026b01d as reflected here."
 }

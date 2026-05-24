@@ -1,0 +1,381 @@
+{
+  "_source": "https://raw.githubusercontent.com/liquity/bold/main/contracts/src/Interfaces/IAddressesRegistry.sol",
+  "_contractName": "AddressesRegistry",
+  "_note": "ABI extracted from the Solidity interface; tuple expansion follows the struct definitions in the same file. Liquity Bold contracts are NOT published as compiled artifacts to npm; the canonical source is the GitHub repo.",
+  "abi": [
+    {
+      "type": "function",
+      "name": "CCR",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "SCR",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "MCR",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "BCR",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "LIQUIDATION_PENALTY_SP",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "LIQUIDATION_PENALTY_REDISTRIBUTION",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "uint256"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "collToken",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "IERC20Metadata"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "borrowerOperations",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "IBorrowerOperations"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "troveManager",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "ITroveManager"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "troveNFT",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "ITroveNFT"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "metadataNFT",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "IMetadataNFT"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "stabilityPool",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "IStabilityPool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "priceFeed",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "IPriceFeed"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "activePool",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "IActivePool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "defaultPool",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "IDefaultPool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "gasPoolAddress",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "collSurplusPool",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "ICollSurplusPool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "sortedTroves",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "ISortedTroves"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "interestRouter",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "IInterestRouter"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "hintHelpers",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "IHintHelpers"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "multiTroveGetter",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "IMultiTroveGetter"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "collateralRegistry",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "ICollateralRegistry"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "boldToken",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "IBoldToken"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "WETH",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "IWETH"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "setAddresses",
+      "inputs": [
+        {
+          "name": "_vars",
+          "type": "tuple",
+          "components": [
+            {
+              "name": "collToken",
+              "type": "IERC20Metadata"
+            },
+            {
+              "name": "borrowerOperations",
+              "type": "IBorrowerOperations"
+            },
+            {
+              "name": "troveManager",
+              "type": "ITroveManager"
+            },
+            {
+              "name": "troveNFT",
+              "type": "ITroveNFT"
+            },
+            {
+              "name": "metadataNFT",
+              "type": "IMetadataNFT"
+            },
+            {
+              "name": "stabilityPool",
+              "type": "IStabilityPool"
+            },
+            {
+              "name": "priceFeed",
+              "type": "IPriceFeed"
+            },
+            {
+              "name": "activePool",
+              "type": "IActivePool"
+            },
+            {
+              "name": "defaultPool",
+              "type": "IDefaultPool"
+            },
+            {
+              "name": "gasPoolAddress",
+              "type": "address"
+            },
+            {
+              "name": "collSurplusPool",
+              "type": "ICollSurplusPool"
+            },
+            {
+              "name": "sortedTroves",
+              "type": "ISortedTroves"
+            },
+            {
+              "name": "interestRouter",
+              "type": "IInterestRouter"
+            },
+            {
+              "name": "hintHelpers",
+              "type": "IHintHelpers"
+            },
+            {
+              "name": "multiTroveGetter",
+              "type": "IMultiTroveGetter"
+            },
+            {
+              "name": "collateralRegistry",
+              "type": "ICollateralRegistry"
+            },
+            {
+              "name": "boldToken",
+              "type": "IBoldToken"
+            },
+            {
+              "name": "WETH",
+              "type": "IWETH"
+            }
+          ]
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    }
+  ]
+}
