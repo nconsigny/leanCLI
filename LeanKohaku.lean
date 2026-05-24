@@ -64,6 +64,7 @@ import LeanKohaku.Wallet.EOA
 import LeanKohaku.Wallet.HDKey
 import LeanKohaku.Wallet.Mnemonic
 import LeanKohaku.Wallet.PpSecretStore
+import LeanKohaku.Wallet.RgSecretStore
 
 import LeanKohaku.RPC.JsonRpc
 import LeanKohaku.RPC.Outbound

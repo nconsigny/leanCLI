@@ -9,6 +9,15 @@ Small shared state for the daemon. Unlocked EOA seeds live only here.
 
 namespace LeanKohaku.Daemon.State
 
+/-- An unlocked EOA slot in memory.
+
+`unlockedAtMs` is interpreted as a *last-activity* timestamp, not a
+fixed unlock timestamp: the RPC dispatcher refreshes it via
+`touchActivity` on every incoming request, so `ttlMs` behaves as an
+idle timeout. With the default `ttlMs = 300000` (5 min), a slot stays
+unlocked for as long as the user keeps interacting with the daemon
+(including the TUI's screen-mount RPCs); after 5 min of true silence,
+the next access purges it via `slotAlive`. -/
 structure UnlockedSlot where
   name           : String
   seed           : ByteArray
@@ -20,8 +29,10 @@ structure UnlockedSlot where
 /-- The wallet-level master KEK, when currently loaded.
 
 The KEK never persists in clear text on disk; it lives only here while
-loaded. Same TTL semantics as `UnlockedSlot` — purged on every access
-once expired. Cleared explicitly by `lockMaster` / `wallet.lock`. -/
+loaded. Same TTL semantics as `UnlockedSlot`: `unlockedAtMs` is bumped
+to "now" by `touchActivity` on each RPC, so `ttlMs` is an idle timeout
+rather than a fixed lifetime. Purged on every access once expired.
+Cleared explicitly by `lockMaster` / `wallet.lock`. -/
 structure MasterKekSlot where
   kek          : ByteArray
   unlockedAtMs : Nat
@@ -146,6 +157,25 @@ def lockMaster (state : Shared) : IO Unit := do
 /-- Lock every per-slot unlock AND the master KEK in one shot. -/
 def lockAll (state : Shared) : IO Unit := do
   state.modify fun s => { s with unlocked := [], masterKek := none }
+
+/-- Refresh the idle-TTL clock on the master KEK and every unlocked slot.
+
+The RPC dispatcher (`handleConn` in `Daemon.Server`) calls this once per
+incoming request, BEFORE dispatching the method handler. Effect: any
+daemon traffic (`wallet.master.status`, `chain.balance`, an
+`eoa.send` …) counts as activity and resets the lock countdown. With
+the default `ttlMs = 300000`, the master + slots stay live as long as
+the user keeps interacting; after 5 minutes of true silence the next
+read purges them through `slotAlive` / `masterAlive`.
+
+Cheap no-op when nothing is unlocked — the list/option `.map`s reduce
+to identity and the single `state.modify` is an atomic ref write. -/
+def touchActivity (state : Shared) : IO Unit := do
+  let nowMs ← IO.monoMsNow
+  state.modify fun s =>
+    { s with
+        masterKek := s.masterKek.map (fun slot => { slot with unlockedAtMs := nowMs }),
+        unlocked := s.unlocked.map (fun slot => { slot with unlockedAtMs := nowMs }) }
 
 /-- Spawn the persistent Colibri client and store it in shared state.
     Idempotent: if a client is already running, returns it. Throws on
