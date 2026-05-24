@@ -8,7 +8,11 @@ url="https://github.com/OWNER/leanKohaku"
 license=('custom:TBD')
 # `curl` is the runtime dep for the Lean-native LLM agent (kohaku-agent
 # links against /usr/lib/libcurl.so for its loopback-only HTTP shim).
-depends=('lean4' 'curl')
+# `sqlite` is the runtime dep for the Phase 1a persistent agent daemon
+# (kohaku-agentd uses /usr/lib/libsqlite3.so for FTS5-backed session
+# history). Both linked-shared-libraries are absolute-path linked, so
+# pinning the soname here keeps `pacman -Syu` honest about ABI breaks.
+depends=('lean4' 'curl' 'sqlite')
 makedepends=('git' 'cmake' 'ninja' 'clang' 'nodejs' 'npm')
 optdepends=(
   'tpm2-tools: required for `wallet master init` TPM PIN + `wallet master bind-tpm` (TPM-bound wallet KEK)'
@@ -49,6 +53,10 @@ package() {
   # PATH. The Lake target is `kohaku_agent` (underscore) so the
   # artefact lives at .lake/build/bin/kohaku_agent.
   install -Dm755 ".lake/build/bin/kohaku_agent" "${pkgdir}/usr/bin/kohaku-agent"
+  # Phase 1a persistent agent daemon. Installed as `kohaku-agentd`
+  # (dash form) to match the systemd unit name; the Lake target is
+  # `kohaku_agentd` so the artefact lives at .lake/build/bin/kohaku_agentd.
+  install -Dm755 ".lake/build/bin/kohaku_agentd" "${pkgdir}/usr/bin/kohaku-agentd"
   # Short alias users type interactively. Symlink keeps a single binary on disk.
   ln -s leankohaku "${pkgdir}/usr/bin/kohaku"
 
@@ -66,6 +74,9 @@ package() {
 
   install -Dm644 "packaging/systemd/leankohaku.socket" "${pkgdir}/usr/lib/systemd/user/leankohaku.socket"
   install -Dm644 "packaging/systemd/leankohaku.service" "${pkgdir}/usr/lib/systemd/user/leankohaku.service"
+  # Phase 1a persistent agent daemon. Optional, opt-in via
+  # `systemctl --user enable --now kohaku-agentd`.
+  install -Dm644 "packaging/systemd/kohaku-agentd.service" "${pkgdir}/usr/lib/systemd/user/kohaku-agentd.service"
 
   # TUI bundle. The launcher in Cli/Runtime.lean looks here first
   # (<appDir>/../share/leankohaku/tui/index.mjs) — keep this path in sync
