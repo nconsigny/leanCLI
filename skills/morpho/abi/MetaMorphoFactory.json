@@ -1,6 +1,73 @@
 {
-  "_source": "https://github.com/morpho-org/metamorpho",
+  "_source": "https://raw.githubusercontent.com/morpho-org/metamorpho/main/src/interfaces/IMetaMorphoFactory.sol",
   "_contractName": "MetaMorphoFactory",
-  "_todo": "TODO(curator): fetch from https://github.com/morpho-org/metamorpho; no automatic fetch source configured",
-  "abi": []
+  "_note": "ABI extracted from IMetaMorphoFactory.sol.",
+  "abi": [
+    {
+      "type": "function",
+      "name": "MORPHO",
+      "inputs": [],
+      "outputs": [
+        {
+          "name": "",
+          "type": "address"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "isMetaMorpho",
+      "inputs": [
+        {
+          "name": "target",
+          "type": "address"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bool"
+        }
+      ],
+      "stateMutability": "view"
+    },
+    {
+      "type": "function",
+      "name": "createMetaMorpho",
+      "inputs": [
+        {
+          "name": "initialOwner",
+          "type": "address"
+        },
+        {
+          "name": "initialTimelock",
+          "type": "uint256"
+        },
+        {
+          "name": "asset",
+          "type": "address"
+        },
+        {
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "name": "symbol",
+          "type": "string"
+        },
+        {
+          "name": "salt",
+          "type": "bytes32"
+        }
+      ],
+      "outputs": [
+        {
+          "name": "metaMorpho",
+          "type": "IMetaMorpho"
+        }
+      ],
+      "stateMutability": "nonpayable"
+    }
+  ]
 }
