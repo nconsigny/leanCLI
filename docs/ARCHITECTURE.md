@@ -4,23 +4,24 @@ A map of the repository as it actually exists, complementing `README.md`
 (goals & user-visible behavior), `INVARIANTS.md` (proof obligations & status),
 and `CLAUDE.md` (build & contributor workflow).
 
-The codebase is **60 Lean source files** plus C/Rust FFI helpers. There are
-**no `sorry`s** in proofs and no `axiom`s outside the explicit FFI boundary
-(opaque `Hacl` / `Tpm2` primitives). Every theorem in `LeanKohaku/Invariants/`
-is closed.
+The codebase is **129 Lean source files** plus C/Rust FFI helpers. There
+are **no `sorry`s** in proofs and no `axiom`s outside the explicit FFI
+boundary (opaque `Hacl` / `Tpm2` primitives, plus the `@[extern]`
+declarations in `Daemon/Uds.lean` and `Agent/Http.lean`). Every theorem
+in `LeanKohaku/Invariants/` is closed.
 
 ## Layered structure
 
 ```
-Entry points        LeanKohaku/App/Main.lean    LeanKohaku/App/DaemonMain.lean
-                        │                      │
-Surfaces            Cli/                  RPC/   Daemon/
-                        │                      │
+Entry points        LeanKohaku/App/{Main,DaemonMain,AgentMain}.lean
+                        │
+Surfaces            Cli/   RPC/   Daemon/   Agent/
+                        │
 Domain              Wallet/   Ethereum/   Keystore/   Contract/   Privacy/   Network/
                         │
 Primitives          Crypto/   Encoding/
                         │
-FFI boundary        c/hacl_helpers   c/secp256k1_helpers   c/lean_uds   c/rustcrypto_helpers
+FFI boundary        c/hacl_helpers   c/secp256k1_helpers   c/lean_uds   c/lean_http   c/rustcrypto_helpers
 ```
 
 `LeanKohaku.lean` is import-only and re-exports every module; downstream code
@@ -36,6 +37,10 @@ the abstract models defined alongside it (not about runtime IO).
 - `LeanKohaku/App/DaemonMain.lean` — Daemon executable root; thin wrapper over
   `LeanKohaku.Lib.Core` that loads `Daemon.Config` from env and runs
   `Daemon.Server.run`.
+- `LeanKohaku/App/AgentMain.lean` — `kohaku-agent` executable root.
+  Phase-0 Lean-native replacement for the `bridge/llm-legacy/` Node
+  sidecar. One-shot JSON-RPC over `--rpc '<json>'`; speaks to a local
+  loopback LLM via `c/lean_http/` and to the daemon over UDS.
 - `LeanKohaku/Lib/{Client,Core,Spec}.lean` — aggregate library roots
   (CLI surface, daemon/runtime surface, proof/spec surface) consumed by the
   three `lean_lib` targets in `lakefile.lean`.
@@ -109,6 +114,36 @@ the abstract models defined alongside it (not about runtime IO).
 - `DaemonClient.lean` — UDS client.
 - `Passphrase.lean` — passphrase prompting.
 
+### `Agent/` — Lean-native LLM agent (Phase 0)
+- `State.lean` — `Role`, `ToolCall`, `AgentMessage`, `AgentConfig`,
+  `AgentState`. No IO. No crypto imports.
+- `Http.lean` — loopback-only HTTP wrapper over `c/lean_http`. The
+  string-prefix loopback check is redundant with the C floor.
+- `DaemonClient.lean` — one-shot UDS JSON-RPC client used by every
+  chain-reading tool. Contains the only `partial def` in the agent
+  tree (`drainConn`, tagged `PHASE_N: prove termination`).
+- `Tools.lean` — `ToolDecl`/`ToolRegistry`/`dispatch`. Allowlist
+  enforced in code before any tool runs.
+- `ToolDefs/{Decode,Simulate,Chain,Propose}.lean` — the seven
+  default tools mapping to existing daemon RPCs
+  (`tx.decodeIntent`, `eip712.decodeIntent`, `tx.simulate`,
+  `chain.ethCall`, `chain.nonce`, `chain.gasPrice`); `propose_send`
+  is local and emits a draft `{to, value, data, chainId}` envelope.
+- `Persona.lean` + `Prompt.lean` — system-prompt assembly: frozen
+  persona, operational rules (chain whitelist [1, 11155111], step
+  budget, single `propose_send` final-answer shape), auto-generated
+  tool docs.
+- `Llm.lean` — OpenAI-compatible chat completions client. Pure
+  request/response shaping.
+- `Loop.lean` — bounded `runOneShot` loop (`partial def`, tagged
+  `PHASE_N: prove termination`).
+- `Registry.lean` — the default 7-tool registry.
+
+The full trust contract: nothing in `Agent/` imports
+`Crypto.Secp256k1Native`, `Crypto.Random`, `Wallet.{EOA,HDKey,
+Mnemonic,Entropy}`, `Keystore/**`, or `Daemon.State`. The agent
+proposes; the daemon signs.
+
 ### `Invariants/` — all proofs closed, no `sorry`
 - `Core.lean` — top-level safety: no key exfiltration, verified-only signing,
   chain match, approval requirement, signer/path separation, R1 ↔ TPM policy.
@@ -127,12 +162,16 @@ the abstract models defined alongside it (not about runtime IO).
 | `c/hacl_helpers/ripemd160_*` | HACL\* | RIPEMD-160 for BIP-32 HASH160 |
 | `c/secp256k1_helpers/` | libsecp256k1 | sign / pubkey / recover / verify (hex in/out CLI helpers) |
 | `c/lean_uds/lean_uds.c` | POSIX | `bind/accept/connect/read/write/close/shutdown`, peer-uid/current-uid |
+| `c/lean_http/lean_http.c` | libcurl | loopback-only HTTP POST for `kohaku-agent`. Refuses non-`http://127.0.0.1`/`http://[::1]`/`http://localhost` URLs at the C layer. 8 MiB response cap. No TLS, no redirects. |
 | `c/rustcrypto_helpers/` | RustCrypto | optional Rust ripemd160 binary |
 
 Build automation: `script/setup_hacl.sh`, `script/setup_secp256k1.sh`,
-`script/setup_uds.sh`. The UDS C lib is linked into the Lean library via
-`extern_lib liblean_uds` in `lakefile.lean`. The other helpers are external
-binaries invoked at runtime.
+`script/setup_uds.sh`, `script/setup_http.sh`. The UDS and HTTP C libs
+are linked into the Lean library via `extern_lib liblean_uds` and
+`extern_lib liblean_http` in `lakefile.lean`; the HTTP shim links
+against the system libcurl via `weakLinkArgs := #["/usr/lib/libcurl.so"]`
+on the package. The other helpers are external binaries invoked at
+runtime.
 
 ## Companion artifacts outside the main library
 
@@ -150,27 +189,31 @@ binaries invoked at runtime.
   `docs/R1_SEPOLIA.md`, `SECURITY.md` — user
   documentation.
 
-### Sidecar bridges (`bridge/`)
+### Sidecar bridges (`bridge/`) and the Lean-native agent
 
-Three Node sidecars sit outside the Lean tree. Each one is one-shot stdio
-JSON-RPC: the daemon spawns the binary per call with the request as
-`--rpc <json>` on argv, reads one line of stdout, and reaps. The Lean spawn
-modules listed below are the **only** places that fork them; every output is
-treated as untrusted and re-validated.
+Phase 0 split the LLM backend into a Lean-native primary (`kohaku-agent`)
+and an opt-in legacy Node sidecar. The other two bridges remain Node.
+Each bridge is one-shot stdio JSON-RPC: the daemon spawns the binary per
+call with the request as `--rpc <json>` on argv, reads one line of
+stdout, and reaps. The Lean spawn modules listed below are the **only**
+places that fork them; every output is treated as untrusted and
+re-validated.
 
-| Bridge | Lean wrapper | Executable env var | Purpose |
+| Backend | Lean wrapper | Executable env var | Purpose |
 |---|---|---|---|
+| `kohaku-agent` (in-tree Lean) | `LeanKohaku/LlmAgent/Bridge.lean` | `LEAN_KOHAKU_LLM_BRIDGE` (override) | Primary LLM backend (Phase 0). Loopback HTTP via `c/lean_http`; talks to the daemon over UDS. |
+| `bridge/llm-legacy/` (Node fallback) | `LeanKohaku/LlmAgent/Bridge.lean` | `LEAN_KOHAKU_LLM_BRIDGE_LEGACY=1` | Opt-in fallback. Anthropic SDK + viem; `ANTHROPIC_API_KEY` enables the model fallback. Kept for parity tests. |
 | `bridge/` | `LeanKohaku/Privacy/Bridge.lean` | `LEAN_KOHAKU_BRIDGE` | Privacy Pools / Railgun (snarkjs, libp2p) |
 | `bridge/clearsign/` | `LeanKohaku/Clearsign/Bridge.lean` | `LEAN_KOHAKU_CLEARSIGN_BRIDGE` | ERC-7730 calldata + EIP-712 walker |
-| `bridge/llm/` | `LeanKohaku/LlmAgent/Bridge.lean` | `LEAN_KOHAKU_LLM_BRIDGE` | NL → tx-draft candidates (Anthropic SDK + viem); `ANTHROPIC_API_KEY` enables the model fallback |
 
 The clearsign sidecar bundles ERC-7730 descriptors under
 `bridge/clearsign/registry/` (ERC-20, Uniswap V3 SwapRouter02, Permit2,
-CowSwap order EIP-712, plus a `4byte.json` fallback dict). The LLM sidecar
-bundles `KNOWN_TOKENS` and `KNOWN_PROTOCOLS` (Aave V3 Pool, Morpho Blue,
-Uniswap V3 QuoterV2/Router02 per chain) and opens UDS back to the daemon
-socket via `bridge/llm/src/daemon-callback.mjs` so its tools can read chain
-state under the daemon's policy gate.
+CowSwap order EIP-712, plus a `4byte.json` fallback dict). The Lean
+agent's chain-context surface lives in `LeanKohaku/Agent/ToolDefs/Chain.lean`
+and routes every read through the daemon's `chain.ethCall` /
+`chain.nonce` / `chain.gasPrice` RPCs under the standard
+`Privacy.NetworkPolicy` gate — same trust model as the legacy sidecar's
+`daemon-callback.mjs`, but no Node process involved.
 
 ### Terminal UI (`tui/`)
 
@@ -203,6 +246,11 @@ Trusted (not proved in Lean):
   helper binaries).
 - TPM2 hardware operations (`Keystore/Tpm2Runtime.lean` — `tpm2-tools` shell-out).
 - POSIX UDS syscalls (`Daemon/Uds.lean` — `@[extern]`).
+- The loopback HTTP shim (`Agent/Http.lean` + `c/lean_http/` — `@[extern]`).
+  Trusted as an *opaque transport* only: the loopback restriction is
+  C-enforced and re-checked in Lean, and the agent treats every byte the
+  LLM returns as adversarial input that must traverse the standard
+  decode → simulate → ConfirmGate pipeline before any signing.
 - The C/Rust helpers in `c/` and the binaries on `$PATH`.
 
 The split is deliberate: the wallet's signing path is reasoned about in Lean,
