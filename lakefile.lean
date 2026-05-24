@@ -25,7 +25,22 @@ package "leanKohaku" where
   -- path form only loads libcurl itself; libcurl's transitive deps
   -- (libnghttp2, libssl, …) come from the host's runtime linker
   -- search at execution time via DT_NEEDED entries on libcurl.so.4.
-  weakLinkArgs := #["/usr/lib/libcurl.so"]
+  weakLinkArgs := #[
+    "/usr/lib/libcurl.so",
+    -- libsqlite3 is the runtime dep for liblean_sqlite (Phase 1a
+    -- persistent agent sessions). Same absolute-path form as libcurl
+    -- to avoid the bundled-glibc / host-glibc mismatch that bare
+    -- `-L/usr/lib -lsqlite3` would trigger.
+    "/usr/lib/libsqlite3.so",
+    -- libsqlite3 references libpthread/libdl/libm/libc symbols via
+    -- DT_NEEDED, but the Lean toolchain's bundled lld defaults to
+    -- --no-allow-shlib-undefined. libcurl avoids the problem because
+    -- its transitive deps are all third-party libs; libsqlite3 needs
+    -- libpthread/libdl (merged into glibc 2.34+) which the bundled
+    -- sysroot does not advertise. Standard fix for "trust DT_NEEDED
+    -- at runtime" is to allow undefined symbols from shared libs.
+    "-Wl,--allow-shlib-undefined"
+  ]
 
 lean_lib LeanKohaku where
 
@@ -59,6 +74,19 @@ extern_lib liblean_http pkg := do
       "-I", (pkg.dir / "c" / "lean_http").toString,
       "-fPIC"] #[]
   buildStaticLib (pkg.buildDir / "native" / "liblean_http.a") #[oJob]
+
+-- SQLite FFI shim consumed by LeanKohaku/Agent/Session.lean (Phase 1a
+-- persistent agent sessions). Linked against the system libsqlite3 —
+-- Arch (`sqlite`) and Debian 12+ (`libsqlite3-0`) ship FTS5 enabled.
+-- See `c/lean_sqlite/README.md` for the vendoring tradeoff.
+extern_lib liblean_sqlite pkg := do
+  let srcJob ← inputTextFile <| pkg.dir / "c" / "lean_sqlite" / "lean_sqlite.c"
+  let lean ← getLeanInstall
+  let oJob ← buildO (pkg.buildDir / "native" / "lean_sqlite.o") srcJob
+    #["-I", lean.includeDir.toString,
+      "-I", (pkg.dir / "c" / "lean_sqlite").toString,
+      "-fPIC"] #[]
+  buildStaticLib (pkg.buildDir / "native" / "liblean_sqlite.a") #[oJob]
 
 @[default_target]
 lean_exe leankohaku where
