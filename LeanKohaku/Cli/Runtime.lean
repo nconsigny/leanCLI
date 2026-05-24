@@ -1,6 +1,7 @@
 import LeanKohaku.Basic
 import LeanKohaku.Cli.Commands
 import LeanKohaku.Cli.DaemonClient
+import LeanKohaku.Cli.MemoryCmd
 import LeanKohaku.Cli.NetworkConfig
 import LeanKohaku.Cli.Passphrase
 import LeanKohaku.Keystore.Tpm2Runtime
@@ -3204,6 +3205,10 @@ def run (args : List String) : IO UInt32 := do
   | .install    => runKohakuspawn #[]
   | .update     => runKohakuspawn #["--pull"]
   | .uninstall  => runKohakuspawn #["--uninstall"]
+  | .memoryShow              => MemoryCmd.cmdShow
+  | .memoryEdit              => MemoryCmd.cmdEdit
+  | .memoryRefresh sid?      => MemoryCmd.cmdRefresh sid?
+  | .memoryForget pattern    => MemoryCmd.cmdForget pattern
   | .invalid args =>
       match args with
       | "send" :: rest =>

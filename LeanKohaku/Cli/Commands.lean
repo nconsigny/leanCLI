@@ -342,6 +342,13 @@ inductive Command where
   | install
   | update
   | uninstall
+  -- Phase 1c memory subcommands. All four route through the
+  -- kohaku-agentd UDS socket; the daemon is the sole writer of
+  -- MEMORY.md.
+  | memoryShow
+  | memoryEdit
+  | memoryRefresh (sessionId? : Option Nat)
+  | memoryForget (pattern : String)
   | resolve (name : String)
   | bookList
   | bookAdd (label : String) (addrOrEns : String) (tag? : Option String)
@@ -724,6 +731,15 @@ def parse : List String → Command
   | ["book", "remove", label]      => .bookRemove label
   | ["book", "rm", label]          => .bookRemove label
   | ["book", "show", needle]       => .bookShow needle
+  | ["memory"]                              => .memoryShow
+  | ["memory", "show"]                      => .memoryShow
+  | ["memory", "edit"]                      => .memoryEdit
+  | ["memory", "refresh"]                   => .memoryRefresh none
+  | ["memory", "refresh", "--session", n]   =>
+      match n.toNat? with
+      | some k => .memoryRefresh (some k)
+      | none   => .invalid ["memory", "refresh", "--session", n]
+  | ["memory", "forget", pattern]           => .memoryForget pattern
   | args                  => .invalid args
 
 /-- Parse argv, also returning an optional `--account <n>` index that got
