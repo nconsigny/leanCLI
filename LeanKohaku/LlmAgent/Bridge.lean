@@ -20,16 +20,40 @@ namespace LeanKohaku.LlmAgent.Bridge
 
 open LeanKohaku.Encoding.Json
 
-def defaultExecutable : String := "leankohaku-llm-bridge"
+def defaultExecutable : String := "kohaku-agent"
 
-/-- Resolve via the shared `BridgeResolve` chain
-    (env → cwd-walk → recorded-checkout → PATH fallback).
-    See `LeanKohaku/Util/BridgeResolve.lean` for the resolution order. -/
-def resolveExecutable : IO String :=
-  LeanKohaku.Util.BridgeResolve.resolveExecutable
-    "LEAN_KOHAKU_LLM_BRIDGE"
-    ("bridge" / "llm" / "bridge.mjs")
-    defaultExecutable
+/-- Phase 0: the Lean-native `kohaku-agent` executable is the default
+    backend. `LEAN_KOHAKU_LLM_BRIDGE` still overrides everything (used
+    by integration tests and operators pinning a custom binary).
+    `LEAN_KOHAKU_LLM_BRIDGE_LEGACY=1` opts back into the legacy Node
+    sidecar at `bridge/llm-legacy/bridge.mjs`. -/
+def resolveExecutable : IO String := do
+  -- Explicit override wins, regardless of any other knob.
+  match ← IO.getEnv "LEAN_KOHAKU_LLM_BRIDGE" with
+  | some s => pure s
+  | none =>
+      let useLegacy : Bool ← do
+        match ← IO.getEnv "LEAN_KOHAKU_LLM_BRIDGE_LEGACY" with
+        | some v =>
+            let t := v.trimAscii.toString
+            pure (t ≠ "" && t ≠ "0")
+        | none => pure false
+      if useLegacy then
+        LeanKohaku.Util.BridgeResolve.resolveExecutable
+          "LEAN_KOHAKU_LLM_BRIDGE_LEGACY_PATH"
+          ("bridge" / "llm-legacy" / "bridge.mjs")
+          "leankohaku-llm-bridge"
+      else
+        -- Lean-native default. The agent is built into the same Lake
+        -- project; .lake/build/bin/kohaku_agent (lake's underscore
+        -- form) is the dev fallback, and the installed binary is
+        -- `kohaku-agent` on PATH (the canonical install name).
+        let cwd ← IO.currentDir
+        let devCandidate := cwd / ".lake" / "build" / "bin" / "kohaku_agent"
+        if (← devCandidate.pathExists) then
+          pure devCandidate.toString
+        else
+          pure defaultExecutable
 
 structure Request where
   method : String
