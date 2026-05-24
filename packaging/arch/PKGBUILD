@@ -6,7 +6,9 @@ pkgdesc="Formally modeled Ethereum wallet daemon written in Lean 4"
 arch=('x86_64' 'aarch64')
 url="https://github.com/OWNER/leanKohaku"
 license=('custom:TBD')
-depends=('lean4')
+# `curl` is the runtime dep for the Lean-native LLM agent (kohaku-agent
+# links against /usr/lib/libcurl.so for its loopback-only HTTP shim).
+depends=('lean4' 'curl')
 makedepends=('git' 'cmake' 'ninja' 'clang' 'nodejs' 'npm')
 optdepends=(
   'tpm2-tools: required for `wallet master init` TPM PIN + `wallet master bind-tpm` (TPM-bound wallet KEK)'
@@ -42,6 +44,11 @@ package() {
   cd "${srcdir}/${pkgname}"
   install -Dm755 ".lake/build/bin/leankohaku" "${pkgdir}/usr/bin/leankohaku"
   install -Dm755 ".lake/build/bin/leankohaku-daemon" "${pkgdir}/usr/bin/leankohaku-daemon"
+  # Lean-native LLM agent (Phase 0). Installed as `kohaku-agent`
+  # (dash form) because that is the name LlmAgent.Bridge resolves on
+  # PATH. The Lake target is `kohaku_agent` (underscore) so the
+  # artefact lives at .lake/build/bin/kohaku_agent.
+  install -Dm755 ".lake/build/bin/kohaku_agent" "${pkgdir}/usr/bin/kohaku-agent"
   # Short alias users type interactively. Symlink keeps a single binary on disk.
   ln -s leankohaku "${pkgdir}/usr/bin/kohaku"
 
