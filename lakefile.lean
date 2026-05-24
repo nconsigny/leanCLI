@@ -70,6 +70,18 @@ lean_exe «leankohaku-daemon» where
   root := `LeanKohaku.App.DaemonMain
   supportInterpreter := true
 
+/--
+Lean-native LLM agent (Phase 0). One-shot replacement for the legacy
+`bridge/llm/bridge.mjs` Node sidecar. Accepts `--rpc '<json>'` on argv,
+runs the Lean agent loop, emits one JSON-RPC envelope line on stdout.
+
+`LlmAgent.Bridge` switches to this binary by default; the legacy
+sidecar is reachable via `LEAN_KOHAKU_LLM_BRIDGE_LEGACY=1`.
+-/
+lean_exe kohaku_agent where
+  root := `LeanKohaku.App.AgentMain
+  supportInterpreter := true
+
 lean_exe «leankohaku-eip712-check» where
   root := `LeanKohaku.App.Eip712Check
   supportInterpreter := true
