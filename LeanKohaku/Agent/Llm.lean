@@ -1,0 +1,151 @@
+import LeanKohaku.Agent.State
+import LeanKohaku.Agent.Http
+import LeanKohaku.Agent.Tools
+import LeanKohaku.Encoding.Json
+
+/-!
+# OpenAI-compatible chat completions client
+
+Single-call POST to `<llmUrl>/chat/completions` over the local
+loopback HTTP shim. The shape is OpenAI-compatible because every
+local backend we support (`llama.cpp`'s server, vLLM, Ollama's `/v1`)
+implements that surface; no per-server forking.
+
+Each call sends the current message transcript plus the schemas of
+the tools the operator allowed for the invocation, parses the
+single-turn response, and returns an `AgentMessage`. The agent loop
+in `Agent.Loop` is in charge of multiplexing tool calls and feeding
+their results back in.
+-/
+
+namespace LeanKohaku.Agent.Llm
+
+open LeanKohaku.Agent
+open LeanKohaku.Encoding.Json
+
+/-- Error returned to the loop. `transport` covers HTTP / loopback /
+    socket failures; `protocol` covers a successful HTTP exchange with
+    a body we cannot decode as a chat response. -/
+inductive Error where
+  | transport (msg : String)
+  | protocol  (msg : String)
+  deriving Repr
+
+private def roleToWire : Role → String
+  | .system    => "system"
+  | .user      => "user"
+  | .assistant => "assistant"
+  | .tool      => "tool"
+
+private def messageToJson (m : AgentMessage) : Json :=
+  let baseFields : Array (String × Json) := #[
+    ("role", .str (roleToWire m.role))
+  ]
+  let contentField : Array (String × Json) := #[
+    ("content", match m.content with
+      | some s => .str s
+      | none   => .str "")
+  ]
+  let toolCallsField : Array (String × Json) :=
+    if m.toolCalls.isEmpty then #[] else
+      let calls : Array Json := m.toolCalls.toArray.map fun c =>
+        .obj #[
+          ("id",   .str c.id),
+          ("type", .str "function"),
+          ("function", .obj #[
+            ("name",      .str c.name),
+            ("arguments", .str c.argsJson)
+          ])
+        ]
+      #[("tool_calls", .arr calls)]
+  let toolCallIdField : Array (String × Json) :=
+    match m.toolCallId with
+    | some s => #[("tool_call_id", .str s)]
+    | none   => #[]
+  .obj (baseFields ++ contentField ++ toolCallsField ++ toolCallIdField)
+
+private def toolToSchemaJson (t : Tools.ToolDecl) : Json :=
+  .obj #[
+    ("type", .str "function"),
+    ("function", .obj #[
+      ("name",        .str t.name),
+      ("description", .str t.description),
+      ("parameters",  t.paramSchema)
+    ])
+  ]
+
+/-- Build the JSON body POSTed to `/chat/completions`. The `tools`
+    list is included only when non-empty; OpenAI-compat servers
+    typically tolerate an empty array but vLLM is stricter. -/
+def buildRequestBody
+    (s : AgentState) (tools : List Tools.ToolDecl) : String :=
+  let baseFields : Array (String × Json) := #[
+    ("model",       .str s.cfg.model),
+    ("max_tokens",  .num (Int.ofNat s.cfg.maxTokens)),
+    ("temperature", .num 0), -- explicit; deterministic mode
+    ("stream",      .bool false),
+    ("messages",    .arr (s.messages.map messageToJson))
+  ]
+  let toolFields : Array (String × Json) :=
+    if tools.isEmpty then #[]
+    else #[
+      ("tools", .arr (tools.toArray.map toolToSchemaJson)),
+      ("tool_choice", .str "auto")
+    ]
+  compact (.obj (baseFields ++ toolFields))
+
+private def parseToolCalls (msg : Json) : List ToolCall :=
+  match getField "tool_calls" msg with
+  | some (.arr arr) =>
+      arr.toList.filterMap fun call =>
+        match call with
+        | .obj _ =>
+            let id := (getField "id" call >>= asString).getD ""
+            let fn := getField "function" call
+            let name := (fn >>= getField "name" >>= asString).getD ""
+            let argsJson := (fn >>= getField "arguments" >>= asString).getD "{}"
+            if name.isEmpty then none
+            else some { id := id, name := name, argsJson := argsJson }
+        | _ => none
+  | _ => []
+
+/-- Decode the first `choices[0].message` of a chat-completions
+    response into our `AgentMessage` shape. -/
+def decodeChoiceMessage (resp : Json) : Except Error AgentMessage := do
+  let some choicesJ := getField "choices" resp
+    | .error (.protocol "chat response missing 'choices'")
+  let some choices := asArray choicesJ
+    | .error (.protocol "chat response 'choices' not array")
+  let some choice := choices[0]?
+    | .error (.protocol "chat response 'choices' is empty")
+  let some msg := getField "message" choice
+    | .error (.protocol "chat response choice missing 'message'")
+  let content : Option String := getField "content" msg >>= asString
+  let toolCalls := parseToolCalls msg
+  .ok {
+    role := .assistant,
+    content := content,
+    toolCalls := toolCalls
+  }
+
+/-- One chat-completions round-trip. Returns the assistant message
+    parsed from `choices[0].message`. -/
+def chat
+    (s : AgentState) (tools : List Tools.ToolDecl) :
+    IO (Except Error AgentMessage) := do
+  let body := buildRequestBody s tools
+  match ← Http.postJson s.cfg.llmUrl body s.cfg.timeoutMs with
+  | .error (.transport m) => return .error (.transport s!"http transport: {m}")
+  | .error (.nonLoopback m) => return .error (.transport s!"non-loopback: {m}")
+  | .error (.tooLarge) => return .error (.transport "response exceeded 8 MiB cap")
+  | .error (.timeout) => return .error (.transport "http timeout")
+  | .error (.nonJsonResponse m) => return .error (.protocol m)
+  | .ok resp =>
+      match Http.Response.bodyString resp with
+      | .error _ => return .error (.protocol "response body not valid UTF-8")
+      | .ok txt =>
+          match parse txt with
+          | .error e => return .error (.protocol s!"response not JSON: {e}: {txt}")
+          | .ok j => return decodeChoiceMessage j
+
+end LeanKohaku.Agent.Llm
