@@ -25,10 +25,14 @@ ConfirmGate stays the load-bearing safety net. This module narrows
   (file-system, not net), which still works because UDS is namespace-
   agnostic at the filesystem level.
 
-  The LLM bridge (`bridge/llm/`) keeps the host network namespace
+  The legacy LLM bridge (`bridge/llm-legacy/`, reachable via
+  `LEAN_KOHAKU_LLM_BRIDGE_LEGACY=1`) keeps the host network namespace
   because it must talk to the local llama-server at `127.0.0.1:8080`.
-  The loopback-only URL guard (in `bridge/llm/src/clients/`) is the
-  enforcement layer there.
+  The loopback-only URL guard (in `bridge/llm-legacy/src/clients/`) is
+  the enforcement layer there. The Phase 0 default `kohaku-agent`
+  (Lean) does not need a Node sandbox carve-out because it is a
+  trusted in-tree binary; its loopback enforcement lives in
+  `c/lean_http/` + `LeanKohaku/Agent/Http.lean`.
 
 ## What this slice does NOT do
 

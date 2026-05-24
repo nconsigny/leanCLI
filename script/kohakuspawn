@@ -323,7 +323,8 @@ if [[ "$MODE" == "uninstall" ]]; then
   # blanket rm -f is safe — no chance of nuking a user-managed wrapper
   # that happens to share the name.
   for bridge_exe in leankohaku-kohaku-bridge leankohaku-clearsign-bridge \
-                    leankohaku-colibri-bridge leankohaku-llm-bridge; do
+                    leankohaku-colibri-bridge leankohaku-llm-bridge \
+                    leankohaku-llm-legacy; do
     if [[ -e "$KOHAKU_BIN/$bridge_exe" ]]; then
       rm -f "$KOHAKU_BIN/$bridge_exe"
       echo "removed $KOHAKU_BIN/$bridge_exe"
@@ -720,7 +721,7 @@ install_bridge_wrappers() {
     "leankohaku-kohaku-bridge:bridge/bridge.mjs:LEAN_KOHAKU_BRIDGE"
     "leankohaku-clearsign-bridge:bridge/clearsign/bridge.mjs:LEAN_KOHAKU_CLEARSIGN_BRIDGE"
     "leankohaku-colibri-bridge:bridge/colibri/bridge.mjs:LEAN_KOHAKU_COLIBRI_BRIDGE"
-    "leankohaku-llm-bridge:bridge/llm/bridge.mjs:LEAN_KOHAKU_LLM_BRIDGE"
+    "leankohaku-llm-legacy:bridge/llm-legacy/bridge.mjs:LEAN_KOHAKU_LLM_BRIDGE_LEGACY_PATH"
   )
 
   # daemon.env may not exist yet — the wizard creates it only after the

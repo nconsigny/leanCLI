@@ -58,8 +58,11 @@ private def sidecars : Array SidecarDescriptor := #[
     defaultExe := "leankohaku-colibri-bridge" },
   { name := "llm",
     envVar := "LEAN_KOHAKU_LLM_BRIDGE",
-    relPath := "bridge" / "llm" / "bridge.mjs",
-    defaultExe := "leankohaku-llm-bridge" },
+    -- Phase 0: the Lean-native kohaku-agent is the default backend.
+    -- This status row points at the legacy Node sidecar that is now
+    -- opt-in via LEAN_KOHAKU_LLM_BRIDGE_LEGACY=1.
+    relPath := "bridge" / "llm-legacy" / "bridge.mjs",
+    defaultExe := "kohaku-agent" },
   { name := "privacy",
     envVar := "LEAN_KOHAKU_BRIDGE",
     relPath := "bridge" / "bridge.mjs",

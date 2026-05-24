@@ -5,15 +5,20 @@ import LeanKohaku.Util.BridgeResolve
 /-!
 # LLM-agent bridge
 
-Untrusted Node sidecar (`bridge/llm/`) that turns natural-language intents
-into transaction-draft candidates. The Lean daemon is the trusted policy
-enforcer; this process is treated as malicious. Every draft it emits flows
-through the existing decode → simulate → user-confirm gate before any
-signing happens.
+One-shot stdio JSON-RPC client for the LLM agent backend. The Phase 0
+default is the Lean-native `kohaku-agent` (built from
+`LeanKohaku/App/AgentMain.lean`); the legacy Node sidecar at
+`bridge/llm-legacy/bridge.mjs` is opt-in via
+`LEAN_KOHAKU_LLM_BRIDGE_LEGACY=1`.
+
+The Lean daemon is the trusted policy enforcer; either backend is
+treated as a thin transport over an untrusted process. Every draft it
+emits flows through the existing decode → simulate → user-confirm
+gate before any signing happens.
 
 Same one-shot stdio pattern as `LeanKohaku.Privacy.Bridge` and
 `LeanKohaku.Clearsign.Bridge`. This module is the **only** place that
-spawns the llm sidecar.
+spawns the llm backend.
 -/
 
 namespace LeanKohaku.LlmAgent.Bridge
