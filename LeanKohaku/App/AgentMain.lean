@@ -14,8 +14,10 @@ one-shot agent loop for `llm.parseIntent`, emits exactly one
 JSON-RPC envelope line on stdout.
 
 Trust contract (Phase 0):
-* Never imports `Wallet.*`, `Keystore.*`, `Daemon.State`, `Crypto.
-  Secp256k1Native`, or `Crypto.Random`.
+* This module imports no signing or key-material module. See
+  `docs/PHASE0_PLAN.md` for the exact forbidden-import list — the
+  acceptance gate greps for those names and the list is maintained
+  in one place to avoid false positives in prose here.
 * The only path to the network is through `Agent.Http`
   (loopback-only) and `Agent.DaemonClient` (existing UDS surface).
 * The only path to a signature is the upstream consumer's

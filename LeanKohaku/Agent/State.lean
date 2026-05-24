@@ -5,10 +5,11 @@ Plain data — no IO, no signing imports. The agent runs as the
 `kohaku-agent` executable; this module defines what a single
 one-shot agent invocation looks like in memory.
 
-Trust contract: nothing in `LeanKohaku/Agent/**` may import
-`Crypto.Secp256k1Native`, `Crypto.Random`, `Wallet.{EOA,HDKey,
-Mnemonic,Entropy}`, `Keystore/**`, or `Daemon.State`. The agent
-proposes; the daemon signs.
+Trust contract: nothing in `LeanKohaku/Agent/**` imports any of the
+signing or key-material modules. The full forbidden-import list lives
+in `docs/PHASE0_PLAN.md`; the acceptance gate greps for those names so
+the canonical reference stays in one place. The agent proposes; the
+daemon signs.
 -/
 
 namespace LeanKohaku.Agent
