@@ -1,0 +1,6 @@
+{
+  "_source": "https://github.com/aave/aave-v3-core",
+  "_contractName": "Pool",
+  "_todo": "TODO(curator): fetch from https://github.com/aave/aave-v3-core; no automatic fetch source configured",
+  "abi": []
+}

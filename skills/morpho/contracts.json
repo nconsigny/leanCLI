@@ -1,0 +1,18 @@
+{
+  "mainnet": {
+    "MorphoBlue": {
+      "address": "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb",
+      "abi": "abi/MorphoBlue.json",
+      "verified": true,
+      "source": "https://docs.morpho.org/morpho-blue/contracts/"
+    },
+    "MetaMorphoFactory": {
+      "address": "0xA9c3D3a366466Fa809d1Ae982Fb2c46E5fC41101",
+      "abi": "abi/MetaMorphoFactory.json",
+      "verified": true,
+      "source": "https://docs.morpho.org/metamorpho/contracts/"
+    }
+  },
+  "sepolia": {},
+  "_sepolia_note": "TODO(curator): confirm whether Morpho Blue/MetaMorpho have a Sepolia deployment; the docs above list mainnet first."
+}

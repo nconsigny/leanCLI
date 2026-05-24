@@ -1,0 +1,6 @@
+{
+  "_source": "https://github.com/cowprotocol/contracts",
+  "_contractName": "GPv2Settlement",
+  "_todo": "TODO(curator): fetch from https://github.com/cowprotocol/contracts; no automatic fetch source configured",
+  "abi": []
+}

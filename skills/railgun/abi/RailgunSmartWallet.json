@@ -1,0 +1,6 @@
+{
+  "_source": "https://docs.railgun.org/developer-guide/contract/contract-addresses",
+  "_contractName": "RailgunSmartWallet",
+  "_todo": "TODO(curator): fetch from https://docs.railgun.org/developer-guide/contract/contract-addresses; no automatic fetch source configured",
+  "abi": []
+}

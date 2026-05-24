@@ -1,0 +1,30 @@
+{
+  "mainnet": {
+    "ETH_0.1": {
+      "address": "0x12D66f87A04A9E220743712cE6d9bB1B5616B8Fc",
+      "abi": "abi/ETHTornado.json",
+      "verified": true,
+      "source": "https://github.com/tornadocash/tornado-core"
+    },
+    "ETH_1": {
+      "address": "0x47CE0C6eD5B0Ce3d3A51fdb1C52DC66a7c3c2936",
+      "abi": "abi/ETHTornado.json",
+      "verified": true,
+      "source": "https://github.com/tornadocash/tornado-core"
+    },
+    "ETH_10": {
+      "address": "0x910Cbd523D972eb0a6f4cAe4618aD62622b39DbF",
+      "abi": "abi/ETHTornado.json",
+      "verified": true,
+      "source": "https://github.com/tornadocash/tornado-core"
+    },
+    "ETH_100": {
+      "address": "0xA160cdAB225685dA1d56aa342Ad8841c3b53f291",
+      "abi": "abi/ETHTornado.json",
+      "verified": true,
+      "source": "https://github.com/tornadocash/tornado-core"
+    }
+  },
+  "sepolia": {},
+  "_sepolia_note": "Tornado Cash was not redeployed on Sepolia."
+}

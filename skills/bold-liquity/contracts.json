@@ -1,0 +1,12 @@
+{
+  "mainnet": {
+    "BoldToken": {
+      "address": "0xb01dd87B29d187F3E3a4Bf6cdAebfb97F3D9aB98",
+      "abi": "abi/BoldToken.json",
+      "verified": true,
+      "source": "https://github.com/liquity/bold"
+    }
+  },
+  "sepolia": {},
+  "_sepolia_note": "TODO(curator): confirm Liquity V2 BOLD Sepolia deployment status (may exist; pin address from GitHub deployment table)."
+}

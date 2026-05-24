@@ -1,0 +1,58 @@
+{
+  "mainnet": {
+    "UniversalRouter": {
+      "address": "0x3fC91A3afd70395Cd496C647d5a6CC9D4B2b7FAD",
+      "abi": "abi/UniversalRouter.json",
+      "verified": true,
+      "source": "https://docs.uniswap.org/contracts/universal-router/overview"
+    },
+    "SwapRouter02": {
+      "address": "0x68b3465833fb72A70ecDF485E0e4C7bD8665Fc45",
+      "abi": "abi/SwapRouter02.json",
+      "verified": true,
+      "source": "https://docs.uniswap.org/contracts/v3/reference/deployments"
+    },
+    "UniswapV2Router02": {
+      "address": "0x7a250d5630B4cF539739dF2C5dAcb4c659F2488D",
+      "abi": "abi/UniswapV2Router02.json",
+      "verified": true,
+      "source": "https://docs.uniswap.org/contracts/v2/reference/smart-contracts/v2-deployments"
+    },
+    "WETH9": {
+      "address": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      "verified": true,
+      "source": "https://etherscan.io/token/0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+    },
+    "Permit2": {
+      "address": "0x000000000022D473030F116dDEE9F6B43aC78BA3",
+      "verified": true,
+      "source": "https://github.com/Uniswap/permit2#deployments",
+      "_note": "ERC-7730 descriptor at bridge/clearsign/registry/permit2.json"
+    }
+  },
+  "sepolia": {
+    "UniversalRouter": {
+      "address": "0x3A9D48AB9751398BbFa63ad67599Bb04e4BdF98b",
+      "abi": "abi/UniversalRouter.json",
+      "verified": true,
+      "source": "https://docs.uniswap.org/contracts/universal-router/overview"
+    },
+    "SwapRouter02": {
+      "address": "0x3bFA4769FB09eefC5a80d6E87c3B9C650f7Ae48E",
+      "abi": "abi/SwapRouter02.json",
+      "verified": true,
+      "source": "https://docs.uniswap.org/contracts/v3/reference/deployments"
+    },
+    "UniswapV2Router02": {
+      "address": "0xeE567Fe1712Faf6149d80dA1E6934E354124CfE3",
+      "abi": "abi/UniswapV2Router02.json",
+      "verified": true,
+      "source": "https://docs.uniswap.org/contracts/v2/reference/smart-contracts/v2-deployments"
+    },
+    "WETH9": {
+      "address": "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14",
+      "verified": true,
+      "source": "https://docs.uniswap.org/contracts/v3/reference/deployments"
+    }
+  }
+}

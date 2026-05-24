@@ -1,0 +1,19 @@
+{
+  "mainnet": {
+    "Entrypoint": {
+      "address": "0x6818809EefCe719E480a7526D76bD3e561526b46",
+      "abi": "abi/Entrypoint.json",
+      "verified": true,
+      "source": "https://docs.privacypools.com/"
+    }
+  },
+  "sepolia": {
+    "Entrypoint": {
+      "address": "0x9D8D4cdfeD605293DC8826BC2D2A2c7Fb867Edd0",
+      "abi": "abi/Entrypoint.json",
+      "verified": true,
+      "source": "https://docs.privacypools.com/",
+      "_note": "TODO(curator): confirm Sepolia Entrypoint address vs current 0xbow deployment table"
+    }
+  }
+}

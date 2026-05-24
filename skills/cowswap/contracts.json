@@ -1,0 +1,19 @@
+{
+  "mainnet": {
+    "GPv2Settlement": {
+      "address": "0x9008D19f58AAbD9eD0D60971565AA8510560ab41",
+      "abi": "abi/GPv2Settlement.json",
+      "verified": true,
+      "source": "https://docs.cow.fi/cow-protocol/reference/contracts/core"
+    }
+  },
+  "sepolia": {
+    "GPv2Settlement": {
+      "address": "0x9008D19f58AAbD9eD0D60971565AA8510560ab41",
+      "abi": "abi/GPv2Settlement.json",
+      "verified": true,
+      "source": "https://docs.cow.fi/cow-protocol/reference/contracts/core",
+      "_note": "CoW Protocol settlement is deployed at the same address on Sepolia."
+    }
+  }
+}

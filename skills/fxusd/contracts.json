@@ -1,0 +1,12 @@
+{
+  "mainnet": {
+    "fxUSD": {
+      "address": "0x085780639CC2cACd35E474e71f4d000e2405d8f6",
+      "abi": "abi/fxUSD.json",
+      "verified": true,
+      "source": "https://docs.aladdin.club/fx-protocol/fx-protocol-overview"
+    }
+  },
+  "sepolia": {},
+  "_sepolia_note": "fxUSD has no Sepolia deployment."
+}
