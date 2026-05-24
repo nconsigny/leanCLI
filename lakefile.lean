@@ -110,6 +110,18 @@ lean_exe kohaku_agent where
   root := `LeanKohaku.App.AgentMain
   supportInterpreter := true
 
+/--
+SQLite session-store smoke test (Phase 1a). Exercises schema
+bootstrap, append + load, tool-call round-trip, FTS5 search, and a
+second-handle concurrent read. Build with
+`lake build agent_session_test`, run with
+`.lake/build/bin/agent_session_test`. Exits non-zero on any
+regression — `tests/agent_phase1a_smoke.sh` runs it as a prereq.
+-/
+lean_exe agent_session_test where
+  root := `LeanKohaku.Agent.SessionTest
+  supportInterpreter := true
+
 lean_exe «leankohaku-eip712-check» where
   root := `LeanKohaku.App.Eip712Check
   supportInterpreter := true
