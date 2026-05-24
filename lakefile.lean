@@ -11,6 +11,21 @@ package "leanKohaku" where
     ⟨`pp.unicode.fun, true⟩,
     ⟨`autoImplicit, false⟩
   ]
+  -- libcurl is consumed transitively by liblean_http (see below) and
+  -- linked into every executable that pulls it in. We use weakLinkArgs
+  -- rather than moreLinkArgs because changing the linker line for a
+  -- system library should not invalidate Lean compilation caches.
+  --
+  -- We pass the absolute path to /usr/lib/libcurl.so to the linker
+  -- rather than `-L/usr/lib -lcurl`: the Lean toolchain links against
+  -- its own bundled glibc via `--sysroot`, so a bare `-L/usr/lib`
+  -- accidentally drags in the host's current glibc (which on Arch is
+  -- newer than the bundled one and removes symbols like
+  -- `__libc_csu_init` that Scrt1.o still references). The absolute-
+  -- path form only loads libcurl itself; libcurl's transitive deps
+  -- (libnghttp2, libssl, …) come from the host's runtime linker
+  -- search at execution time via DT_NEEDED entries on libcurl.so.4.
+  weakLinkArgs := #["/usr/lib/libcurl.so"]
 
 lean_lib LeanKohaku where
 
@@ -32,6 +47,18 @@ extern_lib liblean_uds pkg := do
   let oJob ← buildO (pkg.buildDir / "native" / "lean_uds.o") srcJob
     #["-I", lean.includeDir.toString, "-fPIC"] #[]
   buildStaticLib (pkg.buildDir / "native" / "liblean_uds.a") #[oJob]
+
+-- Loopback-only HTTP POST shim consumed by LeanKohaku/Agent/Http.lean.
+-- Compiled against the system libcurl headers; the actual `-lcurl`
+-- link arg is set in the package-level `weakLinkArgs` above.
+extern_lib liblean_http pkg := do
+  let srcJob ← inputTextFile <| pkg.dir / "c" / "lean_http" / "lean_http.c"
+  let lean ← getLeanInstall
+  let oJob ← buildO (pkg.buildDir / "native" / "lean_http.o") srcJob
+    #["-I", lean.includeDir.toString,
+      "-I", (pkg.dir / "c" / "lean_http").toString,
+      "-fPIC"] #[]
+  buildStaticLib (pkg.buildDir / "native" / "liblean_http.a") #[oJob]
 
 @[default_target]
 lean_exe leankohaku where
