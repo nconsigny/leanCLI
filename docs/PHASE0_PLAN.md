@@ -155,11 +155,11 @@ Run as real Bash tool calls; paste raw output:
 ```
 git log --oneline master..HEAD
 lake build
-find LeanKohaku/Agent LeanKohaku/App/AgentMain.lean -type f 2>/dev/null \
+find LeanKohaku/Agent LeanKohaku/App/AgentMain.lean LeanKohaku/App/AgentDaemonMain.lean -type f 2>/dev/null \
   | xargs grep -lE "Crypto\\.Secp256k1Native|Crypto\\.Random|Wallet\\.(EOA|HDKey|Mnemonic|Entropy)|^import LeanKohaku\\.Keystore|^import LeanKohaku\\.Daemon\\.State" 2>/dev/null
 find LeanKohaku c -type f \( -name '*.py' -o -name '*.ts' -o -name '*.tsx' -o -name '*.mjs' -o -name '*.cjs' -o -name '*.js' \) 2>/dev/null
-grep -rniE "arbitrum|optimism|polygon|zksync|scroll|linea|blast" LeanKohaku/Agent LeanKohaku/App/AgentMain.lean 2>/dev/null
+grep -rniE "arbitrum|optimism|polygon|zksync|scroll|linea|blast" LeanKohaku/Agent LeanKohaku/App/AgentMain.lean LeanKohaku/App/AgentDaemonMain.lean 2>/dev/null
 find LeanKohaku -name '*.lean' | wc -l
-grep -E "^axiom" LeanKohaku/Agent/*.lean LeanKohaku/Agent/ToolDefs/*.lean LeanKohaku/App/AgentMain.lean 2>/dev/null
-ls -la c/lean_http/ LeanKohaku/Agent/ LeanKohaku/App/AgentMain.lean .lake/build/bin/kohaku_agent 2>&1
+grep -E "^axiom" LeanKohaku/Agent/*.lean LeanKohaku/Agent/ToolDefs/*.lean LeanKohaku/App/AgentMain.lean LeanKohaku/App/AgentDaemonMain.lean 2>/dev/null
+ls -la c/lean_http/ c/lean_sqlite/ LeanKohaku/Agent/ LeanKohaku/App/AgentMain.lean LeanKohaku/App/AgentDaemonMain.lean .lake/build/bin/kohaku_agent .lake/build/bin/kohaku_agentd 2>&1
 ```
