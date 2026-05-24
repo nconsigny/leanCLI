@@ -4,7 +4,7 @@ A map of the repository as it actually exists, complementing `README.md`
 (goals & user-visible behavior), `INVARIANTS.md` (proof obligations & status),
 and `CLAUDE.md` (build & contributor workflow).
 
-The codebase is **134 Lean source files** plus C/Rust FFI helpers. There
+The codebase is **138 Lean source files** plus C/Rust FFI helpers. There
 are **no `sorry`s** in proofs and no `axiom`s outside the explicit FFI
 boundary (opaque `Hacl` / `Tpm2` primitives, plus the `@[extern]`
 declarations in `Daemon/Uds.lean`, `Agent/Http.lean`, and the Phase 1a
@@ -120,6 +120,14 @@ the abstract models defined alongside it (not about runtime IO).
   policy (~480 lines).
 - `DaemonClient.lean` — UDS client.
 - `Passphrase.lean` — passphrase prompting.
+- `MemoryCmd.lean` — Phase-1c `kohaku memory show / edit /
+  refresh / forget` subcommands. All four route through the
+  `kohaku-agentd` UDS socket so the daemon stays the sole
+  writer of `MEMORY.md`; `show` falls back to a direct file
+  read when the daemon is down. `forget` refuses patterns
+  shorter than 4 chars (operator-error guard). Deliberately
+  does not import `LeanKohaku.Agent.*` to keep the CLI surface
+  decoupled from the agent module tree.
 
 ### `Agent/` — Lean-native LLM agent (Phase 0)
 - `State.lean` — `Role`, `ToolCall`, `AgentMessage`, `AgentConfig`,
@@ -162,6 +170,34 @@ the abstract models defined alongside it (not about runtime IO).
 - `ToolDefs/Protocols.lean` — `protocol_lookup` and
   `protocol_function_lookup`. Both read-only, both bound to a
   `Skills.RegistryRef` at construction time.
+- `Memory.lean` + `MemoryPrompts.lean` — Phase-1c long-term
+  memory store. The agent persists a small markdown file
+  (`MEMORY.md`, 0600 mode, 0700 parent dir) under
+  `$XDG_DATA_HOME/leankohaku/`. The daemon is the sole writer:
+  it loads at startup, renders into every system prompt
+  (omitted entirely when empty), and updates either on demand
+  (`update_memory` op) or via LLM-driven extraction at
+  `close_session` (`extract_memory` op). A defence-in-depth
+  post-extraction filter drops any line matching a private-key
+  shape (`\b0x[a-fA-F0-9]{64}\b`), a BIP-39 mnemonic shape
+  (12+ consecutive lowercase ASCII words), or a signing-API
+  method name. Output is capped at 8 KiB at the last newline
+  boundary. The extraction prompt itself
+  (`MemoryPrompts.extractionInstructions`) carries the policy
+  the model is asked to honour. Forbidden-import gate still
+  empty.
+- `Compression.lean` — Phase-1c token-budget transcript
+  compression. Before every chat round in the persistent agent
+  daemon, the loop estimates the transcript's token count
+  (word-count × 1.4; tunable via `KOHAKU_TOKEN_RATIO`) and, if
+  it exceeds the trigger threshold (default 6000), asks the
+  LLM to summarise the middle of the transcript into a single
+  `[Earlier in session, summarised]` system message. The first
+  system message and the last `keepLastTurns` user/assistant
+  turn pairs are preserved verbatim. Idempotent by
+  construction (`targetTokens < triggerTokens`). Failure is a
+  graceful no-op — the agent loop never crashes on a
+  compression error.
 
 The full trust contract: nothing in `Agent/` imports
 `Crypto.Secp256k1Native`, `Crypto.Random`, `Wallet.{EOA,HDKey,
@@ -295,6 +331,29 @@ The agent daemon resolves the skills directory in this order:
 `reload` over the daemon socket re-walks the resolved path and
 swaps the in-memory registry atomically under all active readers.
 
+### Incognito mode (Phase 1c)
+
+Setting `LEAN_KOHAKU_INCOGNITO=1` (e.g. via `kohaku tui
+--incognito`, which sets the env for the TUI subprocess) flips
+the LLM bridge into incognito mode for the duration of that
+process. Behaviour:
+
+- The bridge propagates `{"incognito": true}` in the
+  `create_session` metadata when it opens a new agent session.
+- `kohaku-agentd` registers the returned `session_id` in an
+  in-memory incognito set. For the lifetime of that session,
+  `appendMessage` is a no-op (zero rows in `sessions.db`).
+- On `close_session`, the daemon skips the memory-extraction
+  auto-trigger for incognito sessions.
+- The per-turn response carries an `incognito` boolean back so
+  downstream UIs can render a marker. Visual marker design is
+  not part of the verified core.
+
+Incognito is a hard switch: the daemon does not "downgrade" the
+flag mid-session, and the bridge does not "fall through" to a
+non-incognito session if the daemon is unreachable. If the user
+asked for incognito, an unreachable daemon is a failure.
+
 ### Terminal UI (`tui/`)
 
 `tui/` is an Ink-based TUI bundled with esbuild to a single
@@ -335,6 +394,15 @@ Trusted (not proved in Lean):
   used only by `kohaku-agentd`. Trusted as an *opaque local store* —
   it never sees key material (the agent import graph forbids signing
   modules) and DB content never authorises signing.
+- The MEMORY.md file (`Agent/Memory.lean`, Phase 1c). Same trust
+  shape as the session DB: an opaque local store, written
+  exclusively by `kohaku-agentd` via atomic `tmpfile + rename`,
+  mode 0600 under a 0700 parent dir. The post-extraction filter
+  in `Memory.postFilter` is the second line of defence against
+  the LLM proposing key-shaped or mnemonic-shaped content; the
+  prompt itself (`MemoryPrompts.extractionInstructions`) is the
+  first. Memory content is read into every new session's system
+  prompt; it never authorises signing.
 - The C/Rust helpers in `c/` and the binaries on `$PATH`.
 
 The split is deliberate: the wallet's signing path is reasoned about in Lean,
