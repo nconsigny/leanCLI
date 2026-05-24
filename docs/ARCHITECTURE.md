@@ -4,16 +4,17 @@ A map of the repository as it actually exists, complementing `README.md`
 (goals & user-visible behavior), `INVARIANTS.md` (proof obligations & status),
 and `CLAUDE.md` (build & contributor workflow).
 
-The codebase is **129 Lean source files** plus C/Rust FFI helpers. There
+The codebase is **132 Lean source files** plus C/Rust FFI helpers. There
 are **no `sorry`s** in proofs and no `axiom`s outside the explicit FFI
 boundary (opaque `Hacl` / `Tpm2` primitives, plus the `@[extern]`
-declarations in `Daemon/Uds.lean` and `Agent/Http.lean`). Every theorem
-in `LeanKohaku/Invariants/` is closed.
+declarations in `Daemon/Uds.lean`, `Agent/Http.lean`, and the Phase 1a
+`Agent/Session.lean` SQLite shim). Every theorem in
+`LeanKohaku/Invariants/` is closed.
 
 ## Layered structure
 
 ```
-Entry points        LeanKohaku/App/{Main,DaemonMain,AgentMain}.lean
+Entry points        LeanKohaku/App/{Main,DaemonMain,AgentMain,AgentDaemonMain}.lean
                         │
 Surfaces            Cli/   RPC/   Daemon/   Agent/
                         │
@@ -21,7 +22,8 @@ Domain              Wallet/   Ethereum/   Keystore/   Contract/   Privacy/   Net
                         │
 Primitives          Crypto/   Encoding/
                         │
-FFI boundary        c/hacl_helpers   c/secp256k1_helpers   c/lean_uds   c/lean_http   c/rustcrypto_helpers
+FFI boundary        c/hacl_helpers   c/secp256k1_helpers   c/lean_uds   c/lean_http
+                    c/lean_sqlite    c/rustcrypto_helpers
 ```
 
 `LeanKohaku.lean` is import-only and re-exports every module; downstream code
@@ -41,6 +43,11 @@ the abstract models defined alongside it (not about runtime IO).
   Phase-0 Lean-native replacement for the `bridge/llm-legacy/` Node
   sidecar. One-shot JSON-RPC over `--rpc '<json>'`; speaks to a local
   loopback LLM via `c/lean_http/` and to the daemon over UDS.
+- `LeanKohaku/App/AgentDaemonMain.lean` — `kohaku-agentd` executable
+  root. Phase-1a long-running sibling of `kohaku-agent`. Listens on
+  `$XDG_RUNTIME_DIR/leankohaku/agent.sock`; persists session history
+  in SQLite via `LeanKohaku/Agent/Session.lean`. Wire shape is
+  newline-delimited JSON with the op set in `docs/PHASE1A_PLAN.md`.
 - `LeanKohaku/Lib/{Client,Core,Spec}.lean` — aggregate library roots
   (CLI surface, daemon/runtime surface, proof/spec surface) consumed by the
   three `lean_lib` targets in `lakefile.lean`.
@@ -138,11 +145,17 @@ the abstract models defined alongside it (not about runtime IO).
 - `Loop.lean` — bounded `runOneShot` loop (`partial def`, tagged
   `PHASE_N: prove termination`).
 - `Registry.lean` — the default 7-tool registry.
+- `Session.lean` — Phase-1a SQLite-backed session/message store
+  with FTS5 search. Schema bootstrap is idempotent and version-
+  gated. Used by `kohaku-agentd`; one-shot `kohaku-agent` does
+  not touch it. No signing or key-material imports — the DB
+  carries conversation history only.
 
 The full trust contract: nothing in `Agent/` imports
 `Crypto.Secp256k1Native`, `Crypto.Random`, `Wallet.{EOA,HDKey,
 Mnemonic,Entropy}`, `Keystore/**`, or `Daemon.State`. The agent
-proposes; the daemon signs.
+proposes; the daemon signs. The Phase-1a `AgentDaemonMain.lean`
+joins this gated set; the CI grep gate is extended accordingly.
 
 ### `Invariants/` — all proofs closed, no `sorry`
 - `Core.lean` — top-level safety: no key exfiltration, verified-only signing,
@@ -163,15 +176,19 @@ proposes; the daemon signs.
 | `c/secp256k1_helpers/` | libsecp256k1 | sign / pubkey / recover / verify (hex in/out CLI helpers) |
 | `c/lean_uds/lean_uds.c` | POSIX | `bind/accept/connect/read/write/close/shutdown`, peer-uid/current-uid |
 | `c/lean_http/lean_http.c` | libcurl | loopback-only HTTP POST for `kohaku-agent`. Refuses non-`http://127.0.0.1`/`http://[::1]`/`http://localhost` URLs at the C layer. 8 MiB response cap. No TLS, no redirects. |
+| `c/lean_sqlite/lean_sqlite.c` | libsqlite3 | Phase-1a SQLite shim consumed by `LeanKohaku/Agent/Session.lean`. Links against the system libsqlite3 (Arch + Debian 12+ ship FTS5 enabled). Column-text bytes are copied out before further DB calls. |
 | `c/rustcrypto_helpers/` | RustCrypto | optional Rust ripemd160 binary |
 
 Build automation: `script/setup_hacl.sh`, `script/setup_secp256k1.sh`,
-`script/setup_uds.sh`, `script/setup_http.sh`. The UDS and HTTP C libs
-are linked into the Lean library via `extern_lib liblean_uds` and
-`extern_lib liblean_http` in `lakefile.lean`; the HTTP shim links
-against the system libcurl via `weakLinkArgs := #["/usr/lib/libcurl.so"]`
-on the package. The other helpers are external binaries invoked at
-runtime.
+`script/setup_uds.sh`, `script/setup_http.sh`, `script/setup_sqlite.sh`
+(Phase 1a; header + FTS5 probe). The UDS, HTTP, and SQLite C libs are
+linked into the Lean library via `extern_lib liblean_uds`,
+`extern_lib liblean_http`, and `extern_lib liblean_sqlite` in
+`lakefile.lean`; the package-level `weakLinkArgs` pins
+`/usr/lib/libcurl.so`, `/usr/lib/libsqlite3.so`, and
+`-Wl,--allow-shlib-undefined` so the bundled lld accepts libsqlite3's
+DT_NEEDED dependencies on libc/libpthread (merged into glibc 2.34+).
+The other helpers are external binaries invoked at runtime.
 
 ## Companion artifacts outside the main library
 
@@ -192,16 +209,35 @@ runtime.
 ### Sidecar bridges (`bridge/`) and the Lean-native agent
 
 Phase 0 split the LLM backend into a Lean-native primary (`kohaku-agent`)
-and an opt-in legacy Node sidecar. The other two bridges remain Node.
-Each bridge is one-shot stdio JSON-RPC: the daemon spawns the binary per
-call with the request as `--rpc <json>` on argv, reads one line of
-stdout, and reaps. The Lean spawn modules listed below are the **only**
-places that fork them; every output is treated as untrusted and
-re-validated.
+and an opt-in legacy Node sidecar. Phase 1a adds a long-running sibling
+`kohaku-agentd` selected automatically by `LlmAgent.Bridge.resolveMode`.
+The other two bridges remain Node.
+
+Modes:
+
+* **One-shot (Phase 0 default)** — Spawn `kohaku-agent`, pass the
+  request as `--rpc <json>` on argv, read one line of stdout, reap.
+* **Persistent (Phase 1a, opt-in)** — Talk to a running `kohaku-agentd`
+  over `$XDG_RUNTIME_DIR/leankohaku/agent.sock`. Session history is
+  persisted in `$XDG_DATA_HOME/leankohaku/sessions.db` with FTS5
+  search. Auto-detected: the bridge pings the socket; if `ok`, uses
+  persistent, else one-shot.
+* **Legacy Node sidecar** — `bridge/llm-legacy/bridge.mjs`, opt-in
+  via `LEAN_KOHAKU_LLM_BRIDGE_LEGACY=1`.
+
+Mode resolution order: env override → legacy → socket probe → one-shot.
+Persistent mode that explicitly fails to contact the agent does NOT
+silently fall back. See `docs/PHASE1A_PLAN.md` for the full wire
+shape; `LeanKohaku/LlmAgent/Bridge.lean` is the only path the wallet
+daemon takes into either kohaku backend.
+
+Each bridge is treated as untrusted; every output flows through the
+existing decode → simulate → ConfirmGate gate before any signing.
 
 | Backend | Lean wrapper | Executable env var | Purpose |
 |---|---|---|---|
-| `kohaku-agent` (in-tree Lean) | `LeanKohaku/LlmAgent/Bridge.lean` | `LEAN_KOHAKU_LLM_BRIDGE` (override) | Primary LLM backend (Phase 0). Loopback HTTP via `c/lean_http`; talks to the daemon over UDS. |
+| `kohaku-agent` (in-tree Lean, one-shot) | `LeanKohaku/LlmAgent/Bridge.lean` | `LEAN_KOHAKU_LLM_BRIDGE` (override) | Phase 0 primary. Spawn-per-call. Loopback HTTP via `c/lean_http`; talks to wallet daemon over UDS. |
+| `kohaku-agentd` (in-tree Lean, persistent) | `LeanKohaku/LlmAgent/Bridge.lean` | `LEAN_KOHAKU_AGENT_MODE`, `KOHAKU_AGENT_SOCKET` | Phase 1a opt-in. Long-running UDS sidecar; persists session history in `$XDG_DATA_HOME/leankohaku/sessions.db` via FTS5. Auto-detected. |
 | `bridge/llm-legacy/` (Node fallback) | `LeanKohaku/LlmAgent/Bridge.lean` | `LEAN_KOHAKU_LLM_BRIDGE_LEGACY=1` | Opt-in fallback. Anthropic SDK + viem; `ANTHROPIC_API_KEY` enables the model fallback. Kept for parity tests. |
 | `bridge/` | `LeanKohaku/Privacy/Bridge.lean` | `LEAN_KOHAKU_BRIDGE` | Privacy Pools / Railgun (snarkjs, libp2p) |
 | `bridge/clearsign/` | `LeanKohaku/Clearsign/Bridge.lean` | `LEAN_KOHAKU_CLEARSIGN_BRIDGE` | ERC-7730 calldata + EIP-712 walker |
@@ -251,6 +287,10 @@ Trusted (not proved in Lean):
   C-enforced and re-checked in Lean, and the agent treats every byte the
   LLM returns as adversarial input that must traverse the standard
   decode → simulate → ConfirmGate pipeline before any signing.
+- The SQLite shim (`Agent/Session.lean` + `c/lean_sqlite/` — `@[extern]`)
+  used only by `kohaku-agentd`. Trusted as an *opaque local store* —
+  it never sees key material (the agent import graph forbids signing
+  modules) and DB content never authorises signing.
 - The C/Rust helpers in `c/` and the binaries on `$PATH`.
 
 The split is deliberate: the wallet's signing path is reasoned about in Lean,
