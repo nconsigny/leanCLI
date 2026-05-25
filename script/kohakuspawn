@@ -652,6 +652,53 @@ else
   echo "kohakuspawn: $LEAN_AGENTD not built — skipping kohaku-agentd symlink" >&2
 fi
 
+# Add-or-replace a key=value line in $KOHAKU_ENV_FILE. Same dance the
+# sphincs loop uses below; factored out so the agent and any future
+# env-key install path share one implementation.
+kohaku_env_set() {
+  local var="$1"
+  local val="$2"
+  mkdir -p "$KOHAKU_CFG_DIR"
+  if [[ ! -e "$KOHAKU_ENV_FILE" ]]; then
+    {
+      printf '%s\n' "# kohaku-daemon environment file."
+      printf '%s\n' "# Read by the systemd user unit (kohaku-daemon.service) and by"
+      printf '%s\n' "# shell-launched daemons that source it. This file is auxiliary;"
+      printf '%s\n' "# per-chain RPC config lives in daemon.json next to it."
+    } > "$KOHAKU_ENV_FILE"
+    chmod 0600 "$KOHAKU_ENV_FILE" 2>/dev/null || true
+  fi
+  if grep -qE "^${var}=" "$KOHAKU_ENV_FILE" 2>/dev/null; then
+    local current
+    current="$(grep -E "^${var}=" "$KOHAKU_ENV_FILE" | head -n1 | cut -d= -f2-)"
+    if [[ "$current" != "$val" ]]; then
+      local tmp
+      tmp="$(mktemp "$KOHAKU_ENV_FILE.XXXXXX")"
+      awk -v var="$var" -v val="$val" '
+        $0 ~ "^"var"=" { print var"="val; seen=1; next }
+        { print }
+        END { if (!seen) print var"="val }
+      ' "$KOHAKU_ENV_FILE" > "$tmp"
+      chmod 0600 "$tmp" 2>/dev/null || true
+      mv "$tmp" "$KOHAKU_ENV_FILE"
+      echo "==> $KOHAKU_ENV_FILE: updated $var (was $current)"
+    fi
+  else
+    printf '%s=%s\n' "$var" "$val" >> "$KOHAKU_ENV_FILE"
+    echo "==> $KOHAKU_ENV_FILE: added $var"
+  fi
+}
+
+# LEAN_KOHAKU_LLM_BRIDGE — pin the kohaku-agent path in daemon.env so
+# the wallet daemon resolves it regardless of PATH. Systemd-managed
+# daemons typically run with a minimal PATH that excludes ~/.kohaku/bin,
+# so even after the symlink lands the daemon can fail to spawn the
+# bridge with exit code 127. Same reasoning as the sphincs env vars
+# below.
+if [[ -x "$LEAN_AGENT" ]]; then
+  kohaku_env_set "LEAN_KOHAKU_LLM_BRIDGE" "$KOHAKU_BIN/kohaku-agent"
+fi
+
 # SPHINCS- shim symlinks + daemon.env entries. The daemon's
 # `Sphincs/Bridge.lean::resolveExecutable` checks `LEAN_KOHAKU_SPHINCS_<PARAMSET>`
 # env first, then walks up from cwd looking for `sidecars/sphincs/bin/<basename>`,
