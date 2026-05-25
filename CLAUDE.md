@@ -85,7 +85,7 @@ On-disk, per-skill directories (`SKILL.md` + supporting JSON/ABI/markdown). Load
 Current entries:
 - Meta: `kohaku-wallet`, `web3-security`.
 - DeFi: `aave`, `morpho`, `uniswap`, `cowswap`, `bold-liquity`, `fxusd`.
-- Privacy: `railgun`, `privacy-pool`, `tornado-cash` (last is research/decode-only; no SDK; OFAC posture).
+- Privacy: `railgun`, `privacy-pool`, `tornado-cash` (last is decode-only today; SDK and drafting coming soon).
 - Worked ops: `approve-erc20`, `audit-approvals`, `fresh-address`, `revoke-approval`, `send-erc20`, `send-native`, `shield-eth`, `swap-uniswap-v3`, `unshield-eth`.
 
 Adding a new protocol: drop a skill directory (use `uniswap` as the worked template), declare triggers in its `SKILL.md`, point `Agent/ToolDefs/Protocols.lean` at the new directory if a new selector handler is needed. No daemon RPC change required for read-only operations — they go through `chain.ethCall` like every other policy-gated read.

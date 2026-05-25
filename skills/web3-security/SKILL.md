@@ -4,7 +4,6 @@ version: 0.1
 description: First-principles wallet-security checklist — key separation, signature semantics, EIP-712 risks, approval anti-patterns, phishing-resistant UX.
 category: meta
 alwaysOn: true
-ofacFlagged: false
 ---
 
 # web3-security (meta-skill, always on)

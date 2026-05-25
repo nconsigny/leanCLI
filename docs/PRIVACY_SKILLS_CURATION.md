@@ -23,11 +23,11 @@ asymmetry shapes the curation.
    what is "SDK-available, bridge does not invoke yet". The bridge
    wires the privacy-pools surface aggressively (deposit/unshield/notes/
    sync/balance) and does not yet wire railgun.
-3. For tornado-cash: there is no `@kohaku-eth/tornado-cash` package
-   (upstream Kohaku does not ship one; the protocol is OFAC-sanctioned),
-   so the skill is **research-only**. It exists so the agent can decode
-   "what is this calldata I see?" but must refuse to draft outgoing
-   transactions.
+3. For tornado-cash: no `@kohaku-eth/tornado-cash` package ships yet
+   (upstream Kohaku has not landed one). Drafting Tornado Cash
+   transactions through the agent is **coming soon**. The skill is
+   loaded today for decode context — the agent recognizes Tornado Cash
+   calldata in incoming flows and explains it through ConfirmGate.
 4. Trust model unchanged: every privacy operation still flows through
    `decode_calldata → simulate → ConfirmGate` before any signing. The
    SDK helps generate calldata; it does not bypass the gate. Shielded
@@ -110,12 +110,14 @@ Source file: `dist/index.d.ts`.
 Status in `bridge.mjs`: privacy-pools is **`"live"`** on chains `[11155111, 1]`. The
 skill content references this wiring.
 
-### `@kohaku-eth/tornado-cash` (does not exist)
+### `@kohaku-eth/tornado-cash` (coming soon)
 
-There is no upstream Kohaku SDK for Tornado Cash. The mixer was added to
-OFAC's SDN list on 2022-08-08 (E.O. 13694); the maintained client was
-seized and the contracts are not actively supported by any
-Kohaku-affiliated package. The skill explicitly documents the absence.
+There is no upstream Kohaku SDK for Tornado Cash yet. Drafting Tornado
+Cash transactions through the agent is coming soon. Until then, the
+skill is loaded for decode-context only: the agent recognizes Tornado
+Cash calldata in incoming flows and explains it through the standard
+ConfirmGate. For shielded ETH today the agent uses Privacy Pool or
+Railgun.
 
 ## Follow-ups (not in this PR)
 

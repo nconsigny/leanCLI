@@ -35,7 +35,7 @@ nothing is silently inherited:
    live at the *same* root (flat layout: `skills/<protocol>/...`,
    `skills/<meta>/...`). Daemon `skills.list` will start surfacing
    them too; their frontmatter is a superset of what the daemon parser
-   needs (it ignores `triggers` / `alwaysOn` / `ofacFlagged`). The
+   needs (it ignores `triggers` / `alwaysOn`). The
    `category` field is added to the new skills with the value
    `protocol` or `meta` so the daemon's category-keyed grouping stays
    useful.
@@ -120,8 +120,9 @@ Chain IDs in scope: **1 = mainnet**, **11155111 = Sepolia**. No L2.
    deployment registry <https://docs.privacypools.com>. Triggers:
    `privacy pool`, `privacy-pool`, `privacypool`, addresses
    lowercased.
-6. `tornado-cash` — **OFAC-sanctioned**, `ofacFlagged: true`. ETH
-   pools on mainnet at:
+6. `tornado-cash` — drafting via agent is **coming soon** (no
+   `@kohaku-eth/tornado-cash` SDK yet); decode-only today. ETH pools
+   on mainnet at:
    * `0.1 ETH` `0x12D66f87A04A9E220743712cE6d9bB1B5616B8Fc`
    * `1 ETH`   `0x47CE0C6eD5B0Ce3d3A51fdb1C52DC66a7c3c2936`
    * `10 ETH`  `0x910Cbd523D972eb0a6f4cAe4618aD62622b39DbF`
@@ -214,9 +215,10 @@ C. `protocol_lookup` over a temp socket — the existing daemon's
 D. Reload op via socket: edit a skill, send `{"op":"reload"}` to
    the socket, run another turn, verify the change is picked up.
 
-E. OFAC factual surfacing: trigger the `tornado-cash` skill, grep
-   the rendered system prompt for "OFAC" — the agent must not
-   refuse, only surface the legal status.
+E. Tornado-cash skill loads: trigger the `tornado-cash` skill, grep
+   the rendered system prompt for "coming soon" — the agent must
+   say drafting is coming soon and point at Privacy Pool / Railgun
+   as the active alternatives.
 
 ## Acceptance gate
 

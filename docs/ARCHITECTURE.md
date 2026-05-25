@@ -171,7 +171,7 @@ the abstract models defined alongside it (not about runtime IO).
   carries conversation history only.
 - `Skills.lean` — Phase-1b in-process skill registry. Walks
   `skills/<name>/` one level deep at startup, parses YAML
-  frontmatter (`name`, `triggers`, `alwaysOn`, `ofacFlagged`),
+  frontmatter (`name`, `triggers`, `alwaysOn`),
   and exposes trigger matching + compact prompt rendering. The
   registry is held behind an `IO.Ref` so the daemon's `reload`
   op can hot-swap content without restart (Lean 4 v4.29.1 has
@@ -334,7 +334,7 @@ Two parallel skills layers share the `skills/` root:
 
 Both layers read from the same directory tree; their parsers tolerate
 each other's frontmatter (the action-skill parser ignores
-`triggers`/`alwaysOn`/`ofacFlagged`; the Phase-1b parser ignores
+`triggers`/`alwaysOn`; the Phase-1b parser ignores
 `category`/`risk`). See `docs/PHASE1B_PLAN.md` for the divergence
 record.
 

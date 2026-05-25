@@ -4,7 +4,6 @@ version: 0.2
 description: fxUSD — Aladdin DAO's LRT/LST-backed stable asset, with per-collateral Markets and Rebalance Pools (mainnet only).
 category: protocol
 alwaysOn: false
-ofacFlagged: false
 triggers:
   - fxusd
   - fx.aladdin

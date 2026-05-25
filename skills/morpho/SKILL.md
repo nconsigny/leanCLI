@@ -4,7 +4,6 @@ version: 0.1
 description: Morpho Blue lending primitive + MetaMorpho vaults. Mainnet primary.
 category: protocol
 alwaysOn: false
-ofacFlagged: false
 triggers:
   - morpho
   - morpho blue

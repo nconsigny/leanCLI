@@ -433,7 +433,7 @@ def matchShielded (toks : List String) : Option RegexDraft := do
       action     := .unknown
       fields     := [("verb", canonicalVerb), ("amount", amount), ("asset", asset),
                      ("protocol", "tornado-cash")]
-      unresolved := ["Tornado Cash is OFAC-sanctioned and Kohaku ships no Tornado Cash SDK. This skill is research/decode-only — drafting Tornado Cash transactions is not supported."]
+      unresolved := ["Tornado Cash is coming soon. For now use 'Privacy → Privacy Pool' or 'Privacy → Railgun' from the wallet menu."]
       confidence := .rejected
     }
   if isCanonical ∧ hasRailgun then
@@ -441,7 +441,7 @@ def matchShielded (toks : List String) : Option RegexDraft := do
       action     := .unknown
       fields     := [("verb", canonicalVerb), ("amount", amount), ("asset", asset),
                      ("protocol", "railgun")]
-      unresolved := [s!"Railgun {canonicalVerb} is not wired into the regex shortcut. Use 'Privacy → Railgun' from the wallet menu to {canonicalVerb} via the @kohaku-eth/railgun SDK, or rephrase as '{canonicalVerb} {amount} {asset} with privacy pool' to use the Privacy Pool shortcut."]
+      unresolved := [s!"Railgun {canonicalVerb} via chat shortcut is coming soon. Use 'Privacy → Railgun' from the wallet menu to {canonicalVerb} via the @kohaku-eth/railgun SDK, or rephrase as '{canonicalVerb} {amount} {asset} with privacy pool' to use the Privacy Pool shortcut."]
       confidence := .rejected
     }
   if isCanonical ∧ ¬ hasPrivacyPool then

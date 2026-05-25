@@ -74,10 +74,6 @@ structure SkillFrontmatter where
   /-- Always include in the system prompt when present. Used by the
       meta-skills (`kohaku-wallet`, `web3-security`). -/
   alwaysOn    : Bool := false
-  /-- Marks skills covering OFAC-sanctioned infrastructure. The
-      renderer surfaces this as a factual statement; it does not
-      cause the agent to refuse the turn. -/
-  ofacFlagged : Bool := false
   deriving Repr, Inhabited
 
 /-- A parsed skill ready for trigger matching and prompt rendering.
@@ -257,8 +253,7 @@ def parseFrontmatter (content : String) : Option SkillFrontmatter :=
               version     := (scalar fm "version").getD "0.1",
               description := (scalar fm "description").getD "",
               triggers    := listUnder fm "triggers",
-              alwaysOn    := boolScalar fm "alwaysOn",
-              ofacFlagged := boolScalar fm "ofacFlagged"
+              alwaysOn    := boolScalar fm "alwaysOn"
             }
       else none
   | [] => none
@@ -385,11 +380,6 @@ def renderForPrompt (s : Skill) : String :=
   let fm := s.frontmatter
   let header := s!"# Skill: {fm.name} (v{fm.version})"
   let summary := if fm.description.isEmpty then "" else "\n" ++ fm.description
-  let ofac := if fm.ofacFlagged then
-                "\nNOTE: This skill covers OFAC-sanctioned infrastructure. \
-                 Surface the legal status to the user; the agent does not \
-                 refuse on sanctions grounds."
-              else ""
   let overview :=
     if s.overview.isEmpty then "\n(overview: TODO — curator)"
     else "\n\n## Overview\n" ++ capBody s.overview 6144
@@ -405,7 +395,7 @@ def renderForPrompt (s : Skill) : String :=
     else
       "\n\n## Functions (call `protocol_function_lookup` for bodies)\n" ++
       String.intercalate "\n" (fnNames.map (fun n => "- " ++ n))
-  header ++ summary ++ ofac ++ overview ++ secBlock ++ interBlock ++ fnHint
+  header ++ summary ++ overview ++ secBlock ++ interBlock ++ fnHint
 
 /-- Find a skill by name. -/
 def findSkill (r : Registry) (name : String) : Option Skill :=

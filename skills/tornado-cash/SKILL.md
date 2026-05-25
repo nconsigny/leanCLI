@@ -1,10 +1,9 @@
 ---
 name: tornado-cash
 version: 0.1
-description: Tornado Cash ETH mixer pools. OFAC-sanctioned (SDN list, 2022-08-08). Research / decode-only — Kohaku ships no SDK and the agent does NOT draft Tornado Cash transactions.
+description: Tornado Cash ETH mixer pools. Coming soon — no `@kohaku-eth/tornado-cash` SDK is wired in yet.
 category: protocol
 alwaysOn: false
-ofacFlagged: true
 triggers:
   - tornado cash
   - tornado
@@ -15,10 +14,9 @@ triggers:
   - 0xa160cdab225685da1d56aa342ad8841c3b53f291
 ---
 Tornado Cash is an older fixed-denomination Ethereum mixer that uses zk-SNARKs
-to break the on-chain link between deposit and withdrawal. The primary smart
-contracts are sanctioned under U.S. Treasury / OFAC (SDN listing 2022-08-08,
-E.O. 13694). **Kohaku ships no `@kohaku-eth/tornado-cash` SDK.** This skill
-is **research and decode-only**: the agent can explain what a Tornado Cash
-calldata blob does, but it does NOT draft outgoing Tornado Cash transactions.
-The agent surfaces sanctions status as a factual statement; the legal decision
-belongs to the user in their own jurisdiction.
+to break the on-chain link between deposit and withdrawal. Kohaku does not yet
+ship a `@kohaku-eth/tornado-cash` SDK package, so drafting Tornado Cash
+transactions through the agent is **coming soon**. The skill is loaded today
+for decode context: the agent can explain what a Tornado Cash calldata blob
+does. To shield ETH today, use Privacy Pool (`@kohaku-eth/privacy-pools`) or
+Railgun (`@kohaku-eth/railgun`) from the Privacy menu.

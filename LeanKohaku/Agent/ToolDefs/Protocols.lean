@@ -77,7 +77,6 @@ def protocolLookup (regRef : RegistryRef) : ToolDecl := {
           ("name",         .str s.frontmatter.name),
           ("version",      .str s.frontmatter.version),
           ("description",  .str s.frontmatter.description),
-          ("ofacFlagged",  .bool s.frontmatter.ofacFlagged),
           ("overview",     .str s.overview),
           ("security",     .str s.security),
           ("interactions", .str s.interactions),

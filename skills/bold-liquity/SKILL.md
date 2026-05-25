@@ -4,7 +4,6 @@ version: 0.2
 description: Liquity V2 (BOLD) — ETH/wstETH/rETH-collateralised stable asset, no governance (mainnet only).
 category: protocol
 alwaysOn: false
-ofacFlagged: false
 triggers:
   - bold
   - liquity v2

@@ -4,7 +4,6 @@ version: 0.1
 description: CoW Protocol settlement contract — batch-auction-based DEX with EIP-712 signed orders.
 category: protocol
 alwaysOn: false
-ofacFlagged: false
 triggers:
   - cowswap
   - cow swap

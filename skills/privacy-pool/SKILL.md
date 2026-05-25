@@ -4,7 +4,6 @@ version: 0.1
 description: Privacy Pools v1 (0xbow) — opt-in association-set shielded pools on EVM. Agent uses the @kohaku-eth/privacy-pools SDK; never drafts raw shielded calldata.
 category: protocol
 alwaysOn: false
-ofacFlagged: false
 triggers:
   - privacy pool
   - privacy-pool

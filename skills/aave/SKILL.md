@@ -4,7 +4,6 @@ version: 0.1
 description: Aave V3 — Pool, PoolAddressesProvider. Supply/borrow/repay.
 category: protocol
 alwaysOn: false
-ofacFlagged: false
 triggers:
   - aave
   - aave v3

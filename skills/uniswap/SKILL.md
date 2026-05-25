@@ -4,7 +4,6 @@ version: 0.1
 description: Uniswap V2 + V3 + Universal Router. Spot swap, exact-input/output routing across pools. Mainnet and Sepolia.
 category: protocol
 alwaysOn: false
-ofacFlagged: false
 triggers:
   - uniswap
   - uni

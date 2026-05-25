@@ -4,7 +4,6 @@ version: 0.1
 description: RAILGUN Smart Wallet 2.0 — shielded transfers and shielded interactions on EVM. Mainnet only at present. Agent uses the @kohaku-eth/railgun SDK; never drafts raw shielded calldata.
 category: protocol
 alwaysOn: false
-ofacFlagged: false
 triggers:
   - railgun
   - shield
