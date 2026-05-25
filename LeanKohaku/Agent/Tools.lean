@@ -96,7 +96,15 @@ def daemonCall
 
 /-- Allowlist-checking dispatch. Returns a tool-result envelope even on
     rejection so the model sees structured feedback rather than the
-    loop terminating on it. -/
+    loop terminating on it.
+
+    Chain pin: when the parsed args carry a `chainId` field AND
+    `cfg.chainWhitelist` is non-empty AND the call's chainId is not on
+    the whitelist, return a structured `{ok:false, kind:"chain_denied"}`
+    envelope without running the tool. The model sees the rejection in
+    the trace and self-corrects on the next turn (we deliberately do
+    NOT auto-rewrite the call — trusting the loop over the model's
+    first guess is the whole point of this gate). -/
 def dispatch
     (reg : ToolRegistry) (allow : List String)
     (cfg : AgentConfig) (call : ToolCall) : IO ToolResult := do
@@ -122,13 +130,40 @@ def dispatch
             data := .obj #[("error", .str s!"tool {call.name} args not JSON: {e}")]
           }
       | .ok args =>
-          try
-            decl.invoke cfg args
-          catch e =>
-            return {
-              ok := false,
-              data := .obj #[("error", .str s!"tool {call.name} raised: {toString e}")]
-            }
+          -- Active-chain gate. We only enforce when the tool args
+          -- actually carry a `chainId` field (read tools without one,
+          -- e.g. `slot_lookup`, are unaffected). A non-numeric value is
+          -- left to the tool's own arg validator.
+          match getField "chainId" args >>= asNat with
+          | some cid =>
+              if !cfg.chainWhitelist.isEmpty ∧ !cfg.chainWhitelist.contains cid then
+                let allowedJson : Array Json :=
+                  cfg.chainWhitelist.toArray.map (fun n => .num (Int.ofNat n))
+                return {
+                  ok := false,
+                  data := .obj #[
+                    ("kind",    .str "chain_denied"),
+                    ("error",
+                      .str s!"chainId {cid} not in active whitelist {cfg.chainWhitelist}"),
+                    ("allowed", .arr allowedJson)
+                  ]
+                }
+              else
+                try
+                  decl.invoke cfg args
+                catch e =>
+                  return {
+                    ok := false,
+                    data := .obj #[("error", .str s!"tool {call.name} raised: {toString e}")]
+                  }
+          | none =>
+              try
+                decl.invoke cfg args
+              catch e =>
+                return {
+                  ok := false,
+                  data := .obj #[("error", .str s!"tool {call.name} raised: {toString e}")]
+                }
 
 /-- Render a `ToolResult` as the `content` string of a `role = tool`
     message. Compact JSON keeps prompt overhead small. -/

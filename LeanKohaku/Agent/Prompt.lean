@@ -29,15 +29,44 @@ structure ToolDoc where
 def renderTool (t : ToolDoc) : String :=
   s!"  - `{t.name}` — {t.description}"
 
+/-- Human-readable chain name for the small set we actually support.
+    Anything outside this list renders as `chainId N` so the prompt
+    doesn't lie about a chain it cannot reason about. -/
+private def chainName : Nat → String
+  | 1        => "mainnet"
+  | 11155111 => "sepolia"
+  | n        => s!"chainId {n}"
+
 /-- Static operational rules — chain whitelist + tool discipline. The
     chain numerals are interpolated rather than hardcoded so a future
-    config change is one place to edit. -/
+    config change is one place to edit.
+
+    When `cfg.chainWhitelist` is a singleton, render the stricter
+    "ACTIVE CHAIN" block: every tool call must use that exact
+    chainId, and `Tools.dispatch` will return a structured
+    `chain_denied` envelope for any other value. The singleton shape
+    is the wallet daemon's signal that it knows which chain is
+    active (`buildCfg` in `AgentDaemonMain.lean` narrows the list to
+    `[activeChainId]` whenever `chat.draft` carries one). -/
 def operationalRules (cfg : AgentConfig) : String :=
-  let chains := cfg.chainWhitelist.map toString
-  let chainList := String.intercalate ", " chains
-  s!"OPERATING RULES (hard):
-- Allowed chain ids: \{{chainList}}. Refuse any task that targets a
+  let chainBlock : String :=
+    match cfg.chainWhitelist with
+    | [cid] =>
+        s!"ACTIVE CHAIN (hard pin):
+- This daemon is currently configured for chainId {cid} ({chainName cid}).
+- Every tool call MUST use chainId = {cid}. Tools called with any
+  other chainId will be rejected with kind:\"chain_denied\" before
+  they run; re-issue the call with chainId = {cid}.
+- The user's wallets and balances on other chains are NOT in scope
+  for this session — refuse tasks that explicitly target a different
+  chain.
+"
+    | chains =>
+        let chainList := String.intercalate ", " (chains.map toString)
+        s!"- Allowed chain ids: \{{chainList}}. Refuse any task that targets a
   different chain.
+"
+  chainBlock ++ s!"OPERATING RULES (hard):
 - Use tools to verify facts before proposing a send. Do NOT guess
   contract addresses, decimals, or balances from your prior
   knowledge — call the read tools.
@@ -49,6 +78,11 @@ def operationalRules (cfg : AgentConfig) : String :=
   compute base-unit conversions in your head; call
   `to_base_units(\{amount, decimals})` with the decimals returned by
   `token_lookup`.
+- When the user names a wallet slot (e.g. `leanWallet/0`,
+  `leanWallet/fresh1`), call `slot_lookup(\{name})` to get the exact
+  address. Match slot names character-for-character; never assume
+  two similar slot names (e.g. `leanWallet/0` vs `leanWallet/ops`)
+  refer to the same address.
 - Stop calling tools and emit your final answer once you have what
   you need. The step budget is {cfg.maxSteps} rounds.
 - Single tool call per turn unless the calls are independent. Avoid

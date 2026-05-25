@@ -80,7 +80,10 @@ private def resolveWalletSocket : IO String := do
       | none =>
           let runtime ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
             | some d => pure d
-            | none => pure "/tmp"
+            | none =>
+                match ← IO.getEnv "TMPDIR" with
+                | some d => pure d
+                | none => pure "/tmp"
           pure s!"{runtime}/leankohaku/leankohaku.sock"
 
 /-- Resolve the path this daemon listens on. -/
@@ -90,9 +93,16 @@ private def resolveAgentSocket : IO String := do
   | none =>
       let runtime ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
         | some d => pure d
-        | none => match ← IO.getEnv "UID" with
-                  | some uid => pure s!"/run/user/{uid}"
-                  | none => pure "/tmp"
+        | none =>
+            -- macOS launchd sets TMPDIR to a per-user mode-0700 dir
+            -- under /var/folders/...; treat it as the XDG_RUNTIME_DIR
+            -- equivalent before falling back further.
+            match ← IO.getEnv "TMPDIR" with
+            | some d => pure d
+            | none =>
+                match ← IO.getEnv "UID" with
+                | some uid => pure s!"/run/user/{uid}"
+                | none => pure "/tmp"
       pure s!"{runtime}/leankohaku/agent.sock"
 
 /-- Resolve the session DB path. Matches the Phase 1a plan. -/
@@ -246,6 +256,18 @@ private def errResp (kind msg : String) : Json :=
     ])
   ]
 
+/-- Read the inbound chainId pin out of `run_turn`'s `params`. The
+    wallet daemon's `chat.draft` path forwards its own `chainId` under
+    `context.activeChainId` (preferred) or `context.chainId` (legacy);
+    `opRunTurn` also accepts a top-level `chainId` for callers that
+    plumb it directly. `none` means "no pin was supplied" — keep the
+    defaults. -/
+private def activeChainIdOf (params : Json) : Option Nat :=
+  let ctx := (getField "context" params).getD (.obj #[])
+  (getField "activeChainId" ctx >>= asNat)
+    |>.orElse (fun _ => getField "chainId" ctx >>= asNat)
+    |>.orElse (fun _ => getField "chainId" params >>= asNat)
+
 private def buildCfg (llmUrl model walletSocket : String) (timeoutMs : Nat)
     (regRef : ToolDefs.Protocols.RegistryRef) (params : Json) : AgentConfig :=
   let defaultAllow : List String := (Registry.defaultWithSkills regRef).map (·.name)
@@ -253,11 +275,22 @@ private def buildCfg (llmUrl model walletSocket : String) (timeoutMs : Nat)
     match getField "toolAllowlist" params with
     | some (.arr arr) => arr.toList.filterMap (fun j => asString j)
     | _ => defaultAllow
+  -- Pin the chain whitelist to whatever `chat.draft` told us is active.
+  -- Without this pin the default `[1, 11155111]` lets the model pick a
+  -- chain — and at 4B params it sometimes picks the wrong one
+  -- (mainnet for a Sepolia-configured daemon, observed). A pinned
+  -- whitelist + `Tools.dispatch`'s chain_denied envelope force the
+  -- model to self-correct on the next turn.
+  let whitelist : List Nat :=
+    match activeChainIdOf params with
+    | some cid => [cid]
+    | none     => [1, 11155111]
   {
     llmUrl := llmUrl,
     model := model,
     daemonSocket := walletSocket,
     toolAllowlist := allowlist,
+    chainWhitelist := whitelist,
     timeoutMs := timeoutMs
   }
 
@@ -421,7 +454,47 @@ private def opRunTurn (st : DaemonState) (params : Json) : IO Json := do
        | .ok (finalMsg, trace) => do
            try appendIfNotIncognito st sid finalMsg
            catch _ => pure ()
-           let raw := finalMsg.content.getD ""
+           -- Graceful no-raw exit. The loop normally terminates with a
+           -- tool_calls-empty assistant turn whose `content` is the
+           -- model's final answer. When the model exhausts the
+           -- maxSteps budget mid-tool-chain (or for any other reason
+           -- emits a tool-calls turn with empty content) we'd
+           -- otherwise hand the wallet daemon `raw=""` and trigger the
+           -- "no raw field" hard reject. Instead: walk the trace
+           -- backwards for the last assistant turn that DID emit
+           -- content and synthesize that as the user-visible answer.
+           -- `gaveUp` is exposed so downstream layers can render
+           -- differently if they want (we don't change rendering in
+           -- this commit).
+           let rawContent := finalMsg.content.getD ""
+           let lastToolName : String :=
+             match finalMsg.toolCalls.getLast? with
+             | some tc => tc.name
+             | none    =>
+                 -- Fall back to the latest tool_call seen in the trace.
+                 let names : List String :=
+                   trace.toList.filterMap fun it =>
+                     match it with
+                     | Trace.TraceItem.toolCall n _ _ => some n
+                     | _ => none
+                 names.getLast?.getD "(none)"
+           let isMidChain : Bool :=
+             rawContent.isEmpty ∧ !finalMsg.toolCalls.isEmpty
+           let priorAssistantContent : Option String :=
+             trace.toList.reverse.findSome? fun it =>
+               match it with
+               | Trace.TraceItem.assistant c _ =>
+                   if c.isEmpty then none else some c
+               | _ => none
+           let (raw, gaveUp) : String × Bool :=
+             if rawContent.isEmpty then
+               match priorAssistantContent with
+               | some c => (c, isMidChain)
+               | none =>
+                   ( s!"(agent ran {s₀.cfg.maxSteps} steps without producing a final answer — last tool: {lastToolName})"
+                   , true )
+             else
+               (rawContent, false)
            -- Phase 1d sticky-session bookkeeping: charge this turn's
            -- prompt + assistant tokens to the chainId-keyed cache.
            -- No-op for sessions not in the cache (incognito + one-shot
@@ -441,6 +514,7 @@ private def opRunTurn (st : DaemonState) (params : Json) : IO Json := do
              ("model",      .str cfg.model),
              ("incognito",  .bool incog),
              ("toolTurns",  .num (Int.ofNat finalMsg.toolCalls.length)),
+             ("gaveUp",     .bool gaveUp),
              ("trace",      Trace.toJson trace)
            ])
      catch e =>

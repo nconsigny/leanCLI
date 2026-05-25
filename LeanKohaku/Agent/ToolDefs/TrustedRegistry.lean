@@ -173,9 +173,13 @@ def renderForPrompt (snap : Snapshot) : String :=
       | some s, none,   none   => s
       | none,   _,      some p => p
       | none,   _,      none   => "?"
+    -- Locked entries get a deliberately loud suffix. The address is
+    -- still public information, but a small model can otherwise read
+    -- "(locked)" as an aside and propose signing with the entry
+    -- anyway. The trailing clause makes the constraint unmissable.
     let lockSuffix : String :=
       match a.unlocked with
-      | some false => " (locked)"
+      | some false => " — LOCKED (cannot sign this session)"
       | _ => ""
     s!"EOA {nameLabel}   {a.address}{lockSuffix}"
   let renderSphincs (a : TrustedAddress) : String :=

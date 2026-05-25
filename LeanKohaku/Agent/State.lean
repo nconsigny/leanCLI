@@ -57,8 +57,16 @@ structure AgentConfig where
   llmUrl         : String
   /-- Model id (passed through to the server's `model` field). -/
   model          : String
-  /-- Hard cap on tool-call rounds. -/
-  maxSteps       : Nat   := 8
+  /-- Hard cap on tool-call rounds. 16 is the empirical floor for the
+      common multi-tool flows we hit in production (swap = token_lookup
+      ×2 + slot_lookup + chain_read + nonce + simulate + propose_send,
+      with at least one chain_denied / unknown_token self-correction
+      round on a 4B-param local model). Each step can fan out multiple
+      tool calls per turn, so 16 round-trips is conservative; the cost
+      is more LLM calls per user turn when the model loops on a hard
+      question, bounded by the per-call timeout. Tune downward only
+      after watching real sessions. -/
+  maxSteps       : Nat   := 16
   maxTokens      : Nat   := 4096
   temperature    : Float := 0.2
   timeoutMs      : Nat   := 30000

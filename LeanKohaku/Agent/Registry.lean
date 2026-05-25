@@ -5,6 +5,7 @@ import LeanKohaku.Agent.ToolDefs.Chain
 import LeanKohaku.Agent.ToolDefs.Propose
 import LeanKohaku.Agent.ToolDefs.Protocols
 import LeanKohaku.Agent.ToolDefs.TrustedRegistry
+import LeanKohaku.Agent.ToolDefs.SlotLookup
 import LeanKohaku.Agent.ToolDefs.Tokens
 
 /-!
@@ -45,6 +46,7 @@ def default : ToolRegistry := [
   Chain.gasPrice,
   Propose.proposeSend,
   TrustedRegistry.trustedRegistryList,
+  SlotLookup.slotLookup,
   -- Token-registry trio: addresses + decimals + unit conversions from
   -- a compiled-in, hand-audited list so the LLM never invents them
   -- from training data. Read-only, no daemon RPC, no signing path.

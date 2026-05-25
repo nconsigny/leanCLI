@@ -5624,11 +5624,16 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
             match getField "history" req.params with
             | some (j@(.arr _)) => #[("history", j)]
             | _ => #[]
+          -- `activeChainId` is explicit so the agentd's prompt builder
+          -- can pin the model's tool calls to a single chain. `chainId`
+          -- is preserved for legacy sidecar callers that look only at
+          -- the historical field name; the two MUST agree.
           let llmReq : Json :=
             .obj <| #[
               ("prompt",        .str prompt),
               ("seed",          regexJson),
               ("chainId",       .num (Int.ofNat chainId)),
+              ("activeChainId", .num (Int.ofNat chainId)),
               ("chainContext",  chainContextJson),
               ("walletContext", walletContextJson)
             ] ++ historyField ++ (match skillBody? with
@@ -5924,11 +5929,14 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       let enable := ((getField "enable" req.params) >>= asBool).getD true
       if enable then
         -- Mirror Daemon.Config.runtimeDir; we can't import Config here
-        -- (Config depends on Server, would cycle). Same XDG_RUNTIME_DIR /
-        -- /tmp fallback semantics.
-        let runtimeRoot := match ← IO.getEnv "XDG_RUNTIME_DIR" with
-          | some d => d
-          | none => "/tmp"
+        -- (Config depends on Server, would cycle). Same XDG_RUNTIME_DIR
+        -- → TMPDIR (macOS launchd per-user dir) → /tmp fallback chain.
+        let runtimeRoot ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
+          | some d => pure d
+          | none =>
+              match ← IO.getEnv "TMPDIR" with
+              | some d => pure d
+              | none => pure "/tmp"
         let socketPath := s!"{runtimeRoot}/leankohaku/colibri.sock"
         try
           let _ ← LeanKohaku.Daemon.State.colibriEnable state socketPath
@@ -7715,9 +7723,12 @@ def run (cfg : Config) : IO Unit := do
     | some "0" | some "off" | some "false" | some "no" => true
     | _ => false
   unless colibriDisabled do
-    let runtimeRoot := match ← IO.getEnv "XDG_RUNTIME_DIR" with
-      | some d => d
-      | none => "/tmp"
+    let runtimeRoot ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
+      | some d => pure d
+      | none =>
+          match ← IO.getEnv "TMPDIR" with
+          | some d => pure d
+          | none => pure "/tmp"
     let colibriSocket := s!"{runtimeRoot}/leankohaku/colibri.sock"
     try
       let _ ← LeanKohaku.Daemon.State.colibriEnable state colibriSocket
