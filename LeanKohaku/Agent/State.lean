@@ -67,7 +67,14 @@ structure AgentConfig where
       question, bounded by the per-call timeout. Tune downward only
       after watching real sessions. -/
   maxSteps       : Nat   := 16
-  maxTokens      : Nat   := 4096
+  /-- Per-call output ceiling sent to the LLM as `max_tokens`. 1024
+      bounds a single turn to ~18s at 55 t/s (typical local-MoE
+      generation rate) so multi-tool flows feel snappy. The Brief
+      Mode bullet in `Prompt.operationalRules` reinforces the cap
+      behaviourally so the model emits structured output rather than
+      essays. Raise to 2048+ if a hard question genuinely needs more
+      room. -/
+  maxTokens      : Nat   := 1024
   temperature    : Float := 0.2
   timeoutMs      : Nat   := 30000
   /-- Allowed chain ids for any tool that takes one. Phase 0 ships

@@ -83,6 +83,11 @@ def operationalRules (cfg : AgentConfig) : String :=
   address. Match slot names character-for-character; never assume
   two similar slot names (e.g. `leanWallet/0` vs `leanWallet/ops`)
   refer to the same address.
+- BRIEF MODE: keep each turn ≤ 200 output tokens unless you are
+  emitting the final `propose_send` tool call. Reasoning text
+  ≤ 100 tokens per turn. Don't restate the request, don't summarise
+  what you just did — act. The user reads the trace separately
+  (ctrl+t). Long thinking is a bug, not a feature.
 - Stop calling tools and emit your final answer once you have what
   you need. The step budget is {cfg.maxSteps} rounds.
 - Single tool call per turn unless the calls are independent. Avoid
