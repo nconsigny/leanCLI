@@ -4,6 +4,7 @@ import LeanKohaku.Agent.ToolDefs.Simulate
 import LeanKohaku.Agent.ToolDefs.Chain
 import LeanKohaku.Agent.ToolDefs.Propose
 import LeanKohaku.Agent.ToolDefs.Protocols
+import LeanKohaku.Agent.ToolDefs.TrustedRegistry
 
 /-!
 # Default tool registry
@@ -25,9 +26,15 @@ namespace LeanKohaku.Agent.Registry
 open LeanKohaku.Agent.Tools
 open LeanKohaku.Agent.ToolDefs
 
-/-- The Phase-0 registry, unchanged. Used by one-shot `kohaku-agent`
-    where the lifetime of the skills registry is not worth the IO
-    overhead per spawn. -/
+/-- The Phase-0 registry, plus the Phase-1d trusted-registry read
+    tool. Used by one-shot `kohaku-agent` where the lifetime of the
+    skills registry is not worth the IO overhead per spawn.
+
+    The trusted-registry tool is registered globally (rather than only
+    in `defaultWithSkills`) because the answer to "which addresses are
+    yours" is part of the agent's baseline context regardless of
+    whether the skills layer is loaded — see
+    `docs/PHASE1D_THREAT_MODEL.md` §5 (address spoofing). -/
 def default : ToolRegistry := [
   Decode.decodeCalldata,
   Decode.decodeEip712,
@@ -35,7 +42,8 @@ def default : ToolRegistry := [
   Chain.chainRead,
   Chain.nonce,
   Chain.gasPrice,
-  Propose.proposeSend
+  Propose.proposeSend,
+  TrustedRegistry.trustedRegistryList
 ]
 
 /-- Phase-1b registry: the Phase-0 surface plus the two
