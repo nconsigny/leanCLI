@@ -82,6 +82,13 @@ export default function UnlockEoaStep({
   subtitle,
 }: Props) {
   const [phase, setPhase] = useState<Phase>({ kind: "probe" });
+  // Sub-account display name ("leanWallet/0") vs daemon slot name
+  // ("leanWallet"). Every daemon-side lookup — eoa.list rows, master
+  // status buckets, and especially eoa.unlock's filesystem path
+  // (`eoa/<name>.json`) — keys by slot name. Strip everything after
+  // the first '/' so sub-accounts inherit their parent slot's
+  // enrolment status and unlock the same way.
+  const slotKey = wallet.name.split("/")[0] ?? wallet.name;
 
   // Stage 1: probe per-slot unlock status + master state in parallel.
   // If the slot is already unlocked, short-circuit to onUnlocked() — no
@@ -106,7 +113,7 @@ export default function UnlockEoaStep({
       // false negative just means we'll spend one extra RPC to confirm
       // and unlock — strictly safer than skipping the unlock step.
       const row = el.ok
-        ? (el.result ?? []).find((r) => r?.name === wallet.name)
+        ? (el.result ?? []).find((r) => r?.name === slotKey)
         : undefined;
       const slotUnlocked =
         row?.unlocked === true ||
@@ -124,13 +131,6 @@ export default function UnlockEoaStep({
         return;
       }
       const status = ms.result!;
-      // The daemon's bucket arrays index by SLOT NAME (e.g. "leanWallet"),
-      // but `wallet.name` here can be the sub-account display form
-      // ("leanWallet/0") for BIP-44 sub-accounts. Strip everything after
-      // the first '/' so the lookup matches the daemon's keys; otherwise
-      // every sub-account would falsely fall into the needs-enrolment
-      // branch even when the underlying slot is fully enrolled.
-      const slotKey = wallet.name.split("/")[0] ?? wallet.name;
       const enrolled = status.enrolledEoas.includes(slotKey);
       const custom = status.customEoas.includes(slotKey);
 
@@ -175,8 +175,8 @@ export default function UnlockEoaStep({
       // Tiny audit-trail breadcrumb so the wrong-path hypothesis can be
       // refuted from journalctl when a user reports an unexpected prompt.
       // eslint-disable-next-line no-console
-      console.error(`[tui] auto-unlock via master KEK for slot=${wallet.name}`);
-      const r = await call<any>("eoa.unlock", { name: wallet.name, passphrase: "" });
+      console.error(`[tui] auto-unlock via master KEK for slot=${slotKey} (display=${wallet.name})`);
+      const r = await call<any>("eoa.unlock", { name: slotKey, passphrase: "" });
       if (cancelled) return;
       if (r.ok) {
         onUnlocked();
@@ -328,7 +328,7 @@ export default function UnlockEoaStep({
         onSubmit={async (v) => {
           const pass = v.passphrase ?? "";
           const r = await call<any>("eoa.unlock", {
-            name: wallet.name,
+            name: slotKey,
             passphrase: pass,
           });
           if (r.ok) {
