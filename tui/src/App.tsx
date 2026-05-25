@@ -22,6 +22,7 @@ import PrivateActionsMenu from "./screens/PrivateActionsMenu.js";
 import SendFlow from "./screens/SendFlow.js";
 import SwapFlow from "./screens/SwapFlow.js";
 import ShieldFlow from "./screens/ShieldFlow.js";
+import WalletUnshieldFlow from "./screens/WalletUnshieldFlow.js";
 import CreateEoaFlow from "./screens/CreateEoaFlow.js";
 import CreateR1Flow from "./screens/CreateR1Flow.js";
 import CreateSphincsHybridFlow from "./screens/CreateSphincsHybridFlow.js";
@@ -82,6 +83,7 @@ type Screen =
   | { kind: "swap"; wallet: Wallet }
   | { kind: "manage"; wallet: Wallet; chain: string }
   | { kind: "shield"; wallet: Wallet }
+  | { kind: "unshield"; wallet: Wallet }
   | { kind: "lock-toggle"; wallet: Wallet }
   | { kind: "reveal-mnemonic"; wallet: Wallet }
   | { kind: "details"; wallet: Wallet }
@@ -276,6 +278,7 @@ export default function App() {
       case "send":             return push({ kind: "send", wallet: w });
       case "swap":             return push({ kind: "swap", wallet: w });
       case "shield":           return push({ kind: "shield", wallet: w });
+      case "unshield":         return push({ kind: "unshield", wallet: w });
       case "lock-toggle":      return push({ kind: "lock-toggle", wallet: w });
       case "reveal-mnemonic":  return push({ kind: "reveal-mnemonic", wallet: w });
       case "details":          return push({ kind: "details", wallet: w });
@@ -406,6 +409,8 @@ export default function App() {
       );
     case "shield":
       return <ShieldFlow wallet={top.wallet} onDone={finishAction} />;
+    case "unshield":
+      return <WalletUnshieldFlow wallet={top.wallet} onDone={finishAction} />;
     case "lock-toggle":
       return <LockToggleFlow wallet={top.wallet} onDone={finishAction} />;
     case "reveal-mnemonic":

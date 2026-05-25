@@ -11,6 +11,7 @@ export type Action =
   | "send"
   | "swap"
   | "shield"
+  | "unshield"
   | "history"
   | "details"
   | "balance-refresh"
@@ -67,7 +68,10 @@ export default function ActionPicker({ wallet, onPick, onBack }: Props) {
       ? [{ label: "Swap (Uniswap V3)",          value: "swap" as Action }]
       : []),
     ...(wallet.kind === "eoa"
-      ? [{ label: "Shield (Privacy Pools deposit)", value: "shield" as Action }]
+      ? [
+          { label: "Shield (Privacy Pools or Railgun deposit)", value: "shield" as Action },
+          { label: "Unshield (withdraw to derived / book / paste)", value: "unshield" as Action },
+        ]
       : []),
     ...(wallet.kind === "eoa"
       ? [
