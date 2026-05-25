@@ -62,6 +62,47 @@ def connect (path : String) : IO Conn := do
 def read (conn : Conn) (maxBytes : UInt32 := 65536) : IO ByteArray :=
   readRaw conn.fd maxBytes
 
+/-- Locate the first `'\n'` (0x0A) byte in `bytes` at or after `start`.
+    Returns the absolute index, or `none` if no newline is present. -/
+private partial def newlineIdx (bytes : ByteArray) (start : Nat := 0) :
+    Option Nat :=
+  if start < bytes.size then
+    if bytes.get! start == 0x0A then some start
+    else newlineIdx bytes (start + 1)
+  else none
+
+/-- Read from `conn` until a `'\n'` byte is observed or the peer closes
+    the connection, buffering across syscalls. Returns the bytes received
+    up to (but NOT including) the trailing newline.
+
+    `Transport.Uds.read` is a single `read(2)` and a SOCK_STREAM `read(2)`
+    may return any prefix of what the peer has written — every
+    line-oriented consumer of these sockets must loop until it sees its
+    terminator. The previous single-read shape silently truncated agentd
+    replies large enough to be split by the kernel, producing
+    `unexpected end of JSON input` on the client.
+
+    Anything received past the first newline is discarded: the wire
+    protocol on these sockets is strict one-frame-per-connection, so a
+    second `\n` would be a protocol error rather than a pipelined frame.
+
+    `maxBytes` (default 4 MiB) caps the buffer so a misbehaving peer
+    that never sends a newline cannot exhaust memory. -/
+partial def readLine (conn : Conn) (maxBytes : Nat := 1 <<< 22) :
+    IO ByteArray := do
+  let rec go (acc : ByteArray) : IO ByteArray := do
+    if acc.size > maxBytes then
+      throw <| IO.userError
+        s!"Uds.readLine: exceeded {maxBytes} bytes without newline"
+    let chunk ← readRaw conn.fd 65536
+    if chunk.isEmpty then
+      pure acc
+    else
+      match newlineIdx chunk with
+      | none => go (acc ++ chunk)
+      | some i => pure (acc ++ chunk.extract 0 i)
+  go ByteArray.empty
+
 def write (conn : Conn) (bytes : ByteArray) : IO UInt32 :=
   writeRaw conn.fd bytes
 

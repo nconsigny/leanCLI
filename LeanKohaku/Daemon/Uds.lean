@@ -27,6 +27,7 @@ abbrev bind := LeanKohaku.Transport.Uds.bind
 abbrev accept := LeanKohaku.Transport.Uds.accept
 abbrev connect := LeanKohaku.Transport.Uds.connect
 abbrev read := LeanKohaku.Transport.Uds.read
+abbrev readLine := LeanKohaku.Transport.Uds.readLine
 abbrev write := LeanKohaku.Transport.Uds.write
 abbrev close := LeanKohaku.Transport.Uds.close
 abbrev closeListener := LeanKohaku.Transport.Uds.closeListener

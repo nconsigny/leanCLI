@@ -179,19 +179,35 @@ private def resolveAgentSocket : IO String := do
 
 /-- Send a single newline-delimited JSON frame on `socketPath` and
     read the reply line. The peer is `kohaku-agentd`, which always
-    closes the connection after one reply. -/
+    closes the connection after one reply.
+
+    An EOF before any payload (`bytes.isEmpty`) is reported as a
+    transport error rather than passed through as an empty string —
+    otherwise the downstream `parse` blames the symptom
+    (`unexpected end of JSON input`) rather than the cause (the
+    peer closed without writing). An invalid-UTF-8 payload is
+    treated the same way; we never pass garbage to the JSON
+    parser. -/
 private def socketCall (socketPath : String) (frame : String) :
     IO (Except String String) := do
   try
     let conn ← LeanKohaku.Transport.Uds.connect socketPath
     try
       let _ ← LeanKohaku.Transport.Uds.write conn (frame ++ "\n").toByteArray
-      -- One read is sufficient because the peer's response is a
-      -- single line followed by close. If the response exceeds 64 KiB
-      -- we'd need to loop; Phase 1a runs short reply shapes.
-      let bytes ← LeanKohaku.Transport.Uds.read conn
-      let txt := String.fromUTF8! bytes
-      pure (.ok txt.trimAscii.toString)
+      -- SOCK_STREAM read(2) may return any prefix of what the peer
+      -- wrote; `readLine` loops until the terminating `\n` (or EOF) so
+      -- a kernel-split reply doesn't silently truncate the JSON and
+      -- surface as `unexpected end of JSON input` downstream.
+      let bytes ← LeanKohaku.Transport.Uds.readLine conn
+      if bytes.isEmpty then
+        pure (.error s!"agentd closed socket without writing a reply \
+(peer likely crashed mid-handler; check `journalctl -u kohaku-agentd` \
+or stderr for `[agentd] handleConn raised`)")
+      else
+        match String.fromUTF8? bytes with
+        | none   => pure (.error s!"agentd reply was not valid UTF-8 \
+({bytes.size} bytes)")
+        | some s => pure (.ok s.trimAscii.toString)
     finally
       LeanKohaku.Transport.Uds.close conn
   catch e =>
