@@ -208,20 +208,36 @@ clarification, and `.error msg` for anything malformed or
 hard-rejected. -/
 def parseIntent (rawJsonText : String) (expectedChainId : Nat) :
     Except String ParseResult := do
-  let j ← LeanKohaku.Encoding.Json.parse rawJsonText
-  -- Recognize the documented {error, ask} clarification shape BEFORE
-  -- attempting a structural Intent parse. The model emits this when it
-  -- can't fill required fields without inventing (e.g. unresolved ENS,
-  -- unknown token symbol, missing chain id). That's not a failure of
-  -- ours — it's the model doing what we asked it to.
-  match getField "error" j, getField "ask" j with
-  | some errJ, some askJ =>
-      match asString errJ, asString askJ with
-      | some err, some ask => return .ask err ask
+  match LeanKohaku.Encoding.Json.parse rawJsonText with
+  | .error parseErr =>
+      -- The model emitted prose instead of structured JSON. This
+      -- happens often with small instruct-tuned models that fall back
+      -- to natural language when they need to clarify ("I think you
+      -- meant transfer, not swap — which wallet?"). Surface that
+      -- prose as a `.ask` clarification so the TUI shows the model's
+      -- actual words; do NOT propagate the parse error and lose the
+      -- whole turn. The model is still untrusted: an .ask is
+      -- DISPLAY-ONLY, no Intent is encoded.
+      let trimmed := rawJsonText.trimAscii.toString
+      if trimmed.isEmpty then
+        .error parseErr
+      else
+        .ok (.ask "non-json-response" trimmed)
+  | .ok j =>
+      -- Recognize the documented {error, ask} clarification shape
+      -- BEFORE attempting a structural Intent parse. The model emits
+      -- this when it can't fill required fields without inventing
+      -- (e.g. unresolved ENS, unknown token symbol, missing chain
+      -- id). That's not a failure of ours — it's the model doing
+      -- what we asked it to.
+      match getField "error" j, getField "ask" j with
+      | some errJ, some askJ =>
+          match asString errJ, asString askJ with
+          | some err, some ask => return .ask err ask
+          | _, _ => pure ()
       | _, _ => pure ()
-  | _, _ => pure ()
-  let intent ← LeanKohaku.Ethereum.IntentJson.parseIntent j
-  securityChecks j expectedChainId intent
-  .ok (.intent intent)
+      let intent ← LeanKohaku.Ethereum.IntentJson.parseIntent j
+      securityChecks j expectedChainId intent
+      .ok (.intent intent)
 
 end LeanKohaku.LlmAgent.IntentParser
