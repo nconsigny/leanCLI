@@ -1881,6 +1881,60 @@ private def r1SendFlow (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           message := "r1 digest preparation produced unexpected output",
           data := some (.str prepOut) }
 
+/-- Walk the agent's `trace` array for the LAST `propose_send`
+    tool call and parse its `argsJson` into `(chainId, to, value, data)`.
+    The agent's `propose_send` tool has already validated the shape
+    on its side; this is the canonical signal "the model has reached
+    its final answer". When present, it overrides the prose-text path
+    in `chat.draft` — the model's final assistant content is then
+    informational rather than the source of intent.
+
+    Returns `none` when no propose_send call appears in the trace,
+    when the trace isn't an array, or when the args can't be parsed.
+    A malformed propose_send is treated as `none` rather than an
+    error so the existing IntentParser path runs as a fallback. -/
+private def parseProposeArgs (args : Json) :
+    Option (Nat × String × Nat × String) :=
+  match getField "chainId" args >>= asNat with
+  | none => none
+  | some cid =>
+      match getField "to" args >>= asString with
+      | none => none
+      | some to =>
+          let val : Nat := ((getField "value" args).bind asNat).getD 0
+          let data : String :=
+            ((getField "data" args).bind asString).getD "0x"
+          some (cid, to, val, data)
+
+private def proposeSendFromItem (item : Json) :
+    Option (Nat × String × Nat × String) :=
+  match item with
+  | .obj fields =>
+      let kind  := (fields.find? (·.1 == "kind")     |>.map (·.2)).getD .null
+      let name  := (fields.find? (·.1 == "name")     |>.map (·.2)).getD .null
+      let argsJ := (fields.find? (·.1 == "argsJson") |>.map (·.2)).getD .null
+      match kind, name, argsJ with
+      | .str "tool_call", .str "propose_send", .str argsStr =>
+          match LeanKohaku.Encoding.Json.parse argsStr with
+          | .ok args => parseProposeArgs args
+          | _ => none
+      | _, _, _ => none
+  | _ => none
+
+private partial def scanProposeSend :
+    List Json → Option (Nat × String × Nat × String)
+  | [] => none
+  | item :: rest =>
+      match scanProposeSend rest with
+      | some hit => some hit
+      | none => proposeSendFromItem item
+
+private def extractProposeSendFromTrace (trace : Json) :
+    Option (Nat × String × Nat × String) :=
+  match trace with
+  | .arr items => scanProposeSend items.toList
+  | _ => none
+
 /-- Build the `chat.draft` response JSON for a parsed/synthesized Intent.
 
 For leaf-encodable variants (nativeTransfer, erc20*, swap-leg, aave*,
@@ -5714,16 +5768,48 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           | .ok llmResult =>
               -- Sidecar returned { raw, backend, model, trace? }. The
               -- optional `trace` is the agentd's per-turn observability
-              -- payload — display-only; never affects signing
-              -- decisions. Forwarded verbatim under `agentTrace` so
-              -- the TUI's foldable trace block can render it. See
-              -- `LeanKohaku/Agent/Trace.lean` for the schema.
+              -- payload — display-only for the most part, but it ALSO
+              -- carries the canonical `propose_send` tool call when
+              -- the agent reaches a final answer. When that's present
+              -- it IS the intent; the prose `raw` text becomes purely
+              -- informational. See `LeanKohaku/Agent/Trace.lean`.
               let rawStr :=
                 (getField "raw" llmResult >>= asString).getD ""
               let traceField : Array (String × Json) :=
                 match getField "trace" llmResult with
                 | some t => #[("agentTrace", t)]
                 | none   => #[]
+              -- Precedence: if the trace shows the agent already
+              -- emitted a `propose_send` tool call, hand the TUI an
+              -- `encoded` payload directly — same shape as the
+              -- IntentParser-built encoded leaf, so `latestSignable`
+              -- in the TUI picks it up and the user gets a Sign +
+              -- broadcast button. The model's final prose stays
+              -- under `llmRaw` for context but is no longer the
+              -- source of intent. Without this, the TUI surfaces
+              -- the prose as a non-JSON ask and there's no way to
+              -- confirm a tool-call-driven draft.
+              let proposeFromTrace : Option Json :=
+                match getField "trace" llmResult with
+                | some t =>
+                    match extractProposeSendFromTrace t with
+                    | some (cid, to, val, data) =>
+                        some <| .obj <| #[
+                          ("regex",   regexJson),
+                          ("llmRaw",  .str rawStr),
+                          ("backend", .str "agent-propose-send"),
+                          ("encoded", .obj #[
+                            ("to",      .str to),
+                            ("value",   .num (Int.ofNat val)),
+                            ("data",    .str data),
+                            ("chainId", .num (Int.ofNat cid))
+                          ])
+                        ] ++ traceField
+                    | none => none
+                | none => none
+              match proposeFromTrace with
+              | some resp => pure (.ok resp)
+              | none =>
               if rawStr.isEmpty then
                 pure <| .ok <| .obj <| #[
                   ("regex", regexJson),
