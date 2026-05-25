@@ -657,7 +657,22 @@ private def unlockedSlot (state : LeanKohaku.Daemon.State.Shared) (name : String
     IO (Except RpcError LeanKohaku.Daemon.State.UnlockedSlot) := do
   match ← LeanKohaku.Daemon.State.getUnlocked? state name with
   | some slot => pure (.ok slot)
-  | none => pure (.error { code := -32012, message := "EOA slot is locked" })
+  | none =>
+      -- Sub-account-tolerant retry. The TUI's wallet objects carry
+      -- display names like "leanWallet/0" / "leanWallet/ops" for
+      -- BIP-44 sub-accounts; the unlocked-slot table is keyed by the
+      -- base slot name. EoaStore writes slots as filesystem paths
+      -- (`eoa/<name>.json`), so a literal '/' in a slot name is
+      -- impossible — the split is unambiguous. The sub-account is
+      -- selected later via the separate `account` parameter, which
+      -- `resolveSigningTarget` already reads from the request.
+      let baseName := (name.splitOn "/").headD name
+      if baseName.length == name.length then
+        pure (.error { code := -32012, message := "EOA slot is locked" })
+      else
+        match ← LeanKohaku.Daemon.State.getUnlocked? state baseName with
+        | some slot => pure (.ok slot)
+        | none => pure (.error { code := -32012, message := "EOA slot is locked" })
 
 /-- Why: a freshly read record may carry a synthesized accounts list (when
     the on-disk JSON predates multi-account). Always returns a non-empty array
@@ -705,8 +720,22 @@ private def loadRecord (name : String) :
     IO (Except RpcError LeanKohaku.Wallet.EoaStore.Record) := do
   match ← LeanKohaku.Wallet.EoaStore.load name with
   | .ok r => pure (.ok r)
-  | .error err =>
-      pure (.error { code := -32010, message := "EOA slot not found", data := some (.str err) })
+  | .error _ =>
+      -- Sub-account-tolerant retry for display-form names like
+      -- "leanWallet/0" / "leanWallet/3". EoaStore writes slots as
+      -- `eoa/<name>.json`, so a literal '/' in a slot name is
+      -- impossible — the base name before the first '/' is the
+      -- actual slot identifier. The sub-account index / label
+      -- comes through the separate `account` parameter on send /
+      -- sign RPCs (see `resolveSigningTarget`).
+      let baseName := (name.splitOn "/").headD name
+      if baseName.length == name.length then
+        pure (.error { code := -32010, message := "EOA slot not found", data := some (.str name) })
+      else
+        match ← LeanKohaku.Wallet.EoaStore.load baseName with
+        | .ok r => pure (.ok r)
+        | .error err =>
+            pure (.error { code := -32010, message := "EOA slot not found", data := some (.str err) })
 
 /-- Resolve `(path, address)` for a sign/send operation, considering both
     legacy explicit `path` and new `account` params. `account` takes priority;
@@ -7301,7 +7330,10 @@ def handleConn (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       LeanKohaku.Daemon.Log.write .warn "<peer>" ((← IO.monoMsNow) - started) false
         (some "peer uid rejected")
     else
-      let bytes ← LeanKohaku.Daemon.Uds.read conn
+      -- `readLine` buffers across SOCK_STREAM `read(2)` chunks until
+      -- the terminating `\n`, so a request the kernel splits doesn't
+      -- truncate into a parse error here.
+      let bytes ← LeanKohaku.Daemon.Uds.readLine conn
       match decodeRequestBytes bytes with
       | .error err =>
           let response := compact <| errorResponse .null
