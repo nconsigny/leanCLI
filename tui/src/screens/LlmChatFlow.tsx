@@ -1184,11 +1184,8 @@ function DispatchBlock({ dispatch }: { dispatch?: DispatchState }) {
   return null;
 }
 
-/** Truncate a 0x address to `0xABCD…1234` for inline display. Pass-
- *  through for short strings so we don't mangle non-address content. */
 function shortAddr(s: string): string {
-  if (s.length <= 14) return s;
-  return `${s.slice(0, 8)}…${s.slice(-4)}`;
+  return s;
 }
 
 function RegexLine({

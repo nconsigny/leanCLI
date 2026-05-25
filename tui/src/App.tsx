@@ -39,6 +39,7 @@ import SendRawFlow from "./screens/SendRawFlow.js";
 import DecodeTypedDataFlow from "./screens/DecodeTypedDataFlow.js";
 import RevealMnemonicFlow from "./screens/RevealMnemonicFlow.js";
 import AddAccountFlow from "./screens/AddAccountFlow.js";
+import UnstickFlow from "./screens/UnstickFlow.js";
 import ArchivedAccountsScreen from "./screens/ArchivedAccountsScreen.js";
 import { archiveKey, toggleArchive } from "./archiveStore.js";
 import PrivacyMenu from "./screens/PrivacyMenu.js";
@@ -85,6 +86,7 @@ type Screen =
   | { kind: "details"; wallet: Wallet }
   | { kind: "history"; wallet: Wallet }
   | { kind: "balance-refresh"; wallet: Wallet }
+  | { kind: "unstick"; wallet: Wallet; chain: string }
   | { kind: "create-wallet" }
   | { kind: "create-eoa" }
   | { kind: "create-r1" }
@@ -267,7 +269,7 @@ export default function App() {
     setStack((prev) => [...prev.slice(0, -1), next]);
   };
 
-  const handleWalletAction = (w: Wallet, a: WalletAction) => {
+  const handleWalletAction = (w: Wallet, a: WalletAction, chainHint?: string) => {
     switch (a) {
       case "send":             return push({ kind: "send", wallet: w });
       case "swap":             return push({ kind: "swap", wallet: w });
@@ -278,6 +280,7 @@ export default function App() {
       case "history":          return push({ kind: "history", wallet: w });
       case "balance-refresh":  return push({ kind: "balance-refresh", wallet: w });
       case "add-account":      return push({ kind: "add-account" });
+      case "unstick":          return push({ kind: "unstick", wallet: w, chain: chainHint ?? "sepolia" });
       case "archive":
         toggleArchive(archiveKey(w.kind, w.name, w.accountIndex));
         return finishAction();
@@ -391,9 +394,13 @@ export default function App() {
               token,
             })
           }
-          onAction={(a) => handleWalletAction(top.wallet, a)}
+          onAction={(a) => handleWalletAction(top.wallet, a, top.chain)}
           onDone={pop}
         />
+      );
+    case "unstick":
+      return (
+        <UnstickFlow wallet={top.wallet} chain={top.chain} onDone={finishAction} />
       );
     case "shield":
       return <ShieldFlow wallet={top.wallet} onDone={finishAction} />;

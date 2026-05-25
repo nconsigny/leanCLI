@@ -349,6 +349,7 @@ export default function ManageWalletScreen({
     else if (input === "r") onAction("balance-refresh");
     else if (input === "l" && wallet.kind === "eoa") onAction("lock-toggle");
     else if (input === "a" && wallet.kind === "eoa") onAction("add-account");
+    else if (input === "u" && wallet.kind === "eoa") onAction("unstick");
   });
 
   // Header subtitle prefers our locally-loaded eth balance; falls back
@@ -369,7 +370,7 @@ export default function ManageWalletScreen({
     <Layout
       title={`Manage ${wallet.name}`}
       subtitle={`${shortAddr(wallet.address)} · ${balanceLine} · ${chain}`}
-      hint="↑/↓ token · enter — send token · h history · d details · r refresh · l lock · a add-account · esc back"
+      hint={`↑/↓ token · enter — send token · h history · d details · r refresh${wallet.kind === "eoa" ? " · l lock · a add-account · u unstick-nonce" : ""} · esc back`}
     >
       <Box flexDirection="row">
         <Box flexDirection="column" flexGrow={1} flexBasis={0} minWidth={0}>
@@ -524,9 +525,7 @@ function CompactHistoryRow({ entry }: { entry: JournalEntry }) {
       {entry.txHash && (
         <Box>
           <Text color={theme.dim}>{"  tx "}</Text>
-          <Text color={theme.dim}>
-            {entry.txHash.slice(0, 10)}…{entry.txHash.slice(-8)}
-          </Text>
+          <Text color={theme.dim}>{entry.txHash}</Text>
         </Box>
       )}
     </Box>

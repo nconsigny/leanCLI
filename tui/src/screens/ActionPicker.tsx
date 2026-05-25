@@ -18,6 +18,7 @@ export type Action =
   | "reveal-mnemonic"
   | "add-account"
   | "archive"
+  | "unstick"
   | "back";
 
 type Props = {
