@@ -52,6 +52,16 @@ def operationalRules (cfg : AgentConfig) : String :=
   signature.
 "
 
+/-- One-line addition to the operational rules used in the seed-locked
+    case. The trusted registry would otherwise tell the LLM "these
+    addresses are yours"; when locked the LLM must explicitly refuse to
+    assume any address is the user's own without explicit confirmation.
+    See `docs/PHASE1D_THREAT_MODEL.md` §3 and §5. -/
+def lockedSeedAddendum : String :=
+  "- User's seed is locked: do NOT claim any address is the user's \
+   own without explicit user confirmation. There is no Trusted \
+   Registry to draw on this session."
+
 /-- Build the full system prompt: persona + operational rules + a
     bullet list of available tools and their descriptions. -/
 def buildSystemPrompt (cfg : AgentConfig) (tools : List ToolDoc) : String :=
@@ -65,17 +75,23 @@ where
   buildSystemPromptWithSkills
       (cfg : AgentConfig) (tools : List ToolDoc)
       (alwaysOnSkills triggerSkills : List String) : String :=
-    buildSystemPromptFull cfg tools "" alwaysOnSkills triggerSkills
+    buildSystemPromptFull cfg tools "" "" alwaysOnSkills triggerSkills
   /-- Build the system prompt with an optional rendered memory
-      block. The order is
-      `persona → memory → always-on skills → trigger skills →
-       operational rules → tool docs`. The `memoryRendered` string
-      is included verbatim when non-empty and omitted entirely
-      (no header, no marker) when empty — keeps the prompt clean
-      for fresh installs. -/
+      block AND an optional trusted-registry block. The order
+      (Phase 1d) is:
+      `persona → memory → trusted registry → always-on skills →
+       trigger skills → operational rules → tool docs`.
+      The `memoryRendered` and `trustedRegistryRendered` strings are
+      included verbatim when non-empty and omitted entirely (no
+      header, no marker) when empty.
+
+      When `trustedRegistryRendered` is empty the operational rules
+      get a one-line addendum (`lockedSeedAddendum`) so the LLM does
+      not silently invent ownership claims. See
+      `docs/PHASE1D_THREAT_MODEL.md` §3, §5. -/
   buildSystemPromptFull
       (cfg : AgentConfig) (tools : List ToolDoc)
-      (memoryRendered : String)
+      (memoryRendered trustedRegistryRendered : String)
       (alwaysOnSkills triggerSkills : List String) : String :=
     let toolHeader := "TOOLS AVAILABLE (call by name; do not invent tool names):"
     let toolBlock :=
@@ -85,18 +101,27 @@ where
         String.intercalate "\n" (tools.map renderTool)
     let memoryBlock :=
       if memoryRendered.trimAscii.toString.isEmpty then [] else [memoryRendered]
+    let registryBlock :=
+      if trustedRegistryRendered.trimAscii.toString.isEmpty then []
+      else [trustedRegistryRendered]
     let alwaysOnBlock :=
       if alwaysOnSkills.isEmpty then []
       else [String.intercalate "\n\n" alwaysOnSkills]
     let triggerBlock :=
       if triggerSkills.isEmpty then []
       else [String.intercalate "\n\n" triggerSkills]
+    let ops :=
+      if trustedRegistryRendered.trimAscii.toString.isEmpty then
+        operationalRules cfg ++ "\n" ++ lockedSeedAddendum
+      else
+        operationalRules cfg
     String.intercalate "\n\n"
       ([ kohakuPersona ]
        ++ memoryBlock
+       ++ registryBlock
        ++ alwaysOnBlock
        ++ triggerBlock
-       ++ [ operationalRules cfg
+       ++ [ ops
           , toolHeader ++ "\n" ++ toolBlock ])
 
 /-- Convenience exporter so callers can use the inner builder without
@@ -107,15 +132,16 @@ def buildSystemPromptWithSkills
   buildSystemPrompt.buildSystemPromptWithSkills
     cfg tools alwaysOnSkills triggerSkills
 
-/-- Convenience exporter for the full variant including memory.
-    The Phase-1c agent daemon uses this directly; Phase 0 / 1a / 1b
-    callers can keep using the no-memory entrypoint and pass
-    `""` here is equivalent to the older entrypoints. -/
+/-- Convenience exporter for the full variant including memory and
+    the Phase-1d trusted-registry block. Pre-Phase-1d callers can
+    pass `""` for `trustedRegistryRendered` to opt out (which is
+    equivalent to the seed-locked case — the locked-seed addendum
+    is still appended to operational rules). -/
 def buildSystemPromptFull
     (cfg : AgentConfig) (tools : List ToolDoc)
-    (memoryRendered : String)
+    (memoryRendered trustedRegistryRendered : String)
     (alwaysOnSkills triggerSkills : List String) : String :=
   buildSystemPrompt.buildSystemPromptFull
-    cfg tools memoryRendered alwaysOnSkills triggerSkills
+    cfg tools memoryRendered trustedRegistryRendered alwaysOnSkills triggerSkills
 
 end LeanKohaku.Agent.Prompt

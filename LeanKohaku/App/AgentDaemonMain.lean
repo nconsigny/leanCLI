@@ -7,6 +7,7 @@ import LeanKohaku.Agent.Session
 import LeanKohaku.Agent.Skills
 import LeanKohaku.Agent.Memory
 import LeanKohaku.Agent.ToolDefs.Protocols
+import LeanKohaku.Agent.ToolDefs.TrustedRegistry
 import LeanKohaku.Encoding.Json
 import LeanKohaku.Transport.Uds
 
@@ -131,13 +132,17 @@ private def chmodSessionDb (path : String) : IO Unit := do
     MEMORY.md content (Phase 1c) so every turn can include it in
     the system prompt without a per-turn file read; `incognito` is
     the set of session ids that opted into incognito mode at
-    `create_session` time. -/
+    `create_session` time; `registryRef` caches the most recent
+    Phase-1d trusted-registry snapshot (Phase 1d, fetched at
+    `create_session` and refreshed when the seed fingerprint
+    changes between turns). `none` means seed is locked. -/
 private structure DaemonState where
-  db        : Session.Handle
-  inFlight  : IO.Ref (List Session.SessionId)
-  skills    : ToolDefs.Protocols.RegistryRef
-  memoryRef : IO.Ref Memory.Memory
-  incognito : IO.Ref (List Session.SessionId)
+  db          : Session.Handle
+  inFlight    : IO.Ref (List Session.SessionId)
+  skills      : ToolDefs.Protocols.RegistryRef
+  memoryRef   : IO.Ref Memory.Memory
+  incognito   : IO.Ref (List Session.SessionId)
+  registryRef : IO.Ref (Option ToolDefs.TrustedRegistry.Snapshot)
 
 /-- Mark `sid` busy if it isn't already. Returns `true` when the
     caller has acquired the per-session lock; `false` if another
@@ -213,15 +218,56 @@ private def collectMatchContext (msgs : Array AgentMessage) : String :=
     | none => ""
   String.intercalate " " (lastUser :: toolBlobs)
 
+/-- Refresh the cached trusted-registry snapshot if the seed fingerprint
+    has changed since the last fetch. Idempotent and graceful: when the
+    daemon is locked or unreachable we return `none` and the prompt-
+    builder downgrades to the locked-seed addendum. Logs (via stderr)
+    when a rotation is observed so operators can see seed-swap events.
+
+    Phase 1d: the snapshot is fetched at `create_session` and again here
+    only if the daemon's *currently observable* fingerprint differs from
+    the cached one. We piggy-back on a cheap follow-up RPC: we ask for
+    `count=0` (clamped to the daemon's max but logically a no-op
+    enumeration) and only its `seedFingerprint` field. -/
+private def maybeRefreshRegistry
+    (regRef : IO.Ref (Option ToolDefs.TrustedRegistry.Snapshot))
+    (socketPath : String) : IO (Option ToolDefs.TrustedRegistry.Snapshot) := do
+  let cached ← regRef.get
+  let cachedFp := cached.map (·.seedFingerprint) |>.getD ""
+  -- Cheap probe: count=0 returns just the fingerprint (or an error
+  -- envelope if locked). Failure is a graceful downgrade — we keep
+  -- the cached snapshot if any, otherwise return `none`.
+  match ← ToolDefs.TrustedRegistry.fetchSnapshot socketPath
+           ToolDefs.TrustedRegistry.defaultPaths 0 true with
+  | .error _ => pure cached
+  | .ok probe =>
+      if probe.seedFingerprint == cachedFp && cached.isSome then
+        pure cached
+      else
+        -- Rotation or first-time fill: pull a real snapshot with the
+        -- daemon's default count cap.
+        match ← ToolDefs.TrustedRegistry.fetchSnapshot socketPath
+                 ToolDefs.TrustedRegistry.defaultPaths 5 true with
+        | .error _ => pure cached
+        | .ok fresh =>
+            if cachedFp != "" && cachedFp != fresh.seedFingerprint then
+              IO.eprintln s!"[trusted-registry] seed rotation: {cachedFp} -> {fresh.seedFingerprint}"
+            regRef.set (some fresh)
+            pure (some fresh)
+
 /-- Build the rebuild callback that produces the next system prompt.
-    Reads the live registry and memory ref off `st` so a `reload`
-    or `update_memory` between turns propagates immediately. -/
+    Reads the live registry, memory ref, and trusted-registry snapshot
+    off `st` so a `reload`, `update_memory`, or seed rotation between
+    turns propagates immediately. -/
 private def mkRebuildSystem
     (regRef : ToolDefs.Protocols.RegistryRef)
-    (memRef : IO.Ref Memory.Memory) :
+    (memRef : IO.Ref Memory.Memory)
+    (registryRef : IO.Ref (Option ToolDefs.TrustedRegistry.Snapshot))
+    (walletSocket : String) :
     AgentState → IO String := fun s => do
   let reg ← regRef.get
   let mem ← memRef.get
+  let trustedSnap ← maybeRefreshRegistry registryRef walletSocket
   let visibleTools : List Prompt.ToolDoc :=
     Tools.toToolDocs (filterByAllowlist (Registry.defaultWithSkills regRef) s.cfg.toolAllowlist)
   let alwaysOn := Skills.alwaysOn reg
@@ -230,6 +276,12 @@ private def mkRebuildSystem
   let alwaysOnRendered := alwaysOn.toList.map Skills.renderForPrompt
   let triggeredRendered := triggered.map Skills.renderForPrompt
   let memoryRendered := Memory.renderForPrompt mem 1024
+  let trustedRendered :=
+    match trustedSnap with
+    | some snap =>
+        if snap.addresses.isEmpty then ""
+        else ToolDefs.TrustedRegistry.renderForPrompt snap
+    | none => ""
   -- Optional one-line stderr trace so operators can see what fired.
   -- Gated behind KOHAKU_LOG_PROMPT so the daemon log does not blow up
   -- on every turn.
@@ -239,10 +291,11 @@ private def mkRebuildSystem
         let names := (alwaysOn.toList.map (fun s => s.frontmatter.name)) ++
                      (triggered.map (fun s => s.frontmatter.name))
         let memTag := if memoryRendered.isEmpty then "no" else "yes"
-        IO.eprintln s!"[skills] active: {String.intercalate "," names} memory={memTag}"
+        let regTag := if trustedRendered.isEmpty then "no" else "yes"
+        IO.eprintln s!"[skills] active: {String.intercalate "," names} memory={memTag} trustedRegistry={regTag}"
   | none => pure ()
   pure (Prompt.buildSystemPromptFull s.cfg visibleTools
-          memoryRendered alwaysOnRendered triggeredRendered)
+          memoryRendered trustedRendered alwaysOnRendered triggeredRendered)
 
 /-- Build a prompt transcript by loading session history and appending
     the new user prompt. Returns the message array plus the
@@ -298,6 +351,7 @@ private def opRunTurn (st : DaemonState) (params : Json) : IO Json := do
        appendIfNotIncognito st sid userMsg
        let s₀ : AgentState := { messages := transcript, cfg := cfg }
        let rebuild := mkRebuildSystem st.skills st.memoryRef
+                        st.registryRef walletSocket
        let toolReg := Registry.defaultWithSkills st.skills
        let incog ← isIncognito st sid
        match ← Loop.runOneShotWithRebuild s₀ toolReg (some rebuild) with
@@ -323,7 +377,14 @@ private def opRunTurn (st : DaemonState) (params : Json) : IO Json := do
 /-- Handle `create_session`. If the metadata carries
     `{"incognito": true}`, the session id is registered in the
     incognito set so subsequent `appendMessage` calls become
-    no-ops and `close_session` skips memory extraction. -/
+    no-ops and `close_session` skips memory extraction.
+
+    Phase 1d: also primes the trusted-registry cache from the wallet
+    daemon. The daemon's `wallet.lean_verified_addresses` handler
+    enforces all the bounds documented in
+    `docs/PHASE1D_THREAT_MODEL.md`; failure here is graceful and just
+    leaves the cache as `none` (which renders as the locked-seed
+    addendum in the next system prompt). -/
 private def opCreateSession (st : DaemonState) (params : Json) : IO Json := do
   let metadata := (getField "metadata" params).getD (.obj #[])
   try
@@ -331,6 +392,16 @@ private def opCreateSession (st : DaemonState) (params : Json) : IO Json := do
     -- Inspect incognito flag — it lives inside the metadata object.
     let incog := (getField "incognito" metadata >>= asBool).getD false
     if incog then markIncognito st sid
+    -- Phase 1d: prime the trusted-registry snapshot. Best-effort —
+    -- a locked seed, an unreachable daemon, or a slow socket all
+    -- collapse to "no registry yet" without breaking session creation.
+    try
+      let walletSocket ← resolveWalletSocket
+      match ← ToolDefs.TrustedRegistry.fetchSnapshot walletSocket
+               ToolDefs.TrustedRegistry.defaultPaths 5 true with
+      | .ok snap => st.registryRef.set (some snap)
+      | .error _ => st.registryRef.set none
+    catch _ => st.registryRef.set none
     return okResp <| .obj #[
       ("session_id", .num (Int.ofNat sid)),
       ("incognito",  .bool incog)
@@ -622,9 +693,14 @@ def main (args : List String) : IO UInt32 := do
 
   let inFlight ← IO.mkRef ([] : List Session.SessionId)
   let incognito ← IO.mkRef ([] : List Session.SessionId)
+  -- Phase 1d: trusted-registry snapshot cache. Starts empty; populated
+  -- by the first `create_session` and refreshed when the seed
+  -- fingerprint changes between turns.
+  let registryRef ← IO.mkRef (none : Option ToolDefs.TrustedRegistry.Snapshot)
   let st : DaemonState := {
     db := db, inFlight := inFlight, skills := skillsRef,
-    memoryRef := memoryRef, incognito := incognito
+    memoryRef := memoryRef, incognito := incognito,
+    registryRef := registryRef
   }
 
   IO.eprintln s!"kohaku-agentd: db at {dbPath}"
