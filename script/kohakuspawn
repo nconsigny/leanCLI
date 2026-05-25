@@ -145,7 +145,7 @@ Options:
                       is not a TTY (covers `curl ... | bash` and CI).
   --force             Overwrite existing kohaku / kohaku-daemon symlinks
                       that point somewhere else. Default refuses.
-  --uninstall         Remove ~/.kohaku/bin/{kohaku,kohaku-daemon,kohakuspawn}
+  --uninstall         Remove ~/.kohaku/bin/{kohaku,kohaku-daemon,kohaku-agent,kohaku-agentd,kohakuspawn}
                       (only when the kohaku/kohaku-daemon symlinks point at
                       the recorded checkout; pair with --force to override).
                       Leaves shell-rc edits in place — they're harmless once
@@ -301,6 +301,11 @@ if [[ "$MODE" == "uninstall" ]]; then
 
   remove_link "kohaku" "leankohaku"
   remove_link "kohaku-daemon" "leankohaku-daemon"
+  # Agent binaries (Phase 0 + Phase 1a). Same checkout-rooted symlink
+  # model; remove_link no-ops if the symlink is missing or points
+  # outside the recorded checkout.
+  remove_link "kohaku-agent" "kohaku_agent"
+  remove_link "kohaku-agentd" "kohaku_agentd"
   # SPHINCS- shim symlinks (installed by `install_sphincs_shims`). Same
   # "checkout-rooted symlink" model as kohaku/kohaku-daemon, so the
   # check-and-remove pattern is the same — `remove_link` no-ops when the
@@ -388,6 +393,15 @@ fi
 
 LEAN_BIN="$CHECKOUT/.lake/build/bin/leankohaku"
 LEAN_DAEMON="$CHECKOUT/.lake/build/bin/leankohaku-daemon"
+# Lean-native LLM agent (Phase 0). Installed as `kohaku-agent`
+# (dash form) because that's what LlmAgent.Bridge resolves on PATH.
+# Lake target is `kohaku_agent` (underscore) so the artefact lives
+# at .lake/build/bin/kohaku_agent.
+LEAN_AGENT="$CHECKOUT/.lake/build/bin/kohaku_agent"
+# Phase 1a persistent agent daemon. Installed as `kohaku-agentd`
+# (dash form) to match the systemd unit name; the Lake target is
+# `kohaku_agentd` so the artefact lives at .lake/build/bin/kohaku_agentd.
+LEAN_AGENTD="$CHECKOUT/.lake/build/bin/kohaku_agentd"
 TUI_BUNDLE="$CHECKOUT/tui/dist/index.mjs"
 
 # Kill any stale daemon/bridge processes before we touch anything else.
@@ -625,6 +639,18 @@ link_one() {
 
 link_one "$LEAN_BIN" "kohaku"
 link_one "$LEAN_DAEMON" "kohaku-daemon"
+# Agent binaries are best-effort: an older checkout that predates Phase 0
+# won't have built them. Skip-with-warning rather than fail the install.
+if [[ -x "$LEAN_AGENT" ]]; then
+  link_one "$LEAN_AGENT" "kohaku-agent"
+else
+  echo "kohakuspawn: $LEAN_AGENT not built — skipping kohaku-agent symlink" >&2
+fi
+if [[ -x "$LEAN_AGENTD" ]]; then
+  link_one "$LEAN_AGENTD" "kohaku-agentd"
+else
+  echo "kohakuspawn: $LEAN_AGENTD not built — skipping kohaku-agentd symlink" >&2
+fi
 
 # SPHINCS- shim symlinks + daemon.env entries. The daemon's
 # `Sphincs/Bridge.lean::resolveExecutable` checks `LEAN_KOHAKU_SPHINCS_<PARAMSET>`
