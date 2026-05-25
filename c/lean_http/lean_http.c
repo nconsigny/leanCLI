@@ -222,11 +222,15 @@ lean_object* lk_http_post_json_ffi(lean_object* url_obj,
   int rc = lk_http_post_json(url, body, body_len, (int)timeout_ms,
                              &out_body, &out_len, &status);
 
-  // Build the response triple as a Lean tuple object. To stay
-  // dependency-light on lean ABI helpers we encode the triple as a
-  // structure of three boxed fields built via ctor 0 with 3 args:
-  //   { status : UInt32, kind : UInt32, body : ByteArray }
-  // matches the structure declared on the Lean side.
+  // Build the response triple. Lean's `structure RawResponse where
+  //   status : UInt32; kind : UInt32; body : ByteArray`
+  // is laid out objects-first: 1 object pointer (body) followed by
+  // 8 bytes of scalar storage (status u32, kind u32) in declaration
+  // order. Earlier versions of this shim passed `(0, 3, 0)` to
+  // lean_alloc_ctor and boxed the two UInt32s as objects, which
+  // corrupted the body field on read and segfaulted in
+  // `Agent.Http.fromRaw` the first time `String.fromUTF8!` was
+  // invoked on what the runtime thought was a ByteArray.
   uint32_t status_field = 0;
   uint32_t kind_field   = 0;
   lean_object* body_field = NULL;
@@ -249,10 +253,18 @@ lean_object* lk_http_post_json_ffi(lean_object* url_obj,
     lean_sarray_set_size(body_field, mlen);
   }
 
-  lean_object* tup = lean_alloc_ctor(0, 3, 0);
-  lean_ctor_set(tup, 0, lean_box_uint32(status_field));
-  lean_ctor_set(tup, 1, lean_box_uint32(kind_field));
-  lean_ctor_set(tup, 2, body_field);
+  lean_object* tup = lean_alloc_ctor(0, /*num_objs=*/1, /*scalar_size=*/8);
+  lean_ctor_set(tup, 0, body_field);
+  // lean_ctor_set_uint32's `offset` is bytes from lean_ctor_obj_cptr(o)
+  // (start of the object pointer area), not from the scalar area —
+  // see Lean 4 runtime lean.h:lean_ctor_set_uint32, which asserts
+  // `offset >= num_objs * sizeof(void*)`. The scalar block starts
+  // after our 1 object pointer (8 bytes on 64-bit hosts).
+  {
+    const unsigned scalar_base = (unsigned)(sizeof(void*) * 1u);
+    lean_ctor_set_uint32(tup, scalar_base + 0u, status_field);
+    lean_ctor_set_uint32(tup, scalar_base + 4u, kind_field);
+  }
 
   return lean_io_result_mk_ok(tup);
 }
