@@ -41,6 +41,14 @@ def operationalRules (cfg : AgentConfig) : String :=
 - Use tools to verify facts before proposing a send. Do NOT guess
   contract addresses, decimals, or balances from your prior
   knowledge — call the read tools.
+- Token addresses and decimals are NOT in your training data. Before
+  producing calldata that references a token, call
+  `token_lookup({chainId, query})` with the user's chosen symbol or
+  address. If the response is `kind:"unknown_token"`, ASK the user
+  for the canonical address on that chain — do not guess. NEVER
+  compute base-unit conversions in your head; call
+  `to_base_units({amount, decimals})` with the decimals returned by
+  `token_lookup`.
 - Stop calling tools and emit your final answer once you have what
   you need. The step budget is {cfg.maxSteps} rounds.
 - Single tool call per turn unless the calls are independent. Avoid

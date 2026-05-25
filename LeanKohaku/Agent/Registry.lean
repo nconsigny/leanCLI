@@ -5,6 +5,7 @@ import LeanKohaku.Agent.ToolDefs.Chain
 import LeanKohaku.Agent.ToolDefs.Propose
 import LeanKohaku.Agent.ToolDefs.Protocols
 import LeanKohaku.Agent.ToolDefs.TrustedRegistry
+import LeanKohaku.Agent.ToolDefs.Tokens
 
 /-!
 # Default tool registry
@@ -43,7 +44,13 @@ def default : ToolRegistry := [
   Chain.nonce,
   Chain.gasPrice,
   Propose.proposeSend,
-  TrustedRegistry.trustedRegistryList
+  TrustedRegistry.trustedRegistryList,
+  -- Token-registry trio: addresses + decimals + unit conversions from
+  -- a compiled-in, hand-audited list so the LLM never invents them
+  -- from training data. Read-only, no daemon RPC, no signing path.
+  Tokens.tokenLookup,
+  Tokens.toBaseUnitsTool,
+  Tokens.humanUnitsTool
 ]
 
 /-- Phase-1b registry: the Phase-0 surface plus the two
