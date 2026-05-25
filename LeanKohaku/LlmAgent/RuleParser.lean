@@ -394,14 +394,22 @@ templates, this matcher MUST run before `matchSupply` /
 `matchWithdrawBorrowRepay` in the `parse` dispatch list. -/
 def matchShielded (toks : List String) : Option RegexDraft := do
   let verb ← toks.head?
+  -- Protocol disambiguators. The bare `shield` verb is ambiguous
+  -- between Privacy Pool and Railgun; we require an explicit
+  -- protocol token before firing the Privacy Pool shortcut.
+  let hasPrivacyPool : Bool :=
+    toks.any (fun t =>
+      t = "privacy" ∨ t = "pool" ∨ t = "pools" ∨ t = "0xbow")
+  let hasRailgun : Bool := toks.any (fun t => t = "railgun")
+  let hasTornado : Bool :=
+    toks.any (fun t => t = "tornado" ∨ t = "tornado-cash" ∨ t = "tornadocash")
   -- "private" / "anonymous" as bare adjectives are TOO GENERIC ("my
   -- private wallet", "an anonymous donor") — they would hijack
   -- unrelated prompts. Require the adverb forms or specific Privacy-
   -- Pool nouns.
   let hasPrivacyHint : Bool :=
-    toks.any (fun t =>
-      t = "privacy" ∨ t = "pool" ∨ t = "pools" ∨ t = "shielded"
-        ∨ t = "privately" ∨ t = "anonymously")
+    hasPrivacyPool ∨ toks.any (fun t =>
+      t = "shielded" ∨ t = "privately" ∨ t = "anonymously")
   let isCanonical := verb = "shield" ∨ verb = "unshield"
   let isAliasedShield := verb = "deposit" ∧ hasPrivacyHint
   let isAliasedUnshield := verb = "withdraw" ∧ hasPrivacyHint
@@ -412,6 +420,37 @@ def matchShielded (toks : List String) : Option RegexDraft := do
   if ¬ (isAmount amount) then none
   let asset ← at? toks 2
   let assetOk := isEthLike asset ∨ isKnownSymbol asset ∨ isAddress asset
+  -- Protocol-disambiguation gates. The canonical `shield`/`unshield`
+  -- verb defaulted to Privacy Pool, which silently overrode the user
+  -- whenever they named a different protocol (e.g. "shield 0.05 ETH
+  -- with railgun"). The chat must ask instead of guessing.
+  --
+  -- Aliased verbs ("deposit X privately", "withdraw Y from the
+  -- privacy pool") inherently imply Privacy Pool and skip these
+  -- gates — they only match when hasPrivacyHint is set.
+  if isCanonical ∧ hasTornado then
+    return {
+      action     := .unknown
+      fields     := [("verb", canonicalVerb), ("amount", amount), ("asset", asset),
+                     ("protocol", "tornado-cash")]
+      unresolved := ["Tornado Cash is OFAC-sanctioned and Kohaku ships no Tornado Cash SDK. This skill is research/decode-only — drafting Tornado Cash transactions is not supported."]
+      confidence := .rejected
+    }
+  if isCanonical ∧ hasRailgun then
+    return {
+      action     := .unknown
+      fields     := [("verb", canonicalVerb), ("amount", amount), ("asset", asset),
+                     ("protocol", "railgun")]
+      unresolved := [s!"Railgun {canonicalVerb} is not wired into the regex shortcut. Use 'Privacy → Railgun' from the wallet menu to {canonicalVerb} via the @kohaku-eth/railgun SDK, or rephrase as '{canonicalVerb} {amount} {asset} with privacy pool' to use the Privacy Pool shortcut."]
+      confidence := .rejected
+    }
+  if isCanonical ∧ ¬ hasPrivacyPool then
+    return {
+      action     := .unknown
+      fields     := [("verb", canonicalVerb), ("amount", amount), ("asset", asset)]
+      unresolved := [s!"'{canonicalVerb} {amount} {asset}': which privacy protocol? Add 'with privacy pool' for the 0xbow Privacy Pool shortcut, or 'with railgun' for Railgun (manual flow via Privacy → Railgun menu)."]
+      confidence := .rejected
+    }
   -- Recipient is only meaningful for unshield; for shield, the
   -- destination IS the Privacy Pool contract (no user-supplied
   -- recipient). For aliased "withdraw X from the privacy pool to

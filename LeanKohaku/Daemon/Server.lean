@@ -1052,7 +1052,8 @@ private def shieldedBridgeCall (cfg : Config) (method : String) (params : Json)
     (ppMnemonic? : Option String) (_req : Request)
     (rgMnemonic? : Option String := none)
     (rgBundlerUrl? : Option String := none)
-    (rgDelegatingKeyHex? : Option String := none) :
+    (rgDelegatingKeyHex? : Option String := none)
+    (rgSeedHex? : Option String := none) :
     IO (Except RpcError Json) := do
   let bridgeReq : LeanKohaku.Privacy.Bridge.Request :=
     { method := method, params := params, id := 0 }
@@ -1107,6 +1108,9 @@ private def shieldedBridgeCall (cfg : Config) (method : String) (params : Json)
           | none   => #[])
       ++ (match rgDelegatingKeyHex? with
           | some k => #[("LEANKOHAKU_RG_DELEGATING_KEY", some k)]
+          | none   => #[])
+      ++ (match rgSeedHex? with
+          | some s => #[("LEANKOHAKU_RG_SEED_HEX", some s)]
           | none   => #[])
     let resp ← LeanKohaku.Privacy.Bridge.callWithEnv bridgeReq env
     pure <| .ok <| LeanKohaku.Privacy.Bridge.responseToJson resp
@@ -1230,15 +1234,54 @@ private def unlockRgSecretSmart (state : LeanKohaku.Daemon.State.Shared)
                       | .error _ => pure ())
             pure (.ok phrase)
 
-/-- Unlock the Railgun secret if present, otherwise generate a fresh
-    BIP-39 mnemonic, persist it via `RgSecretStore.save`, enrol into the
-    wallet master KEK (best-effort), and return the plaintext phrase.
+-- TODO(railgun): re-attach this docstring to its function (likely
+-- `unlockOrLazyInitRgSecret`). It became orphaned during the
+-- railgun-alpha-21 merge; Lean 4 rejects two consecutive `/-- -/`
+-- docstrings with no declaration between them.
+--   Unlock the Railgun secret if present, otherwise generate a fresh
+--   BIP-39 mnemonic, persist it via `RgSecretStore.save`, enrol into
+--   the wallet master KEK (best-effort), and return the plaintext
+--   phrase. Mirrors the lazy-init in PP's `shielded.deposit` handler
+--   but writes to the Railgun store. Used by `shielded.railgun.shield`
+--   so first-time shielding into Railgun "just works" without a
+--   separate setup step, while still keeping the Railgun spending
+--   secret cryptographically isolated from the PP and EOA secrets.
+/-- The Railgun keystore is rooted at the EOA's master BIP-39 seed.
+    Railgun derives at its own BIP-32 paths (via
+    `RailgunSigner.spendingKeyPath` / `viewingKeyPath`), disjoint from
+    BIP-44 Ethereum, so the same seed root yields independent Railgun
+    spending/viewing keys. One mnemonic on disk, one unlock surface.
 
-    Mirrors the lazy-init in PP's `shielded.deposit` handler but writes
-    to the Railgun store. Used by `shielded.railgun.shield` so first-time
-    shielding into Railgun "just works" without a separate setup step,
-    while still keeping the Railgun spending secret cryptographically
-    isolated from the PP and EOA secrets. -/
+    Returns the seed of the named wallet's currently-unlocked slot
+    encoded as 0x-prefixed hex, ready to pass to the bridge as
+    `LEANKOHAKU_RG_SEED_HEX`. Errors if the slot is locked. -/
+private def rgSeedHexFromSlot
+    (slot : LeanKohaku.Daemon.State.UnlockedSlot) : String :=
+  "0x" ++ LeanKohaku.Crypto.Hex.encode slot.seed
+
+/-- Default-wallet variant of `rgSeedHexFromSlot`. Looks up the user's
+    configured default EOA, requires it to be currently unlocked (via
+    master KEK or per-slot passphrase), and returns its seed hex. -/
+private def rgSeedHexFromDefault
+    (state : LeanKohaku.Daemon.State.Shared) : IO (Except RpcError String) := do
+  let defaultPath ← defaultAccountPathIO
+  let defaultName? : Option String ← do
+    if ← defaultPath.pathExists then
+      let raw ← try IO.FS.readFile defaultPath catch _ => pure ""
+      let trimmed := raw.trimAscii.toString
+      pure (if trimmed.isEmpty then none else some trimmed)
+    else pure none
+  match defaultName? with
+  | none =>
+      pure <| .error
+        { code := -32013,
+          message := "no default wallet set — run `kohaku wallet use <name>` or pass `name` explicitly",
+          data := none }
+  | some name =>
+      match ← unlockedSlot state name with
+      | .error err => pure (.error err)
+      | .ok slot => pure (.ok (rgSeedHexFromSlot slot))
+
 private def unlockOrCreateRgSecret
     (state : LeanKohaku.Daemon.State.Shared) (passphrase? : Option String) :
     IO (Except RpcError String) := do
@@ -5942,47 +5985,64 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       | .ok mnemonic =>
           shieldedBridgeCall cfg "shielded.balance" (.obj #[]) (some mnemonic) req
   | "shielded.railgun.balance" =>
-      -- Read-only Railgun balance. First call is slow (Subsquid sync +
-      -- POI artifact fetch); subsequent calls reuse persisted provider
-      -- state in rgDir/storage.json. Lazy-init: if no RG secret exists
-      -- yet, generate one — same auto-create UX as shield, so the user
-      -- can bootstrap with a balance read.
-      let passphrase? : Option String := getField "passphrase" req.params >>= asString
-      match ← unlockOrCreateRgSecret state passphrase? with
+      -- Read-only Railgun balance. Railgun keystore is rooted at the
+      -- default EOA's BIP-39 seed (Railgun derives at its own BIP-32
+      -- paths — disjoint from BIP-44 Ethereum — so the same seed root
+      -- yields independent Railgun keys with no separate mnemonic on
+      -- disk). The default wallet must currently be unlocked (master
+      -- KEK / TPM / recent per-slot unlock). First call is slow
+      -- (Subsquid sync + POI artifact fetch); cached runs are fast.
+      -- Optional `name` param overrides the default wallet.
+      let nameOverride? := getField "name" req.params >>= asString
+      let seedHexE ← do
+        match nameOverride? with
+        | some n =>
+            match ← unlockedSlot state n with
+            | .error err => pure (Except.error err)
+            | .ok slot => pure (Except.ok (rgSeedHexFromSlot slot))
+        | none => rgSeedHexFromDefault state
+      match seedHexE with
       | .error err => pure (.error err)
-      | .ok rgMnemonic =>
+      | .ok seedHex =>
           shieldedBridgeCall cfg "shielded.railgun.balance" (.obj #[]) none req
-            (rgMnemonic? := some rgMnemonic)
+            (rgSeedHex? := some seedHex)
   | "shielded.railgun.prepareShield" =>
       -- Preview: build unsigned shield txns. tokenAddress optional;
-      -- absence ⇒ native ETH (plugin wraps to WETH internally). Reads
-      -- the Railgun-specific secret store; PP mnemonic is not touched.
-      -- Lazy-init like balance.
+      -- absence ⇒ native ETH (plugin wraps to WETH internally). Same
+      -- EOA-seed keystore source as balance.
       match paramString req.params "amountEth" with
       | .error err => pure (.error err)
       | .ok amountEth =>
           let tokenAddress? := getField "tokenAddress" req.params >>= asString
-          let passphrase? : Option String := getField "passphrase" req.params >>= asString
-          match ← unlockOrCreateRgSecret state passphrase? with
+          let nameOverride? := getField "name" req.params >>= asString
+          let seedHexE ← do
+            match nameOverride? with
+            | some n =>
+                match ← unlockedSlot state n with
+                | .error err => pure (Except.error err)
+                | .ok slot => pure (Except.ok (rgSeedHexFromSlot slot))
+            | none => rgSeedHexFromDefault state
+          match seedHexE with
           | .error err => pure (.error err)
-          | .ok rgMnemonic =>
+          | .ok seedHex =>
               let bridgeParams : Json := .obj <|
                 #[("amountEth", .str amountEth)] ++
                 (match tokenAddress? with
                   | some a => #[("tokenAddress", .str a)]
                   | none   => #[])
               shieldedBridgeCall cfg "shielded.railgun.prepareShield" bridgeParams none req
-                (rgMnemonic? := some rgMnemonic)
+                (rgSeedHex? := some seedHex)
   | "shielded.railgun.shield" =>
       -- Composed: prepare + EOA-sign + broadcast. Mirrors shielded.deposit
-      -- but uses the Railgun-specific secret store (RgSecretStore) —
-      -- cryptographically isolated from the PP and EOA secrets. On first
-      -- invocation generates a fresh BIP-39 mnemonic for the Railgun
-      -- spending secret and persists it; subsequent calls reuse it.
+      -- but uses the EOA's BIP-39 seed as the Railgun keystore root.
+      -- Railgun derives at its own BIP-32 paths (disjoint from
+      -- BIP-44 Ethereum), so the same seed root yields independent
+      -- Railgun keys. One mnemonic on disk, one unlock surface — the
+      -- EOA unlock already done by the caller (UnlockEoaStep in the
+      -- TUI) is the *only* unlock this handler needs.
       match paramName req.params, paramString req.params "amountEth" with
       | .ok name, .ok amountEth =>
           let tokenAddress? := getField "tokenAddress" req.params >>= asString
-          let passphrase? : Option String := getField "passphrase" req.params >>= asString
           IO.eprintln s!"[shield-rg] shield: wallet={name} amountEth={amountEth}"
           match ← unlockedSlot state name with
           | .error err => pure (.error err)
@@ -5992,18 +6052,16 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
               | .error err =>
                   pure <| .error { invalidParams with data := some (.str err) }
               | .ok privateKey =>
-                  match ← unlockOrCreateRgSecret state passphrase? with
-                  | .error err => pure (.error err)
-                  | .ok rgMnemonic =>
-                      let bridgeParams : Json := .obj <|
-                        #[("amountEth", .str amountEth)] ++
-                        (match tokenAddress? with
-                          | some a => #[("tokenAddress", .str a)]
-                          | none   => #[])
-                      IO.eprintln "[shield-rg] calling bridge shielded.railgun.prepareShield (loads SDK, syncs from Subsquid; may take 30-60s on first run)"
-                      match ← shieldedBridgeCall cfg "shielded.railgun.prepareShield"
-                                bridgeParams none req
-                                (rgMnemonic? := some rgMnemonic) with
+                  let seedHex := rgSeedHexFromSlot slot
+                  let bridgeParams : Json := .obj <|
+                    #[("amountEth", .str amountEth)] ++
+                    (match tokenAddress? with
+                      | some a => #[("tokenAddress", .str a)]
+                      | none   => #[])
+                  IO.eprintln "[shield-rg] calling bridge shielded.railgun.prepareShield (loads SDK, syncs from Subsquid; may take 30-60s on first run)"
+                  match ← shieldedBridgeCall cfg "shielded.railgun.prepareShield"
+                            bridgeParams none req
+                            (rgSeedHex? := some seedHex) with
                       | .error err =>
                           IO.eprintln s!"[shield-rg] bridge prepare failed: {err.message}"
                           pure (.error err)
@@ -6072,7 +6130,6 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
             paramString req.params "amountEth" with
       | .ok name, .ok recipient, .ok amountEth =>
           let tokenAddress? := getField "tokenAddress" req.params >>= asString
-          let passphrase? : Option String := getField "passphrase" req.params >>= asString
           let resolveBundlerUrl : IO (Option String) := do
             match ← IO.getEnv "LEANKOHAKU_RG_BUNDLER_URL" with
             | some u => pure (some u)
@@ -6087,31 +6144,29 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                   message := "no 4337 bundler configured — set LEANKOHAKU_RG_BUNDLER_URL or CANDIDE_API_KEY in daemon env (.env auto-loaded)",
                   data := none }
           | some bundlerUrl =>
-              -- TEMP-TEST: env override path. If LEANKOHAKU_RG_DELEGATING_KEY
-              -- is set directly in daemon env (e.g. by exporting PRIVATE_KEY
-              -- from .env), skip wallet-slot derivation entirely. The `name`
-              -- param is still required by the call signature but ignored.
-              -- REMOVE this branch before production — it bypasses the
-              -- wallet-managed signing path and the master-KEK guard.
+              -- TEMP-TEST env override: if both LEANKOHAKU_RG_DELEGATING_KEY
+              -- and LEANKOHAKU_RG_SEED_HEX are set, skip wallet-slot
+              -- derivation entirely (test setup that uses an EOA outside
+              -- the daemon's wallet store). The `name` param is still
+              -- required by the call signature but ignored. REMOVE this
+              -- branch before production.
               let envDelegatingKey? ← IO.getEnv "LEANKOHAKU_RG_DELEGATING_KEY"
-              match envDelegatingKey? with
-              | some envKey =>
-                  IO.eprintln s!"[shield-rg] TEMP-TEST: using LEANKOHAKU_RG_DELEGATING_KEY from daemon env (wallet '{name}' ignored)"
-                  match ← unlockOrCreateRgSecret state passphrase? with
-                  | .error err => pure (.error err)
-                  | .ok rgMnemonic =>
-                      let bridgeParams : Json := .obj <|
-                        #[("recipient", .str recipient),
-                          ("amountEth", .str amountEth)] ++
-                        (match tokenAddress? with
-                          | some a => #[("tokenAddress", .str a)]
-                          | none   => #[])
-                      shieldedBridgeCall cfg "shielded.railgun.unshield"
-                        bridgeParams none req
-                        (rgMnemonic? := some rgMnemonic)
-                        (rgBundlerUrl? := some bundlerUrl)
-                        (rgDelegatingKeyHex? := some envKey)
-              | none =>
+              let envSeed? ← IO.getEnv "LEANKOHAKU_RG_SEED_HEX"
+              match envDelegatingKey?, envSeed? with
+              | some envKey, some envSeed =>
+                  IO.eprintln s!"[shield-rg] TEMP-TEST: using LEANKOHAKU_RG_DELEGATING_KEY + LEANKOHAKU_RG_SEED_HEX from daemon env (wallet '{name}' ignored)"
+                  let bridgeParams : Json := .obj <|
+                    #[("recipient", .str recipient),
+                      ("amountEth", .str amountEth)] ++
+                    (match tokenAddress? with
+                      | some a => #[("tokenAddress", .str a)]
+                      | none   => #[])
+                  shieldedBridgeCall cfg "shielded.railgun.unshield"
+                    bridgeParams none req
+                    (rgBundlerUrl? := some bundlerUrl)
+                    (rgDelegatingKeyHex? := some envKey)
+                    (rgSeedHex? := some envSeed)
+              | _, _ =>
                   match ← unlockedSlot state name with
                   | .error err => pure (.error err)
                   | .ok slot =>
@@ -6119,21 +6174,19 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                       | .error err =>
                           pure <| .error { invalidParams with data := some (.str err) }
                       | .ok privateKey =>
-                          match ← unlockRgSecretSmart state passphrase? with
-                          | .error err => pure (.error err)
-                          | .ok rgMnemonic =>
-                              let delegatingKeyHex := "0x" ++ LeanKohaku.Crypto.Hex.encode privateKey
-                              let bridgeParams : Json := .obj <|
-                                #[("recipient", .str recipient),
-                                  ("amountEth", .str amountEth)] ++
-                                (match tokenAddress? with
-                                  | some a => #[("tokenAddress", .str a)]
-                                  | none   => #[])
-                              shieldedBridgeCall cfg "shielded.railgun.unshield"
-                                bridgeParams none req
-                                (rgMnemonic? := some rgMnemonic)
-                                (rgBundlerUrl? := some bundlerUrl)
-                                (rgDelegatingKeyHex? := some delegatingKeyHex)
+                          let delegatingKeyHex := "0x" ++ LeanKohaku.Crypto.Hex.encode privateKey
+                          let seedHex := rgSeedHexFromSlot slot
+                          let bridgeParams : Json := .obj <|
+                            #[("recipient", .str recipient),
+                              ("amountEth", .str amountEth)] ++
+                            (match tokenAddress? with
+                              | some a => #[("tokenAddress", .str a)]
+                              | none   => #[])
+                          shieldedBridgeCall cfg "shielded.railgun.unshield"
+                            bridgeParams none req
+                            (rgBundlerUrl? := some bundlerUrl)
+                            (rgDelegatingKeyHex? := some delegatingKeyHex)
+                            (rgSeedHex? := some seedHex)
       | _, _, _ => pure (.error invalidParams)
   | "shielded.railgun.transfer" =>
       -- Railgun-internal transfer (0zk → 0zk). ERC20-only at SDK level
@@ -6142,7 +6195,6 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
             paramString req.params "amountEth",
             paramString req.params "tokenAddress" with
       | .ok name, .ok recipient, .ok amountEth, .ok tokenAddress =>
-          let passphrase? : Option String := getField "passphrase" req.params >>= asString
           let resolveBundlerUrl : IO (Option String) := do
             match ← IO.getEnv "LEANKOHAKU_RG_BUNDLER_URL" with
             | some u => pure (some u)
@@ -6164,19 +6216,17 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                   | .error err =>
                       pure <| .error { invalidParams with data := some (.str err) }
                   | .ok privateKey =>
-                      match ← unlockRgSecretSmart state passphrase? with
-                      | .error err => pure (.error err)
-                      | .ok rgMnemonic =>
-                          let delegatingKeyHex := "0x" ++ LeanKohaku.Crypto.Hex.encode privateKey
-                          shieldedBridgeCall cfg "shielded.railgun.transfer"
-                            (.obj #[
-                              ("recipient", .str recipient),
-                              ("amountEth", .str amountEth),
-                              ("tokenAddress", .str tokenAddress)
-                            ]) none req
-                            (rgMnemonic? := some rgMnemonic)
-                            (rgBundlerUrl? := some bundlerUrl)
-                            (rgDelegatingKeyHex? := some delegatingKeyHex)
+                      let delegatingKeyHex := "0x" ++ LeanKohaku.Crypto.Hex.encode privateKey
+                      let seedHex := rgSeedHexFromSlot slot
+                      shieldedBridgeCall cfg "shielded.railgun.transfer"
+                        (.obj #[
+                          ("recipient", .str recipient),
+                          ("amountEth", .str amountEth),
+                          ("tokenAddress", .str tokenAddress)
+                        ]) none req
+                        (rgBundlerUrl? := some bundlerUrl)
+                        (rgDelegatingKeyHex? := some delegatingKeyHex)
+                        (rgSeedHex? := some seedHex)
       | _, _, _, _ => pure (.error invalidParams)
   | "shielded.prepareDeposit" =>
       match paramString req.params "amountEth" with
