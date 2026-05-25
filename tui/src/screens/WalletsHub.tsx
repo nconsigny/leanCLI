@@ -14,7 +14,7 @@ import { theme } from "../theme.js";
 import { Layout } from "../widgets/Layout.js";
 import TabStrip from "../widgets/TabStrip.js";
 import Select from "../widgets/Select.js";
-import { archiveKey, readArchive } from "../archiveStore.js";
+import { archiveKey, readArchive, toggleArchive } from "../archiveStore.js";
 
 export type WalletsAction = "send" | "swap" | "shield" | "manage";
 
@@ -397,17 +397,31 @@ export default function WalletsHub({
     };
   }, [refreshKey, eoaChain, localRefresh]);
 
+  // Track the currently-highlighted row so `a` can act on it without
+  // requiring the user to Enter into the action menu first. `null` =
+  // either no rows or Select hasn't fired its initial onHighlight yet.
+  const [highlightedKey, setHighlightedKey] = useState<string | null>(null);
+
   // Esc / q falls back to the main menu. ←/→ are owned by the TabStrip,
   // ↑/↓/Enter by the Select below — letting Ink dispatch each key to the
   // right consumer keeps the navigation predictable. `n` flips the EOA
   // chain between mainnet and sepolia; `r` re-runs discovery + balance
-  // fanout (useful when a row landed in `err: chain RPC failed`). Both
-  // bump a dep on the useEffect above.
+  // fanout (useful when a row landed in `err: chain RPC failed`). `a`
+  // archives the currently-highlighted wallet (or unarchives if it's
+  // somehow visible while archived — toggle semantics). Both `r` and
+  // `a` bump a dep on the useEffect above so the wallet list re-fetches.
   useInput((input, key) => {
     if (key.escape || input === "q") onBack();
     else if (input === "n") {
       setEoaChain((c) => (c === "mainnet" ? "sepolia" : "mainnet"));
     } else if (input === "r") {
+      setLocalRefresh((k) => k + 1);
+    } else if (input === "a" && highlightedKey) {
+      // archiveKey/balanceKey share the same `kind|name|idx` shape;
+      // `highlightedKey` from the Select callback is the balanceKey we
+      // composed for that row. Pass it straight to toggleArchive.
+      const next = toggleArchive(highlightedKey);
+      setArchived(next);
       setLocalRefresh((k) => k + 1);
     }
   });
@@ -487,7 +501,7 @@ export default function WalletsHub({
     <Layout
       title="Wallets"
       subtitle={`${tab.label} — ${tab.help}`}
-      hint="←/→ action · ↑/↓ wallet · enter run · n chain · r refresh · esc back"
+      hint="←/→ action · ↑/↓ wallet · enter run · n chain · r refresh · a archive · esc back"
     >
       <Text color={theme.koiCream} backgroundColor={theme.koiInk} bold>
         {" leanKohaku · wallets "}
@@ -521,6 +535,10 @@ export default function WalletsHub({
           </Box>
           <Select
             items={items}
+            onHighlight={(it) => {
+              const cast = it as typeof items[number];
+              setHighlightedKey(cast.value);
+            }}
             onSelect={(it) => {
               const cast = it as typeof items[number];
               // TPM wallets are sepolia-only today; EOAs follow the
