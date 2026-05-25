@@ -153,6 +153,27 @@ function entrypointFor(chainId, presets) {
 // from the EOA mnemonic the daemon manages for signing.
 function keystoreFromMnemonic(mnemonic) {
   const seed = mnemonicToSeedSync(mnemonic);
+  return keystoreFromSeedBytes(seed);
+}
+
+// Build a host keystore from a raw 64-byte BIP-39 master seed (hex).
+// Used by the Railgun path: the daemon passes the unlocked EOA's
+// `slot.seed` (hex-encoded) directly. Railgun derives at its own
+// BIP-32 paths (via RailgunSigner.spendingKeyPath / viewingKeyPath),
+// disjoint from BIP-44 Ethereum, so the same seed root yields
+// independent Railgun keys without cross-domain reuse. Lets the EOA's
+// existing unlock surface (master KEK / TPM / per-slot passphrase)
+// also unlock the Railgun keystore — one stored secret total.
+function keystoreFromSeedHex(seedHex) {
+  const clean = seedHex.startsWith("0x") ? seedHex.slice(2) : seedHex;
+  if (!/^[0-9a-fA-F]+$/.test(clean) || clean.length % 2 !== 0) {
+    throw new Error("LEANKOHAKU_RG_SEED_HEX must be 0x-prefixed even-length hex");
+  }
+  const bytes = Buffer.from(clean, "hex");
+  return keystoreFromSeedBytes(bytes);
+}
+
+function keystoreFromSeedBytes(seed) {
   const master = HDKey.fromMasterSeed(seed);
   return {
     deriveAt(path) {
@@ -316,8 +337,22 @@ async function buildRailgunPlugin(env, { needBundler = false } = {}) {
   const t0 = Date.now();
   const { rg, provider } = await loadRailgun();
   console.error(`[bridge] railgun SDK loaded in ${Date.now() - t0}ms`);
-  if (!env.LEANKOHAKU_RG_MNEMONIC) {
-    throw new Error("LEANKOHAKU_RG_MNEMONIC is required (railgun keystore seed)");
+  // Keystore source priority:
+  //   1. LEANKOHAKU_RG_SEED_HEX — raw BIP-39 master seed from the
+  //      daemon's unlocked EOA slot. This is the default flow: one
+  //      mnemonic on disk, shared with the EOA, Railgun derives at
+  //      its own BIP-32 paths so the keys don't collide.
+  //   2. LEANKOHAKU_RG_MNEMONIC — explicit BIP-39 phrase. Legacy /
+  //      compromise-isolation path: user wants a Railgun-only
+  //      mnemonic separate from any EOA. Still supported but no
+  //      longer the default.
+  let keystore;
+  if (env.LEANKOHAKU_RG_SEED_HEX) {
+    keystore = keystoreFromSeedHex(env.LEANKOHAKU_RG_SEED_HEX);
+  } else if (env.LEANKOHAKU_RG_MNEMONIC) {
+    keystore = keystoreFromMnemonic(env.LEANKOHAKU_RG_MNEMONIC);
+  } else {
+    throw new Error("LEANKOHAKU_RG_SEED_HEX or LEANKOHAKU_RG_MNEMONIC is required (railgun keystore source)");
   }
   if (!env.LEANKOHAKU_RG_STORAGE_PATH) {
     throw new Error("LEANKOHAKU_RG_STORAGE_PATH is required (railgun plugin state file)");
@@ -327,7 +362,7 @@ async function buildRailgunPlugin(env, { needBundler = false } = {}) {
   const host = {
     network: inMemoryNetwork(),
     storage: fileStorage(env.LEANKOHAKU_RG_STORAGE_PATH),
-    keystore: keystoreFromMnemonic(env.LEANKOHAKU_RG_MNEMONIC),
+    keystore,
     provider: withChunkedGetLogs(provider.viem(client)),
   };
 

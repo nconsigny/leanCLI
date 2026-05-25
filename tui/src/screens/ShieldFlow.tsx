@@ -79,12 +79,12 @@ export default function ShieldFlow({ wallet, onDone }: Props) {
   }
 
   if (phase.kind === "form") {
-    // EOA unlock has been factored out into UnlockEoaStep — the form
-    // now only collects the amount and the protocol-specific passphrase.
-    const passLabel =
-      phase.protocol === "pp"
-        ? "Privacy Pool passphrase"
-        : "Railgun passphrase";
+    // EOA unlock has been factored out into UnlockEoaStep. Privacy Pools
+    // still needs a *second* passphrase (PpSecretStore — kept as a
+    // separate encrypted store), but Railgun shares the EOA's BIP-39
+    // seed (derives at its own BIP-32 paths) and so doesn't ask for a
+    // distinct passphrase: the EOA unlock alone is enough.
+    const isRailgun = phase.protocol === "railgun";
     const fields: Field[] = [
       {
         name: "amountEth",
@@ -93,17 +93,20 @@ export default function ShieldFlow({ wallet, onDone }: Props) {
         validate: (v) =>
           /^[0-9]+(\.[0-9]+)?$/.test(v) ? null : "expected a decimal ETH amount",
       },
-      {
-        name: "protocolPass",
-        label: passLabel,
-        secret: true,
-        validate: (v) => (v.length === 0 ? "required" : null),
-      },
+      ...(isRailgun
+        ? []
+        : [
+            {
+              name: "protocolPass",
+              label: "Privacy Pool passphrase",
+              secret: true,
+              validate: (v: string) => (v.length === 0 ? "required" : null),
+            } satisfies Field,
+          ]),
     ];
-    const title =
-      phase.protocol === "pp"
-        ? `Shield from ${wallet.name} → Privacy Pools`
-        : `Shield from ${wallet.name} → Railgun`;
+    const title = isRailgun
+      ? `Shield from ${wallet.name} → Railgun`
+      : `Shield from ${wallet.name} → Privacy Pools`;
     return (
       <Layout title={title}>
         <Form
@@ -133,16 +136,21 @@ export default function ShieldFlow({ wallet, onDone }: Props) {
     const subtitle = isRailgun
       ? "Railgun · Sepolia"
       : "Privacy Pools v1 · Sepolia";
+    const params: Record<string, string> = {
+      name: wallet.name,
+      amountEth: phase.v.amountEth ?? "0",
+    };
+    // PP keeps its second secret in PpSecretStore; Railgun shares the
+    // EOA seed (no second passphrase to plumb).
+    if (!isRailgun && phase.v.protocolPass) {
+      params.passphrase = phase.v.protocolPass;
+    }
     return (
       <RpcRunner
         title={`Shielding ${phase.v.amountEth} ETH from ${wallet.name}`}
         subtitle={subtitle}
         method={method}
-        params={{
-          name: wallet.name,
-          amountEth: phase.v.amountEth,
-          passphrase: phase.v.protocolPass,
-        }}
+        params={params}
         // First-run state sync can take 10+ minutes — both protocols
         // walk every relevant on-chain event from their pool's birth
         // (PP: 0xBow entrypoint deployment; Railgun: smart wallet

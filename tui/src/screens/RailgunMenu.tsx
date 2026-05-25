@@ -2,7 +2,6 @@ import React, { useState } from "react";
 import { Box, Text } from "ink";
 import Select from "../widgets/Select.js";
 import { Layout } from "../widgets/Layout.js";
-import Form from "../widgets/Form.js";
 import RpcRunner from "../widgets/RpcRunner.js";
 import { theme } from "../theme.js";
 
@@ -10,19 +9,22 @@ type RgAction = "balance" | "back";
 
 type Props = { onDone: (s: boolean) => void };
 
-/** Railgun sub-menu. Mirrors PrivacyMenu but routes to
- *  `shielded.railgun.*` RPCs. The Railgun secret store is separate
- *  from the Privacy Pools secret store (RgSecretStore in the daemon),
- *  so the passphrase here is the *Railgun* passphrase. First call
- *  lazy-creates the Railgun secret with the supplied passphrase.
+/** Railgun sub-menu. Routes to `shielded.railgun.*` RPCs.
+ *
+ *  No Railgun-specific passphrase here: the Railgun keystore is rooted
+ *  at the default EOA's BIP-39 seed (Railgun derives at its own BIP-32
+ *  paths, disjoint from BIP-44 Ethereum). The same unlock surface that
+ *  unlocks the EOA (master KEK / TPM / per-slot passphrase) gates this
+ *  flow — if the default wallet is currently unlocked, balance just
+ *  works. If it's locked, the daemon returns -32012 (EOA slot locked)
+ *  and the user lands on a generic error page; the fix is `kohaku
+ *  wallet unlock <name>` (or unlock the master).
  *
  *  Today this menu only exposes balance. Unshield + transfer are
- *  reachable via raw daemon RPC (shielded.railgun.unshield /
- *  shielded.railgun.transfer); the TUI surfaces will come once the
- *  4337 bundler delegation UX is finalised. */
+ *  reachable via raw daemon RPC; their TUI surfaces will come once
+ *  the 4337 bundler delegation UX is finalised. */
 export default function RailgunMenu({ onDone }: Props) {
   const [pick, setPick] = useState<RgAction | null>(null);
-  const [params, setParams] = useState<Record<string, string> | null>(null);
 
   if (!pick) {
     return (
@@ -44,28 +46,6 @@ export default function RailgunMenu({ onDone }: Props) {
     );
   }
 
-  if (!params) {
-    return (
-      <Layout
-        title="Railgun balance"
-        subtitle="Railgun passphrase (separate from your Privacy Pools secret)"
-      >
-        <Form
-          fields={[
-            {
-              name: "passphrase",
-              label: "Railgun passphrase",
-              secret: true,
-              validate: (v) => (v.length === 0 ? "required" : null),
-            },
-          ]}
-          onCancel={() => setPick(null)}
-          onSubmit={(v) => setParams({ passphrase: v.passphrase ?? "" })}
-        />
-      </Layout>
-    );
-  }
-
   // First-call sync (Subsquid + POI artifact fetch) can take minutes;
   // cached runs return in seconds. 20-minute budget mirrors the PP
   // path so the TUI doesn't give up before the daemon.
@@ -74,8 +54,9 @@ export default function RailgunMenu({ onDone }: Props) {
   return (
     <RpcRunner
       title="Railgun: balance"
+      subtitle="default wallet must be unlocked"
       method="shielded.railgun.balance"
-      params={params}
+      params={{}}
       timeoutMs={rgTimeoutMs}
       renderResult={(r: any) => <RgBalanceResult result={r} />}
       onDone={onDone}
