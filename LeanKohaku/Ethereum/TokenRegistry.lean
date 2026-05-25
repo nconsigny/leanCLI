@@ -1,8 +1,12 @@
+import LeanKohaku.Swap.Tokens
+
 /-!
 # Trusted token registry + base-unit conversions
 
-A compiled-in, hand-audited list of ERC-20 token metadata: symbol,
-name, chainId, EIP-55-checksummed address, and decimals.
+The agent's view of ERC-20 token metadata: symbol, name, chainId,
+address, decimals. The actual token list is owned by
+`LeanKohaku.Swap.Tokens.registry` — the same list the wallet's SWAP
+tab uses — and this module is the agent-facing facade.
 
 ## Why this exists
 
@@ -12,24 +16,27 @@ data. That is unsafe: a hallucinated address goes straight into
 calldata, and an off-by-one in decimals can mis-size a transfer by
 10x. After this module, the agent must call `token_lookup` (see
 `LeanKohaku.Agent.ToolDefs.Tokens`) to obtain those fields, and the
-answer is a pure Lean fact reviewed in this source file. The Lake
-build is the audit trail.
+answer is a pure Lean fact reviewed in `LeanKohaku.Swap.Tokens`.
+The Lake build is the audit trail.
 
 ## Trust contract
 
-* Every address in `knownTokens` is EIP-55-checksummed and was
-  cross-checked against Etherscan at the time of writing. Reviewers
-  must re-verify any new entry against an independent source before
-  merging — silent typos here become silent fund loss.
-* Sepolia entries are omitted when no canonical address could be
-  anchored: `token_lookup` returning `unknown_token` and asking the
-  user is the correct UX for unanchored Sepolia symbols. Do not seed
-  guesses.
+* Every entry derives from `Swap.Tokens.registry`, which the wallet
+  daemon's swap path also uses. The agent's `token_lookup` and the
+  TUI's swap tab cannot disagree about an address.
+* Addresses are stored lowercase 0x-prefixed in the source (EVM is
+  case-insensitive at protocol level; EIP-55 mixed case is purely a
+  display checksum). `addressEq` lowercases on both sides so callers
+  matching against EIP-55 input still succeed.
+* Sepolia entries with `addressSepolia := none` in the upstream
+  registry produce no agent entry on chainId 11155111 — `token_lookup`
+  correctly returns `unknown_token` and the agent asks the user.
+  Adding a token here means adding it in `Swap/Tokens.lean`.
 * This module is pure (no IO). A future ERC-7730 augmentation path
   may supply additional metadata at runtime, but if a hardcoded entry
   and an ERC-7730 entry disagree on `address` or `decimals`, the
   hardcoded entry wins. The sidecar can decorate (e.g. richer
-  `name`) but never override a checksummed address or decimals.
+  `name`) but never override the swap registry's address or decimals.
 
 ## Conversions
 
@@ -58,43 +65,43 @@ structure TokenInfo where
   source   : String
   deriving Repr
 
-/-- The hardcoded, hand-audited token list. Every address is
-    EIP-55-checksummed.
+/-- Convert one upstream `Swap.Tokens.Token` into per-chain
+    `TokenInfo` entries — one for mainnet (always present) plus one
+    for Sepolia when the upstream record has `addressSepolia := some
+    _`. Anything else stays a miss so the agent asks the user
+    instead of guessing. -/
+private def fromSwapToken (t : Swap.Tokens.Token) : List TokenInfo :=
+  let mainnet : TokenInfo := {
+    symbol   := t.symbol,
+    name     := t.name,
+    chainId  := 1,
+    address  := t.addressMainnet,
+    decimals := t.decimals,
+    source   := "hardcoded"
+  }
+  match t.addressSepolia with
+  | some addr =>
+      [ mainnet,
+        { symbol   := t.symbol,
+          name     := t.name,
+          chainId  := 11155111,
+          address  := addr,
+          decimals := t.decimals,
+          source   := "hardcoded" } ]
+  | none => [mainnet]
 
-    Mainnet (chainId 1):
-    * USDC `0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48` decimals 6
-    * USDT `0xdAC17F958D2ee523a2206206994597C13D831ec7` decimals 6
-    * DAI  `0x6B175474E89094C44Da98b954EedeAC495271d0F` decimals 18
-    * WETH `0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2` decimals 18
-    * UNI  `0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984` decimals 18
+/-- The hand-audited token list, derived from
+    `LeanKohaku.Swap.Tokens.registry`. The wallet daemon's swap
+    surface and the agent's `token_lookup` share one source of truth,
+    so neither can drift relative to the other. To add a token here,
+    edit `Swap/Tokens.lean`.
 
-    Sepolia (chainId 11155111):
-    * WETH `0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14` decimals 18
-
-    USDC, USDT, DAI, and UNI on Sepolia are intentionally omitted:
-    multiple non-canonical deployments exist and seeding any one of
-    them risks pinning the wrong address. `token_lookup` returning
-    `unknown_token` is the correct UX. -/
-def knownTokens : List TokenInfo := [
-  { symbol := "USDC", name := "USD Coin",      chainId := 1,
-    address := "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
-    decimals := 6,  source := "hardcoded" },
-  { symbol := "USDT", name := "Tether USD",    chainId := 1,
-    address := "0xdAC17F958D2ee523a2206206994597C13D831ec7",
-    decimals := 6,  source := "hardcoded" },
-  { symbol := "DAI",  name := "Dai Stablecoin", chainId := 1,
-    address := "0x6B175474E89094C44Da98b954EedeAC495271d0F",
-    decimals := 18, source := "hardcoded" },
-  { symbol := "WETH", name := "Wrapped Ether", chainId := 1,
-    address := "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
-    decimals := 18, source := "hardcoded" },
-  { symbol := "UNI",  name := "Uniswap",        chainId := 1,
-    address := "0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984",
-    decimals := 18, source := "hardcoded" },
-  { symbol := "WETH", name := "Wrapped Ether (Sepolia)", chainId := 11155111,
-    address := "0xfFf9976782d46CC05630D1f6eBAb18b2324d6B14",
-    decimals := 18, source := "hardcoded" }
-]
+    Current Sepolia coverage (from upstream): WETH, BOLD, UNI, wstETH,
+    USDC. Other symbols (USDT, DAI, MORPHO, AAVE, …) are mainnet-only
+    in the upstream registry and `token_lookup` correctly answers
+    `unknown_token` on Sepolia. -/
+def knownTokens : List TokenInfo :=
+  Swap.Tokens.registry.flatMap fromSwapToken
 
 /-- ASCII lowercase fold. We deliberately only fold ASCII because every
     symbol and every hex address is ASCII; using `Char.toLower` here
