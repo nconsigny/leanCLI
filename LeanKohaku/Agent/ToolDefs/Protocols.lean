@@ -36,14 +36,30 @@ open LeanKohaku.Encoding.Json
     immutable per snapshot; only the ref is mutated. -/
 abbrev RegistryRef := IO.Ref Skills.Registry
 
+/-- Truncate the overview to roughly one paragraph so the default
+    `protocol_lookup` payload stays small. The model gets a short
+    summary by default (saving ~9 KB of re-fed context per turn for
+    Uniswap-sized skills); use `protocol_function_lookup` for the
+    detailed per-function bodies. -/
+private def overviewSummary (overview : String) : String :=
+  let cap : Nat := 600
+  if overview.length ≤ cap then overview
+  else
+    -- `String.take` returns a `String.Slice` in Lean v4.29.1; pull it
+    -- back to `String` before appending the truncation marker.
+    let head : String := (overview.take cap).toString
+    head ++ "\n\n…(truncated — use protocol_function_lookup for function details)"
+
 /-- Build a `protocol_lookup` tool bound to `regRef`. -/
 def protocolLookup (regRef : RegistryRef) : ToolDecl := {
   name := "protocol_lookup",
   description :=
-    "Return the canonical knowledge block for a protocol skill by \
-     name (e.g. uniswap, aave, railgun, cowswap). Read-only. Use \
-     this once a protocol's triggers have fired and you want the \
-     full overview, contracts and function index.",
+    "Return a short summary + contracts + function index for a \
+     protocol skill by name (e.g. uniswap, aave, railgun, cowswap). \
+     Read-only. The overview is truncated to ~600 chars; call \
+     `protocol_function_lookup({name, function})` for full \
+     per-function bodies. Security / interactions sections are NOT \
+     in this payload by design — they bloat every turn's context.",
   paramSchema := .obj #[
     ("type", .str "object"),
     ("required", .arr #[.str "name"]),
@@ -73,15 +89,18 @@ def protocolLookup (regRef : RegistryRef) : ToolDecl := {
                ] }
     | some s =>
         let fnIndex : Array Json := (s.functions.toArray.map fun (n, _) => Json.str n)
+        -- BRIEF payload: overview-summary + contracts + function
+        -- index only. Security / interactions intentionally omitted
+        -- (large markdown bodies that the model re-pays for every
+        -- turn). The model can still read full per-function docs via
+        -- `protocol_function_lookup` if it actually needs them.
         let payload : Json := .obj #[
-          ("name",         .str s.frontmatter.name),
-          ("version",      .str s.frontmatter.version),
-          ("description",  .str s.frontmatter.description),
-          ("overview",     .str s.overview),
-          ("security",     .str s.security),
-          ("interactions", .str s.interactions),
-          ("contracts",    s.contracts),
-          ("functions",    .arr fnIndex)
+          ("name",        .str s.frontmatter.name),
+          ("version",     .str s.frontmatter.version),
+          ("description", .str s.frontmatter.description),
+          ("overview",    .str (overviewSummary s.overview)),
+          ("contracts",   s.contracts),
+          ("functions",   .arr fnIndex)
         ]
         pure { ok := true, data := payload,
                summary := some s!"skill {s.frontmatter.name} v{s.frontmatter.version}" }

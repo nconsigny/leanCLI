@@ -92,11 +92,16 @@ def operationalRules (cfg : AgentConfig) : String :=
   `propose_send`. If the response says `status:\"needs_approval\"`,
   issue `propose_send` for the approve first, then a second
   `propose_send` for the swap.
-- BRIEF MODE: keep each turn ≤ 200 output tokens unless you are
-  emitting the final `propose_send` tool call. Reasoning text
-  ≤ 100 tokens per turn. Don't restate the request, don't summarise
-  what you just did — act. The user reads the trace separately
-  (ctrl+t). Long thinking is a bug, not a feature.
+- BRIEF MODE (strict): between tool calls, emit ZERO prose.
+  Allowed outputs per turn: (a) a tool_call, (b) a single short
+  user-facing question (≤2 sentences), or (c) `propose_send`.
+  Banned phrases — these waste tokens and never help: \"let me
+  think\", \"let me proceed with\", \"actually,\", \"looking at
+  the hex\", \"Wait,\", \"let me check if\", \"first I need to\".
+  If you catch yourself writing prose between tool calls, stop
+  and emit the next tool call instead. Reasoning text ≤ 80
+  tokens per turn. The user reads the trace separately (ctrl+t);
+  long thinking is a bug, not a feature.
 - Stop calling tools and emit your final answer once you have what
   you need. The step budget is {cfg.maxSteps} rounds.
 - Single tool call per turn unless the calls are independent. Avoid
