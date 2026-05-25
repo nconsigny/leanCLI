@@ -132,7 +132,13 @@ touching any storage.
 **Mitigation.**
 - Hard precondition check in `Daemon.Server` before any derivation:
   if `Daemon.State.unlockedNames state` is empty, the handler returns
-  `{"error":{"kind":"locked"}}`.
+  `{"error":{"kind":"locked"}}`. This holds **even when the keystore
+  has TPM-backed R1 entries on disk** — the trusted-registry RPC is
+  the seed-anchored surface; R1-only listings remain available via
+  the existing `account.list` RPC. Reasons: the prompt header advertises
+  the list as "from your seed"; the unlock event is the explicit user
+  authorization for address disclosure; and R1 entries are still
+  reachable through `account.list` so this is not a feature regression.
 - The agent tool surfaces this error so the LLM knows to ask the user
   to unlock first. The agent never silently retries.
 

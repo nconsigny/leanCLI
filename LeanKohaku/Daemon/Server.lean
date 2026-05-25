@@ -6748,9 +6748,18 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           ]
       | none =>
       let unlockedSlots ← LeanKohaku.Daemon.State.unlockedNames state
-      -- Locked-seed gate (threat 3). We refuse before any derivation
-      -- even tries to run.
-      if unlockedSlots.isEmpty && (!includeR1) then
+      -- Locked-seed gate (threat 3). The threat-model contract is
+      -- explicit: when no BIP-44 seed is unlocked we return `locked`
+      -- **regardless** of whether the keystore has TPM-backed R1
+      -- entries on disk. Reasons:
+      --   • The prompt's "Trusted Registry" header tells the LLM the
+      --     list is "from your seed"; rendering only R1 entries under
+      --     that header would be misleading.
+      --   • The user has not authorized address disclosure for this
+      --     session; the unlock event is what gates that.
+      --   • R1-only registries are still served separately via
+      --     `account.list`; this RPC is the seed-anchored surface.
+      if unlockedSlots.isEmpty then
         pure <| .ok <| .obj #[
           ("ok", .bool false),
           ("error", .obj #[
@@ -6785,8 +6794,10 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                       ("path",    .str path),
                       ("address", .str address)
                     ]
-      -- Optionally include R1 entries from the TPM keystore. Uses the
-      -- same enumeration path as `account.list` — no new keystore API.
+      -- Optionally include R1 entries from the TPM keystore — only
+      -- now that we know at least one seed is unlocked, so the user
+      -- has authorized disclosure. Uses the same enumeration path as
+      -- `account.list`; no new keystore API.
       if includeR1 then
         try
           let tpmNames ← listSepoliaKeys
@@ -6803,31 +6814,19 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                   ("address",      .str addr)
                 ]
         catch _ => pure ()  -- TPM listing failure is non-fatal
-      -- If after everything we have nothing AND no R1 entries, this is
-      -- the locked case (slot existed when we read `unlockedNames` but
-      -- expired before we could read the seed).
-      if entries.isEmpty && unlockedSlots.isEmpty then
-        pure <| .ok <| .obj #[
-          ("ok", .bool false),
-          ("error", .obj #[
-            ("kind", .str "locked"),
-            ("msg",  .str "no seeds unlocked; run wallet.unlock or eoa.unlock first")
-          ])
-        ]
-      else
-        -- Combine fingerprints into a single stable string. If multiple
-        -- seeds are unlocked simultaneously the registry shows all of
-        -- their fingerprints joined by ","; rotation of any one will
-        -- change the joined string.
-        let combinedFp : String :=
-          if fingerprints.isEmpty then ""
-          else String.intercalate "," fingerprints.toList
-        pure <| .ok <| .obj #[
-          ("ok",              .bool true),
-          ("addresses",       .arr entries),
-          ("count",           .num (Int.ofNat entries.size)),
-          ("seedFingerprint", .str combinedFp)
-        ]
+      -- Combine fingerprints into a single stable string. If multiple
+      -- seeds are unlocked simultaneously the registry shows all of
+      -- their fingerprints joined by ","; rotation of any one will
+      -- change the joined string.
+      let combinedFp : String :=
+        if fingerprints.isEmpty then ""
+        else String.intercalate "," fingerprints.toList
+      pure <| .ok <| .obj #[
+        ("ok",              .bool true),
+        ("addresses",       .arr entries),
+        ("count",           .num (Int.ofNat entries.size)),
+        ("seedFingerprint", .str combinedFp)
+      ]
   | _ =>
       pure (.error methodNotFound)
 
