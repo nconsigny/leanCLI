@@ -4,7 +4,7 @@ A map of the repository as it actually exists, complementing `README.md`
 (goals & user-visible behavior), `INVARIANTS.md` (proof obligations & status),
 and `CLAUDE.md` (build & contributor workflow).
 
-The codebase is **139 Lean source files** plus C/Rust FFI helpers. There
+The codebase is **140 Lean source files** plus C/Rust FFI helpers. There
 are **no `sorry`s** in proofs and no `axiom`s outside the explicit FFI
 boundary (opaque `Hacl` / `Tpm2` primitives, plus the `@[extern]`
 declarations in `Daemon/Uds.lean`, `Agent/Http.lean`, and the Phase 1a
@@ -162,7 +162,8 @@ the abstract models defined alongside it (not about runtime IO).
 - `Loop.lean` — bounded `runOneShot` loop (`partial def`, tagged
   `PHASE_N: prove termination`).
 - `Registry.lean` — the default 8-tool registry (Phase-0 seven plus
-  Phase-1d `trusted_registry_list`).
+  Phase-1d `trusted_registry_list`). `defaultWithSkills` extends it
+  with the two Phase-1b protocol-lookup tools.
 - `Session.lean` — Phase-1a SQLite-backed session/message store
   with FTS5 search. Schema bootstrap is idempotent and version-
   gated. Used by `kohaku-agentd`; one-shot `kohaku-agent` does
