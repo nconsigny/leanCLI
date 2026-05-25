@@ -124,6 +124,23 @@ private def resolveModel : IO String := do
       | some s => pure s
       | none => pure "local-default"
 
+/-- Per-request HTTP timeout (ms) for the LLM call. The default 30s
+    in `AgentConfig.timeoutMs` is too tight once the context grows
+    past ~8k tokens: prompt eval (~1500 t/s) plus generation
+    (~55 t/s) plus tool-loop overhead routinely crosses 30s on a
+    local model. 120s leaves real headroom while still bounding
+    wedged requests. Tunable via `KOHAKU_AGENT_TIMEOUT_MS` for
+    slower hardware or larger contexts; non-numeric values fall
+    back to the default. -/
+private def resolveTimeoutMs : IO Nat := do
+  let dflt : Nat := 120000
+  match ← IO.getEnv "KOHAKU_AGENT_TIMEOUT_MS" with
+  | none => pure dflt
+  | some s =>
+      match s.trimAscii.toString.toNat? with
+      | some n => pure n
+      | none => pure dflt
+
 /-- Create the parent directory of `path` if missing. -/
 private def ensureParentDir (path : String) : IO Unit := do
   let p : System.FilePath := path
@@ -229,7 +246,7 @@ private def errResp (kind msg : String) : Json :=
     ])
   ]
 
-private def buildCfg (llmUrl model walletSocket : String)
+private def buildCfg (llmUrl model walletSocket : String) (timeoutMs : Nat)
     (regRef : ToolDefs.Protocols.RegistryRef) (params : Json) : AgentConfig :=
   let defaultAllow : List String := (Registry.defaultWithSkills regRef).map (·.name)
   let allowlist : List String :=
@@ -240,7 +257,8 @@ private def buildCfg (llmUrl model walletSocket : String)
     llmUrl := llmUrl,
     model := model,
     daemonSocket := walletSocket,
-    toolAllowlist := allowlist
+    toolAllowlist := allowlist,
+    timeoutMs := timeoutMs
   }
 
 /-- Cap on trigger-matched skills per turn. Always-on skills are
@@ -385,7 +403,8 @@ private def opRunTurn (st : DaemonState) (params : Json) : IO Json := do
        let walletSocket ← resolveWalletSocket
        let llmUrl ← resolveLlmUrl
        let model  ← resolveModel
-       let cfg := buildCfg llmUrl model walletSocket st.skills params
+       let timeoutMs ← resolveTimeoutMs
+       let cfg := buildCfg llmUrl model walletSocket timeoutMs st.skills params
        let history ← Session.loadSession st.db sid
        let (transcript, userMsg) := buildTranscript st.skills cfg history prompt
        -- Persist the user turn FIRST so a crash mid-loop leaves a
@@ -496,7 +515,8 @@ private def runExtraction (st : DaemonState) (sid : Session.SessionId) : IO Bool
     let walletSocket ← resolveWalletSocket
     let llmUrl ← resolveLlmUrl
     let model  ← resolveModel
-    let cfg := buildCfg llmUrl model walletSocket st.skills (.obj #[])
+    let timeoutMs ← resolveTimeoutMs
+    let cfg := buildCfg llmUrl model walletSocket timeoutMs st.skills (.obj #[])
     let existing ← st.memoryRef.get
     match ← Memory.extract cfg existing history with
     | .error e =>
