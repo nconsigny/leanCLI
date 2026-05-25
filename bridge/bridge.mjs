@@ -357,6 +357,39 @@ async function buildRailgunPlugin(env, { needBundler = false } = {}) {
   if (!env.LEANKOHAKU_RG_STORAGE_PATH) {
     throw new Error("LEANKOHAKU_RG_STORAGE_PATH is required (railgun plugin state file)");
   }
+  // Cold-start seed: if the user's railgun storage file doesn't exist
+  // yet AND a bundled snapshot ships alongside bridge.mjs, copy it in
+  // so the SDK starts from an already-synced state instead of from the
+  // Railgun smart-wallet deployment block. The snapshot file contains
+  // only chain-wide indexer state (UTXO commitments, merkle tree,
+  // POI metadata) — no per-user keys, since alpha-21 derives signers
+  // fresh from host.keystore each call. Skipping the cold-sync turns
+  // first-balance latency from minutes into seconds.
+  // Set LEANKOHAKU_RG_SNAPSHOT_DISABLE=1 to opt out (e.g. when
+  // generating a new snapshot via the leankohaku-railgun-snapshot tool).
+  if (
+    !fsSync.existsSync(env.LEANKOHAKU_RG_STORAGE_PATH) &&
+    env.LEANKOHAKU_RG_SNAPSHOT_DISABLE !== "1"
+  ) {
+    try {
+      const here = pathMod.dirname(new URL(import.meta.url).pathname);
+      const snapshotName =
+        Number(chainId) === 11155111
+          ? "railgun-sepolia-snapshot.json"
+          : Number(chainId) === 1
+            ? "railgun-mainnet-snapshot.json"
+            : null;
+      const snapshotPath = snapshotName ? pathMod.join(here, snapshotName) : null;
+      if (snapshotPath && fsSync.existsSync(snapshotPath)) {
+        fsSync.mkdirSync(pathMod.dirname(env.LEANKOHAKU_RG_STORAGE_PATH), { recursive: true });
+        fsSync.copyFileSync(snapshotPath, env.LEANKOHAKU_RG_STORAGE_PATH);
+        const sz = fsSync.statSync(env.LEANKOHAKU_RG_STORAGE_PATH).size;
+        console.error(`[bridge] railgun: seeded storage from bundled snapshot ${snapshotPath} (${sz} bytes)`);
+      }
+    } catch (e) {
+      console.error(`[bridge] railgun: snapshot seeding skipped (${e?.message ?? e})`);
+    }
+  }
   const chain = chainFromId(chainId);
   const client = createPublicClient({ chain, transport: http(env.LEANKOHAKU_RPC_URL) });
   const host = {
@@ -656,7 +689,27 @@ async function shieldedUnshieldDrain(env, params) {
       }
       throw e;
     }
-    const relay = await broadcaster.broadcast(op);
+    let relay;
+    try {
+      relay = await broadcaster.broadcast(op);
+    } catch (e) {
+      // Surface relayer-side failures with actionable context instead of
+      // letting the raw on-chain revert string bubble up. Persist whatever
+      // we drained so far so the user knows where they stand and the
+      // PP state file reflects any successful relays.
+      await persistState(env.LEANKOHAKU_PP_STATE_PATH, plugin);
+      const raw = e?.message ?? String(e);
+      const drainedSoFar = target - remaining;
+      const partial = sent.length > 0 ? ` (drained ${drainedSoFar} of ${target} before failure)` : "";
+      if (/RelayFeeGreaterThanMax/i.test(raw)) {
+        throw new Error(
+          `Privacy Pools relayer quoted a relay fee above the pool's on-chain cap (RelayFeeGreaterThanMax)${partial}. ` +
+          `This is a relayer/pool config mismatch — nothing was deducted. Try again later, ` +
+          `or override the relayer with LEANKOHAKU_PP_BROADCASTER_URL=<url>. Underlying: ${raw}`,
+        );
+      }
+      throw new Error(`relayer rejected unshield at iter ${iter}${partial}: ${raw}`);
+    }
     console.error(`[bridge] drain iter ${iter}: relay ${relay?.txHash ?? "unknown"}`);
     sent.push({ amountWei: chunk, relay: relay ?? { ok: true } });
     remaining -= chunk;

@@ -142,6 +142,27 @@ lean_exe «leankohaku-ens-check» where
   supportInterpreter := true
 
 /--
+Generate the bundled Railgun cold-start snapshot for `bridge/`.
+
+Runs the railgun bridge sidecar with a deterministic dummy seed against
+Sepolia, lets `@kohaku-eth/railgun`'s indexer fully sync the on-chain
+UTXO tree + POI metadata into a temp storage file, then moves that
+file to `bridge/railgun-sepolia-snapshot.json`. The bridge cold-start
+hook in `bridge/bridge.mjs` copies this snapshot into a user's storage
+path on first call so they skip the multi-minute initial sync.
+
+The snapshot contains chain-wide indexer state only — no per-user
+keys. alpha-21 derives signers from `host.keystore` on every plugin
+construction, so the snapshot is keystore-agnostic.
+
+Run as a one-shot dev tool when refreshing the snapshot for a release:
+  lake env .lake/build/bin/leankohaku-railgun-snapshot
+-/
+lean_exe «leankohaku-railgun-snapshot» where
+  root := `LeanKohaku.App.RailgunSnapshotMain
+  supportInterpreter := true
+
+/--
 SPHINCS- shim smoke test. Build with `lake build leankohaku-sphincs-test`,
 run with `lake env .lake/build/bin/leankohaku-sphincs-test`. Exits 0 on
 success or when the shim binaries are absent; non-zero on a real
