@@ -30,7 +30,10 @@ Wants=kohaku-daemon.service
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/kohaku-agentd
+# Match the kohaku-daemon unit's pattern: kohakuspawn installs the
+# binary under %h/.kohaku/bin/. PKGBUILD users who install to
+# /usr/bin/ can override via `systemctl --user edit kohaku-agentd`.
+ExecStart=%h/.kohaku/bin/kohaku-agentd
 
 # Picks up KOHAKU_AGENT_LLM_URL, KOHAKU_AGENT_MODEL, etc. The leading
 # `-` makes the unit tolerant of a missing file.
