@@ -5537,6 +5537,33 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           match earlyReturn with
           | some j => return .ok j
           | none   => pure ()
+          -- 1f. Regex-clarification short-circuit. When the regex has
+          -- already emitted a deliberate `.rejected` draft with a
+          -- complete user-facing clarification in `unresolved` (e.g.
+          -- `shield X with railgun` → "coming soon — use Privacy
+          -- menu"), the LLM has nothing to add. Calling it anyway
+          -- burns 30s of tool chains and ends in `http timeout`,
+          -- which the user sees as a confusing red error line under
+          -- the perfectly good regex answer.
+          --
+          -- This trips ONLY when:
+          --   * action == .unknown          (regex chose to reject)
+          --   * confidence == .rejected     (intentional, not a fallthrough)
+          --   * unresolved is non-empty     (there IS a clarification to show)
+          --
+          -- The response shape mirrors the wallet-direct path: just
+          -- the regex draft, no `llmRaw`/`encoded`/`modelAsk`. The
+          -- TUI's `llm:` line disappears; the `!` lines from
+          -- `regex.unresolved` are the user-facing answer.
+          let regexIsClarification : Bool :=
+            (regex.action == LeanKohaku.Ethereum.Intent.Action.unknown)
+              && (regex.confidence == LeanKohaku.Ethereum.Intent.Confidence.rejected)
+              && (regex.unresolved.length > 0)
+          if regexIsClarification then
+            return .ok <| .obj #[
+              ("regex",   regexJson),
+              ("backend", .str "regex-clarification")
+            ]
           -- 2. Call LLM sidecar with the regex as a seed + the matching
           -- skill body + the chain's token registry. Forward the
           -- optional history field verbatim — the sidecar filters and
