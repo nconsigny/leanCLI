@@ -276,83 +276,136 @@ private def callPersistent (req : Request) : IO Response := do
       | .error e => pure (Response.crash s!"agentd transport: {e}" 0)
       | .ok line => pure (parseResponse line)
   | "llm.parseIntent" =>
-      -- Create a fresh session per call (Phase 1a divergence — see
-      -- docs/PHASE1A_PLAN.md). The session is closed implicitly by
-      -- the daemon's lifecycle; Phase 1d will thread the session_id
-      -- through chat.draft so the wallet daemon can reuse one
-      -- session across many turns.
+      -- Phase 1d: non-incognito calls reuse a sticky session keyed by
+      -- `chainId` via the agentd's `acquire_chat_session` op. The
+      -- agentd holds the (chainId → session_id) mapping for the
+      -- process lifetime and rolls the session over once it crosses
+      -- ~12k estimated tokens; rollover is what makes
+      -- `MEMORY.md`'s auto-extraction fire (a one-shot create + turn
+      -- + walk-away cycle never accumulates the message floor).
+      --
+      -- Incognito calls explicitly bypass the sticky cache and keep
+      -- the Phase 1a shape (fresh transient session per turn, no
+      -- extraction on close) so the "leave no trace" guarantee
+      -- holds.
       let prompt :=
         (getField "prompt" req.params >>= asString).getD ""
       if prompt.isEmpty then
         return Response.crash "llm.parseIntent: missing prompt" 0
-      -- Phase 1c: propagate the incognito flag from the caller's
-      -- env into the agent daemon's create_session metadata. When
-      -- the agent daemon sees `incognito:true`, it skips session
-      -- DB writes AND the auto memory extraction on close.
       let incognito : Bool ← do
         match ← IO.getEnv "LEAN_KOHAKU_INCOGNITO" with
         | none => pure false
         | some v =>
             let t := v.trimAscii.toString
             pure (t ≠ "" && t ≠ "0")
-      let baseMeta : Array (String × Json) :=
-        match getField "chainId" req.params with
-        | some j => #[("chainId", j)]
-        | none   => #[]
-      let metadataJson : Json :=
-        .obj (baseMeta ++ (if incognito then #[("incognito", .bool true)] else #[]))
-      let createFrame : String :=
-        compact <| .obj #[
-          ("op", .str "create_session"),
-          ("metadata", metadataJson)
-        ]
-      match ← socketCall sock createFrame with
-      | .error e => return Response.crash s!"agentd create_session: {e}" 0
-      | .ok line =>
-          match parse line with
-          | .error e => return Response.crash s!"agentd create_session parse: {e}: {line}" 0
-          | .ok (.obj fields) =>
-              let okBool := fields.findSome? (fun (k, v) =>
-                if k = "ok" then some v else none)
-              match okBool with
-              | some (Json.bool true) =>
-                  let result := (fields.findSome? (fun (k, v) =>
-                    if k = "result" then some v else none)).getD .null
-                  let sid := (getField "session_id" result >>= asNat).getD 0
-                  if sid == 0 then
-                    return Response.crash s!"agentd create_session: no session_id in {line}" 0
-                  -- Forward the original params, plus our session_id,
-                  -- in the run_turn op. The agentd takes prompt out
-                  -- of params; the rest is opaque context.
-                  let runFrame : String :=
-                    compact <| .obj <| #[
-                      ("op", .str "run_turn"),
-                      ("session_id", .num (Int.ofNat sid)),
-                      ("prompt", .str prompt),
-                      ("context", req.params)
-                    ]
-                  match ← socketCall sock runFrame with
-                  | .error e => return Response.crash s!"agentd run_turn: {e}" 0
-                  | .ok runLine =>
-                      match parse runLine with
-                      | .error e => return Response.crash s!"agentd run_turn parse: {e}" 0
-                      | .ok j =>
-                          -- run_turn replies with the same envelope
-                          -- shape as a JSON-RPC response we can pass
-                          -- to parseResponse — but the wire here is
-                          -- {ok, result} not {jsonrpc, id, result}.
-                          -- Translate.
-                          match getField "ok" j with
-                          | some (.bool true) =>
-                              let r := (getField "result" j).getD (.null)
-                              pure (Response.ok r)
-                          | _ =>
-                              let errJ := (getField "error" j).getD (.null)
-                              let msg := (getField "msg" errJ >>= asString).getD "agent error"
-                              pure (Response.err (-32000) msg none)
-              | _ =>
-                  return Response.crash s!"agentd create_session not ok: {line}" 0
-          | _ => return Response.crash s!"agentd create_session shape: {line}" 0
+      let chainIdJ? : Option Json := getField "chainId" req.params
+      -- Acquire the session id. Three branches, all converging on
+      -- `sid : Nat`:
+      --   1. incognito → fresh transient session via create_session
+      --      (no chainId metadata, no incognito-tagged sticky cache).
+      --   2. non-incognito with chainId → acquire_chat_session.
+      --   3. non-incognito without chainId → fresh transient session,
+      --      so callers that have not yet plumbed chainId still work.
+      let acquireSid : IO (Except Response Nat) := do
+        if incognito then
+          let metadataJson : Json :=
+            .obj ((match chainIdJ? with
+                    | some j => #[("chainId", j)]
+                    | none   => #[]) ++ #[("incognito", .bool true)])
+          let createFrame : String :=
+            compact <| .obj #[
+              ("op", .str "create_session"),
+              ("metadata", metadataJson)
+            ]
+          match ← socketCall sock createFrame with
+          | .error e =>
+              pure (.error (Response.crash s!"agentd create_session: {e}" 0))
+          | .ok line =>
+              match parse line with
+              | .error e =>
+                  pure (.error (Response.crash s!"agentd create_session parse: {e}: {line}" 0))
+              | .ok j =>
+                  match getField "ok" j with
+                  | some (.bool true) =>
+                      let result := (getField "result" j).getD .null
+                      let sid := (getField "session_id" result >>= asNat).getD 0
+                      if sid == 0 then
+                        pure (.error (Response.crash s!"agentd create_session: no session_id in {line}" 0))
+                      else pure (.ok sid)
+                  | _ =>
+                      pure (.error (Response.crash s!"agentd create_session not ok: {line}" 0))
+        else
+          match chainIdJ? >>= asNat with
+          | some chainId =>
+              let frame : String :=
+                compact <| .obj #[
+                  ("op", .str "acquire_chat_session"),
+                  ("chainId", .num (Int.ofNat chainId))
+                ]
+              match ← socketCall sock frame with
+              | .error e =>
+                  pure (.error (Response.crash s!"agentd acquire_chat_session: {e}" 0))
+              | .ok line =>
+                  match parse line with
+                  | .error e =>
+                      pure (.error (Response.crash s!"agentd acquire_chat_session parse: {e}: {line}" 0))
+                  | .ok j =>
+                      match getField "ok" j with
+                      | some (.bool true) =>
+                          let result := (getField "result" j).getD .null
+                          let sid := (getField "session_id" result >>= asNat).getD 0
+                          if sid == 0 then
+                            pure (.error (Response.crash s!"agentd acquire_chat_session: no session_id in {line}" 0))
+                          else pure (.ok sid)
+                      | _ =>
+                          pure (.error (Response.crash s!"agentd acquire_chat_session not ok: {line}" 0))
+          | none =>
+              -- No chainId in params → fall back to transient session
+              -- (parity with the pre-1d shape for callers that have
+              -- not yet plumbed chainId through to chat.draft).
+              let createFrame : String :=
+                compact <| .obj #[("op", .str "create_session"), ("metadata", .obj #[])]
+              match ← socketCall sock createFrame with
+              | .error e =>
+                  pure (.error (Response.crash s!"agentd create_session: {e}" 0))
+              | .ok line =>
+                  match parse line with
+                  | .error e =>
+                      pure (.error (Response.crash s!"agentd create_session parse: {e}: {line}" 0))
+                  | .ok j =>
+                      match getField "ok" j with
+                      | some (.bool true) =>
+                          let result := (getField "result" j).getD .null
+                          let sid := (getField "session_id" result >>= asNat).getD 0
+                          if sid == 0 then
+                            pure (.error (Response.crash s!"agentd create_session: no session_id in {line}" 0))
+                          else pure (.ok sid)
+                      | _ =>
+                          pure (.error (Response.crash s!"agentd create_session not ok: {line}" 0))
+      match ← acquireSid with
+      | .error resp => return resp
+      | .ok sid =>
+          let runFrame : String :=
+            compact <| .obj <| #[
+              ("op", .str "run_turn"),
+              ("session_id", .num (Int.ofNat sid)),
+              ("prompt", .str prompt),
+              ("context", req.params)
+            ]
+          match ← socketCall sock runFrame with
+          | .error e => return Response.crash s!"agentd run_turn: {e}" 0
+          | .ok runLine =>
+              match parse runLine with
+              | .error e => return Response.crash s!"agentd run_turn parse: {e}" 0
+              | .ok j =>
+                  match getField "ok" j with
+                  | some (.bool true) =>
+                      let r := (getField "result" j).getD .null
+                      pure (Response.ok r)
+                  | _ =>
+                      let errJ := (getField "error" j).getD .null
+                      let msg := (getField "msg" errJ >>= asString).getD "agent error"
+                      pure (Response.err (-32000) msg none)
   | other =>
       pure (Response.crash s!"persistent bridge has no opcode for method: {other}" 0)
 

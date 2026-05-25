@@ -41,6 +41,17 @@ depth:
 
 This module imports no signing or key-material module and is on
 the forbidden-import gated path documented in `docs/PHASE0_PLAN.md`.
+
+## Trust boundary
+
+`MEMORY.md` content is **informational**. It is concatenated into the
+next session's system prompt so the model has cross-session context,
+but it never feeds a signing decision. Every produced calldata still
+flows through the standard `decode → simulate → ConfirmGate` pipeline
+in the wallet daemon; a poisoned memory line could at worst nudge the
+model toward a draft the user must still confirm. The on-disk file is
+mode-0600 and the SQLite session store the extraction reads from is
+the same — both inherit the agentd's UDS peer-uid check.
 -/
 
 namespace LeanKohaku.Agent.Memory
