@@ -55,6 +55,13 @@ type Phase =
   | { kind: "passphrase"; status: MasterStatus; hint?: string }
   | { kind: "master-locked-and-enrolled"; status: MasterStatus }
   | { kind: "master-gate" }
+  // "needs-enrolment" surfaces when the slot is in the unenrolled bucket
+  // (per-slot wrap but no master wrap) AND the user has not opted into a
+  // custom passphrase. Default policy is master-only unlock, so we don't
+  // prompt for the per-slot passphrase here — the user is directed to run
+  // `kohaku wallet enroll <name>` once, after which lazy-rewrap under the
+  // current master KEK lets future unlocks go through the master fast path.
+  | { kind: "needs-enrolment"; status: MasterStatus }
   | { kind: "error"; message: string };
 
 /** Decide which unlock path to use for an EOA slot. The four cases:
@@ -136,9 +143,14 @@ export default function UnlockEoaStep({
       }
       // Not enrolled and not custom (unenrolled bucket): no master wrap
       // available — the slot still has its per-slot wrap from creation.
-      // Prompt for the per-slot passphrase. This also covers the case
-      // where master is locked AND the slot is unenrolled.
-      setPhase({ kind: "passphrase", status });
+      // Default policy (per the no-per-slot-passphrase directive): do
+      // NOT prompt for a per-slot passphrase in-flow. Surface a clear
+      // 'run enrol' message instead. The user runs the CLI once, the
+      // daemon's lazy-rewrap path attaches a master wrap on that unlock,
+      // and the next chat/send flow unlocks silently via the master fast
+      // path. This also covers the master-locked+unenrolled case — the
+      // remediation is the same (unlock master, then enrol).
+      setPhase({ kind: "needs-enrolment", status });
     })();
     return () => {
       cancelled = true;
@@ -181,6 +193,9 @@ export default function UnlockEoaStep({
       // 'M' (or 'm') jumps the user into the inline MasterUnlockGate.
       // No global navigation hop required — we render the gate inside
       // this widget and re-probe on success.
+    }
+    if (phase.kind === "needs-enrolment") {
+      if (key.escape) onCancel();
     }
   });
 
@@ -239,6 +254,44 @@ export default function UnlockEoaStep({
           </Text>
         </Box>
         <UnlockMasterShortcut onPick={() => setPhase({ kind: "master-gate" })} />
+      </Layout>
+    );
+  }
+
+  if (phase.kind === "needs-enrolment") {
+    return (
+      <Layout
+        title={`Unlock ${wallet.name}`}
+        subtitle={subtitle ?? `address: ${wallet.address}`}
+        hint="esc — cancel"
+      >
+        <Box flexDirection="column" marginBottom={1}>
+          <Text color={theme.warn}>
+            This account needs a one-time enrolment under the master KEK
+            before it can be unlocked from chat / send flows.
+          </Text>
+          <Box marginTop={1}>
+            <Text color={theme.dim}>Run this once from the shell:</Text>
+          </Box>
+          <Box marginTop={1} marginLeft={2}>
+            <Text color={theme.primary}>
+              kohaku wallet enroll {wallet.name}
+            </Text>
+          </Box>
+          <Box marginTop={1} marginLeft={2}>
+            <Text color={theme.dim}>
+              (or{" "}
+              <Text color={theme.primary}>kohaku wallet enroll --all</Text>
+              {" "}to migrate every unenrolled slot at once)
+            </Text>
+          </Box>
+          <Box marginTop={1}>
+            <Text color={theme.dim}>
+              Once enrolled, this flow auto-unlocks the slot via the master
+              KEK — no per-slot passphrase prompt.
+            </Text>
+          </Box>
+        </Box>
       </Layout>
     );
   }
