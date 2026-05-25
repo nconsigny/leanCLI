@@ -146,11 +146,13 @@ Options:
   --force             Overwrite existing kohaku / kohaku-daemon symlinks
                       that point somewhere else. Default refuses.
   --uninstall         Remove ~/.kohaku/bin/{kohaku,kohaku-daemon,kohaku-agent,kohaku-agentd,kohakuspawn}
-                      (only when the kohaku/kohaku-daemon symlinks point at
-                      the recorded checkout; pair with --force to override).
-                      Leaves shell-rc edits in place — they're harmless once
-                      the directory is gone, and removing them automatically
-                      would risk eating other edits.
+                      and the XDG skills symlink under
+                      $XDG_DATA_HOME/leankohaku/skills (only when those
+                      symlinks point at the recorded checkout; pair with
+                      --force to override). Leaves shell-rc edits in
+                      place — they're harmless once the directory is
+                      gone, and removing them automatically would risk
+                      eating other edits.
   -h, --help          Show this help.
 
 Environment:
@@ -215,6 +217,12 @@ SYSTEMD_AGENTD_UNIT_PATH="$SYSTEMD_USER_DIR/$SYSTEMD_AGENTD_UNIT_NAME"
 KOHAKU_CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/leankohaku"
 KOHAKU_ENV_FILE="$KOHAKU_CFG_DIR/daemon.env"
 KOHAKU_SYSTEMD_MARKER="$KOHAKU_CFG_DIR/managed-by-systemd"
+
+# XDG data dir hosting the agent's session DB, MEMORY.md, and (Phase 1b)
+# the skills tree symlink. Mirrors `AgentDaemonMain.resolveSkillsDir`'s
+# preference order so the symlink lands on rung 2 of that resolution.
+KOHAKU_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/leankohaku"
+KOHAKU_SKILLS_LINK="$KOHAKU_DATA_DIR/skills"
 
 # One-shot cleanup of stragglers. Today's diagnosis was 5 stale kohaku-daemon
 # PIDs and 8 orphan bridge.mjs sidecars all bound to the same UDS path —
@@ -313,6 +321,32 @@ if [[ "$MODE" == "uninstall" ]]; then
   # outside the recorded checkout.
   remove_link "kohaku-agent" "kohaku_agent"
   remove_link "kohaku-agentd" "kohaku_agentd"
+
+  # Phase 1b skills registry symlink: lives outside $KOHAKU_BIN (under
+  # the XDG data dir) so it doesn't fit `remove_link`'s shape. Same
+  # safety: only remove when it points at the recorded checkout's
+  # `skills/` tree (so users who hand-rolled their own skills dir keep
+  # it), or when --force is passed.
+  if [[ -L "$KOHAKU_SKILLS_LINK" ]]; then
+    skills_current="$(readlink "$KOHAKU_SKILLS_LINK")"
+    if [[ -n "$expected_checkout" \
+          && "$skills_current" == "$expected_checkout/skills" ]]; then
+      rm -f "$KOHAKU_SKILLS_LINK"
+      echo "removed $KOHAKU_SKILLS_LINK"
+    elif [[ $FORCE -eq 1 ]]; then
+      rm -f "$KOHAKU_SKILLS_LINK"
+      echo "removed $KOHAKU_SKILLS_LINK (--force, was -> $skills_current)"
+    else
+      echo "kohakuspawn: $KOHAKU_SKILLS_LINK -> $skills_current does not point at the recorded checkout, leaving it alone (use --force to remove)" >&2
+    fi
+    unset skills_current
+  elif [[ -e "$KOHAKU_SKILLS_LINK" && $FORCE -eq 1 ]]; then
+    rm -rf "$KOHAKU_SKILLS_LINK"
+    echo "removed $KOHAKU_SKILLS_LINK (--force, was a regular directory)"
+  fi
+  # Best-effort: drop the now-empty XDG data dir, but leave it if it
+  # still holds the SQLite session DB or any other agentd state.
+  rmdir "$KOHAKU_DATA_DIR" 2>/dev/null || true
   # SPHINCS- shim symlinks (installed by `install_sphincs_shims`). Same
   # "checkout-rooted symlink" model as kohaku/kohaku-daemon, so the
   # check-and-remove pattern is the same — `remove_link` no-ops when the
@@ -649,6 +683,49 @@ link_one() {
   echo "==> $linkpath -> $target"
 }
 
+# Symlink the checkout's `skills/` tree into the XDG data dir so the
+# agent daemon's `resolveSkillsDir` finds it on rung 2 of its preference
+# order (`$XDG_DATA_HOME/leankohaku/skills`). Without this, the agent
+# daemon falls through to `<cwd>/skills`; under systemd the working
+# directory is the user's home, so `cwd/skills` resolves to a path
+# that doesn't exist and `protocol_lookup` returns an empty registry.
+#
+# Mirrors `link_one`'s safety: idempotent on a correct symlink, --force
+# required to overwrite either a wrong symlink or a regular dir/file.
+# The target is a directory, not an executable, so we don't gate on
+# `-x`; we just require the source path to exist.
+install_skills_link() {
+  local target="$1"
+  if [[ ! -d "$target" ]]; then
+    echo "kohakuspawn: $target not found — skipping skills symlink" >&2
+    return 0
+  fi
+  mkdir -p "$KOHAKU_DATA_DIR"
+  if [[ -L "$KOHAKU_SKILLS_LINK" ]]; then
+    local current
+    current="$(readlink "$KOHAKU_SKILLS_LINK")"
+    if [[ "$current" == "$target" ]]; then
+      echo "==> $KOHAKU_SKILLS_LINK -> $target (already linked)"
+      return 0
+    fi
+    if [[ $FORCE -ne 1 ]]; then
+      echo "kohakuspawn: $KOHAKU_SKILLS_LINK already points to $current" >&2
+      echo "  use --force to overwrite, or remove it manually." >&2
+      exit 1
+    fi
+    rm -f "$KOHAKU_SKILLS_LINK"
+  elif [[ -e "$KOHAKU_SKILLS_LINK" ]]; then
+    if [[ $FORCE -ne 1 ]]; then
+      echo "kohakuspawn: $KOHAKU_SKILLS_LINK exists and is not a symlink" >&2
+      echo "  use --force to overwrite, or remove it manually." >&2
+      exit 1
+    fi
+    rm -rf "$KOHAKU_SKILLS_LINK"
+  fi
+  ln -s "$target" "$KOHAKU_SKILLS_LINK"
+  echo "==> $KOHAKU_SKILLS_LINK -> $target"
+}
+
 link_one "$LEAN_BIN" "kohaku"
 link_one "$LEAN_DAEMON" "kohaku-daemon"
 # Agent binaries are best-effort: an older checkout that predates Phase 0
@@ -663,6 +740,10 @@ if [[ -x "$LEAN_AGENTD" ]]; then
 else
   echo "kohakuspawn: $LEAN_AGENTD not built — skipping kohaku-agentd symlink" >&2
 fi
+# Phase 1b skills registry: point the agent daemon at the checkout's
+# `skills/` tree. Best-effort like the agent binaries — if the directory
+# is missing (very old checkout), we warn and skip rather than fail.
+install_skills_link "$CHECKOUT/skills"
 
 # Add-or-replace a key=value line in $KOHAKU_ENV_FILE. Same dance the
 # sphincs loop uses below; factored out so the agent and any future
