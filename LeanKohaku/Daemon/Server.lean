@@ -51,6 +51,7 @@ import LeanKohaku.Wallet.SphincsHybridStore
 import LeanKohaku.Registry.KnownProtocols
 import LeanKohaku.Swap.Tokens
 import LeanKohaku.Swap.UniV3
+import LeanKohaku.Swap.Prepare
 import LeanKohaku.Util.Units
 import LeanKohaku.Invariants.Swap
 
@@ -3340,6 +3341,61 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                     | _, _ =>
                         pure <| .error { code := -32602, message := "could not resolve tokenIn/tokenOut for chain", data := none }
               | _, _, _, _, _, _ => pure (.error invalidParams)
+  | "swap.prepareUniswapV3" =>
+      -- Why: single-call replacement for the agent's old multi-step
+      -- "read allowance → quote → multiply → encode → maybe approve"
+      -- prose-orchestrated workflow. Reads pass through `Outbound.ethCall`
+      -- (same policy gate as `chain.ethCall`), and the resulting calldata
+      -- still flows through `decodeIntent → simulate → ConfirmGate` before
+      -- any signature. No new trust surface.
+      let chainIdParam :=
+        ((getField "chainId" req.params) >>= asNat).getD cfg.chainId
+      match paramString req.params "sender",
+            paramString req.params "tokenIn",
+            paramString req.params "tokenOut",
+            getField "amountIn" req.params >>= asNat with
+      | .ok sender, .ok tokenIn, .ok tokenOut, some amountIn =>
+          let recipient := paramStringD req.params "recipient" sender
+          let fee := paramNatD req.params "fee" 3000
+          -- `slippageWasDefault` is sticky metadata for the summary
+          -- string: only `false` when the JSON-RPC caller supplied an
+          -- explicit `slippageBps`.
+          let slippageProvided := (getField "slippageBps" req.params >>= asNat).isSome
+          let slippageBps := paramNatD req.params "slippageBps" 50
+          let deadlineSeconds := paramNatD req.params "deadlineSeconds" 1200
+          -- Pre-resolve the endpoint so the closure does not re-walk
+          -- the chain-name guess on every read.
+          let chainName : Option String :=
+            if chainIdParam = 1 then some "mainnet"
+            else if chainIdParam = 11155111 then some "sepolia"
+            else getField "chain" req.params >>= asString
+          match endpointForChain cfg chainName with
+          | .error err =>
+              pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
+          | .ok ep =>
+              let shim : LeanKohaku.Swap.Prepare.ChainEthCallShim :=
+                fun to data chainIdForCall => do
+                  let via? ← colibriVia state chainIdForCall
+                  match ← LeanKohaku.RPC.Outbound.ethCall cfg.policy ep to data "latest" via? with
+                  | .ok ret =>
+                      match asString ret with
+                      | some hex => pure (.ok hex)
+                      | none => pure (.error "non-string return from eth_call")
+                  | .error e => pure (.error e)
+              let request : LeanKohaku.Swap.Prepare.SwapRequest :=
+                { chainId := chainIdParam,
+                  sender := sender,
+                  recipient := recipient,
+                  tokenIn := tokenIn,
+                  tokenOut := tokenOut,
+                  amountIn := amountIn,
+                  fee := fee,
+                  slippageBps := slippageBps,
+                  slippageWasDefault := !slippageProvided,
+                  deadlineSeconds := deadlineSeconds }
+              let result ← LeanKohaku.Swap.Prepare.prepareUniswapV3Swap request shim
+              pure <| .ok (LeanKohaku.Swap.Prepare.PrepareResult.toJson result)
+      | _, _, _, _ => pure (.error invalidParams)
   | "chain.sendRawTransaction" =>
       match paramString req.params "raw" with
       | .error err => pure (.error err)
