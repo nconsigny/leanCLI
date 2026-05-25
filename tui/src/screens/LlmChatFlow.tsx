@@ -811,19 +811,13 @@ function ChatBody({
 
   useInput((ch, key) => {
     if (busy) return;
-    // `t` toggles expand/collapse of the most recent assistant turn's
-    // trace block. We deliberately gate on focus === "input" being
-    // FALSE in the special case where the user is mid-typing — but
-    // since typing into ink-text-input is captured by the widget
-    // (not this hook), `t` here only ever fires when the user is
-    // NOT in the text box. Safe to act on always.
-    //
-    // Collision check: `tab`, `return`, `escape` are the existing
-    // keys in this hook. `t` is otherwise unused; ink-text-input
-    // owns plain-letter keys when input is focused, so this only
-    // fires when focus is on sign/execute (or no widget is focused
-    // because there's nothing to sign).
-    if (ch === "t" && latestTraceIdx !== null) {
+    // Ctrl+T toggles expand/collapse of the most recent assistant
+    // turn's trace block. Plain `t` collides with chat input — ink's
+    // `useInput` fires globally regardless of which widget is
+    // focused, so a bare letter binding would eat every `t` typed
+    // into the message box. Modifier-gated keys reach this hook
+    // without being captured by ink-text-input.
+    if (key.ctrl && ch === "t" && latestTraceIdx !== null) {
       setExpandedTraces((prev) => {
         const next = new Set(prev);
         if (next.has(latestTraceIdx)) next.delete(latestTraceIdx);
@@ -977,7 +971,7 @@ function ChatBody({
           {latestSignable
             ? "tab — toggle focus · enter — act on focused element · "
             : "enter — send · "}
-          {latestTraceIdx !== null ? "t — toggle trace · " : ""}
+          {latestTraceIdx !== null ? "ctrl+t — toggle trace · " : ""}
           esc — leave chat
         </Text>
       </Box>
@@ -1129,7 +1123,7 @@ function AgentTraceBlock({
 }) {
   const toolCallCount = trace.filter((x) => x.kind === "tool_call").length;
   const reasoningTokens = estimateReasoningTokens(trace);
-  const hint = isLatestTrace ? " (press t to toggle)" : "";
+  const hint = isLatestTrace ? " (press ctrl+t to toggle)" : "";
   if (!expanded) {
     return (
       <Box paddingLeft={5} marginTop={1}>
