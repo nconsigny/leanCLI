@@ -37,6 +37,30 @@ partial def parseDigits : List Char → Nat → Bool → Nat × List Char × Boo
       if isDigit c then parseDigits cs (acc * 10 + digitVal c) true else (acc, c :: cs, true)
   | [], acc, seen => (acc, [], seen)
 
+/-- Skip the fractional + exponent tail of a JSON number, e.g. the
+    `.6985731857318573` or `e+12` part of `0.6985...e+12`. The integer
+    portion has already been consumed by `parseDigits`. Stored numbers
+    are `Int` (Phase-0 model), so any fractional precision is discarded
+    — the goal is to keep the parser moving past floats that producers
+    like llama-server's `timings` block emit, not to preserve every
+    decimal place. Callers that need the float can re-parse from the
+    original string. -/
+partial def skipNumberTail : List Char → List Char
+  | '.' :: cs =>
+      -- consume one or more digits after the decimal point
+      let (_, rest, _) := parseDigits cs 0 false
+      skipExponent rest
+  | rest => skipExponent rest
+where
+  skipExponent : List Char → List Char
+    | 'e' :: cs => skipExpDigits cs
+    | 'E' :: cs => skipExpDigits cs
+    | rest => rest
+  skipExpDigits : List Char → List Char
+    | '+' :: cs => let (_, rest, _) := parseDigits cs 0 false; rest
+    | '-' :: cs => let (_, rest, _) := parseDigits cs 0 false; rest
+    | rest      => let (_, rest, _) := parseDigits rest 0 false; rest
+
 partial def consumeKeyword : List Char → List Char → Option (List Char)
   | [], rest => some rest
   | k :: ks, c :: cs => if k = c then consumeKeyword ks cs else none
@@ -53,6 +77,20 @@ partial def parseStringChars : List Char → List Char → Except String (String
   | '\\' :: 'n' :: rest, acc => parseStringChars rest ('\n' :: acc)
   | '\\' :: 'r' :: rest, acc => parseStringChars rest ('\r' :: acc)
   | '\\' :: 't' :: rest, acc => parseStringChars rest ('\t' :: acc)
+  | '\\' :: 'u' :: h1 :: h2 :: h3 :: h4 :: rest, acc =>
+      -- \uXXXX → single code point (BMP only; surrogate pairs would
+      -- require lookahead for a second \uXXXX. Qwen's typical output
+      -- is BMP; punt surrogates to a TODO if they become observable).
+      let hexVal : Char → Option Nat := fun c =>
+        if isDigit c then some (digitVal c)
+        else if 'a' ≤ c && c ≤ 'f' then some (c.toNat - 'a'.toNat + 10)
+        else if 'A' ≤ c && c ≤ 'F' then some (c.toNat - 'A'.toNat + 10)
+        else none
+      match hexVal h1, hexVal h2, hexVal h3, hexVal h4 with
+      | some d1, some d2, some d3, some d4 =>
+          let code := d1 * 4096 + d2 * 256 + d3 * 16 + d4
+          parseStringChars rest (Char.ofNat code :: acc)
+      | _, _, _, _ => .error "invalid \\uXXXX hex digits"
   | '\\' :: _ :: _, _ => .error "unsupported JSON string escape"
   | c :: rest, acc => parseStringChars rest (c :: acc)
 
@@ -83,11 +121,12 @@ mutual
     | '{' :: rest => parseObject rest #[]
     | '-' :: rest =>
         let (n, rest, seen) := parseDigits rest 0 false
-        if seen then .ok (.num (-Int.ofNat n), rest) else .error "expected digits after minus"
+        if seen then .ok (.num (-Int.ofNat n), skipNumberTail rest)
+        else .error "expected digits after minus"
     | c :: rest =>
         if isDigit c then
           let (n, rest, _) := parseDigits rest (digitVal c) true
-          .ok (.num (Int.ofNat n), rest)
+          .ok (.num (Int.ofNat n), skipNumberTail rest)
         else
           .error s!"unexpected JSON character: {c}"
 
