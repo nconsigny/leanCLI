@@ -961,6 +961,48 @@ EOF
 
 install_bridge_wrappers
 
+# ---- bundled bridge data files ---------------------------------------------
+#
+# The privacy sidecars read pre-synced state files from disk on cold
+# start to skip the multi-minute initial chain walk:
+#
+#   bridge/ppv1-sepolia-state.json     — Privacy Pools v1, Sepolia
+#   bridge/ppv1-mainnet-state.json     — Privacy Pools v1, mainnet
+#   bridge/railgun-sepolia-snapshot.json — Railgun (alpha-21), Sepolia
+#   bridge/railgun-mainnet-snapshot.json — Railgun (alpha-21), mainnet
+#
+# These files live in the checkout next to bridge.mjs and are picked
+# up by the bridge via `__dirname`. The wrapper shims installed above
+# already point at the checkout, so no copy step is needed — we just
+# report presence so the user can spot drift and regenerate.
+report_bridge_data_assets() {
+  local missing=0
+  local data_pair
+  for data_pair in \
+      "Privacy Pools (Sepolia):ppv1-sepolia-state.json" \
+      "Privacy Pools (mainnet):ppv1-mainnet-state.json" \
+      "Railgun (Sepolia):railgun-sepolia-snapshot.json" \
+      "Railgun (mainnet):railgun-mainnet-snapshot.json"; do
+    local label="${data_pair%%:*}"
+    local fname="${data_pair##*:}"
+    local path="$CHECKOUT/bridge/$fname"
+    if [[ -f "$path" ]]; then
+      local bytes
+      bytes=$(stat -c%s "$path" 2>/dev/null || echo "?")
+      echo "==> bridge data: $label  $path ($bytes bytes)"
+    else
+      missing=$((missing + 1))
+    fi
+  done
+  if [[ $missing -gt 0 ]]; then
+    echo "==> bridge data: $missing snapshot(s) missing — cold-sync will be slow on first call."
+    echo "    Regenerate Railgun Sepolia (~minutes, needs SEPOLIA_RPC_URL):"
+    echo "      lake build leankohaku-railgun-snapshot"
+    echo "      lake env .lake/build/bin/leankohaku-railgun-snapshot"
+  fi
+}
+report_bridge_data_assets
+
 # ---- sidecar sandbox probe --------------------------------------------------
 #
 # `LeanKohaku.Util.Sandbox.wrap` wraps every sidecar `IO.Process.spawn`
