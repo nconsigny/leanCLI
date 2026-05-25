@@ -16,7 +16,7 @@ import TabStrip from "../widgets/TabStrip.js";
 import Select from "../widgets/Select.js";
 import { archiveKey, readArchive, toggleArchive } from "../archiveStore.js";
 
-export type WalletsAction = "send" | "swap" | "shield" | "manage";
+export type WalletsAction = "send" | "swap" | "shield" | "unshield" | "manage";
 
 type Props = {
   refreshKey?: number;
@@ -104,7 +104,12 @@ const TABS: { label: string; value: WalletsAction; help: string }[] = [
   {
     label: "SHIELD",
     value: "shield",
-    help: "Privacy Pools deposit. EOA only — TPM/R1 keys can't sign the deposit transcript yet.",
+    help: "Privacy Pools or Railgun deposit. EOA only — TPM/R1 keys can't sign the deposit transcript yet.",
+  },
+  {
+    label: "UNSHIELD",
+    value: "unshield",
+    help: "Withdraw shielded ETH back to a 0x address (freshly derived sub-account, address-book entry, or paste). EOA only — Railgun's 4337 path is signed by the EOA.",
   },
 ];
 
@@ -614,6 +619,10 @@ function filterWalletsForTab(action: WalletsAction, wallets: Wallet[]): Wallet[]
       // only, EOA → mainnet/sepolia), so we don't pre-filter here.
       return wallets;
     case "shield":
+    case "unshield":
+      // Both protocols (PP + Railgun) sign the broadcast via an EOA —
+      // PP through the relayer flow, Railgun via the 4337+7702 delegator.
+      // TPM/R1 wallets can't sign these today.
       return wallets.filter((w) => w.kind === "eoa");
   }
 }

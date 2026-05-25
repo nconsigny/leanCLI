@@ -318,10 +318,11 @@ export default function App() {
       return push({ kind: "sphincs-accounts" });
     }
     switch (a) {
-      case "send":   return push({ kind: "send", wallet: w, chain });
-      case "swap":   return push({ kind: "swap", wallet: w });
-      case "shield": return push({ kind: "shield", wallet: w });
-      case "manage": return push({ kind: "manage", wallet: w, chain });
+      case "send":     return push({ kind: "send", wallet: w, chain });
+      case "swap":     return push({ kind: "swap", wallet: w });
+      case "shield":   return push({ kind: "shield", wallet: w });
+      case "unshield": return push({ kind: "unshield", wallet: w });
+      case "manage":   return push({ kind: "manage", wallet: w, chain });
     }
   };
 
