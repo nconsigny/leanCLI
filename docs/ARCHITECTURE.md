@@ -4,7 +4,7 @@ A map of the repository as it actually exists, complementing `README.md`
 (goals & user-visible behavior), `INVARIANTS.md` (proof obligations & status),
 and `CLAUDE.md` (build & contributor workflow).
 
-The codebase is **138 Lean source files** plus C/Rust FFI helpers. There
+The codebase is **139 Lean source files** plus C/Rust FFI helpers. There
 are **no `sorry`s** in proofs and no `axiom`s outside the explicit FFI
 boundary (opaque `Hacl` / `Tpm2` primitives, plus the `@[extern]`
 declarations in `Daemon/Uds.lean`, `Agent/Http.lean`, and the Phase 1a
@@ -114,6 +114,10 @@ the abstract models defined alongside it (not about runtime IO).
 - `State.lean` — `IO.Ref`-backed state for unlocked EOA slots with TTL purge.
 - `Uds.lean` — 9 `@[extern]` Unix-domain-socket FFI bindings (`lk_uds_*`).
 - `Server.lean` — accept loop; routes wallet RPC over UDS under policy.
+  Phase 1d adds the `wallet.lean_verified_addresses` read-only RPC
+  (BIP-44 + R1 enumeration with hardcoded path allowlist and bounded
+  per-path count from `Config.trustedRegistryMaxPerPath`, default 5).
+  See `docs/PHASE1D_THREAT_MODEL.md`.
 
 ### `Cli/`
 - `Commands.lean` — `Command` ADT, validation, preflight against the privacy
@@ -147,12 +151,18 @@ the abstract models defined alongside it (not about runtime IO).
 - `Persona.lean` + `Prompt.lean` — system-prompt assembly: frozen
   persona, operational rules (chain whitelist [1, 11155111], step
   budget, single `propose_send` final-answer shape), auto-generated
-  tool docs.
+  tool docs. Phase-1d section order is
+  `Persona → Memory → Trusted Registry → AlwaysOn skills →
+   Trigger skills → Operational rules → Tool docs`. The Trusted
+  Registry block is omitted when the wallet's seed is locked; the
+  operational rules then carry a one-line `lockedSeedAddendum` so the
+  LLM does not silently invent ownership claims.
 - `Llm.lean` — OpenAI-compatible chat completions client. Pure
   request/response shaping.
 - `Loop.lean` — bounded `runOneShot` loop (`partial def`, tagged
   `PHASE_N: prove termination`).
-- `Registry.lean` — the default 7-tool registry.
+- `Registry.lean` — the default 8-tool registry (Phase-0 seven plus
+  Phase-1d `trusted_registry_list`).
 - `Session.lean` — Phase-1a SQLite-backed session/message store
   with FTS5 search. Schema bootstrap is idempotent and version-
   gated. Used by `kohaku-agentd`; one-shot `kohaku-agent` does
@@ -170,6 +180,12 @@ the abstract models defined alongside it (not about runtime IO).
 - `ToolDefs/Protocols.lean` — `protocol_lookup` and
   `protocol_function_lookup`. Both read-only, both bound to a
   `Skills.RegistryRef` at construction time.
+- `ToolDefs/TrustedRegistry.lean` — Phase-1d `trusted_registry_list`.
+  Surfaces the daemon's `wallet.lean_verified_addresses` RPC to the
+  agent and provides the `Snapshot` shape consumed by
+  `AgentDaemonMain.lean`'s `registryRef` cache. The tool is the only
+  source of truth for "addresses the user owns" in the system prompt;
+  see `docs/PHASE1D_THREAT_MODEL.md`.
 - `Memory.lean` + `MemoryPrompts.lean` — Phase-1c long-term
   memory store. The agent persists a small markdown file
   (`MEMORY.md`, 0600 mode, 0700 parent dir) under
