@@ -78,7 +78,13 @@ def encodeRequest (req : Request) : String :=
     `NetworkPolicy.Policy`). -/
 def methodPurpose (method : String) : Purpose :=
   if method = "shielded.broadcast" || method = "shielded.signAndBroadcast"
-      || method = "shielded.prepareWithdraw" then
+      || method = "shielded.prepareWithdraw"
+      -- Railgun unshield/transfer build a private op AND relay it via the
+      -- bundled Waku broadcaster inside the bridge handler, mirroring PP's
+      -- shielded.prepareWithdraw. Classify as broadcast so the policy gate
+      -- denies them under strict-mainnet.
+      || method = "shielded.railgun.unshield"
+      || method = "shielded.railgun.transfer" then
     -- Why: prepareWithdraw POSTs the withdrawal to the relayer, which counts
     -- as a shielded broadcast for policy classification.
     Purpose.shieldedBroadcast
@@ -86,6 +92,10 @@ def methodPurpose (method : String) : Purpose :=
     -- Local introspection: classified as daemon control, no egress.
     Purpose.daemonControl
   else
+    -- Read-only shielded queries (shielded.balance, shielded.railgun.balance,
+    -- shielded.prepareDeposit, shielded.railgun.prepareShield*) fall here.
+    -- The shield/prepareDeposit return TxData the daemon broadcasts via the
+    -- existing eth-broadcast path, not via the sidecar.
     Purpose.shieldedRead
 
 /-- Run the network policy over a shielded bridge request. `chainId` is

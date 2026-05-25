@@ -42,6 +42,15 @@ async function loadKohaku() {
   return { pp, provider };
 }
 
+// Why: @kohaku-eth/railgun's index does a top-level `await initialize()` that
+// loads the wasm blob. We only want to pay that cost on shielded.railgun.*
+// methods, so the import is lazy.
+async function loadRailgun() {
+  const rg = await import("@kohaku-eth/railgun");
+  const provider = await import("@kohaku-eth/provider/viem");
+  return { rg, provider };
+}
+
 const PROTOCOL_VERSION = "0.0.1";
 
 function jsonrpcResult(id, result) {
@@ -256,6 +265,205 @@ async function buildPlugin(env) {
   return plugin;
 }
 
+// Build a Railgun plugin for alpha-21. Same host shape as PP plugin
+// ({ network, storage, keystore, provider }); separate env vars + storage
+// file so PP and Railgun never clobber each other's persisted state.
+//
+// `needBundler` controls whether the bundler + delegating signer must be
+// configured. Balance/prepareShield don't need them; unshield/transfer do
+// (the broadcast path is ERC-4337 + EIP-7702, not Waku). When
+// `needBundler=true`, both LEANKOHAKU_RG_BUNDLER_URL and
+// LEANKOHAKU_RG_DELEGATING_KEY must be set.
+//
+// EIP-7702 delegation model (per crates/userop-kit/src/railgun.rs in
+// upstream ethereum/kohaku):
+// - Railgun's paymaster (PAYMASTER = 0xBbbc…bB74) verifies on-chain that
+//   each broadcast UserOp's eip7702Auth delegates the sender EOA to a
+//   single hardcoded implementation (IMPL = 0x304a1b31d6cc77616951579bd373a4bd8aef4b4c).
+// - Custom delegate targets (Ambire, Simple7702Account, etc.) are NOT
+//   supported by the paymaster — the UserOp would fail verification.
+// - The SDK builds AND signs the 7702 Authorization internally for every
+//   broadcast. There is no separate one-time "delegate the EOA" step to
+//   run; each UserOp carries its own auth, consumed on inclusion.
+// - The delegating EOA only needs (a) to exist as a regular keypair, and
+//   (b) enough gas to bootstrap if the bundler asks for it (Railgun pays
+//   gas through a shielded fee note to the protocol paymaster, so the
+//   EOA's ETH balance is largely incidental).
+//
+// EntryPoint version: railgun-rs targets EntryPoint 0.8 (ENTRY_POINT_08).
+// The bundler URL must serve EP 0.8. Some bundlers expose distinct
+// endpoints per EP version; using a 0.7/0.9-only endpoint will fail at
+// estimateUserOperationGas or sendUserOperation.
+//
+// Why first invocation is slow: createRailgunPlugin syncs from Subsquid
+// and (with POI enabled, the default) coordinates POI proofs via
+// `ppoi.fdi.network/`. Subsequent calls reuse the persisted provider
+// state in host.storage.
+async function buildRailgunPlugin(env, { needBundler = false } = {}) {
+  const chainId = BigInt(env.LEANKOHAKU_CHAIN_ID);
+  console.error(`[bridge] loading railgun SDK (chainId=${chainId}, rpc=${env.LEANKOHAKU_RPC_URL})`);
+  const t0 = Date.now();
+  const { rg, provider } = await loadRailgun();
+  console.error(`[bridge] railgun SDK loaded in ${Date.now() - t0}ms`);
+  if (!env.LEANKOHAKU_RG_MNEMONIC) {
+    throw new Error("LEANKOHAKU_RG_MNEMONIC is required (railgun keystore seed)");
+  }
+  if (!env.LEANKOHAKU_RG_STORAGE_PATH) {
+    throw new Error("LEANKOHAKU_RG_STORAGE_PATH is required (railgun plugin state file)");
+  }
+  const chain = chainFromId(chainId);
+  const client = createPublicClient({ chain, transport: http(env.LEANKOHAKU_RPC_URL) });
+  const host = {
+    network: inMemoryNetwork(),
+    storage: fileStorage(env.LEANKOHAKU_RG_STORAGE_PATH),
+    keystore: keystoreFromMnemonic(env.LEANKOHAKU_RG_MNEMONIC),
+    provider: withChunkedGetLogs(provider.viem(client)),
+  };
+
+  let bundler;
+  let delegating_account;
+  if (needBundler) {
+    if (!env.LEANKOHAKU_RG_BUNDLER_URL) {
+      throw new Error("LEANKOHAKU_RG_BUNDLER_URL is required for railgun unshield/transfer (4337 bundler URL, e.g. Pimlico)");
+    }
+    if (!env.LEANKOHAKU_RG_DELEGATING_KEY) {
+      throw new Error("LEANKOHAKU_RG_DELEGATING_KEY is required for railgun unshield/transfer (hex private key of the EIP-7702 delegating EOA)");
+    }
+    bundler = rg.Bundler.pimlico(env.LEANKOHAKU_RG_BUNDLER_URL);
+    const key = env.LEANKOHAKU_RG_DELEGATING_KEY.startsWith("0x")
+      ? env.LEANKOHAKU_RG_DELEGATING_KEY
+      : "0x" + env.LEANKOHAKU_RG_DELEGATING_KEY;
+    delegating_account = rg.Signer.privateKey(key);
+  }
+
+  const plugin = await rg.createRailgunPlugin(host, {
+    keyIndex: 0,
+    // POI defaults to true. The alpha-21 wasm has the working
+    // ppoi.fdi.network/ endpoint baked in, so this works on both
+    // mainnet and Sepolia. Set to false only for debugging.
+    poi: true,
+    ...(needBundler ? { bundler: { bundler, delegating_account } } : {}),
+  });
+  plugin.__rg = rg;
+  plugin.__chain = chain;
+  return plugin;
+}
+
+async function shieldedRailgunBalance(env) {
+  const plugin = await buildRailgunPlugin(env);
+  console.error("[bridge] railgun: querying balance (implicit sync + POI check)");
+  const ts = Date.now();
+  const balances = await plugin.balance(undefined);
+  console.error(`[bridge] railgun: balance complete in ${Date.now() - ts}ms (${balances.length} asset entries)`);
+  return {
+    chainId: env.LEANKOHAKU_CHAIN_ID,
+    balances,
+  };
+}
+
+// Build a Railgun asset for shield. tokenAddress=null → native ETH
+// (plugin wraps to WETH inside the shield op via shieldNative).
+function railgunShieldAsset(tokenAddress) {
+  if (!tokenAddress || tokenAddress === "") {
+    return { __type: "native" };
+  }
+  if (!/^0x[0-9a-fA-F]{40}$/.test(tokenAddress)) {
+    throw new Error(`tokenAddress must be 0x-prefixed 20 bytes or empty for native ETH; got ${tokenAddress}`);
+  }
+  return { __type: "erc20", contract: tokenAddress };
+}
+
+// Build a Railgun asset for unshield. In alpha-21 native ETH is supported:
+// the plugin unshields as WETH and appends a `withdraw` tail call.
+function railgunUnshieldAsset(tokenAddress) {
+  if (!tokenAddress || tokenAddress === "") {
+    return { __type: "native" };
+  }
+  if (!/^0x[0-9a-fA-F]{40}$/.test(tokenAddress)) {
+    throw new Error(`tokenAddress must be 0x-prefixed 20 bytes or empty for native ETH; got ${tokenAddress}`);
+  }
+  return { __type: "erc20", contract: tokenAddress };
+}
+
+// Build a Railgun asset for transfer. ERC20-only at the SDK level —
+// prepareTransfer's tokenGuard rejects non-erc20.
+function railgunTransferAsset(tokenAddress) {
+  if (!tokenAddress || !/^0x[0-9a-fA-F]{40}$/.test(tokenAddress)) {
+    throw new Error(`tokenAddress required for railgun transfer (ERC20 only); got ${tokenAddress ?? "null"}`);
+  }
+  return { __type: "erc20", contract: tokenAddress };
+}
+
+async function shieldedRailgunPrepareShield(env, params) {
+  const amountWei = params?.amountWei
+    ? BigInt(params.amountWei)
+    : parseEther(String(params?.amountEth ?? "0"));
+  if (amountWei <= 0n) throw new Error("amount must be > 0");
+  const asset = railgunShieldAsset(params?.tokenAddress);
+  const plugin = await buildRailgunPlugin(env);
+  console.error(`[bridge] railgun: prepareShield amount=${amountWei} asset=${JSON.stringify(asset)}`);
+  const ts = Date.now();
+  const txns = await plugin.prepareShield({ asset, amount: amountWei });
+  console.error(`[bridge] railgun: prepareShield returned ${txns.length} tx(s) in ${Date.now() - ts}ms`);
+  if (!txns || txns.length === 0) {
+    throw new Error("railgun prepareShield returned no txns");
+  }
+  return {
+    chainId: env.LEANKOHAKU_CHAIN_ID,
+    asset,
+    amountWei,
+    txns,
+  };
+}
+
+async function shieldedRailgunUnshield(env, params) {
+  const recipient = params?.recipient;
+  if (!recipient || !/^0x[0-9a-fA-F]{40}$/.test(recipient)) {
+    throw new Error("recipient must be a 0x-prefixed 20-byte address");
+  }
+  const amountWei = params?.amountWei
+    ? BigInt(params.amountWei)
+    : parseEther(String(params?.amountEth ?? "0"));
+  if (amountWei <= 0n) throw new Error("amount must be > 0");
+  const asset = railgunUnshieldAsset(params?.tokenAddress);
+  const plugin = await buildRailgunPlugin(env, { needBundler: true });
+  console.error(`[bridge] railgun: prepareUnshield amount=${amountWei} to=${recipient} asset=${JSON.stringify(asset)}`);
+  const op = await plugin.prepareUnshield({ asset, amount: amountWei }, recipient);
+  console.error(`[bridge] railgun: broadcasting unshield via 4337 bundler`);
+  await plugin.broadcast(op);
+  return {
+    chainId: env.LEANKOHAKU_CHAIN_ID,
+    recipient,
+    asset,
+    amountWei,
+    relay: { ok: true, transport: "erc4337" },
+  };
+}
+
+async function shieldedRailgunTransfer(env, params) {
+  const recipient = params?.recipient;
+  if (!recipient || !/^0zk/.test(recipient)) {
+    throw new Error("recipient must be a 0zk-prefixed RailgunAddress");
+  }
+  const amountWei = params?.amountWei
+    ? BigInt(params.amountWei)
+    : parseEther(String(params?.amountEth ?? "0"));
+  if (amountWei <= 0n) throw new Error("amount must be > 0");
+  const asset = railgunTransferAsset(params?.tokenAddress);
+  const plugin = await buildRailgunPlugin(env, { needBundler: true });
+  console.error(`[bridge] railgun: prepareTransfer amount=${amountWei} to=${recipient}`);
+  const op = await plugin.prepareTransfer({ asset, amount: amountWei }, recipient);
+  console.error(`[bridge] railgun: broadcasting transfer via 4337 bundler`);
+  await plugin.broadcast(op);
+  return {
+    chainId: env.LEANKOHAKU_CHAIN_ID,
+    recipient,
+    tokenAddress: asset.contract,
+    amountWei,
+    relay: { ok: true, transport: "erc4337" },
+  };
+}
+
 const E_ADDRESS = "0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
 
 // Why: upstream kohaku-cli uses { __type: "erc20", contract: ETH_AS_ERC20 } for
@@ -438,7 +646,7 @@ async function dispatch(req) {
       return jsonrpcResult(id, {
         protocols: [
           { name: "privacy-pools", status: "live", chains: [11155111, 1] },
-          { name: "railgun", status: "stub" },
+          { name: "railgun", status: "live", chains: [11155111, 1] },
         ],
       });
     case "shielded.balance":
@@ -449,6 +657,14 @@ async function dispatch(req) {
       return jsonifyResult(id, await shieldedUnshieldDrain(env, params));
     case "shielded.prepareWithdraw":
       return jsonifyResult(id, await shieldedPrepareWithdraw(env, params));
+    case "shielded.railgun.balance":
+      return jsonifyResult(id, await shieldedRailgunBalance(env));
+    case "shielded.railgun.prepareShield":
+      return jsonifyResult(id, await shieldedRailgunPrepareShield(env, params));
+    case "shielded.railgun.unshield":
+      return jsonifyResult(id, await shieldedRailgunUnshield(env, params));
+    case "shielded.railgun.transfer":
+      return jsonifyResult(id, await shieldedRailgunTransfer(env, params));
     default:
       return methodNotFound(id, method);
   }

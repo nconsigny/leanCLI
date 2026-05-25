@@ -1,7 +1,11 @@
-// Why: @kohaku-eth/privacy-pools' bundled output imports
-// `maci-crypto/build/ts/hashing` (no `.js`). Node's strict ESM resolver
-// rejects extension-less specifiers, so we patch only that one path.
-import { existsSync } from "node:fs";
+// Why we need a loader:
+// - @kohaku-eth/privacy-pools' bundled output imports `maci-crypto/build/ts/hashing`
+//   without a `.js` extension. Strict ESM rejects extension-less specifiers.
+// - @kohaku-eth/railgun (alpha-21) imports `"../pkg"` (a directory). Strict ESM
+//   also rejects directory imports — the resolver doesn't auto-fall-back to
+//   pkg/index.js the way CJS does.
+// Both are patched here without touching package internals.
+import { existsSync, statSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export async function resolve(specifier, context, nextResolve) {
@@ -14,13 +18,21 @@ export async function resolve(specifier, context, nextResolve) {
         return withJs;
       } catch (_) { /* fallthrough */ }
     }
-    if (err && err.code === "ERR_MODULE_NOT_FOUND") {
+    if (err && (err.code === "ERR_MODULE_NOT_FOUND" || err.code === "ERR_UNSUPPORTED_DIR_IMPORT")) {
       const url = err.url;
       if (url) {
         const p = fileURLToPath(url);
         if (existsSync(p + ".js")) {
           return { url: pathToFileURL(p + ".js").href, format: "module", shortCircuit: true };
         }
+        try {
+          if (statSync(p).isDirectory()) {
+            const idx = p.replace(/\/$/, "") + "/index.js";
+            if (existsSync(idx)) {
+              return { url: pathToFileURL(idx).href, format: "module", shortCircuit: true };
+            }
+          }
+        } catch (_) { /* fallthrough */ }
       }
     }
     throw err;

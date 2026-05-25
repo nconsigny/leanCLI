@@ -12,8 +12,8 @@
     "leankohaku-kohaku-bridge": "bridge.mjs"
   },
   "dependencies": {
-    "@kohaku-eth/plugins": "0.0.1-alpha.7",
-    "@kohaku-eth/railgun": "0.0.1-alpha.12",
+    "@kohaku-eth/plugins": "0.0.1-alpha.8",
+    "@kohaku-eth/railgun": "0.0.1-alpha.21",
     "@kohaku-eth/privacy-pools": "0.0.2-alpha.9"
   },
   "scripts": {
