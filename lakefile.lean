@@ -181,6 +181,50 @@ the `[sphincs-shims] built` confirmation. We deliberately do not hook
 this into `lean_exe`/`extern_lib` because the C signer does not
 participate in incremental Lean compilation.
 -/
+-- Build the native crypto helpers (`leankohaku-hacl-*`,
+-- `leankohaku-secp256k1-*`) that the wallet daemon shells out to for
+-- every PBKDF2, HMAC, Keccak, ChaCha20-Poly1305, and ECDSA op. They
+-- are NOT produced by `lake build` because the bootstrap clones
+-- hacl-packages + bitcoin-core/secp256k1 and runs CMake/Ninja + cargo
+-- — too heavy for incremental Lean compilation. This script wraps the
+-- two bash setup scripts so users have one discoverable recovery
+-- command:
+--
+--   lake script run setup-helpers
+--
+-- The wallet daemon's boot-time precheck refuses to start when these
+-- helpers are missing, so a successful run of this script is also the
+-- unblock for `wallet unlock` / `eoa.send` / TPM wrap failures.
+script «setup-helpers» (args) do
+  let _ := args
+  let pkgDir ← IO.currentDir
+  let runScript (name : String) : IO Bool := do
+    let path := pkgDir / "script" / name
+    if !(← path.pathExists) then
+      IO.eprintln s!"[setup-helpers] script not found: {path}"
+      return false
+    try
+      let child ← IO.Process.spawn {
+        cmd := "bash",
+        args := #[path.toString],
+        stdin := .null,
+        stdout := .inherit,
+        stderr := .inherit
+      }
+      let code ← child.wait
+      pure (code == 0)
+    catch e =>
+      IO.eprintln s!"[setup-helpers] {name} failed: {e}"
+      pure false
+  let okHacl ← runScript "setup_hacl.sh"
+  let okSecp ← runScript "setup_secp256k1.sh"
+  if okHacl && okSecp then
+    IO.println "[setup-helpers] ok — wallet daemon helpers built"
+    return 0
+  else
+    IO.eprintln "[setup-helpers] FAILED — see errors above"
+    return 1
+
 script «sphincs-shims» (args) do
   let _ := args
   let pkgDir ← IO.currentDir

@@ -7519,6 +7519,102 @@ private def detectExistingDaemon (path : String) : IO (Option String) := do
       try LeanKohaku.Daemon.Uds.close conn catch _ => pure ()
       pure (some "already running")
 
+/-- Native helper binaries the daemon shells out to for every wallet op
+    (PBKDF2 / HMAC / ChaCha20-Poly1305 / Keccak / secp256k1 sign+recover).
+    They are produced by `script/setup_hacl.sh` and
+    `script/setup_secp256k1.sh`, NOT by `lake build`, so a tree built
+    with `lake build` alone is missing them and every unlock fails with
+    a generic `could not execute external process` mid-flow. The boot
+    precheck below stats each and refuses to listen if any are absent. -/
+private def requiredNativeHelpers : Array String := #[
+  LeanKohaku.Crypto.Hacl.helperKeccak,
+  LeanKohaku.Crypto.Hacl.helperSha256,
+  LeanKohaku.Crypto.Hacl.helperHmacSha256,
+  LeanKohaku.Crypto.Hacl.helperHmacSha512,
+  LeanKohaku.Crypto.Hacl.helperRipemd160,
+  LeanKohaku.Crypto.Hacl.helperPbkdf2,
+  LeanKohaku.Crypto.Hacl.helperHmacDrbg,
+  LeanKohaku.Crypto.Hacl.helperChacha20Poly1305,
+  LeanKohaku.Crypto.Secp256k1Native.helperSign,
+  LeanKohaku.Crypto.Secp256k1Native.helperPubkey,
+  LeanKohaku.Crypto.Secp256k1Native.helperRecover,
+  LeanKohaku.Crypto.Secp256k1Native.helperVerify
+]
+
+/-- Resolve a helper basename the same way `runHexHelper` does at run
+    time: prefer `IO.appDir / cmd` (so a daemon shipped via kohakuspawn
+    symlinks resolves through `/proc/self/exe`), fall back to a `$PATH`
+    lookup. Returns the absolute path when found. -/
+private def locateHelper (cmd : String) : IO (Option String) := do
+  let appDirHit ← try
+    let next := (← IO.appDir) / cmd
+    if ← next.pathExists then pure (some next.toString) else pure none
+  catch _ => pure none
+  match appDirHit with
+  | some p => pure (some p)
+  | none =>
+      -- Fall back to $PATH. `IO.Process.output` with `cmd := basename`
+      -- would do the lookup itself but we want to detect absence here.
+      match ← IO.getEnv "PATH" with
+      | none => pure none
+      | some pathStr =>
+          let dirs := pathStr.splitOn ":"
+          let rec scan : List String → IO (Option String)
+            | [] => pure none
+            | d :: rest => do
+                if d.isEmpty then scan rest
+                else
+                  let candidate := (System.FilePath.mk d) / cmd
+                  if ← candidate.pathExists then pure (some candidate.toString)
+                  else scan rest
+          scan dirs
+
+/-- Boot-time precheck. Lists every missing native helper, prints one
+    actionable block to stderr naming the recovery command, and exits
+    with code 70 (EX_SOFTWARE) — distinct from the second-instance exit
+    (code 0) so systemd / kohakuspawn can tell the cases apart.
+
+    The check runs after the second-instance guard so a healthy peer
+    can keep serving even on a tree whose helpers were just nuked.
+
+    Escape hatch: `KOHAKU_SKIP_HELPER_CHECK=1` downgrades to a single
+    warning line. Intended for CI / smoke tests that exercise non-crypto
+    code paths (locked-seed replies, RPC framing) on hosts that don't
+    build the helpers. Never set this for an interactive daemon. -/
+private def verifyNativeHelpersOrExit : IO Unit := do
+  let mut missing : Array String := #[]
+  for cmd in requiredNativeHelpers do
+    match ← locateHelper cmd with
+    | some _ => pure ()
+    | none   => missing := missing.push cmd
+  if missing.isEmpty then return ()
+  match ← IO.getEnv "KOHAKU_SKIP_HELPER_CHECK" with
+  | some "1" | some "true" | some "yes" =>
+      IO.eprintln
+        s!"leankohaku-daemon: KOHAKU_SKIP_HELPER_CHECK=1 — \
+          continuing despite {missing.size} missing native helper(s); \
+          signing/unlock will fail at use time"
+      return ()
+  | _ => pure ()
+  let appDir ← try
+    let d ← IO.appDir
+    pure d.toString
+  catch _ => pure "(unknown)"
+  IO.eprintln "leankohaku-daemon: missing native crypto helpers — refusing to start."
+  IO.eprintln ""
+  IO.eprintln s!"  Expected directory: {appDir}"
+  IO.eprintln "  Missing binaries:"
+  for cmd in missing do
+    IO.eprintln s!"    - {cmd}"
+  IO.eprintln ""
+  IO.eprintln "  These are NOT produced by `lake build`. Build them with one of:"
+  IO.eprintln "    lake script run setup-helpers      # recommended"
+  IO.eprintln "    bash script/setup_hacl.sh && bash script/setup_secp256k1.sh"
+  IO.eprintln "    kohakuspawn --rebuild-helpers      # if installed via kohakuspawn"
+  IO.eprintln ""
+  IO.eprintln "  Required system tools: git cmake ninja gcc cargo"
+  IO.Process.exit 70
+
 def run (cfg : Config) : IO Unit := do
   let ownsSocket := !(← socketActivated)
   -- Single-instance guard: if we are NOT socket-activated and another daemon
@@ -7532,6 +7628,12 @@ def run (cfg : Config) : IO Unit := do
         IO.eprintln s!"leankohaku-daemon: another instance is already listening on {cfg.socketPath} (pid unknown); refusing to start a second instance"
         IO.Process.exit 0
     | none => pure ()
+  -- Boot-time precheck for native crypto helpers. Without these, every
+  -- wallet op fails mid-flow with a generic `could not execute external
+  -- process` error — far less actionable than refusing to start. Exits
+  -- 70 (EX_SOFTWARE) on miss so callers can disambiguate from the
+  -- code-0 second-instance exit above.
+  verifyNativeHelpersOrExit
   let listener ←
     match ← listenerFromSocketActivation? with
     | some listener => pure listener

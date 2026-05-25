@@ -144,7 +144,11 @@ mkdir -p "$XDG_CONFIG_HOME/leankohaku"
 WALLET_SOCKET="$XDG_RUNTIME_DIR/leankohaku/leankohaku.sock"
 
 start_wallet_daemon() {
-  "$LEANKOHAKU_DAEMON" >"$TMP/daemon.log" 2>&1 &
+  # This smoke test only exercises the `locked` and `bad_path` replies of
+  # `wallet.lean_verified_addresses`, which never invoke a crypto helper.
+  # Skip the boot-time helper precheck so hosts that haven't run
+  # `lake script run setup-helpers` can still run Phase 1d.
+  KOHAKU_SKIP_HELPER_CHECK=1 "$LEANKOHAKU_DAEMON" >"$TMP/daemon.log" 2>&1 &
   WALLET_PID=$!
   local waited=0
   while [[ ! -S "$WALLET_SOCKET" && $waited -lt 50 ]]; do

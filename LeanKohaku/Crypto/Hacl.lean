@@ -75,7 +75,15 @@ def runHexHelper (cmd : String) (args : Array String) : IO (Except String ByteAr
     else
       pure (.error out.stderr)
   catch e =>
-    pure (.error e.toString)
+    -- The most common failure here is ENOENT — the helper binary is
+    -- absent because `script/setup_hacl.sh` / `script/setup_secp256k1.sh`
+    -- never ran on this tree. The daemon precheck normally catches that
+    -- at boot, but a helper deleted after boot, or a helper invoked
+    -- outside the daemon (CLI tools), can still land here. Include the
+    -- recovery command in every error so the message is actionable
+    -- wherever it surfaces.
+    pure (.error
+      s!"{cmd}: {e.toString}; rebuild with `lake script run setup-helpers`")
 
 def keccak256EthereumIO (inputHex : String) : IO (Except String ByteArray) :=
   runHexHelper helperKeccak #[inputHex]
