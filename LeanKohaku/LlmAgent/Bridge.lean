@@ -45,10 +45,25 @@ def defaultExecutable : String := "kohaku-agent"
     backend. `LEAN_KOHAKU_LLM_BRIDGE` still overrides everything (used
     by integration tests and operators pinning a custom binary).
     `LEAN_KOHAKU_LLM_BRIDGE_LEGACY=1` opts back into the legacy Node
-    sidecar at `bridge/llm-legacy/bridge.mjs`. -/
+    sidecar at `bridge/llm-legacy/bridge.mjs`.
+
+    Stale-override safety: an explicit `LEAN_KOHAKU_LLM_BRIDGE` that
+    points at a missing filesystem path falls through to the default
+    lookup. This catches stale `daemon.env` files carrying a
+    pre-rename `bridge/llm/bridge.mjs` after the package moved to
+    `bridge/llm-legacy/`. PATH-resolved bare names (e.g.
+    `kohaku-agent`) pass through unchanged. -/
 def resolveExecutable : IO String := do
-  -- Explicit override wins, regardless of any other knob.
-  match ← IO.getEnv "LEAN_KOHAKU_LLM_BRIDGE" with
+  let overrideOk? : IO (Option String) := do
+    match ← IO.getEnv "LEAN_KOHAKU_LLM_BRIDGE" with
+    | none => pure none
+    | some s =>
+        if s.contains '/' ∧ !(← System.FilePath.pathExists (System.FilePath.mk s)) then do
+          IO.eprintln s!"[LEAN_KOHAKU_LLM_BRIDGE] override points at missing file ({s}); falling back to default lookup chain"
+          pure none
+        else
+          pure (some s)
+  match ← overrideOk? with
   | some s => pure s
   | none =>
       let useLegacy : Bool ← do
