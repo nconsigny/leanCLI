@@ -7242,7 +7242,41 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       -- Resolve actual slot records (skip silently if expired between
       -- the name fetch and the slot fetch — TTL races are not errors).
       let mut entries : Array Json := #[]
+      let mut storedAddrs : Array String := #[]
       let mut fingerprints : Array String := #[]
+      -- 1. Stored-accounts walk. Once *some* seed is unlocked the user
+      --    has authorized address disclosure for this session, so every
+      --    on-disk EoaStore slot's already-realized sub-accounts (the
+      --    `Record.accounts` array) become visible — these are the
+      --    wallets the user creates and references by name from the CLI
+      --    / TUI (e.g. "leanWallet/fresh1"). Locked slots are included
+      --    with `unlocked:false` so the agent knows it can't sign with
+      --    them yet; addresses themselves are public, the secret is the
+      --    seed. Labelled accounts win deduplication against the BIP-44
+      --    enumeration below.
+      let allEoaNames ← LeanKohaku.Wallet.EoaStore.list
+      for name in allEoaNames do
+        match ← LeanKohaku.Wallet.EoaStore.load name with
+        | .error _ => pure ()
+        | .ok rec =>
+            let isUnlocked := (← LeanKohaku.Daemon.State.getUnlocked? state name).isSome
+            for acct in rec.accounts do
+              let baseFields : Array (String × Json) := #[
+                ("kind",     .str "eoa"),
+                ("slot",     .str name),
+                ("path",     .str acct.path),
+                ("address",  .str acct.address),
+                ("unlocked", .bool isUnlocked)
+              ]
+              let fields : Array (String × Json) :=
+                match acct.label with
+                | some l => baseFields.push ("label", .str l)
+                | none   => baseFields
+              entries := entries.push (.obj fields)
+              storedAddrs := storedAddrs.push acct.address.toLower
+      -- 2. Per-seed BIP-44 enumeration (unlocked slots only). Skips any
+      --    address already surfaced by the stored-accounts walk so a
+      --    labelled sub-account always wins over its bare derived twin.
       for name in unlockedSlots do
         match ← LeanKohaku.Daemon.State.getUnlocked? state name with
         | none => pure ()
@@ -7259,13 +7293,43 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                 match ← deriveAddressFromSeed slot.seed path with
                 | .error _ => pure ()  -- skip — malformed path or deriver hiccup
                 | .ok address =>
-                    entries := entries.push <| .obj #[
-                      ("kind",    .str "eoa"),
-                      ("slot",    .str name),
-                      ("path",    .str path),
-                      ("address", .str address)
-                    ]
-      -- Optionally include R1 entries from the TPM keystore — only
+                    if storedAddrs.contains address.toLower then
+                      pure ()  -- already surfaced (with label) by the stored walk
+                    else
+                      entries := entries.push <| .obj #[
+                        ("kind",     .str "eoa"),
+                        ("slot",     .str name),
+                        ("path",     .str path),
+                        ("address",  .str address),
+                        ("unlocked", .bool true)
+                      ]
+      -- 3. SPHINCS-hybrid 4337 smart-account records (`kind:"sphincs"`).
+      --    The user controls these via a hybrid ECDSA+SPHINCS+ owner; the
+      --    smart-account address is the CREATE2-derived contract that
+      --    holds the funds. Records without a computed
+      --    `smartAccountAddress` are skipped (factory not yet wired up
+      --    for that paramSet/chain). Enumeration failure is non-fatal —
+      --    we still want EOA + R1 entries to land.
+      try
+        let sphincsNames ← LeanKohaku.Wallet.SphincsHybridStore.listSlotNames
+        for sname in sphincsNames do
+          match ← LeanKohaku.Wallet.SphincsHybridStore.readRecord sname with
+          | .error _ => pure ()
+          | .ok rec =>
+              match rec.smartAccountAddress with
+              | none => pure ()
+              | some sa =>
+                  entries := entries.push <| .obj #[
+                    ("kind",                .str "sphincs"),
+                    ("slot",                .str sname),
+                    ("paramSet",            .str rec.paramSet.toString),
+                    ("chainId",             .num (Int.ofNat rec.chainId)),
+                    ("ownerAddress",        .str rec.ownerAddress),
+                    ("smartAccountAddress", .str sa),
+                    ("address",             .str sa)
+                  ]
+      catch _ => pure ()
+      -- 4. Optionally include R1 entries from the TPM keystore — only
       -- now that we know at least one seed is unlocked, so the user
       -- has authorized disclosure. Uses the same enumeration path as
       -- `account.list`; no new keystore API.
