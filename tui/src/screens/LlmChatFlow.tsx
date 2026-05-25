@@ -68,6 +68,16 @@ type OwnershipEntry = {
   derived?: string;
 };
 
+/** One entry in the agent's per-turn trace. Matches the JSON shape
+ *  produced by `LeanKohaku.Agent.Trace.toJson`. Display-only — never
+ *  gates signing. The TUI's foldable trace block under each assistant
+ *  turn is the only consumer; the agent loop's own correctness is
+ *  unaffected by what we render (or don't render) here. */
+type TraceItem =
+  | { kind: "assistant"; content: string; reasoning?: string }
+  | { kind: "tool_call"; idx: number; name: string; argsJson: string }
+  | { kind: "tool_result"; idx: number; ok: boolean; summary: string };
+
 type DraftResponse = {
   regex?: {
     action: string;
@@ -81,6 +91,10 @@ type DraftResponse = {
   intentActionTag?: string;
   canonical?: string;
   validateError?: string;
+  /** Per-turn observability payload from `kohaku-agentd`. Optional;
+   *  legacy / one-shot bridge replies omit it and the trace block
+   *  simply doesn't render. */
+  agentTrace?: TraceItem[];
   // Standard leaf-encodable response — model emits a tx-shaped Intent
   // and the daemon's encoder returns the {to, value, data} the TUI
   // routes through tx.simulate + ConfirmGate.
@@ -762,6 +776,13 @@ function ChatBody({
   // STOP capturing keystrokes when focus is on the button — otherwise
   // Tab would just insert a "\t" into the prompt.
   const [focus, setFocus] = useState<"input" | "sign" | "execute">("input");
+  // Set of assistant-turn indices whose agentTrace block is expanded.
+  // Folded by default; `t` toggles the LATEST assistant turn that
+  // carries a trace. This keeps the keybinding simple (one global
+  // toggle), since trace-of-the-current-turn is the dominant case.
+  const [expandedTraces, setExpandedTraces] = useState<Set<number>>(
+    () => new Set<number>(),
+  );
   // If the draft goes away (e.g. user retried and got an ask) and we
   // were on a button, drop focus back to input.
   useEffect(() => {
@@ -769,8 +790,48 @@ function ChatBody({
     if (!latestExecutable && focus === "execute") setFocus("input");
   }, [latestSignable, latestExecutable, focus]);
 
-  useInput((_ch, key) => {
+  // Index of the most recent assistant turn that has a trace payload
+  // we could expand. Used by the `t` keybinding; null when no such
+  // turn exists yet (e.g. first prompt still pending).
+  const latestTraceIdx: number | null = (() => {
+    for (let i = turns.length - 1; i >= 0; i--) {
+      const t = turns[i];
+      if (
+        t &&
+        t.kind === "assistant" &&
+        t.status === "done" &&
+        t.result?.agentTrace &&
+        t.result.agentTrace.length > 0
+      ) {
+        return i;
+      }
+    }
+    return null;
+  })();
+
+  useInput((ch, key) => {
     if (busy) return;
+    // `t` toggles expand/collapse of the most recent assistant turn's
+    // trace block. We deliberately gate on focus === "input" being
+    // FALSE in the special case where the user is mid-typing — but
+    // since typing into ink-text-input is captured by the widget
+    // (not this hook), `t` here only ever fires when the user is
+    // NOT in the text box. Safe to act on always.
+    //
+    // Collision check: `tab`, `return`, `escape` are the existing
+    // keys in this hook. `t` is otherwise unused; ink-text-input
+    // owns plain-letter keys when input is focused, so this only
+    // fires when focus is on sign/execute (or no widget is focused
+    // because there's nothing to sign).
+    if (ch === "t" && latestTraceIdx !== null) {
+      setExpandedTraces((prev) => {
+        const next = new Set(prev);
+        if (next.has(latestTraceIdx)) next.delete(latestTraceIdx);
+        else next.add(latestTraceIdx);
+        return next;
+      });
+      return;
+    }
     if (key.tab) {
       // Tab cycles among the buttons that currently exist:
       //   input → (sign if present) → (execute if present) → input
@@ -824,7 +885,13 @@ function ChatBody({
           </Box>
         ) : (
           turns.map((t, i) => (
-            <TurnRow key={i} turn={t} isLatestSignable={t === latestSignable} />
+            <TurnRow
+              key={i}
+              turn={t}
+              isLatestSignable={t === latestSignable}
+              traceExpanded={expandedTraces.has(i)}
+              isLatestTrace={i === latestTraceIdx}
+            />
           ))
         )}
       </Box>
@@ -908,8 +975,10 @@ function ChatBody({
       <Box marginTop={0}>
         <Text color={theme.dim}>
           {latestSignable
-            ? "tab — toggle focus · enter — act on focused element · esc — leave chat"
-            : "enter — send · esc — leave chat"}
+            ? "tab — toggle focus · enter — act on focused element · "
+            : "enter — send · "}
+          {latestTraceIdx !== null ? "t — toggle trace · " : ""}
+          esc — leave chat
         </Text>
       </Box>
     </Container>
@@ -919,9 +988,17 @@ function ChatBody({
 function TurnRow({
   turn,
   isLatestSignable,
+  traceExpanded,
+  isLatestTrace,
 }: {
   turn: Turn;
   isLatestSignable: boolean;
+  /** Whether THIS turn's trace block is currently expanded. */
+  traceExpanded: boolean;
+  /** True for the most recent assistant turn that carries a trace —
+   *  the one the global `t` keybinding will toggle. Used purely for
+   *  the hint text on the fold line. */
+  isLatestTrace: boolean;
 }) {
   if (turn.kind === "user") {
     return (
@@ -1003,6 +1080,122 @@ function TurnRow({
         <DirectiveBlock prepare={r.prepare} audit={r.audit} create={r.create} />
       )}
       <DispatchBlock dispatch={turn.dispatch} />
+      {r.agentTrace && r.agentTrace.length > 0 && (
+        <AgentTraceBlock
+          trace={r.agentTrace}
+          expanded={traceExpanded}
+          isLatestTrace={isLatestTrace}
+        />
+      )}
+    </Box>
+  );
+}
+
+/** Maximum number of trace-block lines to render when expanded. Past
+ *  this cap we show a `… N more` tail. Keeps a runaway agent loop
+ *  from blowing past the terminal height. */
+const TRACE_VISIBLE_LINE_CAP = 30;
+
+/** Crude token estimator: ~4 chars per token. Used only for the
+ *  folded summary line ("· 312 tokens reasoning"); a real tokenizer
+ *  would be overkill for a display hint. */
+function estimateReasoningTokens(trace: TraceItem[]): number {
+  let chars = 0;
+  for (const item of trace) {
+    if (item.kind === "assistant" && item.reasoning) {
+      chars += item.reasoning.length;
+    }
+  }
+  return Math.ceil(chars / 4);
+}
+
+/** Truncate s to n chars with an ellipsis tail. Display-only. */
+function clip(s: string, n: number): string {
+  if (s.length <= n) return s;
+  return s.slice(0, n) + "…";
+}
+
+/** Foldable per-turn trace block. Closed by default; renders a single
+ *  summary line. When expanded, renders each trace item with a short
+ *  prefix as documented in the design doc. */
+function AgentTraceBlock({
+  trace,
+  expanded,
+  isLatestTrace,
+}: {
+  trace: TraceItem[];
+  expanded: boolean;
+  isLatestTrace: boolean;
+}) {
+  const toolCallCount = trace.filter((x) => x.kind === "tool_call").length;
+  const reasoningTokens = estimateReasoningTokens(trace);
+  const hint = isLatestTrace ? " (press t to toggle)" : "";
+  if (!expanded) {
+    return (
+      <Box paddingLeft={5} marginTop={1}>
+        <Text color={theme.dim}>
+          ▸ {toolCallCount} tool call{toolCallCount === 1 ? "" : "s"} ·{" "}
+          {reasoningTokens} tokens reasoning{hint}
+        </Text>
+      </Box>
+    );
+  }
+  // Expanded: render each item with a short prefix. Cap at
+  // TRACE_VISIBLE_LINE_CAP lines (some items render across two lines —
+  // reasoning sits below its assistant). We count rendered lines as we
+  // go and bail with a `… N more` marker when over the cap.
+  type RenderedLine = { text: string; color: string; nested?: boolean };
+  const lines: RenderedLine[] = [];
+  for (const item of trace) {
+    if (lines.length >= TRACE_VISIBLE_LINE_CAP) break;
+    if (item.kind === "assistant") {
+      const head = item.content.replace(/\s+/g, " ").slice(0, 120);
+      lines.push({
+        text: `· assistant: ${head}`,
+        color: theme.dim,
+      });
+      if (item.reasoning && lines.length < TRACE_VISIBLE_LINE_CAP) {
+        const thinking = clip(item.reasoning.replace(/\s+/g, " "), 400);
+        lines.push({
+          text: `  ⌐ thinking: ${thinking}`,
+          color: theme.dim,
+          nested: true,
+        });
+      }
+    } else if (item.kind === "tool_call") {
+      const args = clip(item.argsJson, 80);
+      lines.push({
+        text: `→ ${item.name}(${args})`,
+        color: theme.primary,
+      });
+    } else {
+      const tag = item.ok ? "ok" : "err";
+      lines.push({
+        text: `← ${tag}: ${item.summary}`,
+        color: item.ok ? theme.ok : theme.err,
+      });
+    }
+  }
+  const dropped = Math.max(0, trace.length - lines.filter(
+    (l) => !l.nested,
+  ).length);
+  return (
+    <Box paddingLeft={5} marginTop={1} flexDirection="column">
+      <Text color={theme.dim}>
+        ▾ {toolCallCount} tool call{toolCallCount === 1 ? "" : "s"} ·{" "}
+        {reasoningTokens} tokens reasoning{hint}
+      </Text>
+      {lines.map((line, i) => (
+        <Text key={i} color={line.color}>
+          {"  "}
+          {line.text}
+        </Text>
+      ))}
+      {dropped > 0 && (
+        <Text color={theme.dim}>
+          {"  "}… {dropped} more item{dropped === 1 ? "" : "s"}
+        </Text>
+      )}
     </Box>
   );
 }

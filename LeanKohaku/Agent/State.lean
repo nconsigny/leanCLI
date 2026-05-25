@@ -41,6 +41,12 @@ structure AgentMessage where
   /-- Only set on `role = tool` messages; references the call this
       result responds to. -/
   toolCallId : Option String := none
+  /-- OpenAI-compat `message.reasoning_content`, when the backend
+      emits one (Qwen3.5 and some R1 variants do; gpt-4o-class
+      models do not). Captured for the per-turn trace surface
+      (`Agent.Trace`) and never sent back to the model — it is
+      display-only and has no influence on signing or tool dispatch. -/
+  reasoning  : Option String := none
   deriving Repr, Inhabited
 
 /-- Static configuration for a single agent invocation. Most fields are

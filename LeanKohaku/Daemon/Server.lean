@@ -1142,7 +1142,26 @@ private def shieldedBridgeCall (cfg : Config) (method : String) (params : Json)
           | some s => #[("LEANKOHAKU_RG_SEED_HEX", some s)]
           | none   => #[])
     let resp ← LeanKohaku.Privacy.Bridge.callWithEnv bridgeReq env
-    pure <| .ok <| LeanKohaku.Privacy.Bridge.responseToJson resp
+    -- Propagate bridge errors as JSON-RPC errors instead of burying them
+    -- inside a successful `{ok:false, error:…}` payload. Without this the
+    -- TUI/CLI render the wrapper as a successful result and the user only
+    -- learns the broadcast failed by reading the JSON — which is exactly
+    -- the bug that surfaced with PP v1 `RelayFeeGreaterThanMax`. The
+    -- success branch now hands callers the raw bridge result; callers
+    -- that previously peeled `result` still work because they fall back
+    -- to the top-level object.
+    match resp with
+    | .ok j => pure (.ok j)
+    | .err code msg data =>
+        pure <| .error { code := code, message := msg, data := data }
+    | .crash stderr exitCode =>
+        pure <| .error
+          { code := -32603,
+            message := s!"shielded bridge crashed (exit {exitCode})",
+            data := some (.obj #[
+              ("stderr", .str stderr),
+              ("exitCode", .num (Int.ofNat exitCode.toNat))
+            ]) }
 
 /-- Load the on-disk PP secret if present, decrypt it with the supplied
     passphrase, and return the plaintext mnemonic. Returns `-32021` when
@@ -5628,19 +5647,24 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                 ("llmError", .str s!"sidecar crash: {stderr}")
               ]
           | .ok llmResult =>
-              -- Sidecar returned { raw, backend, model }. Extract raw.
-              -- When `raw` is missing we surface the FULL result object as
-              -- the llmRaw so the TUI shows what the sidecar actually
-              -- returned — diagnoses model-shape mismatches (e.g. some
-              -- models put output only in reasoning_content).
+              -- Sidecar returned { raw, backend, model, trace? }. The
+              -- optional `trace` is the agentd's per-turn observability
+              -- payload — display-only; never affects signing
+              -- decisions. Forwarded verbatim under `agentTrace` so
+              -- the TUI's foldable trace block can render it. See
+              -- `LeanKohaku/Agent/Trace.lean` for the schema.
               let rawStr :=
                 (getField "raw" llmResult >>= asString).getD ""
+              let traceField : Array (String × Json) :=
+                match getField "trace" llmResult with
+                | some t => #[("agentTrace", t)]
+                | none   => #[]
               if rawStr.isEmpty then
-                pure <| .ok <| .obj #[
+                pure <| .ok <| .obj <| #[
                   ("regex", regexJson),
                   ("llmRaw", .str (LeanKohaku.Encoding.Json.compact llmResult)),
                   ("validateError", .str "llm.parseIntent returned no `raw` field (full sidecar response shown above)")
-                ]
+                ] ++ traceField
               else
                 -- 3. Parse + validate via Lean's IntentParser. Three outcomes:
                 --    .error msg          — malformed JSON / hard-reject
@@ -5648,30 +5672,40 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                 --    .ok (.intent i)     — ready to encode
                 match LeanKohaku.LlmAgent.IntentParser.parseIntent rawStr chainId with
                 | .error msg =>
-                    pure <| .ok <| .obj #[
+                    pure <| .ok <| .obj <| #[
                       ("regex", regexJson),
                       ("llmRaw", .str rawStr),
                       ("validateError", .str msg)
-                    ]
+                    ] ++ traceField
                 | .ok (.ask err q) =>
-                    pure <| .ok <| .obj #[
+                    pure <| .ok <| .obj <| #[
                       ("regex", regexJson),
                       ("llmRaw", .str rawStr),
                       ("modelAsk", .obj #[
                         ("error",    .str err),
                         ("question", .str q)
                       ])
-                    ]
+                    ] ++ traceField
                 | .ok (.intent intent) =>
                     -- 4. Route via chatDraftIntentResponse: leaf-encodable
                     -- variants get the `encoded` tx shape; the new
                     -- privacy/hygiene/wallet variants get a
                     -- `prepare`/`audit`/`create` directive instead.
-                    pure <| .ok <| chatDraftIntentResponse
+                    -- We splice the agentTrace into the top-level obj
+                    -- after `chatDraftIntentResponse` has built its
+                    -- payload. Both the encoded-tx and directive
+                    -- variants are objects, so the splice is safe.
+                    let baseResp : Json := chatDraftIntentResponse
                       intent
                       #[("regex", regexJson), ("llmRaw", .str rawStr)]
                       none
                       chainId
+                    let withTrace : Json :=
+                      match baseResp, traceField with
+                      | _, #[] => baseResp
+                      | .obj fields, _ => .obj (fields ++ traceField)
+                      | _, _ => baseResp
+                    pure <| .ok withTrace
       | .error msg, _ =>
           pure (.error msg)
       | _, none =>
@@ -6421,27 +6455,21 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           match ← unlockPpSecretSmart state passphrase? with
           | .error err => pure (.error err)
           | .ok mnemonic =>
-              let res ← shieldedBridgeCall cfg "shielded.unshieldDrain"
-                (.obj #[("recipient", .str recipient), ("amountEth", .str amountEth)]) (some mnemonic) req
-              -- Record the recipient locally so the wallets-hub 0-link
-              -- check still passes after we credit the address with a
-              -- PP withdrawal. PP v1 is Sepolia-only today; chainId is
-              -- pinned in `shieldedBridgeCall`. Best-effort: a failed
-              -- log write never overrides the bridge response.
-              --
-              -- The bridge envelopes relay errors as
-              -- `{ok: false, error: ...}` inside a successful RPC
-              -- response (e.g. RelayFeeGreaterThanMax). The outer .ok
-              -- only means the sidecar replied; the inner `ok` is what
-              -- tells us whether the withdrawal actually happened.
-              match res with
+              match ← shieldedBridgeCall cfg "shielded.unshieldDrain"
+                (.obj #[("recipient", .str recipient), ("amountEth", .str amountEth)])
+                (some mnemonic) req with
+              | .error err => pure (.error err)
               | .ok j =>
-                  let bridgeOk := (getField "ok" j >>= asBool).getD false
-                  if bridgeOk then
-                    LeanKohaku.Daemon.PpDestinations.append recipient 11155111 "shielded.unshieldDrain"
-                  else pure ()
-              | .error _ => pure ()
-              pure res
+                  -- Record the recipient locally so the wallets-hub 0-link
+                  -- check still passes after we credit the address with a
+                  -- PP withdrawal. PP v1 is Sepolia-only today; chainId is
+                  -- pinned in `shieldedBridgeCall`. Best-effort: a failed
+                  -- log write never overrides the bridge response. Bridge
+                  -- errors (e.g. RelayFeeGreaterThanMax) now arrive via
+                  -- `.error` above, so the `.ok` arm is the actual relay
+                  -- success path.
+                  LeanKohaku.Daemon.PpDestinations.append recipient 11155111 "shielded.unshieldDrain"
+                  pure (.ok j)
       | _, _ => pure (.error invalidParams)
   | "daemon.ppDestinations.add" =>
       -- Why: the auto-record hook in `shielded.unshieldDrain` only
@@ -7382,67 +7410,95 @@ private def decodeRequestBytes (bytes : ByteArray) : Except String String :=
   | some s => .ok s.trimAscii.toString
   | none => .error "request was not valid UTF-8"
 
+/-- Body of `handleConn` — all the request reading and dispatch.
+    Extracted so it can be wrapped in a `try/catch` that converts
+    any escaping IO error into a JSON-RPC error frame written on
+    the connection. -/
+private def handleConnBody (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
+    (conn : LeanKohaku.Daemon.Uds.Conn) : IO Unit := do
+  let started ← IO.monoMsNow
+  let sameUid ← LeanKohaku.Daemon.Uds.peerUidMatchesCurrent conn
+  if !sameUid then
+    let response := compact <| errorResponse .null
+      { code := -32001, message := "peer uid rejected" }
+    discard <| LeanKohaku.Daemon.Uds.write conn (response ++ "\n").toByteArray
+    LeanKohaku.Daemon.Log.write .warn "<peer>" ((← IO.monoMsNow) - started) false
+      (some "peer uid rejected")
+  else
+    -- `readLine` buffers across SOCK_STREAM `read(2)` chunks until
+    -- the terminating `\n`, so a request the kernel splits doesn't
+    -- truncate into a parse error here.
+    let bytes ← LeanKohaku.Daemon.Uds.readLine conn
+    match decodeRequestBytes bytes with
+    | .error err =>
+        let response := compact <| errorResponse .null
+          { parseError with data := some (.str err) }
+        discard <| LeanKohaku.Daemon.Uds.write conn (response ++ "\n").toByteArray
+        LeanKohaku.Daemon.Log.write .warn "<parse>" ((← IO.monoMsNow) - started) false
+          (some err)
+    | .ok line =>
+        let parsed := LeanKohaku.RPC.Server.parseRequest line
+        let method :=
+          match parsed with
+          | .ok req => req.method
+          | .error _ => "<parse>"
+        -- UDS-backed notifier: emit JSON-RPC notification frames
+        -- (no `id`, no `result`/`error`) on the same connection
+        -- before the final response. The CLI client buffers and
+        -- splits on `\n`, rendering each notification before
+        -- returning the response.
+        let notify : LeanKohaku.Keystore.Tpm2Runtime.Notifier :=
+          fun event params => do
+            let frame : Json := .obj #[
+              ("jsonrpc", .str "2.0"),
+              ("method", .str "notify"),
+              ("params", .obj #[
+                ("event", .str event),
+                ("data", params)
+              ])
+            ]
+            try
+              discard <| LeanKohaku.Daemon.Uds.write conn (compact frame ++ "\n").toByteArray
+            catch _ => pure ()
+        let response ←
+          match parsed with
+          | .error err => pure (compact <| errorResponse .null err)
+          | .ok req => do
+              -- Idle-TTL refresh: any well-formed RPC counts as user
+              -- activity, so the master KEK + per-slot unlocks behave
+              -- as an idle timeout (lock after `ttlMs` of true
+              -- silence) rather than an absolute timeout from
+              -- unlock. See `State.touchActivity` for rationale.
+              LeanKohaku.Daemon.State.touchActivity state
+              let json ← LeanKohaku.RPC.Server.dispatch (methodHandler cfg state notify) req
+              pure (compact json)
+        discard <| LeanKohaku.Daemon.Uds.write conn (response ++ "\n").toByteArray
+        LeanKohaku.Daemon.Log.write .info method ((← IO.monoMsNow) - started) true
+
+/-- Handle one wallet-daemon connection.
+
+    The dispatch path is wrapped in a `try/catch` that always
+    delivers a JSON-RPC error frame even when a handler raises an
+    IO error past its own catch (FFI panic, untranslated `throw`,
+    etc.). Without this arm the peer would observe a closed socket
+    and surface the failure on the client as `unexpected end of
+    JSON input` rather than a structured `-32603` envelope. -/
 def handleConn (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
     (conn : LeanKohaku.Daemon.Uds.Conn) : IO Unit := do
-  try
-    let started ← IO.monoMsNow
-    let sameUid ← LeanKohaku.Daemon.Uds.peerUidMatchesCurrent conn
-    if !sameUid then
+  let recover (e : IO.Error) : IO Unit := do
+    IO.eprintln s!"[daemon] handleConn raised, returning -32603: {toString e}"
+    try
       let response := compact <| errorResponse .null
-        { code := -32001, message := "peer uid rejected" }
+        { code := -32603, message := s!"internal error: {toString e}" }
       discard <| LeanKohaku.Daemon.Uds.write conn (response ++ "\n").toByteArray
-      LeanKohaku.Daemon.Log.write .warn "<peer>" ((← IO.monoMsNow) - started) false
-        (some "peer uid rejected")
-    else
-      -- `readLine` buffers across SOCK_STREAM `read(2)` chunks until
-      -- the terminating `\n`, so a request the kernel splits doesn't
-      -- truncate into a parse error here.
-      let bytes ← LeanKohaku.Daemon.Uds.readLine conn
-      match decodeRequestBytes bytes with
-      | .error err =>
-          let response := compact <| errorResponse .null
-            { parseError with data := some (.str err) }
-          discard <| LeanKohaku.Daemon.Uds.write conn (response ++ "\n").toByteArray
-          LeanKohaku.Daemon.Log.write .warn "<parse>" ((← IO.monoMsNow) - started) false
-            (some err)
-      | .ok line =>
-          let parsed := LeanKohaku.RPC.Server.parseRequest line
-          let method :=
-            match parsed with
-            | .ok req => req.method
-            | .error _ => "<parse>"
-          -- UDS-backed notifier: emit JSON-RPC notification frames
-          -- (no `id`, no `result`/`error`) on the same connection
-          -- before the final response. The CLI client buffers and
-          -- splits on `\n`, rendering each notification before
-          -- returning the response.
-          let notify : LeanKohaku.Keystore.Tpm2Runtime.Notifier :=
-            fun event params => do
-              let frame : Json := .obj #[
-                ("jsonrpc", .str "2.0"),
-                ("method", .str "notify"),
-                ("params", .obj #[
-                  ("event", .str event),
-                  ("data", params)
-                ])
-              ]
-              try
-                discard <| LeanKohaku.Daemon.Uds.write conn (compact frame ++ "\n").toByteArray
-              catch _ => pure ()
-          let response ←
-            match parsed with
-            | .error err => pure (compact <| errorResponse .null err)
-            | .ok req => do
-                -- Idle-TTL refresh: any well-formed RPC counts as user
-                -- activity, so the master KEK + per-slot unlocks behave
-                -- as an idle timeout (lock after `ttlMs` of true
-                -- silence) rather than an absolute timeout from
-                -- unlock. See `State.touchActivity` for rationale.
-                LeanKohaku.Daemon.State.touchActivity state
-                let json ← LeanKohaku.RPC.Server.dispatch (methodHandler cfg state notify) req
-                pure (compact json)
-          discard <| LeanKohaku.Daemon.Uds.write conn (response ++ "\n").toByteArray
-          LeanKohaku.Daemon.Log.write .info method ((← IO.monoMsNow) - started) true
+    catch _ => pure ()
+  let body : IO Unit := do
+    try
+      handleConnBody cfg state conn
+    catch e =>
+      recover e
+  try
+    body
   finally
     LeanKohaku.Daemon.Uds.close conn
 

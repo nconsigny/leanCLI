@@ -2,6 +2,7 @@ import LeanKohaku.Agent.State
 import LeanKohaku.Agent.Tools
 import LeanKohaku.Agent.Llm
 import LeanKohaku.Agent.Compression
+import LeanKohaku.Agent.Trace
 
 /-!
 # Bounded agent loop
@@ -27,6 +28,7 @@ namespace LeanKohaku.Agent.Loop
 open LeanKohaku.Agent
 open LeanKohaku.Agent.Tools
 open LeanKohaku.Agent.Llm
+open LeanKohaku.Agent.Trace
 open LeanKohaku.Encoding.Json
 
 /-- Convenience: render a `ToolResult` as a `tool` AgentMessage. -/
@@ -55,20 +57,31 @@ private def replaceSystemHead (msgs : Array AgentMessage) (newContent : String) 
 -- the only partial def in the agent tree; every other path is total.
 partial def runOneShot
     (s₀ : AgentState) (registry : ToolRegistry) :
-    IO (Except String AgentMessage) :=
-  runOneShotWithRebuild s₀ registry none
+    IO (Except String AgentMessage) := do
+  match ← runOneShotWithRebuildTraced s₀ registry none with
+  | .error e => pure (.error e)
+  | .ok (msg, _trace) => pure (.ok msg)
 where
   /-- Variant accepting an optional `rebuildSystem` callback. When
       present, the callback is invoked before every `Llm.chat` round
       and its result replaces the system-role head message. This is
       how Phase-1b skill activation is wired in `kohaku-agentd`
       without coupling the Phase-0 one-shot binary to the skills
-      registry. -/
-  runOneShotWithRebuild
+      registry.
+
+      Returns the final assistant message and a `Trace` of everything
+      that happened during this turn — assistant messages (with
+      optional `reasoning`), every tool call the model made, and
+      every tool reply. The trace is display-only (see
+      `Agent.Trace`) and is what the TUI's foldable per-turn trace
+      block consumes via `chat.draft`'s `agentTrace` field. -/
+  runOneShotWithRebuildTraced
       (s₀ : AgentState) (registry : ToolRegistry)
       (rebuildSystem : Option (AgentState → IO String)) :
-      IO (Except String AgentMessage) := do
+      IO (Except String (AgentMessage × Trace)) := do
     let mut s := s₀
+    let mut trace : Trace := #[]
+    let mut callIdx : Nat := 0
     let compressionPolicy : Compression.Policy := {}
     while s.steps < s.cfg.maxSteps do
       let tools := filterByAllowlist registry s.cfg.toolAllowlist
@@ -98,13 +111,23 @@ where
       match ← Llm.chat s tools with
       | .error e => return .error s!"llm error: {repr e}"
       | .ok resp =>
+          -- Record the assistant turn (its content + optional
+          -- reasoning) before any tool dispatch so the trace order
+          -- mirrors wire order.
+          trace := trace.push <|
+            TraceItem.assistant (resp.content.getD "") resp.reasoning
           if resp.toolCalls.isEmpty then
-            return .ok resp
+            return .ok (resp, trace)
           let mut s' : AgentState :=
             { s with messages := s.messages.push resp,
                      steps := s.steps + 1 }
           for tc in resp.toolCalls do
+            trace := trace.push <| TraceItem.toolCall tc.name tc.argsJson callIdx
             let result ← Tools.dispatch registry s.cfg.toolAllowlist s.cfg tc
+            let summary :=
+              truncateForTrace (Tools.resultToContent result)
+            trace := trace.push <| TraceItem.toolResult callIdx result.ok summary
+            callIdx := callIdx + 1
             s' := { s' with messages := s'.messages.push (toolMessage tc result) }
           s := s'
     return .error s!"agent budget exceeded ({s₀.cfg.maxSteps} steps)"
@@ -114,7 +137,7 @@ where
 def runOneShotWithRebuild
     (s₀ : AgentState) (registry : ToolRegistry)
     (rebuildSystem : Option (AgentState → IO String)) :
-    IO (Except String AgentMessage) :=
-  runOneShot.runOneShotWithRebuild s₀ registry rebuildSystem
+    IO (Except String (AgentMessage × Trace)) :=
+  runOneShot.runOneShotWithRebuildTraced s₀ registry rebuildSystem
 
 end LeanKohaku.Agent.Loop

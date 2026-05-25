@@ -121,11 +121,18 @@ def decodeChoiceMessage (resp : Json) : Except Error AgentMessage := do
   let some msg := getField "message" choice
     | .error (.protocol "chat response choice missing 'message'")
   let content : Option String := getField "content" msg >>= asString
+  -- `reasoning_content` is the OpenAI-compat field Qwen3.5 and some
+  -- R1 backends emit alongside `content`. Captured here purely so
+  -- `Agent.Trace` can surface it in the TUI's foldable trace block —
+  -- it is NOT echoed back to the model and never influences signing.
+  let reasoning : Option String :=
+    getField "reasoning_content" msg >>= asString
   let toolCalls := parseToolCalls msg
   .ok {
     role := .assistant,
     content := content,
-    toolCalls := toolCalls
+    toolCalls := toolCalls,
+    reasoning := reasoning
   }
 
 /-- One chat-completions round-trip. Returns the assistant message

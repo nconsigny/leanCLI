@@ -3,6 +3,7 @@ import LeanKohaku.Agent.Prompt
 import LeanKohaku.Agent.Tools
 import LeanKohaku.Agent.Registry
 import LeanKohaku.Agent.Loop
+import LeanKohaku.Agent.Trace
 import LeanKohaku.Agent.Session
 import LeanKohaku.Agent.Skills
 import LeanKohaku.Agent.Memory
@@ -356,17 +357,24 @@ private def opRunTurn (st : DaemonState) (params : Json) : IO Json := do
        let incog ← isIncognito st sid
        match ← Loop.runOneShotWithRebuild s₀ toolReg (some rebuild) with
        | .error e => pure (errResp "agent" e)
-       | .ok finalMsg => do
+       | .ok (finalMsg, trace) => do
            try appendIfNotIncognito st sid finalMsg
            catch _ => pure ()
            let raw := finalMsg.content.getD ""
+           -- `trace` rides on the existing chat.draft reply via the
+           -- agentd wire (`result.trace`). It is display-only — the
+           -- TUI's foldable trace block is the only consumer.
+           -- `toolTurns` is preserved for backward compat with older
+           -- clients; new clients should prefer counting `tool_call`
+           -- items in `trace`.
            pure (okResp <| .obj #[
              ("session_id", .num (Int.ofNat sid)),
              ("raw",        .str raw),
              ("backend",    .str "lean-agent"),
              ("model",      .str cfg.model),
              ("incognito",  .bool incog),
-             ("toolTurns",  .num (Int.ofNat finalMsg.toolCalls.length))
+             ("toolTurns",  .num (Int.ofNat finalMsg.toolCalls.length)),
+             ("trace",      Trace.toJson trace)
            ])
      catch e =>
        pure (errResp "io" s!"run_turn raised: {toString e}")
@@ -584,37 +592,64 @@ def dispatch (st : DaemonState) (req : Json) : IO Json := do
   | other =>
       pure (errResp "bad_request" s!"unknown op: {other}")
 
-/-- Decode a single line from a connection. The wire frame is
-    newline-delimited JSON; we receive whatever the peer has sent so
-    far (up to 64 KiB per read) and treat the first line as the
-    request. -/
+/-- Decode the request line bytes (the wire frame is newline-delimited
+    JSON). `readLine` already stripped the trailing `\n`. -/
 private def decodeRequestBytes (bytes : ByteArray) : Except String String :=
   match String.fromUTF8? bytes with
   | some s => .ok s.trimAscii.toString
   | none => .error "request was not valid UTF-8"
 
+/-- Body of `handleConn` — read one request line, dispatch, write
+    one response line. Extracted so it can be wrapped in a
+    `try/catch` that converts any escaping IO error into a
+    structured wire frame. -/
+private def handleConnBody (st : DaemonState) (conn : Conn) : IO Unit := do
+  let sameUid ← peerUidMatchesCurrent conn
+  if !sameUid then
+    let response := compact (errResp "auth" "peer uid rejected")
+    discard <| write conn (response ++ "\n").toByteArray
+  else
+    -- `readLine` buffers across SOCK_STREAM `read(2)` chunks so a
+    -- request the kernel splits doesn't get truncated mid-JSON.
+    let bytes ← LeanKohaku.Transport.Uds.readLine conn
+    match decodeRequestBytes bytes with
+    | .error err =>
+        let response := compact (errResp "bad_request" err)
+        discard <| write conn (response ++ "\n").toByteArray
+    | .ok line =>
+        match parse line with
+        | .error e =>
+            let response := compact (errResp "bad_request" s!"json parse: {e}")
+            discard <| write conn (response ++ "\n").toByteArray
+        | .ok req =>
+            let response ← dispatch st req
+            discard <| write conn (compact response ++ "\n").toByteArray
+
 /-- Handle one connection: read request line, dispatch, write
-    response line, close. -/
+    response line, close.
+
+    The dispatch path is wrapped in a `try/catch` that always
+    produces a wire response even when a handler raises an IO error
+    that escaped its own catch (panic from a C shim, a tool that
+    forgot to translate `IO.Error` into `.appError`, etc.). Without
+    this arm, an uncaught throw would skip the `write` and the peer
+    would observe a closed socket — surfacing on the client as a
+    parse error on an empty reply (`unexpected end of JSON input`)
+    rather than a structured `kind:"io"` envelope. -/
 def handleConn (st : DaemonState) (conn : Conn) : IO Unit := do
-  try
-    let sameUid ← peerUidMatchesCurrent conn
-    if !sameUid then
-      let response := compact (errResp "auth" "peer uid rejected")
+  let recover (e : IO.Error) : IO Unit := do
+    IO.eprintln s!"[agentd] handleConn raised, returning io error: {toString e}"
+    try
+      let response := compact (errResp "io" s!"handleConn raised: {toString e}")
       discard <| write conn (response ++ "\n").toByteArray
-    else
-      let bytes ← read conn
-      match decodeRequestBytes bytes with
-      | .error err =>
-          let response := compact (errResp "bad_request" err)
-          discard <| write conn (response ++ "\n").toByteArray
-      | .ok line =>
-          match parse line with
-          | .error e =>
-              let response := compact (errResp "bad_request" s!"json parse: {e}")
-              discard <| write conn (response ++ "\n").toByteArray
-          | .ok req =>
-              let response ← dispatch st req
-              discard <| write conn (compact response ++ "\n").toByteArray
+    catch _ => pure ()
+  let body : IO Unit := do
+    try
+      handleConnBody st conn
+    catch e =>
+      recover e
+  try
+    body
   finally
     close conn
 
