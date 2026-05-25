@@ -172,9 +172,15 @@ private def resolveAgentSocket : IO String := do
       let runtime ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
         | some d => pure d
         | none =>
-            match ← IO.getEnv "UID" with
-            | some uid => pure s!"/run/user/{uid}"
-            | none => pure "/tmp"
+            -- macOS launchd sets TMPDIR to a per-user mode-0700 dir
+            -- under /var/folders/...; treat it as the XDG_RUNTIME_DIR
+            -- equivalent before falling back further.
+            match ← IO.getEnv "TMPDIR" with
+            | some d => pure d
+            | none =>
+                match ← IO.getEnv "UID" with
+                | some uid => pure s!"/run/user/{uid}"
+                | none => pure "/tmp"
       pure s!"{runtime}/leankohaku/agent.sock"
 
 /-- Send a single newline-delimited JSON frame on `socketPath` and

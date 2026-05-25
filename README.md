@@ -98,6 +98,39 @@ nix develop
 The Arch Linux scaffold lives in `packaging/arch/`. Replace the placeholder
 repository URL before publishing a package.
 
+### macOS notes
+
+Untested on the author's machine — neither CI nor the author runs macOS
+day-to-day — but the build is structured to work there. If something
+breaks, this section is the first place to look.
+
+Prereqs (Homebrew):
+
+```bash
+brew install elan-init cmake ninja git
+# Xcode Command Line Tools provide `cc`/`clang`, libsqlite3, and libcurl:
+xcode-select --install
+# Optional: only needed for the Ink TUI (`tui/`) and any Node sidecar:
+brew install node
+```
+
+Then the standard `kohakuspawn` / `lake build` flow works the same as
+on Linux. systemd-related steps no-op (kohakuspawn checks
+`command -v systemctl`); the daemons run via autospawn instead.
+
+Runtime-dir behavior: macOS doesn't set `XDG_RUNTIME_DIR`, so the
+daemons fall back to `$TMPDIR` (launchd's per-user mode-0700 dir
+under `/var/folders/...`). UDS paths become e.g.
+`$TMPDIR/leankohaku/leankohaku.sock` — same posture as on Linux, just
+under a longer prefix. macOS's `sun_path` limit is 104 bytes; if you
+ever hit "UDS path is too long", set `LEANKOHAKU_SOCKET` /
+`KOHAKU_AGENT_SOCKET` to a shorter absolute path.
+
+Native helpers: the HACL and secp256k1 setup scripts assume `cc`,
+`cmake`, `ninja`, and (HACL only) `cargo` on `PATH` — all available
+via brew. The Secure Enclave / TPM2 runtime layers are modeled in
+the keystore but not wired up; software-fallback keystores work.
+
 ## Configure RPC
 
 Two commands cover everything — each one propagates to balance, send,

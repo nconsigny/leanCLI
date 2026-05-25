@@ -69,9 +69,15 @@ def resolveAgentSocket : IO String := do
       let runtime ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
         | some d => pure d
         | none =>
-            match ← IO.getEnv "UID" with
-            | some uid => pure s!"/run/user/{uid}"
-            | none => pure "/tmp"
+            -- macOS launchd sets TMPDIR to a per-user mode-0700 dir
+            -- under /var/folders/...; treat it as the XDG_RUNTIME_DIR
+            -- equivalent before falling back further.
+            match ← IO.getEnv "TMPDIR" with
+            | some d => pure d
+            | none =>
+                match ← IO.getEnv "UID" with
+                | some uid => pure s!"/run/user/{uid}"
+                | none => pure "/tmp"
       pure s!"{runtime}/leankohaku/agent.sock"
 
 /-- Send a single newline-delimited JSON frame on `socketPath`
@@ -149,7 +155,10 @@ def cmdEdit : IO UInt32 := do
   -- the same mode posture as the socket dir.
   let runtime ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
     | some d => pure d
-    | none => pure "/tmp"
+    | none =>
+        match ← IO.getEnv "TMPDIR" with
+        | some d => pure d
+        | none => pure "/tmp"
   let stageDir : System.FilePath := (System.FilePath.mk runtime) / "leankohaku"
   try IO.FS.createDirAll stageDir catch _ => pure ()
   -- Suffix the file with the PID for a per-invocation work area;

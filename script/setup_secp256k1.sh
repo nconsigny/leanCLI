@@ -19,6 +19,7 @@ if [[ "${#missing[@]}" -ne 0 ]]; then
   echo "missing secp256k1 build tools: ${missing[*]}" >&2
   echo "Ubuntu: sudo apt install git cmake ninja-build gcc" >&2
   echo "Arch:   sudo pacman -S git cmake ninja gcc" >&2
+  echo "macOS:  brew install git cmake ninja && xcode-select --install   # cc via Xcode Command Line Tools" >&2
   exit 1
 fi
 

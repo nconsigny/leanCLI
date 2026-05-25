@@ -48,7 +48,10 @@ private def resolveDaemonSocket : IO String := do
       | none =>
           let runtime ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
             | some d => pure d
-            | none => pure "/tmp"
+            | none =>
+                match ← IO.getEnv "TMPDIR" with
+                | some d => pure d
+                | none => pure "/tmp"
           pure s!"{runtime}/leankohaku/leankohaku.sock"
 
 private def resolveLlmUrl : IO String := do

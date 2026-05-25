@@ -18,10 +18,19 @@ open LeanKohaku.Encoding.Json
 open LeanKohaku.Privacy.NetworkPolicy
 open LeanKohaku.RPC.Outbound
 
+/-- Resolve the per-user runtime directory hosting the wallet UDS
+    socket. Linux services (and Linux-rooted Lake builds) set
+    `XDG_RUNTIME_DIR` to a mode-0700 tmpfs (`/run/user/<uid>`); macOS
+    has no equivalent but launchd points `TMPDIR` at a per-user mode-
+    0700 dir under `/var/folders/...`. We accept both before falling
+    through to the world-readable `/tmp` of last resort. -/
 def runtimeDir : IO String := do
   match ← IO.getEnv "XDG_RUNTIME_DIR" with
   | some dir => pure dir
-  | none => pure "/tmp"
+  | none =>
+      match ← IO.getEnv "TMPDIR" with
+      | some dir => pure dir
+      | none => pure "/tmp"
 
 def defaultSocketPath : IO String := do
   pure s!"{← runtimeDir}/leankohaku/leankohaku.sock"

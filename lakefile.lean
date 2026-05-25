@@ -11,36 +11,46 @@ package "leanKohaku" where
     ⟨`pp.unicode.fun, true⟩,
     ⟨`autoImplicit, false⟩
   ]
-  -- libcurl is consumed transitively by liblean_http (see below) and
-  -- linked into every executable that pulls it in. We use weakLinkArgs
-  -- rather than moreLinkArgs because changing the linker line for a
-  -- system library should not invalidate Lean compilation caches.
+  -- libcurl + libsqlite3 are consumed transitively by liblean_http and
+  -- liblean_sqlite (see below) and linked into every executable that
+  -- pulls them in. We use weakLinkArgs rather than moreLinkArgs because
+  -- changing the linker line for a system library should not invalidate
+  -- Lean compilation caches.
   --
-  -- We pass the absolute path to /usr/lib/libcurl.so to the linker
-  -- rather than `-L/usr/lib -lcurl`: the Lean toolchain links against
-  -- its own bundled glibc via `--sysroot`, so a bare `-L/usr/lib`
-  -- accidentally drags in the host's current glibc (which on Arch is
-  -- newer than the bundled one and removes symbols like
-  -- `__libc_csu_init` that Scrt1.o still references). The absolute-
-  -- path form only loads libcurl itself; libcurl's transitive deps
-  -- (libnghttp2, libssl, …) come from the host's runtime linker
-  -- search at execution time via DT_NEEDED entries on libcurl.so.4.
-  weakLinkArgs := #[
-    "/usr/lib/libcurl.so",
-    -- libsqlite3 is the runtime dep for liblean_sqlite (Phase 1a
-    -- persistent agent sessions). Same absolute-path form as libcurl
-    -- to avoid the bundled-glibc / host-glibc mismatch that bare
-    -- `-L/usr/lib -lsqlite3` would trigger.
-    "/usr/lib/libsqlite3.so",
-    -- libsqlite3 references libpthread/libdl/libm/libc symbols via
-    -- DT_NEEDED, but the Lean toolchain's bundled lld defaults to
-    -- --no-allow-shlib-undefined. libcurl avoids the problem because
-    -- its transitive deps are all third-party libs; libsqlite3 needs
-    -- libpthread/libdl (merged into glibc 2.34+) which the bundled
-    -- sysroot does not advertise. Standard fix for "trust DT_NEEDED
-    -- at runtime" is to allow undefined symbols from shared libs.
-    "-Wl,--allow-shlib-undefined"
-  ]
+  -- The Linux and macOS link lines diverge in two ways:
+  --
+  -- * Library form. On Linux we pass absolute paths to the system
+  --   `.so`s rather than `-L/usr/lib -lcurl`: the Lean toolchain links
+  --   against its own bundled glibc via `--sysroot`, so a bare
+  --   `-L/usr/lib` accidentally drags in the host's current glibc
+  --   (which on Arch is newer than the bundled one and removes symbols
+  --   like `__libc_csu_init` that Scrt1.o still references). The
+  --   absolute-path form only loads libcurl itself; libcurl's
+  --   transitive deps (libnghttp2, libssl, …) come from the host's
+  --   runtime linker search via DT_NEEDED entries on libcurl.so.4. On
+  --   macOS the bundled-glibc trap doesn't exist (clang+ld64 link
+  --   against the SDK stub libs), library files end in `.dylib`, and
+  --   on Apple Silicon they live in `/opt/homebrew/lib` — not
+  --   `/usr/lib` — so a hardcoded absolute path is the wrong default.
+  --   Bare `-lcurl -lsqlite3` is what works there.
+  --
+  -- * Undefined-symbol policy. On Linux libsqlite3 references
+  --   libpthread/libdl/libm/libc via DT_NEEDED, but the bundled lld
+  --   defaults to `--no-allow-shlib-undefined`; we relax that with
+  --   `-Wl,--allow-shlib-undefined`. Apple's ld64 has no such flag
+  --   (and rejects it), so we omit it on macOS — the SDK libs are
+  --   self-contained against the same SDK.
+  --
+  -- Untested on macOS — neither the author nor the runtime CI has a
+  -- Mac at the time of writing. If `lake build` fails on macOS the
+  -- failure is almost certainly here.
+  weakLinkArgs :=
+    if System.Platform.isOSX then
+      #["-lcurl", "-lsqlite3"]
+    else
+      #["/usr/lib/libcurl.so",
+        "/usr/lib/libsqlite3.so",
+        "-Wl,--allow-shlib-undefined"]
 
 lean_lib LeanKohaku where
 

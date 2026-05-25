@@ -19,6 +19,7 @@ if [[ "${#missing[@]}" -ne 0 ]]; then
   echo "missing HACL build tools: ${missing[*]}" >&2
   echo "Ubuntu: sudo apt install git cmake ninja-build gcc" >&2
   echo "Arch:   sudo pacman -S git cmake ninja gcc" >&2
+  echo "macOS:  brew install git cmake ninja rustup-init && rustup-init -y && xcode-select --install   # cc/cargo via Xcode CLT + rustup" >&2
   exit 1
 fi
 

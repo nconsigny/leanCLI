@@ -17,10 +17,18 @@ structure RpcError where
   message : String
   deriving Repr
 
+/-- Resolve the per-user runtime directory hosting the wallet UDS
+    socket. Mirrors `LeanKohaku.Daemon.Config.runtimeDir`: prefers
+    `XDG_RUNTIME_DIR` (Linux), then `TMPDIR` (macOS per-user mode-
+    0700 dir under `/var/folders/...`), then the world-readable
+    `/tmp` of last resort. -/
 def runtimeDir : IO String := do
   match ← IO.getEnv "XDG_RUNTIME_DIR" with
   | some dir => pure dir
-  | none => pure "/tmp"
+  | none =>
+      match ← IO.getEnv "TMPDIR" with
+      | some dir => pure dir
+      | none => pure "/tmp"
 
 def defaultSocketPath : IO String := do
   pure s!"{← runtimeDir}/leankohaku/leankohaku.sock"
