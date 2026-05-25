@@ -33,10 +33,10 @@ type Phase =
   | { kind: "book-empty"; protocol: Protocol }
   | { kind: "book-pick"; protocol: Protocol; entries: BookEntry[] }
   /* derive-on-this-wallet path */
-  | { kind: "derive-prep" }
+  | { kind: "derive-prep"; protocol: Protocol }
   | { kind: "derive-running"; nextIdx: number; protocol: Protocol; label?: string }
   | { kind: "derive-form"; nextIdx: number; protocol: Protocol }
-  | { kind: "derive-error"; message: string }
+  | { kind: "derive-error"; message: string; protocol: Protocol }
   /* amount entry (post-recipient) */
   | {
       kind: "amount";
@@ -137,11 +137,11 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
       const existing = r.ok ? r.result?.accounts ?? [] : [];
       const nextIdx = nextHardenedAccount(existing.map((a) => a.path ?? ""));
       // The form just collects an optional label; the path is derived
-      // from `nextIdx`. We're keeping it under the source-picker
-      // phase so the user has somewhere to come back to.
+      // from `nextIdx`. Carry the protocol forward from derive-prep so
+      // the eventual unshield dispatch hits the right RPC.
       setPhase((prev) =>
         prev.kind === "derive-prep"
-          ? { kind: "derive-form", nextIdx, protocol: "pp" }
+          ? { kind: "derive-form", nextIdx, protocol: prev.protocol }
           : prev,
       );
     })();
@@ -206,15 +206,9 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
           arrowNav
           onBack={() => setPhase({ kind: "pickProtocol" })}
           onSelect={(it) => {
-            if (it.value === "derive") setPhase({ kind: "derive-prep" });
+            if (it.value === "derive") setPhase({ kind: "derive-prep", protocol });
             else if (it.value === "book") setPhase({ kind: "book-loading", protocol });
             else setPhase({ kind: "paste", protocol });
-            // Stash the protocol so derive-prep/derive-form can advance
-            // to amount with it (derive doesn't carry it through the
-            // RPC, so we re-attach below).
-            if (it.value === "derive") {
-              setPhase({ kind: "derive-prep" });
-            }
           }}
         />
         <Box marginTop={1}>
@@ -379,7 +373,9 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
             source: "derive",
           })
         }
-        onError={(message) => setPhase({ kind: "derive-error", message })}
+        onError={(message) =>
+          setPhase({ kind: "derive-error", message, protocol: phase.protocol })
+        }
       />
     );
   }
@@ -390,7 +386,7 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
         <Box marginTop={1}>
           <Select
             items={[{ label: "← Back", value: "back" }]}
-            onSelect={() => setPhase({ kind: "pickProtocol" })}
+            onSelect={() => setPhase({ kind: "pickSource", protocol: phase.protocol })}
           />
         </Box>
       </Layout>
