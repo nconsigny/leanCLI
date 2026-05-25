@@ -124,8 +124,15 @@ export default function UnlockEoaStep({
         return;
       }
       const status = ms.result!;
-      const enrolled = status.enrolledEoas.includes(wallet.name);
-      const custom = status.customEoas.includes(wallet.name);
+      // The daemon's bucket arrays index by SLOT NAME (e.g. "leanWallet"),
+      // but `wallet.name` here can be the sub-account display form
+      // ("leanWallet/0") for BIP-44 sub-accounts. Strip everything after
+      // the first '/' so the lookup matches the daemon's keys; otherwise
+      // every sub-account would falsely fall into the needs-enrolment
+      // branch even when the underlying slot is fully enrolled.
+      const slotKey = wallet.name.split("/")[0] ?? wallet.name;
+      const enrolled = status.enrolledEoas.includes(slotKey);
+      const custom = status.customEoas.includes(slotKey);
 
       if (custom) {
         // User explicitly set a per-slot passphrase; that's the only way
