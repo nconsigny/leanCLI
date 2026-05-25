@@ -43,6 +43,7 @@ import UnstickFlow from "./screens/UnstickFlow.js";
 import ArchivedAccountsScreen from "./screens/ArchivedAccountsScreen.js";
 import { archiveKey, toggleArchive } from "./archiveStore.js";
 import PrivacyMenu from "./screens/PrivacyMenu.js";
+import RailgunMenu from "./screens/RailgunMenu.js";
 import NetworkScreen from "./screens/NetworkScreen.js";
 import NetworkMonitor from "./screens/NetworkMonitor.js";
 import StatusFlow from "./screens/StatusFlow.js";
@@ -104,6 +105,7 @@ type Screen =
   | { kind: "import-eoa" }
   | { kind: "private" }
   | { kind: "privacy" }
+  | { kind: "railgun" }
   | { kind: "network" }
   | { kind: "network-monitor" }
   | { kind: "status" }
@@ -440,11 +442,14 @@ export default function App() {
           onPick={(a) => {
             if (a === "back") return pop();
             if (a === "privacy-pools") push({ kind: "privacy" });
+            else if (a === "railgun") push({ kind: "railgun" });
           }}
         />
       );
     case "privacy":
       return <PrivacyMenu onDone={pop} />;
+    case "railgun":
+      return <RailgunMenu onDone={pop} />;
     case "network":
       return (
         <NetworkScreen

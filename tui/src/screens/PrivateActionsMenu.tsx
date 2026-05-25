@@ -10,11 +10,10 @@ type Props = {
   onPick: (a: PrivateActionPick) => void;
 };
 
-/** "Private actions" hub — shielded transfer systems live here. Today
- *  Privacy Pools is the only wired-up backend; the Railgun row is dim
- *  and a no-op so the roadmap is visible without dropping into a
- *  half-implemented flow (the dim hint rides on the leading `\x01` byte
- *  that `Select`'s itemComponent strips before rendering). */
+/** "Private actions" hub — shielded transfer systems. Both backends are
+ *  live: Privacy Pools v1 (0xBow) and Railgun. Shield deposits start
+ *  from a wallet's "shield" action (which picks the protocol there);
+ *  this hub is for post-deposit operations (balance, unshield, etc.). */
 export default function PrivateActionsMenu({ onPick }: Props) {
   useInput((input, key) => {
     if (key.escape || input === "q") onPick("back");
@@ -22,11 +21,11 @@ export default function PrivateActionsMenu({ onPick }: Props) {
 
   const items = [
     {
-      label: "Privacy Pools — balance · shield · unshield · mnemonic",
+      label: "Privacy Pools — balance · unshield · mnemonic",
       value: "privacy-pools" as PrivateActionPick,
     },
     {
-      label: "\x01Railgun — coming soon (not yet supported)",
+      label: "Railgun — balance",
       value: "railgun" as PrivateActionPick,
     },
     { label: "← Back", value: "back" as PrivateActionPick },
@@ -53,16 +52,13 @@ export default function PrivateActionsMenu({ onPick }: Props) {
             items={items}
             arrowNav
             onBack={() => onPick("back")}
-            onSelect={(it) => {
-              if (it.value === "railgun") return; // dim row — no-op on enter
-              onPick(it.value);
-            }}
+            onSelect={(it) => onPick(it.value)}
           />
         </Box>
         <Box marginTop={1}>
           <Text color={theme.dim}>
-            Railgun integration is on the roadmap — the row will light up
-            the moment the daemon-side bridge ships.
+            To shield ETH into a pool, use the "shield" action from a
+            wallet — protocol is picked there.
           </Text>
         </Box>
       </Box>

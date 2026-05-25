@@ -3,6 +3,7 @@ import { Box, Text } from "ink";
 import { Wallet } from "../types.js";
 import { Layout, Banner } from "../widgets/Layout.js";
 import Form, { Field } from "../widgets/Form.js";
+import Select from "../widgets/Select.js";
 import RpcRunner from "../widgets/RpcRunner.js";
 import { theme } from "../theme.js";
 import { hexToBigInt, formatEth } from "../format.js";
@@ -13,19 +14,28 @@ type Props = {
   onDone: (success: boolean) => void;
 };
 
+type Protocol = "pp" | "railgun";
+
 type Phase =
-  | { kind: "form" }
-  | { kind: "unlock"; v: Record<string, string> }
-  | { kind: "deposit"; v: Record<string, string> }
+  | { kind: "pickProtocol" }
+  | { kind: "form"; protocol: Protocol }
+  | { kind: "unlock"; protocol: Protocol; v: Record<string, string> }
+  | { kind: "deposit"; protocol: Protocol; v: Record<string, string> }
   | { kind: "error"; message: string };
 
-/** Privacy-Pools deposit. Two distinct secrets:
- *   1. EOA passphrase  → daemon `eoa.unlock`
- *   2. PP passphrase   → daemon `shielded.deposit`
- *  Kept separate so a leak of one doesn't compromise the other. TPM
- *  wallets are gated out at the action menu, but we double-check here. */
+/** Shield deposit. User first picks the privacy protocol (Privacy Pools
+ *  v1 or Railgun), then unlocks the EOA, then deposits.
+ *
+ *  Two distinct secrets per protocol:
+ *    EOA passphrase  → daemon `eoa.unlock`
+ *    Protocol secret → daemon `shielded.deposit` (PP) or `shielded.railgun.shield`
+ *  Kept separate so a leak of one doesn't compromise the other. Each
+ *  protocol has its own on-disk encrypted store (PpSecretStore /
+ *  RgSecretStore) — no shared key material between them.
+ *
+ *  TPM wallets are gated out at the action menu, but we double-check here. */
 export default function ShieldFlow({ wallet, onDone }: Props) {
-  const [phase, setPhase] = useState<Phase>({ kind: "form" });
+  const [phase, setPhase] = useState<Phase>({ kind: "pickProtocol" });
 
   if (wallet.kind !== "eoa") {
     return (
@@ -42,10 +52,39 @@ export default function ShieldFlow({ wallet, onDone }: Props) {
     );
   }
 
+  if (phase.kind === "pickProtocol") {
+    return (
+      <Layout
+        title={`Shield from ${wallet.name}`}
+        subtitle="pick a privacy backend"
+        hint="↑/↓ move · → / enter select · ← / esc cancel"
+      >
+        <Select
+          items={[
+            {
+              label: "Privacy Pools v1 (0xBow) — Sepolia · ASP-gated unshield",
+              value: "pp" as Protocol,
+            },
+            {
+              label: "Railgun — Sepolia · POI-gated · 4337 + 7702 unshield",
+              value: "railgun" as Protocol,
+            },
+          ]}
+          arrowNav
+          onBack={() => onDone(false)}
+          onSelect={(it) => setPhase({ kind: "form", protocol: it.value })}
+        />
+      </Layout>
+    );
+  }
+
   if (phase.kind === "form") {
     // EOA unlock has been factored out into UnlockEoaStep — the form
-    // now only collects the amount and the PP passphrase (a distinct
-    // secret from the EOA passphrase by design).
+    // now only collects the amount and the protocol-specific passphrase.
+    const passLabel =
+      phase.protocol === "pp"
+        ? "Privacy Pool passphrase"
+        : "Railgun passphrase";
     const fields: Field[] = [
       {
         name: "amountEth",
@@ -55,52 +94,62 @@ export default function ShieldFlow({ wallet, onDone }: Props) {
           /^[0-9]+(\.[0-9]+)?$/.test(v) ? null : "expected a decimal ETH amount",
       },
       {
-        name: "ppPass",
-        label: "Privacy Pool passphrase",
+        name: "protocolPass",
+        label: passLabel,
         secret: true,
         validate: (v) => (v.length === 0 ? "required" : null),
       },
     ];
+    const title =
+      phase.protocol === "pp"
+        ? `Shield from ${wallet.name} → Privacy Pools`
+        : `Shield from ${wallet.name} → Railgun`;
     return (
-      <Layout title={`Shield from ${wallet.name}`}>
+      <Layout title={title}>
         <Form
           fields={fields}
-          onSubmit={(v) => setPhase({ kind: "unlock", v })}
-          onCancel={() => onDone(false)}
+          onSubmit={(v) => setPhase({ kind: "unlock", protocol: phase.protocol, v })}
+          onCancel={() => setPhase({ kind: "pickProtocol" })}
         />
       </Layout>
     );
   }
 
   if (phase.kind === "unlock") {
-    // Auto-routes through master KEK when available, prompts per-slot
-    // otherwise. Then auto-advance to deposit.
     return (
       <UnlockEoaStep
         wallet={wallet}
-        onUnlocked={() => setPhase({ kind: "deposit", v: phase.v })}
+        onUnlocked={() =>
+          setPhase({ kind: "deposit", protocol: phase.protocol, v: phase.v })
+        }
         onCancel={() => onDone(false)}
       />
     );
   }
 
   if (phase.kind === "deposit") {
+    const isRailgun = phase.protocol === "railgun";
+    const method = isRailgun ? "shielded.railgun.shield" : "shielded.deposit";
+    const subtitle = isRailgun
+      ? "Railgun · Sepolia"
+      : "Privacy Pools v1 · Sepolia";
     return (
       <RpcRunner
         title={`Shielding ${phase.v.amountEth} ETH from ${wallet.name}`}
-        subtitle="Privacy Pools v1 · Sepolia"
-        method="shielded.deposit"
+        subtitle={subtitle}
+        method={method}
         params={{
           name: wallet.name,
           amountEth: phase.v.amountEth,
-          passphrase: phase.v.ppPass,
+          passphrase: phase.v.protocolPass,
         }}
-        // First-run PP state sync can take 10+ minutes — the SDK
-        // walks every relevant on-chain event from the pool's birth.
-        // Cached runs return in seconds. 20-minute window covers both
-        // with margin so the TUI doesn't give up before the daemon
-        // does. Bridge stderr is captured (slice 32) so a real error
-        // still surfaces.
+        // First-run state sync can take 10+ minutes — both protocols
+        // walk every relevant on-chain event from their pool's birth
+        // (PP: 0xBow entrypoint deployment; Railgun: smart wallet
+        // deployment + POI start block). Cached runs return in seconds.
+        // 20-minute window covers both with margin so the TUI doesn't
+        // give up before the daemon does. Bridge stderr is captured so
+        // a real error still surfaces.
         timeoutMs={20 * 60 * 1000}
         renderResult={(r) => <ShieldResult result={r} />}
         onDone={onDone}
