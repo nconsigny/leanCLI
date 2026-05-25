@@ -226,6 +226,13 @@ structure Config where
   -- chain name. Read by `sphincs.account.send`; populated from
   -- `daemon.json`'s `sphincs_bundlers` block.
   sphincsBundlers : Array (String × String) := #[]
+  -- Why: hard cap on the number of BIP-44 indices the trusted-registry
+  -- RPC (`wallet.lean_verified_addresses`, Phase 1d) will enumerate per
+  -- path. Lower = stricter forward-privacy at the cost of less context
+  -- in the agent's system prompt. The handler clamps user-supplied
+  -- `count` to this value; a request for more is silently capped, not
+  -- errored. See `docs/PHASE1D_THREAT_MODEL.md` §2 for the rationale.
+  trustedRegistryMaxPerPath : Nat := 5
 
 instance : Repr Config where
   reprPrec cfg _ :=
@@ -606,6 +613,32 @@ private def deriveAddressFromSeed (seed : ByteArray) (path : String) :
       false
     let address ← expectExcept <| ← LeanKohaku.Wallet.Address.addressFromUncompressedPubkeyIO pub
     LeanKohaku.Wallet.Address.eip55Checksum address
+  catch e =>
+    pure (.error e.toString)
+
+/-- Stable per-seed identifier used by the trusted-registry RPC.
+
+Defined as the lowercased 16-character hex prefix (first 8 bytes) of
+`keccak256(masterCompressedPubkey)`, where `masterCompressedPubkey` is
+BIP-32's compressed master public key (33 bytes). The input is a
+public quantity (anyone with a single non-hardened child pubkey can
+derive it), so the fingerprint leaks no secret.
+
+See `docs/PHASE1D_THREAT_MODEL.md` §"Seed fingerprint definition" for
+the rationale. Used by `wallet.lean_verified_addresses` to let the
+agent detect seed rotation between sessions without ever observing
+the seed itself. -/
+private def seedFingerprintFromSeed (seed : ByteArray) :
+    IO (Except String String) := do
+  try
+    let master ← expectExcept (← LeanKohaku.Wallet.HDKey.fromSeedIO seed)
+    let pub ← expectExcept <| ← LeanKohaku.Crypto.Secp256k1Native.pubkeyIO
+      (LeanKohaku.Crypto.Hex.encode (LeanKohaku.Wallet.HDKey.Nat.toFixedBytes 32 master.key))
+      true
+    let digest ← expectExcept <| ← LeanKohaku.Crypto.Hacl.keccak256EthereumIO
+      (LeanKohaku.Crypto.Hex.encode pub)
+    -- Take 8 bytes ⇒ 16 hex chars; lowercased by `Hex.encode`.
+    pure (.ok ("0x" ++ LeanKohaku.Crypto.Hex.encode (LeanKohaku.Wallet.HDKey.take digest 0 8)))
   catch e =>
     pure (.error e.toString)
 
@@ -6665,6 +6698,136 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                 let updated := { m with ttlMs := newTtl }
                 LeanKohaku.Keystore.MasterPassphrase.saveManifest updated
                 pure <| .ok <| .obj #[("ttlMs", .num (Int.ofNat newTtl))]
+  | "wallet.lean_verified_addresses" =>
+      -- Phase 1d: trusted-registry RPC. Returns the BIP-44-derived
+      -- addresses for currently-unlocked seeds, plus any TPM-backed R1
+      -- accounts. Read-only; no chain I/O. See
+      -- `docs/PHASE1D_THREAT_MODEL.md` for the full threat model.
+      --
+      -- Params (all optional):
+      --   paths      : Array String — defaults to ["m/44'/60'/0'/0", "m/44'/60'/0'/1"]
+      --                Anything outside that allowlist is rejected
+      --                with `bad_path` (no arbitrary BIP-32 walks).
+      --   count      : Nat — per-path enumeration window; clamped to
+      --                `cfg.trustedRegistryMaxPerPath` (default 5).
+      --                Clamped silently, not errored — see threat 2.
+      --   includeR1  : Bool — default true. When false, omits TPM-
+      --                backed R1 entries.
+      --
+      -- Failure modes documented in the threat model:
+      --   `locked`     — no seeds unlocked
+      --   `bad_path`   — caller asked for a non-allowlisted prefix
+      --
+      -- The handler must NOT touch any signing primitive, must NOT
+      -- call out to a node, and must NOT export private keys.
+      let allowedPrefixes : List String :=
+        ["m/44'/60'/0'/0", "m/44'/60'/0'/1"]
+      let defaultPaths : Array String :=
+        #["m/44'/60'/0'/0", "m/44'/60'/0'/1"]
+      let paths : Array String :=
+        match getField "paths" req.params with
+        | some (.arr arr) => arr.filterMap (fun j => asString j)
+        | _ => defaultPaths
+      let requestedCount := paramNatD req.params "count" 5
+      let count := min requestedCount cfg.trustedRegistryMaxPerPath
+      let includeR1 :=
+        match getField "includeR1" req.params >>= asBool with
+        | some b => b
+        | none => true
+      -- Path-allowlist gate (threat 4).
+      let badPath? : Option String :=
+        paths.toList.find? (fun p => !(allowedPrefixes.contains p))
+      match badPath? with
+      | some bp =>
+          pure <| .ok <| .obj #[
+            ("ok", .bool false),
+            ("error", .obj #[
+              ("kind", .str "bad_path"),
+              ("msg",  .str s!"path '{bp}' is not in the allowlist")
+            ])
+          ]
+      | none =>
+      let unlockedSlots ← LeanKohaku.Daemon.State.unlockedNames state
+      -- Locked-seed gate (threat 3). We refuse before any derivation
+      -- even tries to run.
+      if unlockedSlots.isEmpty && (!includeR1) then
+        pure <| .ok <| .obj #[
+          ("ok", .bool false),
+          ("error", .obj #[
+            ("kind", .str "locked"),
+            ("msg",  .str "no seeds unlocked; run wallet.unlock or eoa.unlock first")
+          ])
+        ]
+      else
+      -- Resolve actual slot records (skip silently if expired between
+      -- the name fetch and the slot fetch — TTL races are not errors).
+      let mut entries : Array Json := #[]
+      let mut fingerprints : Array String := #[]
+      for name in unlockedSlots do
+        match ← LeanKohaku.Daemon.State.getUnlocked? state name with
+        | none => pure ()
+        | some slot =>
+            -- Per-slot fingerprint (best-effort; failure is non-fatal).
+            match ← seedFingerprintFromSeed slot.seed with
+            | .ok fp => fingerprints := fingerprints.push fp
+            | .error _ => pure ()
+            -- For each allowlisted prefix the user asked about,
+            -- enumerate `count` indices.
+            for pathPrefix in paths do
+              for i in [0:count] do
+                let path := s!"{pathPrefix}/{i}"
+                match ← deriveAddressFromSeed slot.seed path with
+                | .error _ => pure ()  -- skip — malformed path or deriver hiccup
+                | .ok address =>
+                    entries := entries.push <| .obj #[
+                      ("kind",    .str "eoa"),
+                      ("slot",    .str name),
+                      ("path",    .str path),
+                      ("address", .str address)
+                    ]
+      -- Optionally include R1 entries from the TPM keystore. Uses the
+      -- same enumeration path as `account.list` — no new keystore API.
+      if includeR1 then
+        try
+          let tpmNames ← listSepoliaKeys
+          let stateDir : System.FilePath := ".leankohaku/keystore/tpm2"
+          for name in tpmNames do
+            let addrFile := stateDir / name / "r1-account-address.txt"
+            if ← addrFile.pathExists then
+              let raw ← IO.FS.readFile addrFile
+              let addr := raw.trimAscii.toString
+              if !addr.isEmpty then
+                entries := entries.push <| .obj #[
+                  ("kind",         .str "r1"),
+                  ("credentialId", .str name),
+                  ("address",      .str addr)
+                ]
+        catch _ => pure ()  -- TPM listing failure is non-fatal
+      -- If after everything we have nothing AND no R1 entries, this is
+      -- the locked case (slot existed when we read `unlockedNames` but
+      -- expired before we could read the seed).
+      if entries.isEmpty && unlockedSlots.isEmpty then
+        pure <| .ok <| .obj #[
+          ("ok", .bool false),
+          ("error", .obj #[
+            ("kind", .str "locked"),
+            ("msg",  .str "no seeds unlocked; run wallet.unlock or eoa.unlock first")
+          ])
+        ]
+      else
+        -- Combine fingerprints into a single stable string. If multiple
+        -- seeds are unlocked simultaneously the registry shows all of
+        -- their fingerprints joined by ","; rotation of any one will
+        -- change the joined string.
+        let combinedFp : String :=
+          if fingerprints.isEmpty then ""
+          else String.intercalate "," fingerprints.toList
+        pure <| .ok <| .obj #[
+          ("ok",              .bool true),
+          ("addresses",       .arr entries),
+          ("count",           .num (Int.ofNat entries.size)),
+          ("seedFingerprint", .str combinedFp)
+        ]
   | _ =>
       pure (.error methodNotFound)
 
