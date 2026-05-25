@@ -23,6 +23,17 @@ if (!process.env.__LEANKOHAKU_BRIDGE_LOADED) {
 // must re-decode every prepared tx and only sign through the existing
 // TPM-rooted path. Network egress from this process must be bound to the
 // daemon's policy (LEANKOHAKU_RPC_URL passed by the daemon spawn site).
+//
+// STDOUT IS RESERVED FOR JSON-RPC. The Railgun SDK (`@kohaku-eth/railgun`)
+// uses `console.log(...)` internally for progress diagnostics, which
+// would pollute the response line the daemon reads back. We redirect
+// all stdout console output to stderr at startup so the only thing that
+// ever lands on stdout is the single JSON-RPC response line written by
+// `main()` below.
+console.log = (...args) => console.error(...args);
+console.info = (...args) => console.error(...args);
+console.warn = (...args) => console.error(...args);
+console.debug = (...args) => console.error(...args);
 
 import { createPublicClient, http, parseEther } from "viem";
 import { sepolia, mainnet } from "viem/chains";
