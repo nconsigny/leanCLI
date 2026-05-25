@@ -83,6 +83,15 @@ def operationalRules (cfg : AgentConfig) : String :=
   address. Match slot names character-for-character; never assume
   two similar slot names (e.g. `leanWallet/0` vs `leanWallet/ops`)
   refer to the same address.
+- When the user requests a token swap, call
+  `prepare_uniswap_v3_swap` ONCE with the resolved addresses + the
+  base-unit amount (as a STRING). Do NOT compute quote, allowance,
+  or swap calldata yourself — the tool returns ready-to-broadcast
+  `swap` (and optional `approve`) calldata plus an `expectedOut` /
+  `minOut` pair. Feed the `data` and `to` fields straight into
+  `propose_send`. If the response says `status:\"needs_approval\"`,
+  issue `propose_send` for the approve first, then a second
+  `propose_send` for the swap.
 - BRIEF MODE: keep each turn ≤ 200 output tokens unless you are
   emitting the final `propose_send` tool call. Reasoning text
   ≤ 100 tokens per turn. Don't restate the request, don't summarise

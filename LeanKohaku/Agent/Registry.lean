@@ -7,6 +7,8 @@ import LeanKohaku.Agent.ToolDefs.Protocols
 import LeanKohaku.Agent.ToolDefs.TrustedRegistry
 import LeanKohaku.Agent.ToolDefs.SlotLookup
 import LeanKohaku.Agent.ToolDefs.Tokens
+import LeanKohaku.Agent.ToolDefs.UniV3Swap
+import LeanKohaku.Agent.ToolDefs.Numeric
 
 /-!
 # Default tool registry
@@ -52,7 +54,17 @@ def default : ToolRegistry := [
   -- from training data. Read-only, no daemon RPC, no signing path.
   Tokens.tokenLookup,
   Tokens.toBaseUnitsTool,
-  Tokens.humanUnitsTool
+  Tokens.humanUnitsTool,
+  -- One-shot Uniswap V3 swap builder (commit 2 of the swap-snappiness
+  -- plan): forwards to daemon RPC `swap.prepareUniswapV3` so the LLM
+  -- never recomputes a quote, allowance, or swap calldata by hand.
+  UniV3Swap.prepareUniswapV3Swap,
+  -- Pure numeric utilities. No IO, no daemon round-trip — they exist
+  -- so the model has somewhere to hand off hex/decimal conversions
+  -- and basis-point slippage math instead of doing prose arithmetic.
+  Numeric.hexToUint,
+  Numeric.uintToHex,
+  Numeric.applySlippage
 ]
 
 /-- Phase-1b registry: the Phase-0 surface plus the two
