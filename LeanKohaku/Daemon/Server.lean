@@ -1305,7 +1305,11 @@ private def unlockRgSecretSmart (state : LeanKohaku.Daemon.State.Shared)
     `LEANKOHAKU_RG_SEED_HEX`. Errors if the slot is locked. -/
 private def rgSeedHexFromSlot
     (slot : LeanKohaku.Daemon.State.UnlockedSlot) : String :=
-  "0x" ++ LeanKohaku.Crypto.Hex.encode slot.seed
+  -- Hex.encode emits an already-`0x`-prefixed string (`Crypto/Hex.lean`
+  -- line 25), so we pass its output through verbatim. Double-prefixing
+  -- here would produce `0x0x…` which the bridge's keystoreFromSeedHex
+  -- rejects after stripping the leading `0x` once.
+  LeanKohaku.Crypto.Hex.encode slot.seed
 
 /-- Default-wallet variant of `rgSeedHexFromSlot`. Looks up the user's
     configured default EOA, requires it to be currently unlocked (via
@@ -6264,7 +6268,8 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                       | .error err =>
                           pure <| .error { invalidParams with data := some (.str err) }
                       | .ok privateKey =>
-                          let delegatingKeyHex := "0x" ++ LeanKohaku.Crypto.Hex.encode privateKey
+                          -- Hex.encode emits its own `0x` prefix.
+                          let delegatingKeyHex := LeanKohaku.Crypto.Hex.encode privateKey
                           let seedHex := rgSeedHexFromSlot slot
                           let bridgeParams : Json := .obj <|
                             #[("recipient", .str recipient),
@@ -6306,7 +6311,8 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                   | .error err =>
                       pure <| .error { invalidParams with data := some (.str err) }
                   | .ok privateKey =>
-                      let delegatingKeyHex := "0x" ++ LeanKohaku.Crypto.Hex.encode privateKey
+                      -- Hex.encode emits its own `0x` prefix.
+                      let delegatingKeyHex := LeanKohaku.Crypto.Hex.encode privateKey
                       let seedHex := rgSeedHexFromSlot slot
                       shieldedBridgeCall cfg "shielded.railgun.transfer"
                         (.obj #[
