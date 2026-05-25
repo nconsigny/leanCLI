@@ -34,16 +34,13 @@ open LeanKohaku.Agent.DaemonClient
 open LeanKohaku.Agent.ToolDefs.TrustedRegistry
 open LeanKohaku.Encoding.Json
 
-/-- Canonical name for an EOA entry. Mirrors `renderForPrompt`:
-    `"{slot}/{label}"` when the entry has both, else just `{slot}`,
-    else the path. Anything without a slot or path renders as `"?"`. -/
+/-- Canonical name for an EOA entry — delegates to
+    `TrustedRegistry.slotDisplayName` so the lookup form ALWAYS
+    matches the form the user sees in the system prompt's Trusted
+    Registry block AND the form the TUI uses in its top-of-screen
+    wallet list. Entries with no slot or path render as `"?"`. -/
 private def canonicalName (a : TrustedAddress) : String :=
-  match a.slot, a.label, a.path with
-  | some s, some l, _      => s!"{s}/{l}"
-  | some s, none,   some p => s!"{s} @ {p}"
-  | some s, none,   none   => s
-  | none,   _,      some p => p
-  | none,   _,      none   => "?"
+  (slotDisplayName a).getD "?"
 
 /-- Render the entry's payload for a hit response. EOA and sphincs
     diverge slightly: sphincs carries the smart-account address under
@@ -70,14 +67,30 @@ private def renderHitData (slot : String) (a : TrustedAddress) : Json :=
       | none   => #[])
   .obj (common ++ extra)
 
-/-- Find entries whose canonical name starts with `query` (case-
-    sensitive). Returns the list of canonical names. Used to fill the
-    `nearestMatches` array on a miss so the model has something
-    actionable to ask the user about instead of re-guessing. -/
-private def prefixMatches (snap : Snapshot) (query : String) : List String :=
+/-- Find entries that look like `query` so the model can ask a
+    useful clarifying question on a miss instead of re-guessing.
+    Tolerance is intentionally loose — accept any of:
+    * prefix match (case-insensitive),
+    * substring containment in either direction,
+    * shared slot prefix (`"leanWallet/foo"` → all `leanWallet/*`).
+    The exact-match path runs first elsewhere, so this only fires
+    when the user typed something close-but-wrong. -/
+private def nearMatches (snap : Snapshot) (query : String) : List String :=
+  let qLower := query.toLower
+  let querySlot : String :=
+    match query.splitOn "/" with
+    | s :: _ => s
+    | []     => query
   snap.addresses.toList.filterMap fun a =>
     let n := canonicalName a
-    if n.startsWith query ∧ n ≠ query then some n else none
+    if n == query then none
+    else
+      let nLower := n.toLower
+      let prefixHit  := nLower.startsWith qLower || qLower.startsWith nLower
+      let containHit := nLower.length ≥ 3 ∧ qLower.length ≥ 3 ∧
+                        (nLower.splitOn qLower).length > 1
+      let slotHit    := (a.slot.map (· == querySlot)).getD false
+      if prefixHit || containHit || slotHit then some n else none
 
 /-- Single-entry registry lookup keyed by exact canonical name. -/
 def slotLookup : ToolDecl := {
@@ -140,7 +153,7 @@ def slotLookup : ToolDecl := {
               summary := some s!"{name} → {hit.address}"
             }
         | none =>
-            let near := prefixMatches snap name
+            let near := nearMatches snap name
             let nearJson : Array Json := near.toArray.map (fun s => .str s)
             pure {
               ok := false,

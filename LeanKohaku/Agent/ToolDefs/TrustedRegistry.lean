@@ -31,6 +31,23 @@ open LeanKohaku.Agent.Tools
 open LeanKohaku.Agent.DaemonClient
 open LeanKohaku.Encoding.Json
 
+/-- Parse the account index from a BIP-44 path like
+    `"m/44'/60'/N'/0/0"`. Returns `none` for non-conforming paths so
+    callers keep their current fallback behaviour. We look for the
+    fourth segment (`m / 44' / 60' / <account>' / ...`) which by
+    BIP-44 convention is the account number. Pattern-matches the
+    list shape directly to avoid `List.get?` / deprecated string
+    surgery in Lean 4 v4.29.1. -/
+private def bip44AccountIndex (path : String) : Option Nat :=
+  match path.splitOn "/" with
+  | _ :: _ :: _ :: account :: _ =>
+      -- Strip the trailing hardened-derivation apostrophe by taking
+      -- chars up to it, then parse as Nat. `takeWhile` + `String.ofList`
+      -- stays on the stable side of v4.29.1's string-API churn.
+      let stripped := account.toList.takeWhile (· ≠ '\'')
+      (String.ofList stripped).toNat?
+  | _ => none
+
 /-- One entry in the trusted-registry snapshot. Mirrors the daemon RPC
     response shape one-for-one.
 
@@ -77,6 +94,34 @@ structure Snapshot where
     Anything outside this list returns `bad_path`. -/
 def defaultPaths : List String :=
   ["m/44'/60'/0'/0", "m/44'/60'/0'/1"]
+
+/-- Canonical short display name for a `TrustedAddress`. Mirrors the
+    form the TUI uses in its wallet list AND the form the user is
+    most likely to type:
+
+    * EOA with stored sub-account label → `"{slot}/{label}"`
+      (e.g. `"leanWallet/fresh1"`).
+    * EOA without a label but with a BIP-44 path → `"{slot}/{index}"`
+      where `index` is the account number from `m/44'/60'/N'/0/0`
+      (so `leanWallet @ m/44'/60'/0'/0/0` becomes `"leanWallet/0"`).
+      This is the SAME shorthand the TUI shows in its top-of-screen
+      wallet list, making the user's input match what they see.
+    * EOA with a slot but a non-BIP-44 path → `"{slot} @ {path}"`
+      (fallback for non-conforming paths).
+    * EOA with no slot or path → `none`.
+
+    Used by both `renderForPrompt` and the `slot_lookup` tool so the
+    two never disagree on the canonical form. -/
+def slotDisplayName (a : TrustedAddress) : Option String :=
+  match a.slot, a.label, a.path with
+  | some s, some l, _      => some s!"{s}/{l}"
+  | some s, none,   some p =>
+      match bip44AccountIndex p with
+      | some idx => some s!"{s}/{idx}"
+      | none     => some s!"{s} @ {p}"
+  | some s, none,   none   => some s
+  | none,   _,      some p => some p
+  | none,   _,      none   => none
 
 /-- Decode one address entry from the JSON the daemon returns. Returns
     `none` on shape mismatch so the snapshot can omit malformed entries
@@ -166,13 +211,7 @@ def renderForPrompt (snap : Snapshot) : String :=
     if snap.seedFingerprint.isEmpty then ""
     else s!"Seed fingerprint: {snap.seedFingerprint}\n"
   let renderEoa (a : TrustedAddress) : String :=
-    let nameLabel : String :=
-      match a.slot, a.label, a.path with
-      | some s, some l, _      => s!"{s}/{l}"
-      | some s, none,   some p => s!"{s} @ {p}"
-      | some s, none,   none   => s
-      | none,   _,      some p => p
-      | none,   _,      none   => "?"
+    let nameLabel : String := (slotDisplayName a).getD "?"
     -- Locked entries get a deliberately loud suffix. The address is
     -- still public information, but a small model can otherwise read
     -- "(locked)" as an aside and propose signing with the entry
