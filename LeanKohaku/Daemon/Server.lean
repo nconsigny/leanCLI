@@ -1312,9 +1312,17 @@ private def rgSeedHexFromSlot
   -- rejects after stripping the leading `0x` once.
   LeanKohaku.Crypto.Hex.encode slot.seed
 
-/-- Default-wallet variant of `rgSeedHexFromSlot`. Looks up the user's
-    configured default EOA, requires it to be currently unlocked (via
-    master KEK or per-slot passphrase), and returns its seed hex. -/
+/-- Default-wallet variant of `rgSeedHexFromSlot`. Resolution order:
+
+      1. `defaultAccountPathIO` (set by `kohaku wallet use <name>` or
+         the `account.setDefault` RPC).
+      2. If no default is set, fall back to the **single** currently
+         unlocked slot in `state.unlocked`. This covers the common
+         "I have one EOA, just unlocked it via master KEK" case
+         without forcing the user to also run `wallet use`.
+
+    Returns `-32013` if neither step yields a wallet, or `-32012`
+    (slot locked) if the resolved name isn't in `state.unlocked`. -/
 private def rgSeedHexFromDefault
     (state : LeanKohaku.Daemon.State.Shared) : IO (Except RpcError String) := do
   let defaultPath ← defaultAccountPathIO
@@ -1325,15 +1333,27 @@ private def rgSeedHexFromDefault
       pure (if trimmed.isEmpty then none else some trimmed)
     else pure none
   match defaultName? with
-  | none =>
-      pure <| .error
-        { code := -32013,
-          message := "no default wallet set — run `kohaku wallet use <name>` or pass `name` explicitly",
-          data := none }
   | some name =>
       match ← unlockedSlot state name with
       | .error err => pure (.error err)
       | .ok slot => pure (.ok (rgSeedHexFromSlot slot))
+  | none =>
+      -- No default configured. If exactly one slot is currently
+      -- unlocked, use it — that's the user's intent in the
+      -- single-wallet / master-KEK-unlock-then-balance flow.
+      let unlocked := (← state.get).unlocked
+      match unlocked with
+      | [slot] => pure (.ok (rgSeedHexFromSlot slot))
+      | [] =>
+          pure <| .error
+            { code := -32013,
+              message := "no default wallet set and no slot unlocked — unlock a wallet (`kohaku wallet unlock <name>`) or set a default (`kohaku wallet use <name>`)",
+              data := none }
+      | _ :: _ :: _ =>
+          pure <| .error
+            { code := -32013,
+              message := "no default wallet set and multiple slots are unlocked — pick one with `kohaku wallet use <name>` or pass `name` explicitly to the RPC",
+              data := none }
 
 private def unlockOrCreateRgSecret
     (state : LeanKohaku.Daemon.State.Shared) (passphrase? : Option String) :
