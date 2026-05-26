@@ -12,14 +12,23 @@ export type MainAction =
   | "private"
   | "status"
   | "toggle-colibri"
+  | "cycle-read-backend"
   | "unlock"
   | "more"
   | "quit";
+
+export type ReadBackend = "rpc" | "colibri" | "helios";
 
 type Props = {
   onPick: (a: MainAction) => void;
   colibriEnabled: boolean;
   colibriPending?: boolean;
+  /** Daemon-side default backend for `tx.simulate` (kohaku-provider-style
+   *  toggle). Cycles rpc → colibri → helios on the menu entry; helios needs
+   *  `KOHAKU_HELIOS=1` to actually serve (otherwise it falls through to the
+   *  one-shot sidecar spawn per call). */
+  readBackend: ReadBackend;
+  readBackendPending?: boolean;
   /** Bumped by App whenever master-lock state may have changed (e.g. after
    *  the unlock gate closes) so MainMenu re-fetches `wallet.master.status`
    *  and the locked badge disappears. */
@@ -34,6 +43,8 @@ export default function MainMenu({
   onPick,
   colibriEnabled,
   colibriPending,
+  readBackend,
+  readBackendPending,
   masterStatusKey,
 }: Props) {
   // null = unknown (probe in flight or failed); true/false = answered.
@@ -78,6 +89,12 @@ export default function MainMenu({
         colibriPending ? "…" : colibriEnabled ? "ON  ✓" : "off"
       }`,
       value: "toggle-colibri",
+    },
+    {
+      label: `Read/simulate backend: ${
+        readBackendPending ? "…" : `${readBackend}${readBackend === "helios" ? "  ✓" : readBackend === "colibri" ? "  ✓" : ""}`
+      }   (cycle: rpc → colibri → helios)`,
+      value: "cycle-read-backend",
     },
     { label: "More commands",                                            value: "more" },
     { label: "Quit",                                                     value: "quit" },

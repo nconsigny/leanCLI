@@ -113,9 +113,11 @@ structure DaemonState where
   heliosSocket : Option String := none
   /-- Daemon-wide default backend for `tx.simulate` and future unified
   read RPCs. Initial value is `KOHAKU_READ_BACKEND` from the env (or
-  `.rpc` when unset); flipped at runtime via `daemon.readBackend.set`;
+  `.helios` when unset — helios is the default because it's the most
+  trust-minimised path we ship: consensus-verified state + REVM
+  execution); flipped at runtime via `daemon.readBackend.set`;
   overridden per-call via `params.backend`. -/
-  readBackend : ReadBackend := .rpc
+  readBackend : ReadBackend := .helios
   /-- Wallet-level master KEK, when currently loaded. `none` means the
   wallet is locked at the master level — slot unlocks must come through
   the per-slot `eoa.unlock` path. Populated by `wallet.unlock`. -/

@@ -8485,17 +8485,20 @@ def run (cfg : Config) : IO Unit := do
       IO.eprintln s!"leankohaku-daemon: colibri verified-reads enabled (socket={colibriSocket})"
     catch e =>
       IO.eprintln s!"leankohaku-daemon: colibri auto-enable failed ({e}); reads will use the configured RPC"
-  -- Opt-in Helios sidecar (parallel to Colibri). Opt-in (rather than
-  -- opt-out) because @a16z/helios needs to be installed under
-  -- `bridge/helios/` first; we keep the default boot quiet on machines
-  -- that haven't run `npm install` there yet. Enable with `KOHAKU_HELIOS=1`.
+  -- Default-on Helios sidecar (helios is now the default `readBackend`,
+  -- so the persistent client should be running for it to be useful — a
+  -- cold one-shot spawn pays ~10s consensus sync per simulate). Spawning
+  -- itself is cheap; the sync defers until the first proofable request.
+  -- Opt out with `KOHAKU_HELIOS=0`. Failure is non-fatal: the daemon
+  -- keeps serving and per-call `tx.simulateHelios` falls back to a fresh
+  -- one-shot spawn (slower but functional).
   let heliosEnabled :=
     match ← IO.getEnv "KOHAKU_HELIOS" with
-    | some "1" | some "on" | some "true" | some "yes" => true
-    | _ => false
+    | some "0" | some "off" | some "false" | some "no" => false
+    | _ => true
   -- Honor `KOHAKU_READ_BACKEND` for the initial default backend. Same
   -- naming as the `daemon.readBackend.set { backend }` RPC. Unrecognized
-  -- values fall through to the structure default (.rpc) with a warning.
+  -- values fall through to the structure default (.helios) with a warning.
   match ← IO.getEnv "KOHAKU_READ_BACKEND" with
   | some raw =>
       match LeanKohaku.Daemon.State.ReadBackend.parse? raw with
@@ -8503,7 +8506,7 @@ def run (cfg : Config) : IO Unit := do
           LeanKohaku.Daemon.State.setReadBackend state b
           IO.eprintln s!"leankohaku-daemon: read backend default = {b.asString} (from KOHAKU_READ_BACKEND)"
       | none =>
-          IO.eprintln s!"leankohaku-daemon: KOHAKU_READ_BACKEND={raw} unrecognized; using default rpc"
+          IO.eprintln s!"leankohaku-daemon: KOHAKU_READ_BACKEND={raw} unrecognized; using default helios"
   | none => pure ()
   if heliosEnabled then
     let runtimeRoot ← match ← IO.getEnv "XDG_RUNTIME_DIR" with

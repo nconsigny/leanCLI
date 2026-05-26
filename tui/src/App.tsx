@@ -157,6 +157,14 @@ export default function App() {
   // for power users.
   const [colibriEnabled, setColibriEnabled] = useState(false);
   const [colibriPending, setColibriPending] = useState(false);
+  // Daemon-side default backend for tx.simulate (kohaku-provider style
+  // toggle). The MainMenu entry cycles rpc → colibri → helios → rpc and
+  // sends `daemon.readBackend.set` after each tick. Initial value pulled
+  // from `daemon.readBackend.status` so a fresh-install daemon (booted
+  // with KOHAKU_READ_BACKEND=helios from kohakuspawn's daemon.env) lights
+  // the menu up at "helios" without a manual flip.
+  const [readBackend, setReadBackend] = useState<"rpc" | "colibri" | "helios">("helios");
+  const [readBackendPending, setReadBackendPending] = useState(false);
   // Bumped whenever the master-unlock gate closes so MainMenu re-queries
   // `wallet.master.status` and the locked-badge state stays consistent
   // with the daemon. The bump is unconditional (we don't know whether the
@@ -200,6 +208,37 @@ export default function App() {
     });
     if (r.ok) setColibriEnabled(r.result?.running === true);
     setColibriPending(false);
+  };
+
+  // Initial read-backend fetch (same defer-until-boot pattern as colibri).
+  useEffect(() => {
+    if (!bootDone) return;
+    let cancelled = false;
+    (async () => {
+      const r = await call<{ backend?: string }>("daemon.readBackend.status", {});
+      if (cancelled) return;
+      const b = r.ok ? r.result?.backend : undefined;
+      if (b === "rpc" || b === "colibri" || b === "helios") setReadBackend(b);
+    })();
+    return () => { cancelled = true; };
+  }, [bootDone]);
+
+  const cycleReadBackend = async () => {
+    if (readBackendPending) return;
+    setReadBackendPending(true);
+    const next: "rpc" | "colibri" | "helios" =
+      readBackend === "rpc" ? "colibri"
+      : readBackend === "colibri" ? "helios"
+      : "rpc";
+    const r = await call<{ backend?: string }>("daemon.readBackend.set", {
+      backend: next,
+    });
+    if (r.ok && (r.result?.backend === "rpc"
+              || r.result?.backend === "colibri"
+              || r.result?.backend === "helios")) {
+      setReadBackend(r.result.backend);
+    }
+    setReadBackendPending(false);
   };
 
   const top = stack[stack.length - 1]!;
@@ -253,6 +292,7 @@ export default function App() {
       case "private":          return push({ kind: "private" });
       case "status":           return push({ kind: "status" });
       case "toggle-colibri":   return void toggleColibri();
+      case "cycle-read-backend": return void cycleReadBackend();
       case "unlock":           return push({ kind: "master-unlock" });
       case "more":             return push({ kind: "more" });
       case "quit":             return exit();
@@ -351,6 +391,8 @@ export default function App() {
           onPick={handleMain}
           colibriEnabled={colibriEnabled}
           colibriPending={colibriPending}
+          readBackend={readBackend}
+          readBackendPending={readBackendPending}
           masterStatusKey={masterStatusKey}
         />
       );
