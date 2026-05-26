@@ -1,5 +1,6 @@
 import LeanKohaku.Ethereum.Intent
 import LeanKohaku.Swap.Tokens
+import LeanKohaku.Registry.KnownProtocols
 
 /-!
 # Rule-based English → `RegexDraft` parser
@@ -724,10 +725,55 @@ def matchProtocolAction (toks : List String) (verb : String)
     confidence := confidence
   }
 
+/-- Default-protocol-by-asset matcher: covers `supply 1000 BOLD` /
+`deposit 100 fxusd` (no protocol clause). The protocol is inferred
+from `KnownProtocols.defaultProtocolForAsset` — BOLD → liquity v2,
+fxUSD → fxusd, MORPHO → morpho blue, etc. Generic stablecoins
+(USDC/USDT/DAI) and ETH-likes have no default and fall through to
+matchProtocolAction or the LLM.
+
+Inference is conservative: confidence drops to `.medium` so the LLM
+or skill card can confirm before signing. The draft carries an
+`inferredProtocol` field so the user-facing UI can render
+"Inferred from asset: liquity v2" rather than silently submitting. -/
+def matchProtocolActionByAssetDefault
+    (toks : List String) (verb : String) : Option RegexDraft := do
+  let v ← toks.head?
+  if v ≠ verb then none
+  -- Reject if any explicit protocol clause exists — those go through
+  -- the canonical matchProtocolAction path.
+  if (indexOfKeyword toks "to").isSome ∨ (indexOfKeyword toks "on").isSome
+      ∨ (indexOfKeyword toks "from").isSome then none
+  let amountRaw ← at? toks 1
+  if ¬ (isAmountLike amountRaw) then none
+  let amount := (normalizeAmount amountRaw).getD amountRaw
+  let assetRaw ← at? toks 2
+  let asset := stripCashtag assetRaw
+  let inferred ← LeanKohaku.Registry.KnownProtocols.defaultProtocolForAsset asset
+  let action ←
+    (actionFor verb (some inferred)) <|> (actionFor verb none)
+  let assetOk := isEthLike asset ∨ isKnownSymbol asset ∨ isAddress asset
+  let unresolved : List String :=
+    (if assetOk then [] else [s!"asset '{asset}' not in known-tokens registry"])
+    ++ [s!"protocol inferred from asset → '{inferred}'; confirm before signing"]
+  some {
+    action     := action
+    fields     := [
+      ("verb", verb), ("amount", amount), ("asset", asset),
+      ("protocol", inferred),
+      ("inferredProtocol", "true")
+    ] ++ extractFromHint toks
+    unresolved := unresolved
+    confidence := .medium  -- always medium — explicit confirmation expected
+  }
+
 /-- `supply / deposit <amount> <asset> (to|on) <protocol>`. The action
 tag is decided by `actionFor` from the resolved protocol, so adding a
 new lending protocol (Morpho, Liquity, fxUSD) is one row in the table
-rather than a new matcher here. -/
+rather than a new matcher here.
+
+`supply/deposit <amount> <asset>` without a protocol clause falls
+through to `matchProtocolActionByAssetDefault`. -/
 def matchSupply (toks : List String) : Option RegexDraft :=
   (matchProtocolAction toks "supply" "to")
     <|> (matchProtocolAction toks "supply" "on")
@@ -739,6 +785,17 @@ def matchWithdrawBorrowRepay (toks : List String) : Option RegexDraft :=
   (matchProtocolAction toks "withdraw" "from")
     <|> (matchProtocolAction toks "borrow"   "from")
     <|> (matchProtocolAction toks "repay"    "to")
+
+/-- Asset-default umbrella matcher. Tries each protocol verb against
+the no-preposition default-protocol path. Used after the explicit
+matchSupply / matchWithdrawBorrowRepay so the user's explicit choice
+always wins. -/
+def matchAssetDefault (toks : List String) : Option RegexDraft :=
+  (matchProtocolActionByAssetDefault toks "supply")
+    <|> (matchProtocolActionByAssetDefault toks "deposit")
+    <|> (matchProtocolActionByAssetDefault toks "withdraw")
+    <|> (matchProtocolActionByAssetDefault toks "borrow")
+    <|> (matchProtocolActionByAssetDefault toks "repay")
 
 /-- Privacy Pools deposit / withdraw atom extractor.
 
@@ -1444,6 +1501,11 @@ def parse (input : String) : RegexDraft :=
         , matchSwap toks
         , matchSupply toks
         , matchWithdrawBorrowRepay toks
+        -- Asset-default umbrella: catches `supply 1000 BOLD` (no `to
+        -- <protocol>` clause) and infers the protocol from the asset.
+        -- Runs AFTER the explicit matchers so the user's explicit
+        -- protocol choice always wins.
+        , matchAssetDefault toks
         , matchWrap toks
         -- Multi-leg conjunctions land LAST. If any single-leg matcher
         -- consumed the prompt we never get here.

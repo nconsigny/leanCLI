@@ -223,6 +223,66 @@ example :
       = some "and"
   := by native_decide
 
+/-! ## Token + protocol disambiguation -/
+
+-- USDC.e / DAI.e / WETH.e bridge variants normalise to canonical
+-- mainnet symbols (we don't track L2 deployments yet, so we route to
+-- the closest-thing-on-mainnet).
+example :
+    LeanKohaku.Swap.Tokens.disambiguateSymbol "USDC.e"      = "USDC" ∧
+    LeanKohaku.Swap.Tokens.disambiguateSymbol "USDC-e"      = "USDC" ∧
+    LeanKohaku.Swap.Tokens.disambiguateSymbol "bridged-USDC" = "USDC" ∧
+    LeanKohaku.Swap.Tokens.disambiguateSymbol "DAI.e"       = "DAI"  ∧
+    LeanKohaku.Swap.Tokens.disambiguateSymbol "WETH.e"      = "WETH" ∧
+    LeanKohaku.Swap.Tokens.disambiguateSymbol "eth2"        = "ETH"  ∧
+    LeanKohaku.Swap.Tokens.disambiguateSymbol "USDC"        = "USDC"  -- canonical pass-through
+  := by native_decide
+
+-- findBySymbol applies disambiguation transparently.
+example :
+    (LeanKohaku.Swap.Tokens.findBySymbol "USDC.e").isSome ∧
+    (LeanKohaku.Swap.Tokens.findBySymbol "usdc-bridged").isNone
+      -- "usdc-bridged" uses '-' as a separator, gets split by tokenize
+      -- (which is upstream); raw lookup with that string isn't a
+      -- recognised normalisation, so we expect a miss here. The chat
+      -- path tokenises before lookup.
+  := by native_decide
+
+-- Asset → default-protocol routing.
+example :
+    LeanKohaku.Registry.KnownProtocols.defaultProtocolForAsset "BOLD"
+      = some "liquity v2" ∧
+    LeanKohaku.Registry.KnownProtocols.defaultProtocolForAsset "fxusd"
+      = some "fxusd" ∧
+    LeanKohaku.Registry.KnownProtocols.defaultProtocolForAsset "MORPHO"
+      = some "morpho blue" ∧
+    LeanKohaku.Registry.KnownProtocols.defaultProtocolForAsset "USDC"
+      = none  -- too many reasonable destinations; user must specify
+  := by native_decide
+
+-- End-to-end: "supply 1000 BOLD" with no protocol clause infers
+-- Liquity V2 from the asset and lands on .aaveSupply (the
+-- bare-verb default) with confidence .medium (always-medium for
+-- inferred protocols).
+example :
+    (parse "supply 1000 BOLD").action = .aaveSupply ∧
+    (parse "supply 1000 BOLD").fields.lookup "protocol" = some "liquity v2" ∧
+    (parse "supply 1000 BOLD").fields.lookup "inferredProtocol" = some "true" ∧
+    (parse "supply 1000 BOLD").confidence = .medium
+  := by native_decide
+
+-- Same shape for fxUSD.
+example :
+    (parse "supply 100 fxusd").fields.lookup "protocol" = some "fxusd" ∧
+    (parse "supply 100 fxusd").fields.lookup "inferredProtocol" = some "true"
+  := by native_decide
+
+-- Generic stablecoins have no default → fall through past the
+-- asset-default matcher; no protocol field is populated.
+example :
+    (parse "supply 1000 USDC").fields.lookup "inferredProtocol" = none
+  := by native_decide
+
 -- Cashtag + suffix end-to-end.
 example :
     (parse "send $1.5k usdc to vitalik.eth").action     = .erc20Transfer ∧

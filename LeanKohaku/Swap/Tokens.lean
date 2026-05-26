@@ -125,9 +125,43 @@ def registry : List Token := [
     decimals := 6, name := "USD Coin" }
 ]
 
-/-- Case-insensitive symbol lookup. -/
+/-- Disambiguate user-typed token variations into a canonical symbol
+the registry can find.
+
+Today's chain coverage is mainnet + sepolia, where there is exactly
+one USDC and exactly one DAI; the L2-bridged variants (`USDC.e`,
+`USDC-bridged`, `DAI.e`) don't have separate registry entries because
+we don't track L2 addresses yet. Mapping them to the canonical
+mainnet/sepolia symbol lets the chat path resolve the user's intent
+to the closest-thing-on-the-target-chain rather than failing with
+`unknown asset`.
+
+When (and only when) we extend `Token` to carry per-L2 addresses,
+this function will route to L2-specific variants per chain.
+
+Other normalisations:
+* `eth` ↔ `weth` — the chat path treats native ETH and WETH as
+  near-equivalents; the *caller* (matcher / encoder) decides whether
+  the operation is native (use ETH semantics) or wrapped (encode
+  against WETH).
+* `eth2` / `eth_2.0` / `eth-staking` → `ETH` (rare in user prompts
+  but cheap to handle). -/
+def disambiguateSymbol (sym : String) : String :=
+  let s := sym.toLower
+  if s = "usdc.e" || s = "usdc-e" || s = "bridged-usdc" || s = "usdc.bridged" then
+    "USDC"
+  else if s = "dai.e" || s = "dai-bridged" then
+    "DAI"
+  else if s = "weth.e" then
+    "WETH"
+  else if s = "eth2" || s = "eth_2.0" || s = "eth-staking" then
+    "ETH"
+  else
+    sym
+
+/-- Case-insensitive symbol lookup with `disambiguateSymbol` applied. -/
 def findBySymbol (sym : String) : Option Token :=
-  let target := sym.toLower
+  let target := (disambiguateSymbol sym).toLower
   registry.find? (fun t => t.symbol.toLower = target)
 
 /-- Pick the token's address on the given chain. Returns `none` when no

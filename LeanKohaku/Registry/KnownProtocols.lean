@@ -299,6 +299,32 @@ def resolve (name : String) (chain : ChainId) : Option String :=
       => fxUsdTokenFor chain
   | _ => none
 
+/-- Asset → default-protocol slug. When the user types
+`"supply 1000 BOLD"` without specifying a protocol, this maps BOLD to
+its native home (Liquity V2 stability pool). The caller (matcher)
+uses the result to populate the `protocol` field, then `resolve`
+turns the slug into an address.
+
+This is **defaulting**, not authority — the user can override by
+naming a different protocol explicitly. We don't fall through to a
+swap aggregator or anything similar; missing the default just means
+the chat path returns a `.medium`-confidence draft with a
+`protocol not specified` note.
+
+Coverage: native-home assets only (BOLD → Liquity, fxUSD → f(x),
+MORPHO → morpho blue, ENS → ens controller). Generic stablecoins
+(USDC, USDT, DAI) and ETH-likes (WETH, stETH) deliberately have NO
+default — there are too many reasonable destinations to pick one for
+the user. -/
+def defaultProtocolForAsset (assetSymbol : String) : Option String :=
+  match assetSymbol.toLower with
+  | "bold"   => some "liquity v2"
+  | "fxusd"  => some "fxusd"
+  | "morpho" => some "morpho blue"
+  | "ens"    => some "ens"
+  | "aave"   => some "aave v3"
+  | _        => none
+
 /-! ### Build-time anchors
 
 `native_decide` checks pin the canonical name → address mapping. Any
