@@ -56,11 +56,14 @@ Untrusted Node sidecars. Each Lean wrapper is the **only** place that spawns its
 | `bridge/` | `LeanKohaku/Privacy/Bridge.lean` | Privacy Pools / Railgun (snarkjs, libp2p) | Witness generation; **not** tx structure |
 | `bridge/clearsign/` | `LeanKohaku/Clearsign/Bridge.lean` | ERC-7730 calldata + EIP-712 walker | UI rendering only |
 | `bridge/colibri/` | `LeanKohaku/Colibri/{Bridge,Persistent}.lean` | Stateless light client (Helios-backed); verified reads + opt-in verified simulation | UI confirmation copy; **not** signing |
+| `bridge/helios/` | `LeanKohaku/Helios/{Bridge,Persistent}.lean` | `@a16z/helios` Rust light client + embedded REVM; opt-in local `eth_call` / `eth_estimateGas` simulation against sync-committee-verified state | UI confirmation copy; **not** signing |
 | `bridge/llm-legacy/` | `LeanKohaku/LlmAgent/Bridge.lean` | Legacy NL → tx-draft (Anthropic SDK + viem) | UI suggestion only |
 
 The LLM default is now the native `kohaku-agent` exe. The legacy sidecar is reachable via `LEAN_KOHAKU_LLM_BRIDGE_LEGACY=1`.
 
 `Colibri/Persistent.lean` keeps a long-lived UDS connection to `bridge/colibri/bridge.mjs --listen`, so the sync-committee bootstrap is paid once per chainId per daemon lifetime. Toggled at runtime via `daemon.colibri.toggle`; auto-started at daemon boot unless `KOHAKU_COLIBRI_DISABLED=1`.
+
+`Helios/Persistent.lean` is the parallel boundary for `@a16z/helios`. Same UDS / newline-JSON wire protocol; same trust posture (output is rendered to ConfirmGate, never trusted for signing). Toggled via `daemon.helios.toggle`; opt-in at boot via `KOHAKU_HELIOS=1` (since `@a16z/helios` must be installed under `bridge/helios/` first). RPCs: `tx.simulateHelios`, `eth.proxyHelios`, `daemon.helios.status`. Each call carries `executionRpc` — Helios needs an execution-layer fallback for `eth_getLogs` and similar non-light-verifiable methods.
 
 The trust model is uniform: **every sidecar is treated as malicious**. The daemon never signs based on sidecar output. Chain reads from sidecars (and from the agent) are policy-gated by `Privacy.NetworkPolicy` exactly like CLI/TUI requests.
 

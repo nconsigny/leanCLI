@@ -1,4 +1,5 @@
 import LeanKohaku.Colibri.Persistent
+import LeanKohaku.Helios.Persistent
 import LeanKohaku.RPC.Outbound
 
 /-!
@@ -67,6 +68,16 @@ structure DaemonState where
   `Daemon.Config` and is otherwise not reachable from here). Cleared
   alongside `colibri` on `colibriDisable`. -/
   colibriSocket : Option String := none
+  /-- Long-running Helios light-client sidecar. `none` when helios is
+  disabled (the default). Helios is an opt-in second backend that
+  exposes the same `eth.proxy` / `tx.simulate` shape as Colibri but
+  executes locally via REVM against sync-committee-verified state.
+  Spawning is cheap; the first call pays the consensus sync. -/
+  helios : Option LeanKohaku.Helios.Persistent.Client := none
+  /-- Socket path used to spawn `helios`. Cached for future
+  `heliosRespawn` parity with Colibri; not yet exercised because the
+  initial helios surface does not auto-substitute into verified reads. -/
+  heliosSocket : Option String := none
   /-- Wallet-level master KEK, when currently loaded. `none` means the
   wallet is locked at the master level — slot unlocks must come through
   the per-slot `eoa.unlock` path. Populated by `wallet.unlock`. -/
@@ -241,6 +252,32 @@ def colibriRespawn (state : Shared) : IO (Option LeanKohaku.Colibri.Persistent.C
 /-- Read the current Colibri client without spawning. -/
 def colibriClient? (state : Shared) : IO (Option LeanKohaku.Colibri.Persistent.Client) := do
   pure (← state.get).colibri
+
+/-- Spawn the persistent Helios client and store it in shared state.
+    Idempotent: if a client is already running, returns it. Throws on
+    spawn / connect failure (caller decides whether to surface or fall
+    back). Symmetric with `colibriEnable`. -/
+def heliosEnable (state : Shared) (socketPath : String) : IO LeanKohaku.Helios.Persistent.Client := do
+  let s ← state.get
+  match s.helios with
+  | some c => pure c
+  | none =>
+      let c ← LeanKohaku.Helios.Persistent.start socketPath
+      state.modify (fun s => { s with helios := some c, heliosSocket := some socketPath })
+      pure c
+
+/-- Tear down the persistent Helios client. Idempotent. -/
+def heliosDisable (state : Shared) : IO Unit := do
+  let s ← state.get
+  match s.helios with
+  | none => pure ()
+  | some c =>
+      try LeanKohaku.Helios.Persistent.close c catch _ => pure ()
+      state.modify (fun s => { s with helios := none, heliosSocket := none })
+
+/-- Read the current Helios client without spawning. -/
+def heliosClient? (state : Shared) : IO (Option LeanKohaku.Helios.Persistent.Client) := do
+  pure (← state.get).helios
 
 /-! ## Verified-read backend builder
 

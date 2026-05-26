@@ -1,0 +1,17 @@
+{
+  "name": "leankohaku-helios-bridge",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Untrusted Node sidecar exposing the @a16z/helios trustless light client + REVM-backed eth_call simulation to the leanKohaku daemon. Mirrors bridge/colibri/. Output is re-validated in Lean before any signing decision.",
+  "type": "module",
+  "main": "bridge.mjs",
+  "bin": {
+    "leankohaku-helios-bridge": "bridge.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@a16z/helios": ">=0.11"
+  }
+}

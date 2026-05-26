@@ -43,6 +43,8 @@ import LeanKohaku.Sphincs.Bridge
 import LeanKohaku.Sphincs.UserOp
 import LeanKohaku.Colibri.Bridge
 import LeanKohaku.Colibri.Persistent
+import LeanKohaku.Helios.Bridge
+import LeanKohaku.Helios.Persistent
 import LeanKohaku.Network.Provider
 import LeanKohaku.Network.Endpoint
 

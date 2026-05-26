@@ -16,6 +16,8 @@ import LeanKohaku.Sphincs.UserOp
 import LeanKohaku.Sphincs.Send
 import LeanKohaku.Colibri.Bridge
 import LeanKohaku.Colibri.Persistent
+import LeanKohaku.Helios.Bridge
+import LeanKohaku.Helios.Persistent
 import LeanKohaku.Daemon.Preflight
 import LeanKohaku.Daemon.TokenMeta
 import LeanKohaku.Daemon.EnsNames
@@ -6438,6 +6440,80 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           ]
       | none =>
           pure <| .ok <| .obj #[("running", .bool false)]
+  | "tx.simulateHelios" =>
+      -- Why: opt-in REVM-backed simulation. Same role as `tx.simulate`
+      -- (pre-sign dry run) but executed inside @a16z/helios — a Rust
+      -- trustless light client that verifies execution state against
+      -- sync-committee proofs and runs eth_call / eth_estimateGas in an
+      -- embedded REVM. Prefers the persistent client when running; falls
+      -- back to a fresh one-shot spawn otherwise. The sidecar requires
+      -- `executionRpc` in `req.params` (helios uses it for eth_getLogs and
+      -- a few non-verifiable fallbacks). UNTRUSTED for signing decisions
+      -- — ConfirmGate uses output as confirmation copy; the signed tx is
+      -- re-decoded in Lean before broadcast.
+      match ← LeanKohaku.Daemon.State.heliosClient? state with
+      | some c =>
+          let resp ← LeanKohaku.Helios.Persistent.call c "tx.simulate" req.params
+          pure <| .ok <| LeanKohaku.Helios.Persistent.responseToJson resp
+      | none =>
+          let resp ← LeanKohaku.Helios.Bridge.call
+            { method := "tx.simulate", params := req.params, id := 0 }
+          pure <| .ok <| LeanKohaku.Helios.Bridge.responseToJson resp
+  | "eth.proxyHelios" =>
+      -- Why: generic helios-backed read surface. Same shape as
+      -- `eth.proxyVerified` (Colibri) but routes through the helios
+      -- sidecar. Available only when the persistent helios client is
+      -- running; returns a clear error otherwise so callers can fall
+      -- back to the configured RPC or to the colibri-verified path.
+      match ← LeanKohaku.Daemon.State.heliosClient? state with
+      | some c =>
+          let resp ← LeanKohaku.Helios.Persistent.call c "eth.proxy" req.params
+          pure <| .ok <| LeanKohaku.Helios.Persistent.responseToJson resp
+      | none =>
+          pure <| .error {
+            code := -32099,
+            message := "helios client not running",
+            data := some (.str "call daemon.helios.toggle { enable: true } first")
+          }
+  | "daemon.helios.toggle" =>
+      -- Why: spawn or tear down the persistent helios client at runtime.
+      -- Idempotent. Spawning is cheap (consensus sync deferred until the
+      -- first proofable request); falling back to the legacy one-shot
+      -- path when off pays the sync per call.
+      let enable := ((getField "enable" req.params) >>= asBool).getD true
+      if enable then
+        let runtimeRoot ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
+          | some d => pure d
+          | none =>
+              match ← IO.getEnv "TMPDIR" with
+              | some d => pure d
+              | none => pure "/tmp"
+        let socketPath := s!"{runtimeRoot}/leankohaku/helios.sock"
+        try
+          let _ ← LeanKohaku.Daemon.State.heliosEnable state socketPath
+          pure <| .ok <| .obj #[
+            ("ok", .bool true),
+            ("running", .bool true),
+            ("socket", .str socketPath)
+          ]
+        catch e =>
+          pure <| .error {
+            code := -32099,
+            message := s!"failed to start helios: {e}",
+            data := none
+          }
+      else
+        LeanKohaku.Daemon.State.heliosDisable state
+        pure <| .ok <| .obj #[("ok", .bool true), ("running", .bool false)]
+  | "daemon.helios.status" =>
+      match ← LeanKohaku.Daemon.State.heliosClient? state with
+      | some c =>
+          pure <| .ok <| .obj #[
+            ("running", .bool true),
+            ("socket", .str c.socket)
+          ]
+      | none =>
+          pure <| .ok <| .obj #[("running", .bool false)]
   | "daemon.approvals.list" =>
       -- Read-only listing of outgoing ERC-20 allowances for a wallet
       -- on a chain. Spec (per D3 / audit-approvals SKILL.md): walk
@@ -8250,12 +8326,35 @@ def run (cfg : Config) : IO Unit := do
       IO.eprintln s!"leankohaku-daemon: colibri verified-reads enabled (socket={colibriSocket})"
     catch e =>
       IO.eprintln s!"leankohaku-daemon: colibri auto-enable failed ({e}); reads will use the configured RPC"
+  -- Opt-in Helios sidecar (parallel to Colibri). Opt-in (rather than
+  -- opt-out) because @a16z/helios needs to be installed under
+  -- `bridge/helios/` first; we keep the default boot quiet on machines
+  -- that haven't run `npm install` there yet. Enable with `KOHAKU_HELIOS=1`.
+  let heliosEnabled :=
+    match ← IO.getEnv "KOHAKU_HELIOS" with
+    | some "1" | some "on" | some "true" | some "yes" => true
+    | _ => false
+  if heliosEnabled then
+    let runtimeRoot ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
+      | some d => pure d
+      | none =>
+          match ← IO.getEnv "TMPDIR" with
+          | some d => pure d
+          | none => pure "/tmp"
+    let heliosSocket := s!"{runtimeRoot}/leankohaku/helios.sock"
+    try
+      let _ ← LeanKohaku.Daemon.State.heliosEnable state heliosSocket
+      IO.eprintln s!"leankohaku-daemon: helios enabled (socket={heliosSocket})"
+    catch e =>
+      IO.eprintln s!"leankohaku-daemon: helios auto-enable failed ({e}); use daemon.helios.toggle to retry"
   try
     acceptLoop cfg state listener
   finally
     -- Tear down persistent sidecars before releasing the listener so we
-    -- don't leak the colibri.sock file (and the Node child) on shutdown.
+    -- don't leak the colibri.sock / helios.sock files (and the Node
+    -- children) on shutdown.
     LeanKohaku.Daemon.State.colibriDisable state
+    LeanKohaku.Daemon.State.heliosDisable state
     LeanKohaku.Daemon.Uds.closeListener listener
     if ownsSocket then
       removeSocketFile cfg.socketPath

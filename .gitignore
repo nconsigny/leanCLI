@@ -9,6 +9,7 @@
 /bridge/node_modules/
 /bridge/clearsign/node_modules/
 /bridge/colibri/node_modules/
+/bridge/helios/node_modules/
 /bridge/llm/node_modules/
 /bridge/llm-legacy/node_modules/
 /tui/node_modules/
