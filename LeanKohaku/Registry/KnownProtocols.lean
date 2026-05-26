@@ -96,10 +96,19 @@ def ensPublicResolverFor : ChainId → Option String
 
 /-! ## Liquity V2 (BOLD) — user-facing entry points. The frontend env
 file (`liquity/bold/frontend/app/.env`) is the source of truth for
-mainnet addresses. -/
+mainnet addresses. Liquity V2 has three collateral branches, each with
+its own `BorrowerOperations` proxy:
 
-/-- BorrowerOperations — `openTrove` / `closeTrove` / `adjustTrove`. -/
-def liquityV2BorrowerOpsEthMainnet : String := "0x4231ec00a82bdd00f7dc9b2d3aa01ff8e51fb01e"
+* ETH branch (WETH-collateral)
+* wstETH branch
+* rETH branch
+
+The bare `liquity v2` slug resolves to the ETH branch. Branch-suffixed
+names route to the matching branch. -/
+
+def liquityV2BorrowerOpsEthMainnet     : String := "0x372abd1810eaf23cb9d941bbe7596dfb2c46bc65"
+def liquityV2BorrowerOpsWstethMainnet  : String := "0xa741a32f9dcfe6adba088fd0f97e90742d7d5da3"
+def liquityV2BorrowerOpsRethMainnet    : String := "0xe8119fc02953b27a1b48d2573855738485a17329"
 
 /-- CollateralRegistry — discovers per-collateral branches. -/
 def liquityV2CollateralRegistryMainnet : String := "0xf949982b91c8c61e952b3ba942cbbfaef5386684"
@@ -107,8 +116,22 @@ def liquityV2CollateralRegistryMainnet : String := "0xf949982b91c8c61e952b3ba942
 /-- BoldToken (ERC-20). -/
 def liquityV2BoldTokenMainnet : String := "0x6440f144b7e50d6a8439336510312d2f54beb01d"
 
+/-- Default branch: ETH (WETH-collateral) — what the bare `liquity v2`
+slug resolves to. -/
 def liquityV2BorrowerOpsFor : ChainId → Option String
   | .mainnet => some liquityV2BorrowerOpsEthMainnet
+  | .sepolia => none
+
+def liquityV2BorrowerOpsFor_ETH : ChainId → Option String
+  | .mainnet => some liquityV2BorrowerOpsEthMainnet
+  | .sepolia => none
+
+def liquityV2BorrowerOpsFor_wstETH : ChainId → Option String
+  | .mainnet => some liquityV2BorrowerOpsWstethMainnet
+  | .sepolia => none
+
+def liquityV2BorrowerOpsFor_rETH : ChainId → Option String
+  | .mainnet => some liquityV2BorrowerOpsRethMainnet
   | .sepolia => none
 
 def liquityV2CollateralRegistryFor : ChainId → Option String
@@ -242,9 +265,14 @@ def resolve (name : String) (chain : ChainId) : Option String :=
       => ensControllerFor chain
   | "ens resolver" | "ens public resolver"
       => ensPublicResolverFor chain
-  -- Liquity V2 (BOLD)
+  -- Liquity V2 (BOLD) — bare slug defaults to ETH branch.
   | "liquity" | "liquity v2" | "bold" | "bold liquity"
-      => liquityV2BorrowerOpsFor chain
+  | "liquity eth" | "liquity v2 eth"
+      => liquityV2BorrowerOpsFor_ETH chain
+  | "liquity wsteth" | "liquity v2 wsteth"
+      => liquityV2BorrowerOpsFor_wstETH chain
+  | "liquity reth"   | "liquity v2 reth"
+      => liquityV2BorrowerOpsFor_rETH chain
   | "liquity collateral" | "liquity v2 collateral"
       => liquityV2CollateralRegistryFor chain
   -- Railgun
@@ -283,8 +311,10 @@ example : resolve "Morpho Blue"   .mainnet = some morphoBlueMainnet := by native
 example : resolve "morpho"        .sepolia = none := by native_decide
 example : resolve "ENS"           .mainnet = some ensControllerMainnet := by native_decide
 example : resolve "ens resolver"  .mainnet = some ensPublicResolverMainnet := by native_decide
-example : resolve "liquity v2"    .mainnet = some liquityV2BorrowerOpsEthMainnet := by native_decide
-example : resolve "BOLD"          .mainnet = some liquityV2BorrowerOpsEthMainnet := by native_decide
+example : resolve "liquity v2"        .mainnet = some liquityV2BorrowerOpsEthMainnet     := by native_decide
+example : resolve "BOLD"              .mainnet = some liquityV2BorrowerOpsEthMainnet     := by native_decide
+example : resolve "liquity wsteth"    .mainnet = some liquityV2BorrowerOpsWstethMainnet  := by native_decide
+example : resolve "liquity v2 reth"   .mainnet = some liquityV2BorrowerOpsRethMainnet    := by native_decide
 example : resolve "Railgun"       .mainnet = some railgunSmartWalletMainnet := by native_decide
 example : resolve "privacy pool"  .mainnet = some privacyPoolEntrypointMainnet := by native_decide
 example : resolve "privacy pool"  .sepolia = some privacyPoolEntrypointSepolia := by native_decide

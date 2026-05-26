@@ -1,0 +1,270 @@
+{
+  "$schema": "../../specs/erc7730-v2.schema.json",
+  "context": {
+    "contract": {
+      "deployments": [
+        {
+          "chainId": 1,
+          "address": "0x372ABD1810eAF23Cb9D941BbE7596DFb2c46BC65"
+        }
+      ]
+    }
+  },
+  "metadata": {
+    "owner": "Liquity V2 \u2014 ETH branch",
+    "info": {
+      "url": "https://docs.liquity.org/v2-faq"
+    },
+    "constants": {
+      "collToken": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+      "collTicker": "WETH",
+      "boldToken": "0x6440f144b7e50D6a8439336510312d2F54beB01D",
+      "boldTicker": "BOLD"
+    }
+  },
+  "display": {
+    "formats": {
+      "openTrove(address _owner,uint256 _ownerIndex,uint256 _ETHAmount,uint256 _boldAmount,uint256 _upperHint,uint256 _lowerHint,uint256 _annualInterestRate,uint256 _maxUpfrontFee,address _addManager,address _removeManager,address _receiver)": {
+        "intent": "Open Liquity V2 trove (borrow BOLD against WETH)",
+        "fields": [
+          {
+            "label": "Owner",
+            "format": "addressName",
+            "params": {
+              "types": [
+                "wallet",
+                "eoa"
+              ]
+            },
+            "path": "#._owner",
+            "visible": "always"
+          },
+          {
+            "label": "Trove sub-index",
+            "format": "raw",
+            "path": "#._ownerIndex"
+          },
+          {
+            "label": "Collateral (WETH)",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.collToken"
+            },
+            "path": "#._ETHAmount",
+            "visible": "always"
+          },
+          {
+            "label": "Debt (BOLD)",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.boldToken"
+            },
+            "path": "#._boldAmount",
+            "visible": "always"
+          },
+          {
+            "label": "Annual interest rate (1e18=100%)",
+            "format": "raw",
+            "path": "#._annualInterestRate",
+            "visible": "always"
+          },
+          {
+            "label": "Max upfront fee",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.boldToken"
+            },
+            "path": "#._maxUpfrontFee"
+          },
+          {
+            "label": "Add-collateral manager",
+            "format": "addressName",
+            "params": {
+              "types": [
+                "wallet",
+                "eoa",
+                "contract"
+              ]
+            },
+            "path": "#._addManager"
+          },
+          {
+            "label": "Remove-collateral manager",
+            "format": "addressName",
+            "params": {
+              "types": [
+                "wallet",
+                "eoa",
+                "contract"
+              ]
+            },
+            "path": "#._removeManager"
+          },
+          {
+            "label": "BOLD receiver",
+            "format": "addressName",
+            "params": {
+              "types": [
+                "wallet",
+                "eoa"
+              ]
+            },
+            "path": "#._receiver"
+          }
+        ]
+      },
+      "closeTrove(uint256 _troveId)": {
+        "intent": "Close Liquity V2 trove (repay debt + reclaim collateral)",
+        "fields": [
+          {
+            "label": "Trove ID",
+            "format": "raw",
+            "path": "#._troveId",
+            "visible": "always"
+          }
+        ]
+      },
+      "adjustTrove(uint256 _troveId,uint256 _collChange,bool _isCollIncrease,uint256 _debtChange,bool isDebtIncrease,uint256 _maxUpfrontFee)": {
+        "intent": "Adjust Liquity V2 trove",
+        "fields": [
+          {
+            "label": "Trove ID",
+            "format": "raw",
+            "path": "#._troveId",
+            "visible": "always"
+          },
+          {
+            "label": "Collateral change (WETH)",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.collToken"
+            },
+            "path": "#._collChange",
+            "visible": "always"
+          },
+          {
+            "label": "Collateral increase?",
+            "format": "raw",
+            "path": "#._isCollIncrease",
+            "visible": "always"
+          },
+          {
+            "label": "Debt change (BOLD)",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.boldToken"
+            },
+            "path": "#._debtChange",
+            "visible": "always"
+          },
+          {
+            "label": "Debt increase?",
+            "format": "raw",
+            "path": "#.isDebtIncrease",
+            "visible": "always"
+          },
+          {
+            "label": "Max upfront fee",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.boldToken"
+            },
+            "path": "#._maxUpfrontFee"
+          }
+        ]
+      },
+      "addColl(uint256 _troveId,uint256 _ETHAmount)": {
+        "intent": "Top up Liquity V2 trove collateral (WETH)",
+        "fields": [
+          {
+            "label": "Trove ID",
+            "format": "raw",
+            "path": "#._troveId",
+            "visible": "always"
+          },
+          {
+            "label": "Add (WETH)",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.collToken"
+            },
+            "path": "#._ETHAmount",
+            "visible": "always"
+          }
+        ]
+      },
+      "withdrawColl(uint256 _troveId,uint256 _amount)": {
+        "intent": "Withdraw collateral from Liquity V2 trove (WETH)",
+        "fields": [
+          {
+            "label": "Trove ID",
+            "format": "raw",
+            "path": "#._troveId",
+            "visible": "always"
+          },
+          {
+            "label": "Withdraw (WETH)",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.collToken"
+            },
+            "path": "#._amount",
+            "visible": "always"
+          }
+        ]
+      },
+      "withdrawBold(uint256 _troveId,uint256 _amount,uint256 _maxUpfrontFee)": {
+        "intent": "Borrow more BOLD from Liquity V2 trove",
+        "fields": [
+          {
+            "label": "Trove ID",
+            "format": "raw",
+            "path": "#._troveId",
+            "visible": "always"
+          },
+          {
+            "label": "Amount (BOLD)",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.boldToken"
+            },
+            "path": "#._amount",
+            "visible": "always"
+          },
+          {
+            "label": "Max upfront fee",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.boldToken"
+            },
+            "path": "#._maxUpfrontFee"
+          }
+        ]
+      },
+      "repayBold(uint256 _troveId,uint256 _amount)": {
+        "intent": "Repay BOLD on Liquity V2 trove",
+        "fields": [
+          {
+            "label": "Trove ID",
+            "format": "raw",
+            "path": "#._troveId",
+            "visible": "always"
+          },
+          {
+            "label": "Amount (BOLD)",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.boldToken"
+            },
+            "path": "#._amount",
+            "visible": "always"
+          }
+        ]
+      },
+      "claimCollateral()": {
+        "intent": "Claim post-liquidation surplus collateral",
+        "fields": []
+      }
+    }
+  }
+}
