@@ -121,15 +121,6 @@ def registry : List Token := [
     -- canonical Sepolia USDT. Leave none.
     addressSepolia := none,
     decimals := 6, name := "Tether USD" },
-  { symbol := "LINK",
-    addressMainnet := "0x514910771af9ca656af840dff83e8264ecf986ca",
-    -- Chainlink publishes faucet LINK on Sepolia at this address.
-    addressSepolia := some "0x779877a7b0d9e8603169ddbd7836e478b4624789",
-    decimals := 18, name := "Chainlink" },
-  { symbol := "LDO",
-    addressMainnet := "0x5a98fcbea516cf06857215779fd812ca3bef1b32",
-    addressSepolia := none,
-    decimals := 18, name := "Lido DAO" },
   { symbol := "GHO",
     addressMainnet := "0x40d16fc0246ad3160ccc09b8d0d3a2cd28ae6c2f",
     addressSepolia := some "0xc4bf5cbdabe595361438f8c6a187bdc330539c60",

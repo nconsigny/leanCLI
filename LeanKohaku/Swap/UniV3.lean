@@ -318,8 +318,8 @@ example : defaultFeeTier "USDC" "WETH"   = 500  := by native_decide  -- order-in
 example : defaultFeeTier "WETH" "WBTC"   = 500  := by native_decide
 example : defaultFeeTier "WETH" "wstETH" = 500  := by native_decide
 example : defaultFeeTier "wstETH" "WETH" = 500  := by native_decide
-example : defaultFeeTier "LDO"  "WETH"   = 3000 := by native_decide
 example : defaultFeeTier "CRV"  "USDC"   = 3000 := by native_decide
-example : defaultFeeTier "LINK" "AAVE"   = 3000 := by native_decide
+example : defaultFeeTier "UNI"  "AAVE"   = 3000 := by native_decide
+example : defaultFeeTier "MORPHO" "WETH" = 3000 := by native_decide
 
 end LeanKohaku.Swap.UniV3

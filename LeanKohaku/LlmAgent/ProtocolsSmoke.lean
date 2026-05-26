@@ -301,8 +301,6 @@ path's `isKnownSymbol` check accepts the canonical form. Decimals
 are anchored because off-by-12-zeros bugs are catastrophic. -/
 
 example : (LeanKohaku.Swap.Tokens.findBySymbol "USDT").map (·.decimals) = some 6  := by native_decide
-example : (LeanKohaku.Swap.Tokens.findBySymbol "LINK").map (·.decimals) = some 18 := by native_decide
-example : (LeanKohaku.Swap.Tokens.findBySymbol "LDO").map  (·.decimals) = some 18 := by native_decide
 example : (LeanKohaku.Swap.Tokens.findBySymbol "GHO").map  (·.decimals) = some 18 := by native_decide
 example : (LeanKohaku.Swap.Tokens.findBySymbol "CRV").map  (·.decimals) = some 18 := by native_decide
 example : (LeanKohaku.Swap.Tokens.findBySymbol "LUSD").map (·.decimals) = some 18 := by native_decide
@@ -318,6 +316,8 @@ example : (LeanKohaku.Swap.Tokens.findBySymbol "sfrxETH").isNone := by native_de
 example : (LeanKohaku.Swap.Tokens.findBySymbol "PYUSD").isNone   := by native_decide
 example : (LeanKohaku.Swap.Tokens.findBySymbol "weETH").isNone   := by native_decide
 example : (LeanKohaku.Swap.Tokens.findBySymbol "USDe").isNone    := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "LDO").isNone     := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "LINK").isNone    := by native_decide
 
 -- Cashtag-prefixed parses still resolve the asset (RuleParser's
 -- isKnownSymbol strips `$` via stripCashtag before findBySymbol).
@@ -325,8 +325,8 @@ example :
     (parse "send 100 $USDT to vitalik.eth").fields.lookup "asset" = some "usdt"
   := by native_decide
 example :
-    (parse "send 50 $LINK to 0x0000000000000000000000000000000000000001").fields.lookup "asset"
-      = some "link"
+    (parse "send 5 $UNI to 0x0000000000000000000000000000000000000001").fields.lookup "asset"
+      = some "uni"
   := by native_decide
 
 /-! ## Uniswap V3 default fee-tier routing through matchSwap
