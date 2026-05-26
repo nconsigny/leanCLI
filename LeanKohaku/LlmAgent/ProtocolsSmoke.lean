@@ -115,6 +115,45 @@ example :
 -- card asks for clarification.
 example : (parse "register vitalik.eth for 5").confidence = .medium := by native_decide
 
+-- ENS resolver actions — set primary + set reverse name.
+example : (parse "set primary to vitalik.eth").action = .ensSetAddr := by native_decide
+example : (parse "set name to vitalik.eth").action   = .ensSetName := by native_decide
+example :
+    (parse "set primary to vitalik.eth").fields.lookup "to"
+      = some "vitalik.eth" ∧
+    (parse "set name to vitalik.eth").fields.lookup "newName"
+      = some "vitalik.eth"
+  := by native_decide
+
+-- New protocol verbs.
+example : (parse "mint 100 fxusd with wstETH").action      = .protocolMint   := by native_decide
+example : (parse "redeem 100 fxusd for wstETH").action     = .protocolRedeem := by native_decide
+example : (parse "open trove with 5 ETH for 1000 BOLD at 7.5%").action
+        = .liquityOpenTrove := by native_decide
+example :
+    (parse "open trove with 5 ETH for 1000 BOLD at 7.5%").fields.lookup "branch" = some "eth" ∧
+    (parse "open trove with 5 ETH for 1000 BOLD at 7.5%").fields.lookup "collAmount" = some "5" ∧
+    (parse "open trove with 5 ETH for 1000 BOLD at 7.5%").fields.lookup "boldAmount" = some "1000" ∧
+    (parse "open trove with 5 ETH for 1000 BOLD at 7.5%").fields.lookup "rate" = some "7.5%"
+  := by native_decide
+example : (parse "close trove 42 on wstETH").action = .liquityCloseTrove := by native_decide
+example :
+    (parse "close trove 42 on wstETH").fields.lookup "troveId" = some "42" ∧
+    (parse "close trove 42 on wstETH").fields.lookup "branch"  = some "wsteth"
+  := by native_decide
+
+-- Claim / stake / unstake.
+example : (parse "claim from liquity v2").action = .protocolClaim := by native_decide
+example :
+    (parse "claim from liquity v2").fields.lookup "protocol" = some "liquity v2"
+  := by native_decide
+example : (parse "stake 1 ETH via lido").action   = .stake   := by native_decide
+example : (parse "unstake 1 ETH via lido").action = .unstake := by native_decide
+-- Bare stake defaults to lido without explicit `via`.
+example :
+    (parse "stake 1 ETH").fields.lookup "protocol" = some "lido"
+  := by native_decide
+
 -- Cashtag + suffix end-to-end.
 example :
     (parse "send $1.5k usdc to vitalik.eth").action     = .erc20Transfer ∧

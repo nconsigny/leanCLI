@@ -278,6 +278,62 @@ inductive Intent where
       (chainId : ChainId)
       (name : String)
       (durationSeconds : Amount)
+  /-- ENS `setAddr` on the resolver — point an ENS name's primary
+  address at `addr`. The encoder hashes the name to a `bytes32 node`;
+  the daemon's ENS namehash cache (see `Daemon/EnsNames.lean`) gets a
+  fresh `(namehash, name)` entry so future decode-time renderings of
+  this node are human-readable. -/
+  | ensSetAddr
+      (chainId : ChainId)
+      (name : String)
+      (addr : Address)
+  /-- ENS `setName` on the resolver — set the reverse record so the
+  caller's address renders as `name` in name-aware UIs. NB: this binds
+  the reverse record for the CALLER, not for `name`'s owner; the
+  resolver checks ownership of `name` before accepting. -/
+  | ensSetName
+      (chainId : ChainId)
+      (name : String)
+      (newName : String)
+  /-- Lido `stake` — deposit native ETH into the Lido staking
+  contract, receive stETH 1:1 (modulo rounding). Encoder pulls the
+  Lido stETH contract address from `KnownProtocols`. The chat path
+  shortcut "stake X ETH" / "stake X ETH via lido" routes here.
+
+  `referral` is optional — empty 20-byte address means "no referral",
+  which is what most users want and the encoder default. -/
+  | lidoStake
+      (chainId : ChainId)
+      (amountWei : Amount)
+  /-- Liquity V2 `openTrove` — borrow BOLD against a collateral
+  branch. Recipient defaults to `owner`. Annual interest rate is in
+  Liquity's 1e18-scaled units; the encoder validates against the
+  branch's `minAnnualInterestRate`.
+
+  `branch` selects the collateral (ETH/WETH, wstETH, rETH); the
+  encoder picks the branch's `BorrowerOperations` from
+  `KnownProtocols`. -/
+  | liquityOpenTrove
+      (chainId : ChainId)
+      (branch : String)
+      (owner : Address)
+      (collateralAmount : Amount)
+      (boldAmount : Amount)
+      (annualInterestRate : Amount)
+  /-- Liquity V2 `closeTrove`. The trove ID is `(owner, ownerIndex)`
+  packed at encode time. -/
+  | liquityCloseTrove
+      (chainId : ChainId)
+      (branch : String)
+      (owner : Address)
+      (ownerIndex : Amount)
+  /-- Generic protocol `claim` — claims rewards / surplus collateral
+  from `protocol`. The encoder fans out by `protocol` slug to the
+  right ABI (`claimCollateral()` on Liquity V2 ActivePool,
+  `claimRewards(...)` on Aave V3 incentives controller, etc.). -/
+  | protocolClaim
+      (chainId : ChainId)
+      (protocol : String)
   /-- Generate a new local wallet. **Not a chain action** — `chainId` is
   recorded only as request context (some R1 deployment flows are
   chain-specific, and we may surface the chain in the wallet's label).
@@ -315,6 +371,12 @@ def Intent.chainId : Intent → ChainId
   | .approvalsAudit   cid _              => cid
   | .ensRegister      cid _ _ _          => cid
   | .ensRenew         cid _ _            => cid
+  | .ensSetAddr       cid _ _            => cid
+  | .ensSetName       cid _ _            => cid
+  | .lidoStake        cid _              => cid
+  | .liquityOpenTrove cid _ _ _ _ _      => cid
+  | .liquityCloseTrove cid _ _ _         => cid
+  | .protocolClaim    cid _              => cid
   | .freshAddress     cid _ _ _          => cid
 
 /-- Coarse action category. Used by the regex parser (which hasn't
@@ -364,6 +426,27 @@ inductive Action where
   -- the timing copy in between.
   | ensRegister
   | ensRenew
+  -- ENS resolver actions (set the bytes32 node's record). These live
+  -- next to register/renew because the chat shortcuts share the same
+  -- ".eth" prefix recognition.
+  | ensSetAddr
+  | ensSetName
+  -- Liquity V2 explicit trove verbs. Distinct from .aaveSupply /
+  -- .aaveWithdraw because the encoder needs to pick the branch's
+  -- BorrowerOperations and form openTrove/closeTrove args (which are
+  -- structurally different — opens carry interest rate + dual amounts).
+  | liquityOpenTrove
+  | liquityCloseTrove
+  -- ERC-4626 / fxUSD mint+redeem. The bare verbs route through the
+  -- protocol field so the encoder picks the right contract.
+  | protocolMint
+  | protocolRedeem
+  -- Generic claim — protocol-keyed inside the matcher; encoder
+  -- dispatches to claimCollateral / claimRewards / etc.
+  | protocolClaim
+  -- Staking (Lido today; LST extensions later).
+  | stake
+  | unstake
   | freshAddress
   | unknown
   deriving Repr, DecidableEq
@@ -437,6 +520,15 @@ def Action.toString : Action → String
   | .approvalsAudit    => "approvals.audit"
   | .ensRegister       => "ens.register"
   | .ensRenew          => "ens.renew"
+  | .ensSetAddr        => "ens.setAddr"
+  | .ensSetName        => "ens.setName"
+  | .liquityOpenTrove  => "liquity.openTrove"
+  | .liquityCloseTrove => "liquity.closeTrove"
+  | .protocolMint      => "protocol.mint"
+  | .protocolRedeem    => "protocol.redeem"
+  | .protocolClaim     => "protocol.claim"
+  | .stake             => "stake"
+  | .unstake           => "unstake"
   | .freshAddress      => "address.fresh"
   | .unknown           => "unknown"
 
@@ -457,6 +549,15 @@ example : Action.toString .tornadoWithdraw   = "shielded.tornado.withdraw" := by
 example : Action.toString .approvalsAudit    = "approvals.audit"            := by native_decide
 example : Action.toString .ensRegister       = "ens.register"               := by native_decide
 example : Action.toString .ensRenew          = "ens.renew"                  := by native_decide
+example : Action.toString .ensSetAddr        = "ens.setAddr"                := by native_decide
+example : Action.toString .ensSetName        = "ens.setName"                := by native_decide
+example : Action.toString .liquityOpenTrove  = "liquity.openTrove"          := by native_decide
+example : Action.toString .liquityCloseTrove = "liquity.closeTrove"         := by native_decide
+example : Action.toString .protocolMint      = "protocol.mint"              := by native_decide
+example : Action.toString .protocolRedeem    = "protocol.redeem"            := by native_decide
+example : Action.toString .protocolClaim     = "protocol.claim"             := by native_decide
+example : Action.toString .stake             = "stake"                      := by native_decide
+example : Action.toString .unstake           = "unstake"                    := by native_decide
 example : Action.toString .freshAddress      = "address.fresh"              := by native_decide
 example : WalletKind.toString .eoa           = "eoa"                := by native_decide
 example : WalletKind.toString .r1            = "r1"                 := by native_decide

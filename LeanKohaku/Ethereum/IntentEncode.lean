@@ -163,6 +163,18 @@ def encode : Intent → Except String EncodedTx
       .error "ens.register: not leaf-encodable here; route via daemon RPC ens.prepareRegister so the persisted commit-secret is loaded and the calldata reconstructs the same commitment the user already committed to"
   | .ensRenew _ _ _ =>
       .error "ens.renew: not leaf-encodable here; route via daemon RPC ens.prepareRenew so the controller's renew fee can be quoted via eth_call before signing"
+  | .ensSetAddr _ _ _ =>
+      .error "ens.setAddr: not leaf-encodable here; route via daemon RPC ens.prepareSetAddr so the bytes32 namehash is computed in the daemon's Keccak path and the resolver address is looked up per-name"
+  | .ensSetName _ _ _ =>
+      .error "ens.setName: not leaf-encodable here; route via daemon RPC ens.prepareSetName"
+  | .lidoStake _ _ =>
+      .error "stake (Lido): not leaf-encodable here; route via daemon RPC stake.lido.prepare so the Lido contract address can be looked up per chain"
+  | .liquityOpenTrove _ _ _ _ _ _ =>
+      .error "liquity.openTrove: not leaf-encodable here; route via daemon RPC liquity.prepareOpenTrove so upper/lower hints can be quoted from HintHelpers and the branch-specific BorrowerOperations is selected"
+  | .liquityCloseTrove _ _ _ _ =>
+      .error "liquity.closeTrove: not leaf-encodable here; route via daemon RPC liquity.prepareCloseTrove"
+  | .protocolClaim _ _ =>
+      .error "protocol.claim: not leaf-encodable here; route via daemon RPC <protocol>.prepareClaim"
   | .freshAddress _ _ _ _ =>
       .error "address.fresh: local wallet creation; no encoded tx"
 

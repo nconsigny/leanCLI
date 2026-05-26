@@ -207,6 +207,51 @@ def toCanonicalString : Intent → String
         s!"name:       {name}",
         s!"durationS:  {durationSeconds}"
       ]
+  | .ensSetAddr chainId name addr =>
+      String.intercalate "\n" [
+        "action:     ens.setAddr",
+        s!"chain:      {chainId}",
+        s!"name:       {name}",
+        s!"address:    {addrHex addr}"
+      ]
+  | .ensSetName chainId name newName =>
+      String.intercalate "\n" [
+        "action:     ens.setName",
+        s!"chain:      {chainId}",
+        s!"name:       {name}",
+        s!"reverseAs:  {newName}"
+      ]
+  | .lidoStake chainId amountWei =>
+      String.intercalate "\n" [
+        "action:     stake (Lido)",
+        s!"chain:      {chainId}",
+        s!"amountWei:  {amountWei}",
+        "note:       receives stETH 1:1 at submit time (modulo rebase rounding)"
+      ]
+  | .liquityOpenTrove chainId branch owner collAmount boldAmount rate =>
+      String.intercalate "\n" [
+        "action:     liquity.openTrove",
+        s!"chain:      {chainId}",
+        s!"branch:     {branch}",
+        s!"owner:      {addrHex owner}",
+        s!"collAmount: {collAmount}",
+        s!"boldAmount: {boldAmount}",
+        s!"rate1e18:   {rate}"
+      ]
+  | .liquityCloseTrove chainId branch owner ownerIndex =>
+      String.intercalate "\n" [
+        "action:     liquity.closeTrove",
+        s!"chain:      {chainId}",
+        s!"branch:     {branch}",
+        s!"owner:      {addrHex owner}",
+        s!"ownerIndex: {ownerIndex}"
+      ]
+  | .protocolClaim chainId protocol =>
+      String.intercalate "\n" [
+        "action:     protocol.claim",
+        s!"chain:      {chainId}",
+        s!"protocol:   {protocol}"
+      ]
   | .freshAddress chainId kind label deployImmediately =>
       let labelStr := label.getD "(unnamed)"
       String.intercalate "\n" [
@@ -236,6 +281,12 @@ def actionTag : Intent → String
   | .approvalsAudit   _ _              => "approvals.audit"
   | .ensRegister      _ _ _ _          => "ens.register"
   | .ensRenew         _ _ _            => "ens.renew"
+  | .ensSetAddr       _ _ _            => "ens.setAddr"
+  | .ensSetName       _ _ _            => "ens.setName"
+  | .lidoStake        _ _              => "stake"
+  | .liquityOpenTrove _ _ _ _ _ _      => "liquity.openTrove"
+  | .liquityCloseTrove _ _ _ _         => "liquity.closeTrove"
+  | .protocolClaim    _ _              => "protocol.claim"
   | .freshAddress     _ _ _ _          => "address.fresh"
 
 end LeanKohaku.Ethereum.IntentCanonical

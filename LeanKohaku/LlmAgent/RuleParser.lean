@@ -998,6 +998,249 @@ def matchEns (toks : List String) : Option RegexDraft := do
     confidence := conf
   }
 
+/-- `set primary to <0x...|.eth>` / `set primary address to <0x>` /
+`set <name>.eth primary to <0x>` — ENS resolver `setAddr`. Recognised
+shapes:
+
+* `set primary to vitalik.eth`              — bind current wallet's
+  default ENS name to `vitalik.eth`'s namehash (the daemon picks the
+  user's wallet's `.eth` name from the EOA store).
+* `set primary address of foo.eth to 0xABC` — bind `foo.eth`'s
+  primary address to `0xABC`.
+
+The draft populates `name` (the .eth name whose primary we set, or
+empty when implicit) and `to` (the target address). -/
+def matchSetPrimary (toks : List String) : Option RegexDraft := do
+  let verb ← toks.head?
+  if verb ≠ "set" then none
+  -- Must mention "primary" somewhere — otherwise this collides with
+  -- "set interest rate", etc.
+  if ¬ toks.any (fun t => t = "primary") then none
+  let toIdx ← indexOfKeyword toks "to"
+  let target ← at? toks (toIdx + 1)
+  -- Name detection: look for any `.eth` token in the prefix that's NOT
+  -- the target. Empty string when implicit.
+  let nameTok : String :=
+    let beforeTo := (List.range toIdx).filterMap (at? toks)
+    (beforeTo.find? isEnsName).getD ""
+  let targetOk := isAddress target ∨ isEnsName target
+  let unresolved : List String :=
+    if targetOk then [] else [s!"target '{target}' not parseable as address or ENS"]
+  some {
+    action     := .ensSetAddr
+    fields     := [("verb", "set"), ("subaction", "primary"), ("name", nameTok), ("to", target)]
+                  ++ extractFromHint toks
+    unresolved := unresolved
+    confidence := if targetOk then .high else .medium
+  }
+
+/-- `set name to <X.eth>` — ENS resolver `setName` (reverse record).
+Distinct verb-phrase from `setAddr`: "name" not "primary". -/
+def matchSetName (toks : List String) : Option RegexDraft := do
+  let verb ← toks.head?
+  if verb ≠ "set" then none
+  -- Trigger words: "name" (the reverse-record sense). To disambiguate
+  -- from "set this name to X", require the second token to be "name"
+  -- or "reverse" (canonical forms). Looser phrasings ("update my
+  -- name") aren't recognised here — the LLM picks them up.
+  let isReverse :=
+    (at? toks 1 = some "name" ∨ at? toks 1 = some "reverse")
+  if ¬ isReverse then none
+  let toIdx ← indexOfKeyword toks "to"
+  let newName ← at? toks (toIdx + 1)
+  let nameOk := isEnsName newName
+  let unresolved : List String :=
+    if nameOk then [] else [s!"new name '{newName}' must end with .eth"]
+  some {
+    action     := .ensSetName
+    fields     := [("verb", "set"), ("subaction", "name"), ("newName", newName)]
+                  ++ extractFromHint toks
+    unresolved := unresolved
+    confidence := if nameOk then .high else .medium
+  }
+
+/-- `mint <amount> <fToken> [with <collToken>]` — fxUSD-style or
+ERC-4626 vault mint. The protocol field is inferred from the asset
+when known (fxUSD → f(x), gtUSDC → Morpho Gauntlet, etc.); falls
+through to the model when not.
+
+Also accepts `mint <amount> <vaultShares> on <vault>` for the
+generic ERC-4626 `mint(shares, receiver)` shape. -/
+def matchMint (toks : List String) : Option RegexDraft := do
+  let verb ← toks.head?
+  if verb ≠ "mint" then none
+  let amountRaw ← at? toks 1
+  if ¬ (isAmountLike amountRaw) then none
+  let amount := (normalizeAmount amountRaw).getD amountRaw
+  let assetRaw ← at? toks 2
+  let asset := stripCashtag assetRaw
+  -- Optional `with <collateral>` and `on <protocol>` hints.
+  let collateral? : Option String :=
+    (indexOfKeyword toks "with").bind (fun i =>
+      (at? toks (i + 1)).map stripCashtag)
+  let protocol? : Option String :=
+    (indexOfKeyword toks "on").bind (fun i =>
+      extractProtocolName toks (i + 1))
+  let fields : List (String × String) :=
+    [("verb", verb), ("amount", amount), ("asset", asset)]
+    ++ (match collateral? with | some c => [("collateral", c)] | none => [])
+    ++ (match protocol? with   | some p => [("protocol",   p)] | none => [])
+  let assetOk := isKnownSymbol asset ∨ isAddress asset
+  let unresolved : List String :=
+    if assetOk then [] else [s!"asset '{asset}' not in known-tokens registry"]
+  some {
+    action     := .protocolMint
+    fields     := fields
+    unresolved := unresolved
+    confidence := if assetOk then .high else .medium
+  }
+
+/-- `redeem <amount> <fToken|shares> [for <collateral>]` — fxUSD
+`redeemFToken` / `redeemXToken`, or ERC-4626 `redeem(shares, ...)`. -/
+def matchRedeem (toks : List String) : Option RegexDraft := do
+  let verb ← toks.head?
+  if verb ≠ "redeem" then none
+  let amountRaw ← at? toks 1
+  if ¬ (isAmountLike amountRaw) then none
+  let amount := (normalizeAmount amountRaw).getD amountRaw
+  let assetRaw ← at? toks 2
+  let asset := stripCashtag assetRaw
+  let intoAsset? : Option String :=
+    (indexOfKeyword toks "for").bind (fun i =>
+      (at? toks (i + 1)).map stripCashtag)
+  let protocol? : Option String :=
+    (indexOfKeyword toks "on").bind (fun i =>
+      extractProtocolName toks (i + 1))
+  let fields : List (String × String) :=
+    [("verb", verb), ("amount", amount), ("asset", asset)]
+    ++ (match intoAsset? with | some c => [("intoAsset", c)] | none => [])
+    ++ (match protocol? with  | some p => [("protocol",  p)] | none => [])
+  let assetOk := isKnownSymbol asset ∨ isAddress asset
+  let unresolved : List String :=
+    if assetOk then [] else [s!"asset '{asset}' not in known-tokens registry"]
+  some {
+    action     := .protocolRedeem
+    fields     := fields
+    unresolved := unresolved
+    confidence := if assetOk then .high else .medium
+  }
+
+/-- `open trove with <collAmount> <coll> for <boldAmount> BOLD [at <rate>%]`
+— Liquity V2 explicit openTrove. The branch is the collateral symbol
+(ETH / wstETH / rETH); the encoder maps it to the right
+BorrowerOperations from `KnownProtocols`. -/
+def matchOpenTrove (toks : List String) : Option RegexDraft := do
+  let verb ← toks.head?
+  if verb ≠ "open" then none
+  if ¬ toks.any (fun t => t = "trove") then none
+  -- `with <collAmount> <coll>` and `for <boldAmount> bold`.
+  let withIdx ← indexOfKeyword toks "with"
+  let collAmountRaw ← at? toks (withIdx + 1)
+  if ¬ (isAmountLike collAmountRaw) then none
+  let collAmount := (normalizeAmount collAmountRaw).getD collAmountRaw
+  let collAsset ← (at? toks (withIdx + 2)).map stripCashtag
+  let forIdx ← indexOfKeyword toks "for"
+  let boldAmountRaw ← at? toks (forIdx + 1)
+  if ¬ (isAmountLike boldAmountRaw) then none
+  let boldAmount := (normalizeAmount boldAmountRaw).getD boldAmountRaw
+  -- Optional `at <rate>%`.
+  let rate? : Option String :=
+    (indexOfKeyword toks "at").bind (fun i =>
+      (at? toks (i + 1)).filter (fun s => s.endsWith "%"))
+  let fields : List (String × String) :=
+    [("verb", "open-trove"), ("branch", collAsset),
+     ("collAmount", collAmount), ("boldAmount", boldAmount),
+     ("protocol", "liquity v2")]
+    ++ (match rate? with | some r => [("rate", r)] | none => [])
+    ++ extractFromHint toks
+  let collOk := isEthLike collAsset ∨ isKnownSymbol collAsset
+  let unresolved : List String :=
+    (if collOk then [] else [s!"collateral '{collAsset}' not in known-tokens registry"])
+    ++ (if rate?.isSome then []
+        else ["interest rate not specified — encoder will require explicit rate"])
+  some {
+    action     := .liquityOpenTrove
+    fields     := fields
+    unresolved := unresolved
+    confidence := if collOk ∧ rate?.isSome then .high else .medium
+  }
+
+/-- `close trove <troveId> [on <branch>]`. The trove ID is opaque to
+the parser — encoded as a string for the encoder to parse as a Nat. -/
+def matchCloseTrove (toks : List String) : Option RegexDraft := do
+  let verb ← toks.head?
+  if verb ≠ "close" then none
+  if ¬ toks.any (fun t => t = "trove") then none
+  -- Trove ID is the token after "trove". Optional.
+  let troveIdx ← indexOfKeyword toks "trove"
+  let troveId : String := (at? toks (troveIdx + 1)).getD ""
+  let branch? : Option String :=
+    (indexOfKeyword toks "on").bind (fun i => (at? toks (i + 1)))
+  let fields : List (String × String) :=
+    [("verb", "close-trove"), ("troveId", troveId), ("protocol", "liquity v2")]
+    ++ (match branch? with | some b => [("branch", b)] | none => [])
+    ++ extractFromHint toks
+  some {
+    action     := .liquityCloseTrove
+    fields     := fields
+    unresolved := if troveId.isEmpty then ["trove ID missing"] else []
+    confidence := if troveId.isEmpty then .medium else .high
+  }
+
+/-- `claim [rewards|surplus] [from <protocol>]` — generic claim. -/
+def matchClaim (toks : List String) : Option RegexDraft := do
+  let verb ← toks.head?
+  if verb ≠ "claim" then none
+  let protocol? : Option String :=
+    (indexOfKeyword toks "from").bind (fun i =>
+      extractProtocolName toks (i + 1))
+  let fields : List (String × String) :=
+    [("verb", "claim")]
+    ++ (match protocol? with | some p => [("protocol", p)] | none => [])
+    ++ extractFromHint toks
+  some {
+    action     := .protocolClaim
+    fields     := fields
+    unresolved := if protocol?.isSome then []
+                  else ["protocol not specified — daemon will ask"]
+    confidence := if protocol?.isSome then .high else .medium
+  }
+
+/-- `stake <amount> <asset> [via <protocol>]` / `unstake <amount> <asset>`.
+Today Lido is the only routed protocol; explicit `via lido` is
+preferred. Bare `stake X ETH` defaults to Lido. -/
+def matchStake (toks : List String) : Option RegexDraft := do
+  let verb ← toks.head?
+  let action ←
+    match verb with
+    | "stake"   => some Action.stake
+    | "unstake" => some Action.unstake
+    | _         => none
+  let amountRaw ← at? toks 1
+  if ¬ (isAmountLike amountRaw) then none
+  let amount := (normalizeAmount amountRaw).getD amountRaw
+  let assetRaw ← at? toks 2
+  let asset := stripCashtag assetRaw
+  let protocol? : Option String :=
+    (indexOfKeyword toks "via").bind (fun i =>
+      extractProtocolName toks (i + 1))
+  let resolvedProtocol : String :=
+    match protocol? with
+    | some p => p
+    | none   => "lido"  -- default
+  let fields : List (String × String) :=
+    [("verb", verb), ("amount", amount), ("asset", asset),
+     ("protocol", resolvedProtocol)]
+    ++ extractFromHint toks
+  let assetOk := isEthLike asset ∨ isKnownSymbol asset
+  some {
+    action     := action
+    fields     := fields
+    unresolved := if assetOk then [] else
+      [s!"asset '{asset}' not recognized for stake/unstake"]
+    confidence := if assetOk then .high else .medium
+  }
+
 /-! ## Top-level entry -/
 
 /-- Politeness/filler tokens that may prefix a real intent. We strip
@@ -1042,6 +1285,22 @@ def parse (input : String) : RegexDraft :=
         , matchAuditApprovals toks
         , matchFreshAddress toks
         , matchEns toks
+        -- "set primary" + "set name" land before generic matchers
+        -- because the verb "set" doesn't appear anywhere else.
+        , matchSetPrimary toks
+        , matchSetName toks
+        -- Liquity V2 explicit verbs MUST run before matchSendOrTransfer
+        -- because "open trove" / "close trove" share no overlap, but
+        -- the strict-ordering principle is easier to maintain than
+        -- ad-hoc anti-collision rules.
+        , matchOpenTrove toks
+        , matchCloseTrove toks
+        -- claim / stake / unstake / mint / redeem have unique verbs
+        -- with no collision among existing templates.
+        , matchClaim toks
+        , matchStake toks
+        , matchMint toks
+        , matchRedeem toks
         , matchSendOrTransfer toks
         , matchApprove toks
         , matchRevoke toks
