@@ -41,6 +41,17 @@ example : (parse "supply 0.1 ETH to aave v3").confidence  = .high         := by 
 example : (parse "withdraw 0.1 ETH from aave v3").action  = .aaveWithdraw := by native_decide
 example : (parse "borrow 100 USDC from aave").action      = .aaveBorrow   := by native_decide
 example : (parse "repay 100 USDC to aave").action         = .aaveRepay    := by native_decide
+-- "into" is a common English equivalent of "to" / "on" for lending
+-- deposits ("supply 10 USDC into aave V3"); regex now accepts it so
+-- DirectSynth handles the phrasing without falling through to the LLM.
+example : (parse "supply 10 USDC into aave v3").action    = .aaveSupply   := by native_decide
+-- "using <slot>" is a common sender-hint synonym for "from <slot>"
+-- ("supply X into aave v3 using leanWallet/0"); extractFromHint picks
+-- it up so chat.draft's wallet resolver can substitute the 0x address.
+example :
+    (parse "supply 10 USDC into aave v3 using leanwallet/0").fields.lookup "from"
+      = some "leanwallet/0"
+  := by native_decide
 
 -- Morpho — protocol field carries the multi-word form.
 example :

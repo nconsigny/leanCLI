@@ -461,7 +461,18 @@ patterns (see matchProtocolAction), but those parsers run after this
 one in the dispatch order so there's no ambiguity for the supported
 templates. -/
 def extractFromHint (toks : List String) : List (String × String) :=
-  match indexOfKeyword toks "from" with
+  -- Accept both "from <name>" and "using <name>" — both phrasings are
+  -- common ("approve 42 USDC for vitalik.eth from leanWallet",
+  -- "supply 10 USDC into aave V3 using leanWallet/0"). First hit wins
+  -- so a literal "from" beats a stray "using" elsewhere in the
+  -- sentence, matching the historical canonical form.
+  let firstIndex : Option Nat :=
+    match indexOfKeyword toks "from", indexOfKeyword toks "using" with
+    | some i, some j => some (Nat.min i j)
+    | some i, none   => some i
+    | none,   some j => some j
+    | none,   none   => none
+  match firstIndex with
   | none => []
   | some idx =>
       match at? toks (idx + 1) with
@@ -721,6 +732,7 @@ def matchProtocolAction (toks : List String) (verb : String)
   some {
     action     := action
     fields     := [("verb", verb), ("amount", amount), ("asset", asset), ("protocol", protocol)]
+                  ++ extractFromHint toks
     unresolved := unresolved
     confidence := confidence
   }
@@ -775,10 +787,16 @@ rather than a new matcher here.
 `supply/deposit <amount> <asset>` without a protocol clause falls
 through to `matchProtocolActionByAssetDefault`. -/
 def matchSupply (toks : List String) : Option RegexDraft :=
-  (matchProtocolAction toks "supply" "to")
-    <|> (matchProtocolAction toks "supply" "on")
+  -- Prepositions: `to` / `on` are the canonical English forms; `into`
+  -- is included because users commonly write "supply X into aave V3"
+  -- (treats the protocol as a container). All three resolve the
+  -- protocol qualifier identically via `extractProtocolName`.
+  (matchProtocolAction toks "supply"  "to")
+    <|> (matchProtocolAction toks "supply"  "on")
+    <|> (matchProtocolAction toks "supply"  "into")
     <|> (matchProtocolAction toks "deposit" "to")
     <|> (matchProtocolAction toks "deposit" "on")
+    <|> (matchProtocolAction toks "deposit" "into")
 
 /-- `withdraw / borrow / repay <amount> <asset> from <protocol>`. -/
 def matchWithdrawBorrowRepay (toks : List String) : Option RegexDraft :=
