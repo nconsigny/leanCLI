@@ -228,4 +228,99 @@ def decodeWordAt (hex : String) (off : Nat) : Option Nat :=
 def decodeQuoteAmountOut (hex : String) : Option Nat :=
   decodeWordAt hex 0
 
+/-! ## Pair classification + default fee-tier routing
+
+Uniswap V3 has four published fee tiers: 100, 500, 3000, 10000 (units
+are 0.01% basis points scaled to a uint24 expressing percent × 10000).
+Picking the right tier matters — quoting against the wrong tier
+returns a worse price OR no price at all if no pool exists at that
+tier.
+
+When the chat path or the trusted UI doesn't have the user explicitly
+naming a tier, we pick a reasonable default from the pair's category:
+
+* **stable↔stable** — 100 (0.01%). Stablecoin pairs trade tight; the
+  cheapest tier is canonical (USDC/USDT, DAI/USDC, USDe/USDC).
+* **stable↔ETH-like** — 500 (0.05%). The standard for USDC/ETH,
+  USDC/WETH, the deepest pool on mainnet.
+* **ETH-like↔blue-chip** — 500 (0.05%). e.g. WETH/WBTC, WETH/wstETH;
+  these pairs also concentrate at the 500 tier on mainnet.
+* **anything else** — 3000 (0.30%). Conservative fallback for exotic
+  token pairs (LDO/USDC, MKR/ETH, longtail/longtail).
+
+These are display-only defaults — the encoder still takes an explicit
+`fee` argument. A user / agent that wants a non-default tier can
+override; the daemon's quoter prepass quotes against the picked tier
+and surfaces the price to ConfirmGate before any signature. -/
+
+/-- Classification of a pair for default-fee-tier purposes. -/
+inductive PairClass where
+  | stableStable
+  | stableEthLike
+  | ethBlueChip
+  | exotic
+  deriving Repr, DecidableEq
+
+/-- Stablecoin symbols recognised by the pair-class router. The list
+is conservative — only assets that actually trade as 1:1 USD pegs (no
+volatile LSTs, no commodity-pegged tokens). Lowercase for the
+case-insensitive matcher. -/
+def stablecoinSymbols : List String :=
+  ["usdc", "usdt", "dai", "lusd", "frax", "pyusd", "usde",
+   "gho", "usds", "crvusd", "fxusd", "bold", "usdm", "tusd",
+   "rusd", "sdai", "susde"]
+
+/-- ETH-like symbols — native ETH plus liquid staking tokens that
+trade near a 1:1 ETH peg over short windows. -/
+def ethLikeSymbols : List String :=
+  ["eth", "weth", "steth", "wsteth", "reth", "cbeth", "weeth",
+   "ezeth", "sfrxeth"]
+
+/-- Blue-chip non-ETH-non-stable assets. Today: BTC variants only. -/
+def blueChipSymbols : List String :=
+  ["wbtc", "cbbtc"]
+
+private def memberCI (xs : List String) (s : String) : Bool :=
+  xs.any (· == s.toLower)
+
+/-- Classify a Uniswap V3 pair. Order-independent. -/
+def classifyPair (a b : String) : PairClass :=
+  let isStable := fun s => memberCI stablecoinSymbols s
+  let isEthLike := fun s => memberCI ethLikeSymbols s
+  let isBlue := fun s => memberCI blueChipSymbols s
+  if isStable a ∧ isStable b then .stableStable
+  else if (isStable a ∧ isEthLike b) ∨ (isEthLike a ∧ isStable b) then .stableEthLike
+  else if (isEthLike a ∧ isBlue b) ∨ (isBlue a ∧ isEthLike b) then .ethBlueChip
+  else if (isEthLike a ∧ isEthLike b) then .stableEthLike  -- WETH/wstETH etc. → 500
+  else .exotic
+
+/-- Default fee tier for a pair, in Uniswap V3's uint24 representation
+(percentage × 10_000). -/
+def defaultFeeTier (a b : String) : Nat :=
+  match classifyPair a b with
+  | .stableStable   => 100
+  | .stableEthLike  => 500
+  | .ethBlueChip    => 500
+  | .exotic         => 3000
+
+/-! ### Build-time anchors for the default-tier matrix
+
+`native_decide` checks pin the canonical pair→tier mapping. Renaming
+a stablecoin symbol or accidentally moving a token between buckets
+(e.g. WETH out of the ethLike list) breaks the build before the
+chat path can quote against the wrong pool. -/
+
+example : defaultFeeTier "USDC" "USDT"   = 100  := by native_decide
+example : defaultFeeTier "DAI"  "USDC"   = 100  := by native_decide
+example : defaultFeeTier "USDe" "USDC"   = 100  := by native_decide
+example : defaultFeeTier "WETH" "USDC"   = 500  := by native_decide
+example : defaultFeeTier "ETH"  "USDC"   = 500  := by native_decide
+example : defaultFeeTier "USDC" "WETH"   = 500  := by native_decide  -- order-independent
+example : defaultFeeTier "WETH" "WBTC"   = 500  := by native_decide
+example : defaultFeeTier "WETH" "wstETH" = 500  := by native_decide
+example : defaultFeeTier "wstETH" "WETH" = 500  := by native_decide
+example : defaultFeeTier "LDO"  "WETH"   = 3000 := by native_decide
+example : defaultFeeTier "MKR"  "USDC"   = 3000 := by native_decide
+example : defaultFeeTier "SNX"  "BAL"    = 3000 := by native_decide
+
 end LeanKohaku.Swap.UniV3

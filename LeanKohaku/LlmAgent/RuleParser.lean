@@ -1,5 +1,6 @@
 import LeanKohaku.Ethereum.Intent
 import LeanKohaku.Swap.Tokens
+import LeanKohaku.Swap.UniV3
 import LeanKohaku.Registry.KnownProtocols
 
 /-!
@@ -682,8 +683,15 @@ def matchSwap (toks : List String) : Option RegexDraft := do
     ++ (match amountMax? with
         | some hi => [s!"range amountIn 'low={amount} high={hi}' — wallet quotes against the low; user can edit"]
         | none    => [])
+  -- Default fee tier — picked from the pair classification when the
+  -- user doesn't name a tier inline. The chat path / skill card can
+  -- override this; the encoder requires an explicit `fee` so this is
+  -- the suggested value only.
+  let feeTier : Nat := LeanKohaku.Swap.UniV3.defaultFeeTier assetIn assetOut
   let fields : List (String × String) :=
-    [("verb", verb), ("amountIn", amount), ("tokenIn", assetIn), ("tokenOut", assetOut)]
+    [("verb", verb), ("amountIn", amount), ("tokenIn", assetIn), ("tokenOut", assetOut),
+     ("feeTier", toString feeTier),
+     ("feeTierSource", "default-from-pair-class")]
     ++ (match amountMax? with | some hi => [("amountInMax", hi)] | none => [])
     ++ (match slippage with   | some s  => [("slippage", s)]    | none => [])
     ++ (match minOut?  with   | some m  => [("minAmountOut", m)] | none => [])

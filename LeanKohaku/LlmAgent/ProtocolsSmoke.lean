@@ -294,6 +294,60 @@ example :
     (parse "supply 1000 USDC").fields.lookup "inferredProtocol" = none
   := by native_decide
 
+/-! ## New top assets — registry coverage
+
+Every newly-added symbol resolves via `findBySymbol` so the chat
+path's `isKnownSymbol` check accepts the canonical form. Decimals
+are anchored because off-by-12-zeros bugs are catastrophic. -/
+
+example : (LeanKohaku.Swap.Tokens.findBySymbol "USDT").map (·.decimals) = some 6  := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "LINK").map (·.decimals) = some 18 := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "LDO").map  (·.decimals) = some 18 := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "GHO").map  (·.decimals) = some 18 := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "MKR").map  (·.decimals) = some 18 := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "SNX").map  (·.decimals) = some 18 := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "CRV").map  (·.decimals) = some 18 := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "BAL").map  (·.decimals) = some 18 := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "LUSD").map (·.decimals) = some 18 := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "cbETH").map (·.decimals) = some 18 := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "cbBTC").map (·.decimals) = some 8  := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "PYUSD").map (·.decimals) = some 6  := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "sDAI").map (·.decimals) = some 18  := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "USDS").map (·.decimals) = some 18  := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "sfrxETH").map (·.decimals) = some 18 := by native_decide
+
+-- Cashtag-prefixed parses still resolve the asset (RuleParser's
+-- isKnownSymbol strips `$` via stripCashtag before findBySymbol).
+example :
+    (parse "send 100 $USDT to vitalik.eth").fields.lookup "asset" = some "usdt"
+  := by native_decide
+example :
+    (parse "send 50 $LINK to 0x0000000000000000000000000000000000000001").fields.lookup "asset"
+      = some "link"
+  := by native_decide
+
+/-! ## Uniswap V3 default fee-tier routing through matchSwap
+
+When the user doesn't name a fee tier inline, matchSwap picks one
+from the pair classification. The smoke anchor pins each tier so a
+classification regression breaks the build. -/
+
+example :
+    (parse "swap 1000 USDC for USDT with 0.05% slippage").fields.lookup "feeTier" = some "100"
+  := by native_decide
+example :
+    (parse "swap 1 WETH for USDC with 0.5% slippage").fields.lookup "feeTier" = some "500"
+  := by native_decide
+example :
+    (parse "swap 0.1 WETH for WBTC with 0.3% slippage").fields.lookup "feeTier" = some "500"
+  := by native_decide
+example :
+    (parse "swap 100 LDO for USDC with 1% slippage").fields.lookup "feeTier" = some "3000"
+  := by native_decide
+example :
+    (parse "swap 1 ETH for wstETH with 0.05% slippage").fields.lookup "feeTier" = some "500"
+  := by native_decide
+
 -- Cashtag + suffix end-to-end.
 example :
     (parse "send $1.5k usdc to vitalik.eth").action     = .erc20Transfer ∧
