@@ -295,5 +295,29 @@
     "0x2ec0f359": "setVerificationKey(uint256 _nullifiers,uint256 _commitments,(string artifactsIPFSHash,(uint256 x,uint256 y) alpha1,(uint256[2] x,uint256[2] y) beta2,(uint256[2] x,uint256[2] y) gamma2,(uint256[2] x,uint256[2] y) delta2,(uint256 x,uint256 y)[] ic) _verifyingKey)",
     "0x044a40c3": "shield(((bytes32 npk,(uint8 tokenType,address tokenAddress,uint256 tokenSubID) token,uint120 value) preimage,(bytes32[3] encryptedBundle,bytes32 shieldKey) ciphertext)[] _shieldRequests)",
     "0xd8ae136a": "transact((((uint256 x,uint256 y) a,(uint256[2] x,uint256[2] y) b,(uint256 x,uint256 y) c) proof,bytes32 merkleRoot,bytes32[] nullifiers,bytes32[] commitments,(uint16 treeNumber,uint72 minGasPrice,uint8 unshield,uint64 chainID,address adaptContract,bytes32 adaptParams,(bytes32[4] ciphertext,bytes32 blindedSenderViewingKey,bytes32 blindedReceiverViewingKey,bytes annotationData,bytes memo)[] commitmentCiphertext) boundParams,(bytes32 npk,(uint8 tokenType,address tokenAddress,uint256 tokenSubID) token,uint120 value) unshieldPreimage)[] _transactions)"
+  },
+  "Ens": {
+    "0xa7fc7a07": "addController(address controller)",
+    "0x28ed4f6c": "reclaim(uint256 id,address owner)",
+    "0xfca247ac": "register(uint256 id,address owner,uint256 duration)",
+    "0x0e297b45": "registerOnly(uint256 id,address owner,uint256 duration)",
+    "0xf6a74ed7": "removeController(address controller)",
+    "0xc475abff": "renew(uint256 id,uint256 duration)",
+    "0x4e543b26": "setResolver(address resolver)",
+    "0x5b0fc9c3": "setOwner(bytes32 node,address owner)",
+    "0xcf408823": "setRecord(bytes32 node,address owner,address resolver,uint64 ttl)",
+    "0x1896f70a": "setResolver(bytes32 node,address resolver)",
+    "0x06ab5923": "setSubnodeOwner(bytes32 node,bytes32 label,address owner)",
+    "0x5ef2c7f0": "setSubnodeRecord(bytes32 node,bytes32 label,address owner,address resolver,uint64 ttl)",
+    "0x14ab9038": "setTTL(bytes32 node,uint64 ttl)",
+    "0x5d3590d5": "recoverFunds(address _token,address _to,uint256 _amount)",
+    "0x3ccfd60b": "withdraw()",
+    "0xa4b91a01": "approve(bytes32 node,address delegate,bool approved)",
+    "0xe32954eb": "multicallWithNodeCheck(bytes32 nodehash,bytes[] data)",
+    "0x623195b0": "setABI(bytes32 node,uint256 contentType,bytes data)",
+    "0x0af179d7": "setDNSRecords(bytes32 node,bytes data)",
+    "0xe59d895d": "setInterface(bytes32 node,bytes4 interfaceID,address implementer)",
+    "0x29cd62ea": "setPubkey(bytes32 node,bytes32 x,bytes32 y)",
+    "0xce3decdc": "setZonehash(bytes32 node,bytes hash)"
   }
 }

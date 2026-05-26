@@ -1,0 +1,45 @@
+{
+  "$schema": "../../specs/erc7730-v2.schema.json",
+  "context": {
+    "contract": {
+      "deployments": [
+        { "chainId": 1, "address": "0x253553366Da8546fC250F225fe3d25d0C782303b" },
+        { "chainId": 11155111, "address": "0xFB3cE5D01e0f33f41DbB39035dB9745962F1f968" }
+      ]
+    }
+  },
+  "metadata": {
+    "owner": "Ethereum Name Service",
+    "info": { "url": "https://docs.ens.domains/registry/eth" }
+  },
+  "display": {
+    "formats": {
+      "commit(bytes32 commitment)": {
+        "intent": "Commit to ENS name registration",
+        "fields": [
+          { "label": "Commitment", "format": "raw", "path": "#.commitment", "visible": "always" }
+        ]
+      },
+      "register(string name,address owner,uint256 duration,bytes32 secret,address resolver,bytes[] data,bool reverseRecord,uint16 ownerControlledFuses)": {
+        "intent": "Register .eth name",
+        "fields": [
+          { "label": "Name",       "format": "raw",         "path": "#.name", "visible": "always" },
+          { "label": "Owner",      "format": "addressName", "params": { "types": ["wallet", "eoa"] }, "path": "#.owner", "visible": "always" },
+          { "label": "Duration",   "format": "duration",    "path": "#.duration", "visible": "always" },
+          { "label": "Secret",     "format": "raw",         "path": "#.secret" },
+          { "label": "Resolver",   "format": "addressName", "params": { "types": ["contract"] }, "path": "#.resolver" },
+          { "label": "Records",    "format": "raw",         "path": "#.data" },
+          { "label": "Set reverse record", "format": "raw", "path": "#.reverseRecord", "visible": "always" },
+          { "label": "Owner-controlled fuses", "format": "raw", "path": "#.ownerControlledFuses" }
+        ]
+      },
+      "renew(string name,uint256 duration)": {
+        "intent": "Renew .eth name",
+        "fields": [
+          { "label": "Name",     "format": "raw",      "path": "#.name",     "visible": "always" },
+          { "label": "Duration", "format": "duration", "path": "#.duration", "visible": "always" }
+        ]
+      }
+    }
+  }
+}
