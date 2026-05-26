@@ -133,11 +133,23 @@ export function decodeTxIntent(req, registry) {
       )
     : {};
 
+  // Daemon may inject an `ensNames` map: { "0x<namehash>": "vitalik.eth" }.
+  // The `ensName` formatter consults this when rendering bytes32 node
+  // arguments on PublicResolver calls. If the daemon hasn't populated the
+  // map (or the namehash isn't in it), the formatter falls back to short
+  // hex — NEVER to a wrong name. Wallet logic doesn't rely on this map.
+  const ensNames = (req.ensNames && typeof req.ensNames === "object")
+    ? Object.fromEntries(
+        Object.entries(req.ensNames).map(([k, v]) => [k.toLowerCase(), v]),
+      )
+    : {};
+
   const ctx = {
     descriptor: chosen.descriptor,
     structured,
     container: { chainId, to, value, from: req.from ?? null },
     tokenMetadata,
+    ensNames,
     // Threaded through so the `calldata` formatter can recursively decode
     // each element of a `multicall(bytes[])` against the same descriptor
     // set. Inner calls in a multicall execute via `delegatecall` from the

@@ -17,44 +17,44 @@
       "setAddr(bytes32 node,address a)": {
         "intent": "Set ENS primary address",
         "fields": [
-          { "label": "Name node", "format": "raw",         "path": "#.node", "visible": "always" },
-          { "label": "Address",   "format": "addressName", "params": { "types": ["wallet", "eoa", "contract"] }, "path": "#.a", "visible": "always" }
+          { "label": "Name (node)", "format": "ensName",     "path": "#.node", "visible": "always" },
+          { "label": "Address",     "format": "addressName", "params": { "types": ["wallet", "eoa", "contract"] }, "path": "#.a", "visible": "always" }
         ]
       },
       "setAddr(bytes32 node,uint256 coinType,bytes a)": {
         "intent": "Set ENS multichain address",
         "fields": [
-          { "label": "Name node", "format": "raw", "path": "#.node",     "visible": "always" },
-          { "label": "Coin type", "format": "raw", "path": "#.coinType", "visible": "always" },
-          { "label": "Address",   "format": "raw", "path": "#.a",        "visible": "always" }
+          { "label": "Name (node)", "format": "ensName", "path": "#.node",     "visible": "always" },
+          { "label": "Coin type",   "format": "raw",     "path": "#.coinType", "visible": "always" },
+          { "label": "Address",     "format": "raw",     "path": "#.a",        "visible": "always" }
         ]
       },
       "setName(bytes32 node,string newName)": {
         "intent": "Set ENS reverse record (display name)",
         "fields": [
-          { "label": "Name node",   "format": "raw", "path": "#.node",    "visible": "always" },
-          { "label": "Display name", "format": "raw", "path": "#.newName", "visible": "always" }
+          { "label": "Name (node)",  "format": "ensName", "path": "#.node",    "visible": "always" },
+          { "label": "Display name", "format": "raw",     "path": "#.newName", "visible": "always" }
         ]
       },
       "setText(bytes32 node,string key,string value)": {
         "intent": "Set ENS text record",
         "fields": [
-          { "label": "Name node", "format": "raw", "path": "#.node",  "visible": "always" },
-          { "label": "Key",       "format": "raw", "path": "#.key",   "visible": "always" },
-          { "label": "Value",     "format": "raw", "path": "#.value", "visible": "always" }
+          { "label": "Name (node)", "format": "ensName", "path": "#.node",  "visible": "always" },
+          { "label": "Key",         "format": "raw",     "path": "#.key",   "visible": "always" },
+          { "label": "Value",       "format": "raw",     "path": "#.value", "visible": "always" }
         ]
       },
       "setContenthash(bytes32 node,bytes hash)": {
         "intent": "Set ENS content hash (IPFS / IPNS)",
         "fields": [
-          { "label": "Name node",    "format": "raw", "path": "#.node", "visible": "always" },
-          { "label": "Content hash", "format": "raw", "path": "#.hash", "visible": "always" }
+          { "label": "Name (node)",  "format": "ensName", "path": "#.node", "visible": "always" },
+          { "label": "Content hash", "format": "raw",     "path": "#.hash", "visible": "always" }
         ]
       },
       "clearRecords(bytes32 node)": {
         "intent": "Clear ALL ENS records",
         "fields": [
-          { "label": "Name node", "format": "raw", "path": "#.node", "visible": "always" }
+          { "label": "Name (node)", "format": "ensName", "path": "#.node", "visible": "always" }
         ]
       }
     }

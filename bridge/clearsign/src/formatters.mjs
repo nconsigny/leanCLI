@@ -45,10 +45,36 @@ function renderValue(formatter, raw, params, ctx) {
       return formatEnumValue(raw, params, ctx);
     case "calldata":
       return formatCalldataArray(raw, params, ctx);
+    case "ensName":
+      return formatEnsName(raw, params, ctx);
     case "raw":
     default:
       return formatRaw(raw);
   }
+}
+
+// Render an ENS bytes32 namehash as the human-readable name when the
+// daemon has populated `ctx.ensNames[<namehash>]`. Falls back to a
+// short-hex with an "(unresolved)" suffix so the user can see SOMETHING
+// useful while the daemon cache builds up.
+//
+// Population: the daemon's tx.decodeIntent prefetch should walk every
+// (namehash, name) pair it sees in this and prior register/renew calls
+// and inject the resulting map alongside tokenMetadata. The map is
+// pure data — no signing trust placed on it; if the daemon's cache is
+// stale or empty, the rendered field just falls back to raw hex, never
+// to a wrong name. Wallet logic stays Lean-side.
+function formatEnsName(raw, _params, ctx) {
+  if (typeof raw !== "string") return formatRaw(raw);
+  const normalised = raw.toLowerCase();
+  const map = ctx?.ensNames;
+  if (map && typeof map === "object") {
+    const hit = map[normalised];
+    if (typeof hit === "string" && hit.length > 0) {
+      return `${hit} (${shortAddr(normalised)})`;
+    }
+  }
+  return `${shortAddr(normalised)} (unresolved name)`;
 }
 
 function formatAddress(raw, params, ctx) {
