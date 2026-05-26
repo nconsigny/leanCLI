@@ -45,9 +45,13 @@ const PROTOCOL_VERSION = "0.0.1";
 // specific chain literal that goes into the config. Defaults pick a
 // public lightclientdata.org consensus endpoint where one is well-known;
 // callers can override per-request via params.consensusRpc.
+// Default beacon endpoints match upstream helios @ 0.11.1 (see helios
+// issue #710: lightclientdata.org died, a16z migrated everything to
+// operationsolarstorm.org). The verifiableApi variant is what they
+// actually run; the plain consensus RPC at the same domain is fine too.
 const CHAIN_TO_NET = new Map([
-  [1,        { network: "mainnet",  kind: "ethereum", defaultConsensusRpc: "https://www.lightclientdata.org" }],
-  [11155111, { network: "sepolia",  kind: "ethereum", defaultConsensusRpc: null }],
+  [1,        { network: "mainnet",  kind: "ethereum", defaultConsensusRpc: "https://ethereum.operationsolarstorm.org" }],
+  [11155111, { network: "sepolia",  kind: "ethereum", defaultConsensusRpc: "https://sepolia.operationsolarstorm.org" }],
   [17000,    { network: "holesky",  kind: "ethereum", defaultConsensusRpc: null }],
 ]);
 
@@ -110,7 +114,13 @@ async function getClient(chainId, executionRpc, consensusRpcOverride, checkpoint
   let entry = clients.get(key);
   if (entry) return entry;
 
-  const checkpoint = checkpointOverride ?? await fetchFinalizedCheckpoint(consensusRpc);
+  // Checkpoint policy: pass-through only when the caller supplied one.
+  // Auto-fetching the finalized root (what we tried first) backfires —
+  // helios's verify_update rejects update sequences whose period jumps
+  // > +1 from the stored period, and a freshly-finalized root can sit
+  // mid-period, forcing such a jump on the first update. Helios's own
+  // built-in checkpoint (baked into the release) is the safe default.
+  const checkpoint = checkpointOverride;
 
   // dbType: "config" — the default "localstorage" only works in browsers
   // and throws under Node. "config" tells helios to persist checkpoints
@@ -119,10 +129,10 @@ async function getClient(chainId, executionRpc, consensusRpcOverride, checkpoint
   const config = {
     executionRpc,
     consensusRpc,
-    checkpoint,
     network: meta.network,
     dbType: "config",
   };
+  if (checkpoint) config.checkpoint = checkpoint;
   const provider = await createHeliosProvider(config, meta.kind);
   // waitSynced() blocks until the sync committee has caught up; cold-start
   // is typically a few seconds.
