@@ -56,14 +56,43 @@ open LeanKohaku.Ethereum.Intent
 
 /-! ## Tokenization -/
 
+/-- Drop commas that sit between two digits (thousand-grouping
+inside a numeric run), leaving every other comma intact for the next
+pass to replace with a space.
+
+Walks the chars once with a 1-char lookback (`prev`) and a 1-char
+lookahead. Pure `Nat` indexing into `chars.length` keeps the fuel
+explicit and avoids `partial`. Used by `tokenize` so
+`"send 1,500.5 USDC ..."` does not shatter into
+`["send", "1", "500.5", ...]`. -/
+private def stripNumericCommas (s : String) : String := Id.run do
+  let chars := s.toList
+  let n := chars.length
+  let mut out : String := ""
+  let mut prev : Char := ' '
+  let mut i : Nat := 0
+  while h : i < n do
+    let c := chars[i]
+    let next : Char :=
+      if h2 : i + 1 < n then chars[i + 1] else ' '
+    if c == ',' ∧ prev.isDigit ∧ next.isDigit then
+      pure ()  -- drop this comma
+    else
+      out := out.push c
+    prev := c
+    i := i + 1
+  return out
+
 /-- Split on whitespace and strip sentence-ending punctuation.
 **Does not** strip `.` — that would shatter decimal amounts (`0.01`
-becomes `0 01`). Comma is stripped because users write "1,000.5" but
-the regex doesn't currently support thousand-grouped numerals anyway.
-Lowercases each token so downstream matching is case-insensitive. -/
+becomes `0 01`). Numeric grouping commas (`1,500.5`) are fused first
+so they survive; other commas are replaced with spaces so they act as
+clause separators. Lowercases each token so downstream matching is
+case-insensitive. -/
 def tokenize (s : String) : List String :=
+  let collapsed : String := stripNumericCommas s
   let cleaned : String :=
-    s.toList.foldr
+    collapsed.toList.foldr
       (fun c acc =>
         if c == ',' || c == ';' || c == '!' || c == '?' then
           " " ++ acc
@@ -101,11 +130,139 @@ def verbToAction : String → Option Action
 
 /-- Is this token a decimal number (e.g. "0.5", "100")? Returns the
 original (lowercased) string when so, since the regex draft preserves
-the user's input shape. -/
+the user's input shape.
+
+Enforces at most one `.` so `"1.2.3"` is rejected — downstream
+consumers (`shiftDecimalRight`, the matchers, `Numeric.toBaseUnits`)
+all assume a single decimal point. -/
 def isAmount (s : String) : Bool :=
   s.length > 0
   && s.toList.all (fun c => c.isDigit || c == '.')
   && s.toList.any Char.isDigit
+  && (s.toList.filter (· == '.')).length ≤ 1
+
+/-- Read a unit suffix multiplier in zero-count form. The tokenizer
+already lowercases the input, so we only check the lowercase forms.
+
+* `k` → 3 (×1000)
+* `m` → 6 (×1,000,000)
+* `b` → 9 (×1,000,000,000)
+
+Returns `none` for any other char. Deliberately conservative — we
+don't recognise `g`/`t` because no one writes "swap 1g ETH" and the
+risk of misreading a token symbol whose first char happens to be a
+multiplier ("MORPHO") is real if we got greedy. -/
+private def unitMultiplierZeros : Char → Option Nat
+  | 'k' => some 3
+  | 'm' => some 6
+  | 'b' => some 9
+  | _   => none
+
+/-- Shift the decimal point of `s` right by `zeros` positions, dropping
+the dot once the fractional part is consumed. Pure string surgery — no
+`Nat` math on the value, so a 256-bit amount stays exact.
+
+* `shiftDecimalRight "1.5" 3 = "1500"`
+* `shiftDecimalRight "1.5" 6 = "1500000"`
+* `shiftDecimalRight "100" 3 = "100000"`
+* `shiftDecimalRight "0.0005" 3 = "0.5"`
+* `shiftDecimalRight "0.5" 0 = "0.5"` -/
+private def shiftDecimalRight (s : String) (zeros : Nat) : String :=
+  match s.splitOn "." with
+  | [intPart] => intPart ++ String.ofList (List.replicate zeros '0')
+  | [intPart, fracPart] =>
+      let fracLen := fracPart.length
+      if zeros ≥ fracLen then
+        let extra := zeros - fracLen
+        -- Strip leading zeros from intPart unless intPart is "0".
+        let combined := intPart ++ fracPart ++ String.ofList (List.replicate extra '0')
+        -- Drop leading zeros except keep at least one char.
+        let trimmed := combined.toList.dropWhile (· = '0')
+        if trimmed.isEmpty then "0" else String.ofList trimmed
+      else
+        -- Move the dot right by `zeros` digits within `fracPart`.
+        let moved := fracPart.toList.take zeros
+        let remaining := fracPart.toList.drop zeros
+        let newInt := intPart ++ String.ofList moved
+        -- Strip leading zeros from newInt (but keep at least one).
+        let newIntL := newInt.toList.dropWhile (· = '0')
+        let newIntS := if newIntL.isEmpty then "0" else String.ofList newIntL
+        newIntS ++ "." ++ String.ofList remaining
+  | _ =>
+      -- More than one '.' — not a number, hand back unchanged so the
+      -- caller's isAmount check rejects it.
+      s
+
+/-- Normalise an amount-like token. Handles the `$` prefix
+(`"$100" → "100"`) and the `k`/`m`/`b` suffixes (`"1.5k" → "1500"`,
+`"2m" → "2000000"`). Returns the canonical decimal string. Returns
+`none` if the token doesn't look like a number even after stripping.
+
+Percent suffix is **not** normalised here — `matchSwap` looks for a
+trailing `%` to extract slippage, so we leave that for the matcher.
+
+The unit-suffix character must be at position `s.length - 1`; we don't
+recognise `1k5` or other infix forms. -/
+def normalizeAmount (s : String) : Option String :=
+  if s.isEmpty then none else
+    -- Strip leading $.
+    let s1 := if s.front = '$' then (s.drop 1).toString else s
+    if s1.isEmpty then none else
+      -- Inspect the trailing char via the char-list view so we avoid
+      -- v4.29.1's deprecated `String.get` and `String.dropRight`
+      -- byte-index APIs.
+      let chars := s1.toList
+      match chars.getLast? with
+      | none => none
+      | some lastChar =>
+          match unitMultiplierZeros lastChar with
+          | some zeros =>
+              let body := String.ofList chars.dropLast
+              if isAmount body then some (shiftDecimalRight body zeros) else none
+          | none =>
+              if isAmount s1 then some s1 else none
+
+/-- True when the token, after `normalizeAmount`, parses as a decimal
+number. Used by matchers to accept the richer amount forms without
+each matcher having to re-implement the stripping logic. -/
+def isAmountLike (s : String) : Bool :=
+  (normalizeAmount s).isSome
+
+/-! ### Build-time anchors for amount normalisation
+
+`native_decide` checks fixing the canonical decimal form so any
+regression in `stripNumericCommas` / `normalizeAmount` /
+`shiftDecimalRight` breaks `lake build` instead of producing the
+wrong wei in production. -/
+
+-- Cashtag stripping.
+example : normalizeAmount "$100"    = some "100"     := by native_decide
+example : normalizeAmount "$1.5"    = some "1.5"     := by native_decide
+
+-- Unit suffixes — k / m / b.
+example : normalizeAmount "1.5k"    = some "1500"    := by native_decide
+example : normalizeAmount "2m"      = some "2000000" := by native_decide
+example : normalizeAmount "0.5b"    = some "500000000" := by native_decide
+example : normalizeAmount "100k"    = some "100000"  := by native_decide
+example : normalizeAmount "0.0005k" = some "0.5"     := by native_decide
+
+-- Bare decimals pass through untouched.
+example : normalizeAmount "0.5"     = some "0.5"     := by native_decide
+example : normalizeAmount "100"     = some "100"     := by native_decide
+
+-- Cashtag + suffix.
+example : normalizeAmount "$1.5k"   = some "1500"    := by native_decide
+
+-- Garbage rejected.
+example : normalizeAmount ""        = none           := by native_decide
+example : normalizeAmount "abc"     = none           := by native_decide
+example : normalizeAmount "1.2.3"   = none           := by native_decide
+
+-- Comma-grouped numerals survive tokenisation.
+example : tokenize "send 1,500.5 usdc" = ["send", "1500.5", "usdc"] := by native_decide
+example : tokenize "have 1,000,000 cake" = ["have", "1000000", "cake"] := by native_decide
+-- Non-numeric commas still act as clause separators.
+example : tokenize "ok, send 1 usdc" = ["ok", "send", "1", "usdc"] := by native_decide
 
 /-- Is this token an `0x40-hex` address? -/
 def isAddress (s : String) : Bool :=
@@ -119,9 +276,17 @@ happens daemon-side later.) -/
 def isEnsName (s : String) : Bool :=
   s.endsWith ".eth" && s.length > 4
 
-/-- Recognize a known token symbol via `Swap.Tokens.findBySymbol`. -/
+/-- Strip a single leading `$` (cashtag) so `"$USDC"` and `"USDC"` are
+treated identically by `isKnownSymbol` and the matchers' asset slots.
+Returns the input unchanged when no `$` is present. -/
+private def stripCashtag (s : String) : String :=
+  if s.startsWith "$" then (s.drop 1).toString else s
+
+/-- Recognize a known token symbol via `Swap.Tokens.findBySymbol`.
+Accepts optional `$` cashtag prefix so `"$USDC"` resolves the same as
+`"USDC"`. -/
 def isKnownSymbol (s : String) : Bool :=
-  (LeanKohaku.Swap.Tokens.findBySymbol s).isSome
+  (LeanKohaku.Swap.Tokens.findBySymbol (stripCashtag s)).isSome
 
 /-- The pseudo-symbol "ETH" treated specially (native value, no token
 contract). -/
@@ -142,6 +307,33 @@ def indexOfKeyword (toks : List String) (kw : String) : Option Nat :=
 /-- Get the token at index `i`, or `none`. -/
 def at? (toks : List String) (i : Nat) : Option String :=
   toks[i]?
+
+/-- Single-token version qualifier that disambiguates a protocol name
+(e.g. "aave v3", "morpho blue", "liquity v2"). Tokenizer has already
+lowercased, so the literal forms are matched exactly. -/
+private def isProtocolQualifier : String → Bool
+  | "v1" | "v2" | "v3" | "v4" => true  -- "borrow X from aave v3"
+  | "blue"                    => true  -- "supply X to morpho blue"
+  | "pool" | "pools"          => true  -- "deposit X to privacy pool"
+  | "cash"                    => true  -- "withdraw X from tornado cash"
+  | "protocol"                => true  -- "supply X to liquity protocol"
+  | _                         => false
+
+/-- Read up to two adjacent tokens at `start` as a protocol designator.
+The second token is included only when it qualifies the first (see
+`isProtocolQualifier`) — so `"to aave"`, `"to aave v3"`, and
+`"to morpho blue"` all resolve, but a stray `"to morpho cowswap"` does
+not pull in `cowswap`. Returns the joined lowercase string; empty list
+when nothing is there. -/
+def extractProtocolName (toks : List String) (start : Nat) : Option String :=
+  match at? toks start with
+  | none => none
+  | some head =>
+      match at? toks (start + 1) with
+      | some next =>
+          if isProtocolQualifier next then some s!"{head} {next}"
+          else some head
+      | none => some head
 
 /-! ## Template matchers — each returns either a populated draft or
 `none` (no match). The top-level `parse` tries them in order and picks
@@ -176,9 +368,11 @@ def matchSendOrTransfer (toks : List String) : Option RegexDraft := do
   -- Find "to" — the recipient indicator.
   let toIdx ← indexOfKeyword toks "to"
   -- Pieces: tokens 1..toIdx-1 are amount + asset; toIdx+1 is recipient.
-  let amount ← at? toks 1
-  if ¬ (isAmount amount) then none
-  let asset ← at? toks 2
+  let amountRaw ← at? toks 1
+  if ¬ (isAmountLike amountRaw) then none
+  let amount := (normalizeAmount amountRaw).getD amountRaw
+  let assetRaw ← at? toks 2
+  let asset := stripCashtag assetRaw
   let recipient ← at? toks (toIdx + 1)
   let action : Action :=
     if isEthLike asset then .nativeTransfer else .erc20Transfer
@@ -205,9 +399,12 @@ def matchApprove (toks : List String) : Option RegexDraft := do
   -- Token 1 is the amount-or-"unlimited".
   let amountTok ← at? toks 1
   let isUnlimited := amountTok == "unlimited" || amountTok == "infinite" || amountTok == "max"
-  let amount := if isUnlimited then "unlimited" else amountTok
-  if ¬ (isUnlimited ∨ isAmount amountTok) then none
-  let asset ← at? toks 2
+  let amount :=
+    if isUnlimited then "unlimited"
+    else (normalizeAmount amountTok).getD amountTok
+  if ¬ (isUnlimited ∨ isAmountLike amountTok) then none
+  let assetRaw ← at? toks 2
+  let asset := stripCashtag assetRaw
   let spender ← at? toks (forIdx + 1)
   let assetOk := isKnownSymbol asset ∨ isAddress asset
   let spOk := isAddress spender ∨ isEnsName spender
@@ -253,7 +450,10 @@ def matchRevoke (toks : List String) : Option RegexDraft := do
                        && t ≠ "allowance"
                        -- Skip pure numbers: "revoke 10 USDC" means
                        -- "revoke USDC" — the 10 is a leftover word.
-                       && !(isAmount t))
+                       -- Use isAmountLike so suffixed forms like
+                       -- "1.5k" also get treated as numbers, not
+                       -- assets.
+                       && !(isAmountLike t))
   -- Detect a discarded numeric amount (e.g. "revoke 10 USDC ..."). We
   -- don't try to parse a value out of it because revoke zeros the
   -- allowance unconditionally — but we MUST surface to the user that
@@ -263,7 +463,7 @@ def matchRevoke (toks : List String) : Option RegexDraft := do
     (List.range toks.length).findSome? (fun i =>
       if i > 0 && i < forIdx then
         match at? toks i with
-        | some t => if isAmount t then some t else none
+        | some t => if isAmountLike t then some t else none
         | none => none
       else none)
   match assetIdx with
@@ -306,10 +506,13 @@ def matchSwap (toks : List String) : Option RegexDraft := do
     (indexOfKeyword toks "for")
       <|> (indexOfKeyword toks "to")
       <|> (indexOfKeyword toks "into")
-  let amount ← at? toks 1
-  if ¬ (isAmount amount) then none
-  let assetIn ← at? toks 2
-  let assetOut ← at? toks (bridgeIdx + 1)
+  let amountRaw ← at? toks 1
+  if ¬ (isAmountLike amountRaw) then none
+  let amount := (normalizeAmount amountRaw).getD amountRaw
+  let assetInRaw ← at? toks 2
+  let assetIn := stripCashtag assetInRaw
+  let assetOutRaw ← at? toks (bridgeIdx + 1)
+  let assetOut := stripCashtag assetOutRaw
   -- Optional "with N% slippage"
   let slippage : Option String :=
     (indexOfKeyword toks "with").bind (fun i =>
@@ -329,16 +532,23 @@ def matchSwap (toks : List String) : Option RegexDraft := do
     else .low
   some { action := .swap, fields := fields, unresolved := unresolved, confidence := confidence }
 
-/-- Generic protocol-action template: verb + amount + asset + from/to + protocol. -/
+/-- Generic protocol-action template: verb + amount + asset + from/to + protocol.
+
+`protocol` is read as up to two adjacent tokens so `"... to aave v3"`
+and `"... to morpho blue"` resolve to the joined form, not the bare
+first word. `extractProtocolName` only joins a second token when it's a
+known version/family qualifier — random suffixes do not get pulled in. -/
 def matchProtocolAction (toks : List String) (verb : String) (action : Action)
     (preposition : String) : Option RegexDraft := do
   let v ← toks.head?
   if v ≠ verb then none
   let prepIdx ← indexOfKeyword toks preposition
-  let amount ← at? toks 1
-  if ¬ (isAmount amount) then none
-  let asset ← at? toks 2
-  let protocol ← at? toks (prepIdx + 1)
+  let amountRaw ← at? toks 1
+  if ¬ (isAmountLike amountRaw) then none
+  let amount := (normalizeAmount amountRaw).getD amountRaw
+  let assetRaw ← at? toks 2
+  let asset := stripCashtag assetRaw
+  let protocol ← extractProtocolName toks (prepIdx + 1)
   let assetOk := isEthLike asset ∨ isKnownSymbol asset ∨ isAddress asset
   let unresolved : List String :=
     if assetOk then [] else [s!"asset '{asset}' not in known-tokens registry"]
@@ -416,9 +626,11 @@ def matchShielded (toks : List String) : Option RegexDraft := do
   if ¬ (isCanonical ∨ isAliasedShield ∨ isAliasedUnshield) then none
   let canonicalVerb : String :=
     if verb = "unshield" ∨ isAliasedUnshield then "unshield" else "shield"
-  let amount ← at? toks 1
-  if ¬ (isAmount amount) then none
-  let asset ← at? toks 2
+  let amountRaw ← at? toks 1
+  if ¬ (isAmountLike amountRaw) then none
+  let amount := (normalizeAmount amountRaw).getD amountRaw
+  let assetRaw ← at? toks 2
+  let asset := stripCashtag assetRaw
   let assetOk := isEthLike asset ∨ isKnownSymbol asset ∨ isAddress asset
   -- Protocol-disambiguation gates. The canonical `shield`/`unshield`
   -- verb defaulted to Privacy Pool, which silently overrode the user
@@ -568,9 +780,11 @@ def matchWrap (toks : List String) : Option RegexDraft := do
     | "wrap"   => some Action.wrap
     | "unwrap" => some Action.unwrap
     | _        => none
-  let amount ← at? toks 1
-  if ¬ (isAmount amount) then none
-  let asset ← at? toks 2
+  let amountRaw ← at? toks 1
+  if ¬ (isAmountLike amountRaw) then none
+  let amount := (normalizeAmount amountRaw).getD amountRaw
+  let assetRaw ← at? toks 2
+  let asset := stripCashtag assetRaw
   let assetOk := isEthLike asset ∨ isKnownSymbol asset
   some {
     action     := action
