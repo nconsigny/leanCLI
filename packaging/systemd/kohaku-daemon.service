@@ -9,11 +9,13 @@
 # wallet up, and the autospawn paths in the CLI/TUI refuse to spawn
 # while the marker file ~/.config/leankohaku/managed-by-systemd exists.
 #
-# The colibri light-client sidecar (bridge/colibri/bridge.mjs) is NOT a
-# separate unit. The daemon spawns it as a child process with
-# stderr := .inherit (see LeanKohaku/Colibri/Persistent.lean), so its
-# logs land in this unit's journal automatically and KillMode=control-group
-# guarantees it dies with the daemon when the unit stops.
+# Light-client sidecars (bridge/colibri/bridge.mjs and bridge/helios/bridge.mjs)
+# are NOT separate units. The daemon spawns each as a child process with
+# stderr := .inherit (see LeanKohaku/{Colibri,Helios}/Persistent.lean), so
+# their logs land in this unit's journal automatically and
+# KillMode=control-group guarantees they die with the daemon when the unit
+# stops. Helios is opt-in via KOHAKU_HELIOS=1 in daemon.env (set by
+# kohakuspawn at install time); colibri is opt-out via KOHAKU_COLIBRI=0.
 Description=leanKohaku wallet daemon (user)
 After=default.target
 
@@ -34,10 +36,10 @@ RestartSec=2
 StandardOutput=journal
 StandardError=journal
 
-# control-group + a generous TimeoutStopSec gives the colibri sidecar
-# time to flush its UDS state cleanly when the unit stops. The daemon's
-# own shutdown handler unlinks the socket before exiting; if it hangs,
-# the 10s timeout lets systemd SIGKILL the whole cgroup.
+# control-group + a generous TimeoutStopSec gives the colibri / helios
+# sidecars time to flush their UDS state cleanly when the unit stops.
+# The daemon's own shutdown handler unlinks both sockets before exiting;
+# if it hangs, the 10s timeout lets systemd SIGKILL the whole cgroup.
 KillMode=control-group
 TimeoutStopSec=10
 
@@ -46,7 +48,7 @@ TimeoutStopSec=10
 # NOT set:
 #   - ProtectSystem=strict   (would block writes to %h/.local/share)
 #   - ProtectHome=yes        (would block reads of %h/.config)
-#   - MemoryDenyWriteExecute (breaks Node.js — the colibri sidecar)
+#   - MemoryDenyWriteExecute (breaks Node.js — the colibri / helios sidecars)
 # The settings below are portable to user units and don't require
 # CAP_SYS_ADMIN to enforce.
 NoNewPrivileges=yes

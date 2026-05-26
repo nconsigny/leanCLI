@@ -234,6 +234,7 @@ kill_stale_kohaku_processes() {
   local found_daemon=0 found_bridge=0
   if pgrep -x kohaku-daemon >/dev/null 2>&1; then found_daemon=1; fi
   if pgrep -f 'bridge/colibri/bridge\.mjs' >/dev/null 2>&1; then found_bridge=1; fi
+  if pgrep -f 'bridge/helios/bridge\.mjs' >/dev/null 2>&1; then found_bridge=1; fi
   if [[ $found_daemon -eq 0 && $found_bridge -eq 0 ]]; then
     return 0
   fi
@@ -253,11 +254,13 @@ kill_stale_kohaku_processes() {
   # an autospawned daemon that's outside any cgroup we can reach).
   pkill -x kohaku-daemon 2>/dev/null || true
   pkill -f 'bridge/colibri/bridge\.mjs' 2>/dev/null || true
+  pkill -f 'bridge/helios/bridge\.mjs' 2>/dev/null || true
   # Brief grace period for the processes to exit cleanly.
   local i
   for i in 1 2 3 4 5; do
     if ! pgrep -x kohaku-daemon >/dev/null 2>&1 \
-       && ! pgrep -f 'bridge/colibri/bridge\.mjs' >/dev/null 2>&1; then
+       && ! pgrep -f 'bridge/colibri/bridge\.mjs' >/dev/null 2>&1 \
+       && ! pgrep -f 'bridge/helios/bridge\.mjs' >/dev/null 2>&1; then
       break
     fi
     sleep 0.2
@@ -268,8 +271,12 @@ kill_stale_kohaku_processes() {
     pkill -9 -x kohaku-daemon 2>/dev/null || true
   fi
   if pgrep -f 'bridge/colibri/bridge\.mjs' >/dev/null 2>&1; then
-    echo "    SIGKILL surviving bridge.mjs PIDs: $(pgrep -f 'bridge/colibri/bridge\.mjs' | tr '\n' ' ')"
+    echo "    SIGKILL surviving colibri bridge.mjs PIDs: $(pgrep -f 'bridge/colibri/bridge\.mjs' | tr '\n' ' ')"
     pkill -9 -f 'bridge/colibri/bridge\.mjs' 2>/dev/null || true
+  fi
+  if pgrep -f 'bridge/helios/bridge\.mjs' >/dev/null 2>&1; then
+    echo "    SIGKILL surviving helios bridge.mjs PIDs: $(pgrep -f 'bridge/helios/bridge\.mjs' | tr '\n' ' ')"
+    pkill -9 -f 'bridge/helios/bridge\.mjs' 2>/dev/null || true
   fi
 }
 
@@ -369,8 +376,8 @@ if [[ "$MODE" == "uninstall" ]]; then
   # blanket rm -f is safe — no chance of nuking a user-managed wrapper
   # that happens to share the name.
   for bridge_exe in leankohaku-kohaku-bridge leankohaku-clearsign-bridge \
-                    leankohaku-colibri-bridge leankohaku-llm-bridge \
-                    leankohaku-llm-legacy; do
+                    leankohaku-colibri-bridge leankohaku-helios-bridge \
+                    leankohaku-llm-bridge leankohaku-llm-legacy; do
     if [[ -e "$KOHAKU_BIN/$bridge_exe" ]]; then
       rm -f "$KOHAKU_BIN/$bridge_exe"
       echo "removed $KOHAKU_BIN/$bridge_exe"
@@ -792,6 +799,20 @@ if [[ -x "$LEAN_AGENT" ]]; then
   kohaku_env_set "LEAN_KOHAKU_LLM_BRIDGE" "$KOHAKU_BIN/kohaku-agent"
 fi
 
+# Helios light-client defaults. The sidecar itself is auto-installed by
+# `build_bridges` (any bridge/<name>/ with a package.json is npm-installed
+# in place), and the wrapper-shim resolver picks up `bridge/helios/`. The
+# remaining piece is opt-in at the daemon-boot level — the daemon checks
+# `KOHAKU_HELIOS=1` before auto-spawning the persistent helios client, and
+# `KOHAKU_READ_BACKEND=helios` to default `tx.simulate` to the helios
+# backend. We bake both in so a fresh install gets sync-committee-verified
+# simulation by default; users can flip them off via daemon.env edits or
+# `daemon.readBackend.set { backend: rpc }` at runtime.
+if [[ -f "$CHECKOUT/bridge/helios/package.json" ]]; then
+  kohaku_env_set "KOHAKU_HELIOS"        "1"
+  kohaku_env_set "KOHAKU_READ_BACKEND"  "helios"
+fi
+
 # SPHINCS- shim symlinks + daemon.env entries. The daemon's
 # `Sphincs/Bridge.lean::resolveExecutable` checks `LEAN_KOHAKU_SPHINCS_<PARAMSET>`
 # env first, then walks up from cwd looking for `sidecars/sphincs/bin/<basename>`,
@@ -887,6 +908,7 @@ install_bridge_wrappers() {
     "leankohaku-kohaku-bridge:bridge/bridge.mjs:LEAN_KOHAKU_BRIDGE"
     "leankohaku-clearsign-bridge:bridge/clearsign/bridge.mjs:LEAN_KOHAKU_CLEARSIGN_BRIDGE"
     "leankohaku-colibri-bridge:bridge/colibri/bridge.mjs:LEAN_KOHAKU_COLIBRI_BRIDGE"
+    "leankohaku-helios-bridge:bridge/helios/bridge.mjs:LEAN_KOHAKU_HELIOS_BRIDGE"
     "leankohaku-llm-legacy:bridge/llm-legacy/bridge.mjs:LEAN_KOHAKU_LLM_BRIDGE_LEGACY_PATH"
   )
 
