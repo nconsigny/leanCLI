@@ -82,6 +82,7 @@ type ChainEndpoint = {
 
 type Props = {
   onLiveMonitor: () => void;
+  onTrustedRegistry: () => void;
   onBack: () => void;
 };
 
@@ -89,7 +90,11 @@ type Props = {
  *  `status.snapshot` RPC fans out sidecar pings + sandbox probe
  *  daemon-side; the TUI just renders. R refreshes, M opens the live
  *  network monitor (preserves the existing trace tool), ESC/q backs out. */
-export default function StatusFlow({ onLiveMonitor, onBack }: Props) {
+export default function StatusFlow({
+  onLiveMonitor,
+  onTrustedRegistry,
+  onBack,
+}: Props) {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -127,6 +132,7 @@ export default function StatusFlow({ onLiveMonitor, onBack }: Props) {
     }
     if (input === "r" || input === "R") setRefreshKey((k) => k + 1);
     if (input === "m" || input === "M") onLiveMonitor();
+    if (input === "t" || input === "T") onTrustedRegistry();
   });
 
   return (
@@ -137,7 +143,7 @@ export default function StatusFlow({ onLiveMonitor, onBack }: Props) {
           ? `daemon pid ${snap.daemon.pid} · uptime ${fmtUptime(snap.daemon.uptimeMs)} · v${snap.daemon.version}`
           : "querying daemon…"
       }
-      hint="r refresh · m live network monitor · ← / esc back · q quit"
+      hint="r refresh · m live monitor · t trusted registry · ← / esc back · q quit"
     >
       {error && <Banner kind="err" text={error} />}
       {!snap && !error && (

@@ -1,18 +1,160 @@
 {
+  "_source_note": "Mainnet rows mirror https://docs.morpho.org/get-started/resources/addresses/ (canonical Morpho address book). Sepolia rows are the Vault V2 testnet deployment; the docs page has Sepolia tabs that are JS-rendered and not present in static fetches, so addresses below were taken from the morpho-org/vault-v2 + vault-v2-adapter-registries repos.",
+
   "mainnet": {
     "MorphoBlue": {
       "address": "0xBBBBBbbBBb9cC5e90e3b3Af64bdAF62C37EEFFCb",
       "abi": "abi/MorphoBlue.json",
       "verified": true,
-      "source": "https://docs.morpho.org/morpho-blue/contracts/"
+      "family": "morpho-blue",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+    "AdaptiveCurveIrm": {
+      "address": "0x870aC11D48B15DB9a138Cf899d20F13F79Ba00BC",
+      "verified": true,
+      "family": "morpho-blue",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+    "MorphoChainlinkOracleV2Factory": {
+      "address": "0x3A7bB36Ee3f3eE32A60e9f2b33c1e5f2E83ad766",
+      "verified": true,
+      "family": "morpho-blue",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+    "PreLiquidationFactory": {
+      "address": "0x6FF33615e792E35ed1026ea7cACCf42D9BF83476",
+      "verified": true,
+      "family": "morpho-blue",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+
+    "MetaMorphoFactoryV1_1": {
+      "address": "0x1897A8997241C1cD4bD0698647e4EB7213535c24",
+      "abi": "abi/MetaMorphoFactory.json",
+      "verified": true,
+      "family": "vault-v1",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
     },
     "MetaMorphoFactory": {
       "address": "0xA9c3D3a366466Fa809d1Ae982Fb2c46E5fC41101",
       "abi": "abi/MetaMorphoFactory.json",
       "verified": true,
-      "source": "https://docs.morpho.org/metamorpho/contracts/"
+      "family": "vault-v1",
+      "legacy": true,
+      "_note": "Deprecated MetaMorpho factory. New vaults use MetaMorphoFactoryV1_1 above.",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+    "PublicAllocator": {
+      "address": "0xfd32fA2ca22c76dD6E550706Ad913FC6CE91c75D",
+      "verified": true,
+      "family": "vault-v1",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+
+    "VaultV2Factory": {
+      "address": "0xA1D94F746dEfa1928926b84fB2596c06926C0405",
+      "verified": true,
+      "family": "vault-v2",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+    "MorphoVaultV1AdapterFactory": {
+      "address": "0xD1B8E2dee25c2b89DCD2f98448a7ce87d6F63394",
+      "verified": true,
+      "family": "vault-v2",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+    "MorphoMarketV1AdapterV2Factory": {
+      "address": "0x32BB1c0D48D8b1B3363e86eeB9A0300BAd61ccc1",
+      "verified": true,
+      "family": "vault-v2",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+    "MorphoRegistry": {
+      "address": "0x3696c5eAe4a7Ffd04Ea163564571E9CD8Ed9364e",
+      "verified": true,
+      "family": "vault-v2-adapter-registries",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+
+    "Bundler3": {
+      "address": "0x6566194141eefa99Af43Bb5Aa71460Ca2Dc90245",
+      "verified": true,
+      "family": "bundler",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+    "EthereumGeneralAdapter1": {
+      "address": "0x4A6c312ec70E8747a587EE860a0353cd42Be0aE0",
+      "verified": true,
+      "family": "bundler",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+    "ERC20WrapperAdapter": {
+      "address": "0xf83D17dFE160597b19e4FdD8ea61A23e9a87F962",
+      "verified": true,
+      "family": "bundler",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+    "ParaswapAdapter": {
+      "address": "0x03b5259Bd204BfD4A616E5B79b0B786d90c6C38f",
+      "verified": true,
+      "family": "bundler",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+
+    "UniversalRewardsDistributorFactory": {
+      "address": "0x9baA51245CDD28D8D74Afe8B3959b616E9ee7c8D",
+      "verified": true,
+      "family": "rewards",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+    "UniversalRewardsDistributor": {
+      "address": "0x330eefa8a787552DC5cAd3C3cA644844B1E61Ddb",
+      "verified": true,
+      "family": "rewards",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+
+    "MORPHO": {
+      "address": "0x58D97B57BB95320F9a05dC918Aef65434969c2B2",
+      "verified": true,
+      "family": "token",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+    "MORPHOWrapper": {
+      "address": "0x9D03bb2092270648d7480049d0E58d2FcF0E5123",
+      "verified": true,
+      "family": "token",
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
+    },
+    "LegacyMORPHO": {
+      "address": "0x9994E35Db50125E0DF82e4c2dde62496CE330999",
+      "verified": true,
+      "family": "token",
+      "legacy": true,
+      "source": "https://docs.morpho.org/get-started/resources/addresses/"
     }
   },
-  "sepolia": {},
-  "_sepolia_note": "TODO(curator): confirm whether Morpho Blue/MetaMorpho have a Sepolia deployment; the docs above list mainnet first."
+
+  "sepolia": {
+    "VaultV2Factory": {
+      "address": "0xb3fE2D5f8Af90f194B01db546397058Fcebb85D1",
+      "verified": true,
+      "family": "vault-v2",
+      "source": "https://github.com/morpho-org/vault-v2"
+    },
+    "MorphoMarketV1AdapterV2Factory": {
+      "address": "0x5481f54CACdf0aECE9f71F2Bb2c0A8e44b2d5D81",
+      "verified": true,
+      "family": "vault-v2",
+      "source": "https://github.com/morpho-org/vault-v2"
+    },
+    "MorphoRegistry": {
+      "address": "0xE8eE811C7c9748De2db8c878dc5e32c9DD12dAB3",
+      "verified": true,
+      "family": "vault-v2-adapter-registries",
+      "source": "https://github.com/morpho-org/vault-v2-adapter-registries"
+    }
+  },
+
+  "_sepolia_note": "Morpho Blue itself is mainnet-only — the Sepolia entries above are Vault V2 (the next-gen ERC-4626-style vault stack). Supplying on Sepolia goes through a Vault V2 vault deployed via VaultV2Factory; that vault holds a MorphoMarketV1 adapter that exposes a Morpho-Blue-like market. There is no canonical Sepolia Morpho Blue contract to point at."
 }
