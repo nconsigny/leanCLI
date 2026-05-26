@@ -1628,7 +1628,17 @@ private def buildSignBroadcastTx
     -- cap, so this raises the success rate without raising the bill.
     let maxFeePerGas := 2 * gasPrice + maxPriorityFeePerGas
     let estimateRequest := estimateTxJson slot.address to value data
-    let gasJson ← expectExcept <| (← LeanKohaku.RPC.Outbound.estimateGas cfg.policy cfg.rpcEndpoint estimateRequest "latest" via?)
+    -- Pin estimateGas to direct RPC. Colibri's stateless EVM verifies
+    -- state reads against committee proofs, but can't faithfully replay
+    -- multicall / router calls (Aave supply, Uniswap V3 swap, Morpho
+    -- bundler, etc.) — its light-client validation surfaces those as
+    -- spurious "execution reverted" errors. `tx.simulate` already pins
+    -- itself to direct RPC for this exact reason; we apply the same fix
+    -- here so the send-path gas estimate doesn't fail on contracts that
+    -- the pre-send simulate succeeded against. Other reads in this
+    -- function (nonce, gasPrice, maxPriorityFeePerGas) are simple state
+    -- queries that Colibri handles correctly, so they keep `via?`.
+    let gasJson ← expectExcept <| (← LeanKohaku.RPC.Outbound.estimateGas cfg.policy cfg.rpcEndpoint estimateRequest "latest" none)
     let gasLimit ← jsonHexNatIO gasJson "gasLimit"
     let tx : LeanKohaku.Ethereum.Tx.TxEip1559 := {
       chainId := cfg.chainId,
