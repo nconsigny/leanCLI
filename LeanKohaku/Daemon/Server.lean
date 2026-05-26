@@ -6259,6 +6259,13 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       -- Outbound. The output is the load-bearing piece of Phase 2 clear-
       -- signing: every signed tx must be simulated and the user must
       -- confirm the simulated effect, not the LLM/dApp's prose summary.
+      --
+      -- Backend selection (kohaku-provider style): callers can pass
+      -- `params.backend = "rpc" | "colibri" | "helios"` to pick which
+      -- backend executes this single simulation. Absent → the daemon-wide
+      -- `daemon.readBackend` default (also `rpc` until set otherwise). The
+      -- dedicated `tx.simulate{Colibri,Helios}` methods stay as explicit
+      -- aliases and are unaffected.
       match paramString req.params "to" with
       | .error err => pure (.error err)
       | .ok to =>
@@ -6267,88 +6274,121 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           let value := paramStringD req.params "value" "0x0"
           let block := paramStringD req.params "block" "latest"
           let chain? := getField "chain" req.params >>= asString
+          let backendParam : Option LeanKohaku.Daemon.State.ReadBackend :=
+            (getField "backend" req.params >>= asString) >>= LeanKohaku.Daemon.State.ReadBackend.parse?
+          let backend ← match backendParam with
+            | some b => pure b
+            | none => LeanKohaku.Daemon.State.getReadBackend state
           match endpointForChain cfg chain? with
           | .error err =>
               pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
           | .ok endpoint =>
-              -- Build the call object once; eth_call and eth_estimateGas
-              -- accept the same shape.
-              let txObj : Json := .obj <|
-                (match from? with | some f => #[("from", .str f)] | none => #[])
-                ++ #[("to", .str to), ("value", .str value), ("data", .str data)]
-              -- Why: tx.simulate must run against a full execution node.
-              -- Colibri's stateless light-client model verifies state reads
-              -- but cannot faithfully replay arbitrary contract execution
-              -- (multicall, router calls, etc.) — light-client validation
-              -- of a multicall eth_call surfaces as a spurious revert.
-              -- The opt-in tx.simulateColibri method covers the verified
-              -- case explicitly. Keep this path on direct RPC.
-              let via? : Option LeanKohaku.RPC.Outbound.VerifyVia := none
-              let callRes ← LeanKohaku.RPC.Outbound.call cfg.policy endpoint
-                .call (.arr #[txObj, .str block]) via?
-              let gasRes ← LeanKohaku.RPC.Outbound.estimateGas
-                cfg.policy endpoint txObj block via?
-              -- Opt-in `debug_traceCall` with the callTracer + log capture.
-              -- Many public RPCs don't expose `debug_*` namespaces; we
-              -- surface the failure as `traceUnavailable` so callers can
-              -- gracefully degrade to the eth_call-only output. The trace
-              -- itself is returned raw — TUI consumers parse Transfer events
-              -- (topic[0] = 0xddf252ad...) downstream to render which
-              -- tokens move pre-sign.
-              let traceFlag := ((getField "trace" req.params) >>= asBool).getD false
-              let chainIdForMeta :=
-                ((getField "chainId" req.params) >>= asNat).getD cfg.chainId
-              -- traceField holds either `[("trace", ...)]`, `[("trace",...),
-              -- ("tokenMetadata", ...)]`, or `[("traceUnavailable", ...)]`.
-              let traceField : Array (String × Json) ←
-                if traceFlag then
-                  let traceCfg : Json := .obj #[
-                    ("tracer", .str "callTracer"),
-                    ("tracerConfig", .obj #[("withLog", .bool true)])
-                  ]
-                  let traceParams : Json := .arr #[txObj, .str block, traceCfg]
-                  match ← LeanKohaku.RPC.Outbound.call cfg.policy endpoint
-                      .debugTraceCall traceParams with
-                  | .ok traceJson =>
-                      -- Prefetch metadata for every token that emits a
-                      -- Transfer log inside the trace. Dedup by lowercased
-                      -- address so we make one eth_call per token, not per
-                      -- transfer event. Failures are silent — TransfersBlock
-                      -- gracefully falls back to raw uint256 + short addr.
-                      let allTokens := collectTransferTokens traceJson
-                      let mut seen : Array String := #[]
-                      let mut tmObj : Array (String × Json) := #[]
-                      for raw in allTokens do
-                        let lo := raw.toLower
-                        if seen.contains lo then continue
-                        seen := seen.push lo
-                        match ← LeanKohaku.Daemon.TokenMeta.lookupOrFetch
-                            state cfg.policy endpoint chainIdForMeta raw with
-                        | some m =>
-                            tmObj := tmObj.push (lo,
-                              LeanKohaku.Daemon.TokenMeta.toJson m)
-                        | none => pure ()
-                      pure #[("trace", traceJson),
-                             ("tokenMetadata", .obj tmObj)]
-                  | .error e => pure #[("traceUnavailable", Json.str e)]
-                else
-                  pure #[]
-              let okBool := match callRes with | .ok _ => true | .error _ => false
-              let returnField : Array (String × Json) := match callRes with
-                | .ok j => #[("returnData", j)]
-                | .error _ => #[]
-              let revertField : Array (String × Json) := match callRes with
-                | .error e => #[("revertReason", Json.str e)]
-                | .ok _ => #[]
-              let gasField : Array (String × Json) := match gasRes with
-                | .ok j => #[("gasEstimate", j)]
-                | .error e =>
-                    #[("gasEstimateError", Json.str e)]
-              pure <| .ok <| .obj <| #[
-                ("ok", .bool okBool),
-                ("block", .str block),
-                ("tx", txObj)
-              ] ++ returnField ++ revertField ++ gasField ++ traceField
+              match backend with
+              | .colibri =>
+                  -- Route to the persistent Colibri client if running;
+                  -- fall back to the one-shot sidecar otherwise. Same
+                  -- shape as the dedicated `tx.simulateColibri` handler.
+                  let cParams := mergeHeliosDefaults req.params endpoint cfg.chainId
+                  -- mergeHeliosDefaults also injects executionRpc which
+                  -- Colibri ignores — harmless. chainId injection is the
+                  -- piece both backends need.
+                  match ← LeanKohaku.Daemon.State.colibriClient? state with
+                  | some c =>
+                      let resp ← LeanKohaku.Colibri.Persistent.call c "tx.simulate" cParams
+                      pure <| .ok <| LeanKohaku.Colibri.Persistent.responseToJson resp
+                  | none =>
+                      let resp ← LeanKohaku.Colibri.Bridge.call
+                        { method := "tx.simulate", params := cParams, id := 0 }
+                      pure <| .ok <| LeanKohaku.Colibri.Bridge.responseToJson resp
+              | .helios =>
+                  let hParams := mergeHeliosDefaults req.params endpoint cfg.chainId
+                  match ← LeanKohaku.Daemon.State.heliosClient? state with
+                  | some c =>
+                      let resp ← LeanKohaku.Helios.Persistent.call c "tx.simulate" hParams
+                      pure <| .ok <| LeanKohaku.Helios.Persistent.responseToJson resp
+                  | none =>
+                      let resp ← LeanKohaku.Helios.Bridge.call
+                        { method := "tx.simulate", params := hParams, id := 0 }
+                      pure <| .ok <| LeanKohaku.Helios.Bridge.responseToJson resp
+              | .rpc =>
+                -- Build the call object once; eth_call and eth_estimateGas
+                -- accept the same shape.
+                let txObj : Json := .obj <|
+                  (match from? with | some f => #[("from", .str f)] | none => #[])
+                  ++ #[("to", .str to), ("value", .str value), ("data", .str data)]
+                -- Why: tx.simulate must run against a full execution node.
+                -- Colibri's stateless light-client model verifies state reads
+                -- but cannot faithfully replay arbitrary contract execution
+                -- (multicall, router calls, etc.) — light-client validation
+                -- of a multicall eth_call surfaces as a spurious revert.
+                -- The opt-in tx.simulateColibri method covers the verified
+                -- case explicitly. Keep this path on direct RPC.
+                let via? : Option LeanKohaku.RPC.Outbound.VerifyVia := none
+                let callRes ← LeanKohaku.RPC.Outbound.call cfg.policy endpoint
+                  .call (.arr #[txObj, .str block]) via?
+                let gasRes ← LeanKohaku.RPC.Outbound.estimateGas
+                  cfg.policy endpoint txObj block via?
+                -- Opt-in `debug_traceCall` with the callTracer + log capture.
+                -- Many public RPCs don't expose `debug_*` namespaces; we
+                -- surface the failure as `traceUnavailable` so callers can
+                -- gracefully degrade to the eth_call-only output. The trace
+                -- itself is returned raw — TUI consumers parse Transfer events
+                -- (topic[0] = 0xddf252ad...) downstream to render which
+                -- tokens move pre-sign.
+                let traceFlag := ((getField "trace" req.params) >>= asBool).getD false
+                let chainIdForMeta :=
+                  ((getField "chainId" req.params) >>= asNat).getD cfg.chainId
+                -- traceField holds either `[("trace", ...)]`, `[("trace",...),
+                -- ("tokenMetadata", ...)]`, or `[("traceUnavailable", ...)]`.
+                let traceField : Array (String × Json) ←
+                  if traceFlag then
+                    let traceCfg : Json := .obj #[
+                      ("tracer", .str "callTracer"),
+                      ("tracerConfig", .obj #[("withLog", .bool true)])
+                    ]
+                    let traceParams : Json := .arr #[txObj, .str block, traceCfg]
+                    match ← LeanKohaku.RPC.Outbound.call cfg.policy endpoint
+                        .debugTraceCall traceParams with
+                    | .ok traceJson =>
+                        -- Prefetch metadata for every token that emits a
+                        -- Transfer log inside the trace. Dedup by lowercased
+                        -- address so we make one eth_call per token, not per
+                        -- transfer event. Failures are silent — TransfersBlock
+                        -- gracefully falls back to raw uint256 + short addr.
+                        let allTokens := collectTransferTokens traceJson
+                        let mut seen : Array String := #[]
+                        let mut tmObj : Array (String × Json) := #[]
+                        for raw in allTokens do
+                          let lo := raw.toLower
+                          if seen.contains lo then continue
+                          seen := seen.push lo
+                          match ← LeanKohaku.Daemon.TokenMeta.lookupOrFetch
+                              state cfg.policy endpoint chainIdForMeta raw with
+                          | some m =>
+                              tmObj := tmObj.push (lo,
+                                LeanKohaku.Daemon.TokenMeta.toJson m)
+                          | none => pure ()
+                        pure #[("trace", traceJson),
+                               ("tokenMetadata", .obj tmObj)]
+                    | .error e => pure #[("traceUnavailable", Json.str e)]
+                  else
+                    pure #[]
+                let okBool := match callRes with | .ok _ => true | .error _ => false
+                let returnField : Array (String × Json) := match callRes with
+                  | .ok j => #[("returnData", j)]
+                  | .error _ => #[]
+                let revertField : Array (String × Json) := match callRes with
+                  | .error e => #[("revertReason", Json.str e)]
+                  | .ok _ => #[]
+                let gasField : Array (String × Json) := match gasRes with
+                  | .ok j => #[("gasEstimate", j)]
+                  | .error e =>
+                      #[("gasEstimateError", Json.str e)]
+                pure <| .ok <| .obj <| #[
+                  ("ok", .bool okBool),
+                  ("block", .str block),
+                  ("tx", txObj)
+                ] ++ returnField ++ revertField ++ gasField ++ traceField
   | "tx.preflightContext" =>
       -- Why: surface "what does the chain currently say?" alongside the
       -- deterministic simulate output. For approves we read the current
@@ -6554,6 +6594,28 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           ]
       | none =>
           pure <| .ok <| .obj #[("running", .bool false)]
+  | "daemon.readBackend.set" =>
+      -- Pick the daemon's default read/simulate backend (kohaku-provider
+      -- style toggle). Honored by `tx.simulate` when its `backend` field
+      -- is absent. `tx.simulate{Colibri,Helios}` dedicated aliases ignore
+      -- this; pass `backend` explicitly per call to override.
+      match (getField "backend" req.params >>= asString)
+            >>= LeanKohaku.Daemon.State.ReadBackend.parse? with
+      | none =>
+          pure <| .error {
+            code := -32602,
+            message := "params.backend must be one of: rpc | colibri | helios",
+            data := none
+          }
+      | some b =>
+          LeanKohaku.Daemon.State.setReadBackend state b
+          pure <| .ok <| .obj #[
+            ("ok", .bool true),
+            ("backend", .str b.asString)
+          ]
+  | "daemon.readBackend.status" =>
+      let b ← LeanKohaku.Daemon.State.getReadBackend state
+      pure <| .ok <| .obj #[("backend", .str b.asString)]
   | "daemon.approvals.list" =>
       -- Read-only listing of outgoing ERC-20 allowances for a wallet
       -- on a chain. Spec (per D3 / audit-approvals SKILL.md): walk
@@ -8374,6 +8436,18 @@ def run (cfg : Config) : IO Unit := do
     match ← IO.getEnv "KOHAKU_HELIOS" with
     | some "1" | some "on" | some "true" | some "yes" => true
     | _ => false
+  -- Honor `KOHAKU_READ_BACKEND` for the initial default backend. Same
+  -- naming as the `daemon.readBackend.set { backend }` RPC. Unrecognized
+  -- values fall through to the structure default (.rpc) with a warning.
+  match ← IO.getEnv "KOHAKU_READ_BACKEND" with
+  | some raw =>
+      match LeanKohaku.Daemon.State.ReadBackend.parse? raw with
+      | some b =>
+          LeanKohaku.Daemon.State.setReadBackend state b
+          IO.eprintln s!"leankohaku-daemon: read backend default = {b.asString} (from KOHAKU_READ_BACKEND)"
+      | none =>
+          IO.eprintln s!"leankohaku-daemon: KOHAKU_READ_BACKEND={raw} unrecognized; using default rpc"
+  | none => pure ()
   if heliosEnabled then
     let runtimeRoot ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
       | some d => pure d

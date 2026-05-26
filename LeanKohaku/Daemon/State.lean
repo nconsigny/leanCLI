@@ -39,6 +39,39 @@ structure MasterKekSlot where
   unlockedAtMs : Nat
   ttlMs        : Nat
 
+/-- Which backend the daemon defaults to for reads / simulations.
+Mirrors the upstream `ethereum/kohaku` provider-package design where the
+caller picks between `helios(...)` and `colibri(...)`; we expose it as a
+daemon-wide toggle so the CLI/TUI/agent can flip backends once and have
+every subsequent `tx.simulate` honour it without restating the choice.
+
+- `rpc`     direct execution-RPC `eth_call` / `eth_estimateGas`. The
+            historical default; broadest compatibility (multicall etc.).
+- `colibri` Stateless light-client backend (`@corpus-core/colibri-stateless`).
+            Consensus-verified state via committee-signed proofs; can
+            mis-render some router/multicall calls as reverts (which is
+            why `tx.simulate` originally pinned to `rpc`).
+- `helios`  `@a16z/helios` + embedded REVM. Consensus-verified state via
+            sync-committee proofs; opt-in here since helios depends on a
+            beacon RPC plumbed in `bridge/helios/`. -/
+inductive ReadBackend
+  | rpc
+  | colibri
+  | helios
+  deriving Repr, DecidableEq, Inhabited
+
+def ReadBackend.asString : ReadBackend → String
+  | .rpc => "rpc"
+  | .colibri => "colibri"
+  | .helios => "helios"
+
+def ReadBackend.parse? (s : String) : Option ReadBackend :=
+  match s.toLower with
+  | "rpc" | "direct" | "raw" => some .rpc
+  | "colibri" => some .colibri
+  | "helios" => some .helios
+  | _ => none
+
 /-- Cached ERC-20 metadata. The actual struct lives in
 `LeanKohaku.Daemon.TokenMeta`; we store `(decimals, symbol)` raw to avoid
 a circular import. -/
@@ -78,6 +111,11 @@ structure DaemonState where
   `heliosRespawn` parity with Colibri; not yet exercised because the
   initial helios surface does not auto-substitute into verified reads. -/
   heliosSocket : Option String := none
+  /-- Daemon-wide default backend for `tx.simulate` and future unified
+  read RPCs. Initial value is `KOHAKU_READ_BACKEND` from the env (or
+  `.rpc` when unset); flipped at runtime via `daemon.readBackend.set`;
+  overridden per-call via `params.backend`. -/
+  readBackend : ReadBackend := .rpc
   /-- Wallet-level master KEK, when currently loaded. `none` means the
   wallet is locked at the master level — slot unlocks must come through
   the per-slot `eoa.unlock` path. Populated by `wallet.unlock`. -/
@@ -278,6 +316,14 @@ def heliosDisable (state : Shared) : IO Unit := do
 /-- Read the current Helios client without spawning. -/
 def heliosClient? (state : Shared) : IO (Option LeanKohaku.Helios.Persistent.Client) := do
   pure (← state.get).helios
+
+/-- Read the daemon's current default read backend. -/
+def getReadBackend (state : Shared) : IO ReadBackend := do
+  pure (← state.get).readBackend
+
+/-- Set the daemon's default read backend. -/
+def setReadBackend (state : Shared) (b : ReadBackend) : IO Unit := do
+  state.modify (fun s => { s with readBackend := b })
 
 /-! ## Verified-read backend builder
 
