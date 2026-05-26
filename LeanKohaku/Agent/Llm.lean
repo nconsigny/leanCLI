@@ -109,17 +109,33 @@ private def parseToolCalls (msg : Json) : List ToolCall :=
         | _ => none
   | _ => []
 
+/-- Truncate a response body for inclusion in a protocol error.
+    Keeps the user-facing message bounded while still surfacing
+    what the LLM backend actually returned. The full body is
+    `IO.eprintln`'d separately to journalctl so the operator can
+    see everything without restarting the daemon. -/
+private def excerptForError (txt : String) : String :=
+  let cap : Nat := 500
+  if txt.length ≤ cap then txt
+  else (txt.take cap).toString ++ s!"…[+{txt.length - cap} more]"
+
 /-- Decode the first `choices[0].message` of a chat-completions
-    response into our `AgentMessage` shape. -/
-def decodeChoiceMessage (resp : Json) : Except Error AgentMessage := do
+    response into our `AgentMessage` shape. `rawTxt` is the original
+    response body, passed through so protocol-shape errors can
+    surface what the LLM actually returned (a llama-server context
+    overflow returns `{"error":...}` with no `choices` key — the
+    previous version reported only "missing 'choices'" without the
+    underlying cause). -/
+def decodeChoiceMessage (resp : Json) (rawTxt : String) :
+    Except Error AgentMessage := do
   let some choicesJ := getField "choices" resp
-    | .error (.protocol "chat response missing 'choices'")
+    | .error (.protocol s!"chat response missing 'choices'; body: {excerptForError rawTxt}")
   let some choices := asArray choicesJ
-    | .error (.protocol "chat response 'choices' not array")
+    | .error (.protocol s!"chat response 'choices' not array; body: {excerptForError rawTxt}")
   let some choice := choices[0]?
-    | .error (.protocol "chat response 'choices' is empty")
+    | .error (.protocol s!"chat response 'choices' is empty; body: {excerptForError rawTxt}")
   let some msg := getField "message" choice
-    | .error (.protocol "chat response choice missing 'message'")
+    | .error (.protocol s!"chat response choice missing 'message'; body: {excerptForError rawTxt}")
   let content : Option String := getField "content" msg >>= asString
   -- `reasoning_content` is the OpenAI-compat field Qwen3.5 and some
   -- R1 backends emit alongside `content`. Captured here purely so
@@ -152,7 +168,17 @@ def chat
       | .error _ => return .error (.protocol "response body not valid UTF-8")
       | .ok txt =>
           match parse txt with
-          | .error e => return .error (.protocol s!"response not JSON: {e}: {txt}")
-          | .ok j => return decodeChoiceMessage j
+          | .error e => return .error (.protocol s!"response not JSON: {e}: {excerptForError txt}")
+          | .ok j =>
+              let result := decodeChoiceMessage j txt
+              -- On any protocol-shape failure, dump the FULL body to
+              -- stderr so the operator can pull it out of journalctl
+              -- without restarting the daemon. The user-facing error
+              -- carries only the truncated prefix.
+              match result with
+              | .error (.protocol _) =>
+                  IO.eprintln s!"[llm] protocol error; full response body follows:\n{txt}"
+              | _ => pure ()
+              return result
 
 end LeanKohaku.Agent.Llm
