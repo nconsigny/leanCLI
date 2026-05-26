@@ -103,13 +103,16 @@ example : (parse "register vitalik.eth").action = .ensRegister := by native_deci
 example :
     (parse "register vitalik.eth for 2 years").fields.lookup "name"
       = some "vitalik.eth" ∧
-    (parse "register vitalik.eth for 2 years").fields.lookup "durationYears"
+    (parse "register vitalik.eth for 2 years").fields.lookup "durationNum"
       = some "2" ∧
+    (parse "register vitalik.eth for 2 years").fields.lookup "durationUnit"
+      = some "years" ∧
     (parse "register vitalik.eth for 2 years").confidence = .high
   := by native_decide
 example : (parse "renew vitalik.eth for 1 year").action = .ensRenew := by native_decide
 example :
-    (parse "renew vitalik.eth for 1 year").fields.lookup "durationYears" = some "1"
+    (parse "renew vitalik.eth for 1 year").fields.lookup "durationNum" = some "1" ∧
+    (parse "renew vitalik.eth for 1 year").fields.lookup "durationUnit" = some "year"
   := by native_decide
 -- Duration without the "year(s)" unit lowers confidence so the skill
 -- card asks for clarification.
@@ -152,6 +155,72 @@ example : (parse "unstake 1 ETH via lido").action = .unstake := by native_decide
 -- Bare stake defaults to lido without explicit `via`.
 example :
     (parse "stake 1 ETH").fields.lookup "protocol" = some "lido"
+  := by native_decide
+
+/-! ## Smarter NL parsing
+
+Range amounts, multi-unit durations, explicit minOut, and conjunction
+detection. Each canonical form anchored so a regression in the
+helpers (`parseRange`, `durationUnitSeconds`, the minOut sweep)
+breaks `lake build` immediately. -/
+
+-- Range amount: floor goes into amountIn, ceiling into amountInMax.
+example :
+    (parse "swap 1-2 ETH for USDC with 0.5% slippage").fields.lookup "amountIn"
+      = some "1" ∧
+    (parse "swap 1-2 ETH for USDC with 0.5% slippage").fields.lookup "amountInMax"
+      = some "2"
+  := by native_decide
+example :
+    (parse "swap 0.5-1.5k usdc for weth with 0.3% slippage").fields.lookup "amountIn"
+      = some "0.5" ∧
+    (parse "swap 0.5-1.5k usdc for weth with 0.3% slippage").fields.lookup "amountInMax"
+      = some "1500"
+  := by native_decide
+
+-- Explicit minOut overrides the slippage-percentage path.
+example :
+    (parse "swap 1 ETH for USDC minimum 3000 USDC").fields.lookup "minAmountOut"
+      = some "3000" ∧
+    (parse "swap 1 ETH for USDC minimum 3000 USDC").confidence = .high
+  := by native_decide
+example :
+    (parse "swap 1 ETH for USDC at least 3000").fields.lookup "minAmountOut"
+      = some "3000"
+  := by native_decide
+example :
+    (parse "swap 1 ETH for USDC min 2500").fields.lookup "minAmountOut"
+      = some "2500"
+  := by native_decide
+
+-- Multi-unit durations on ENS register/renew.
+example :
+    (parse "register vitalik.eth for 30 days").fields.lookup "durationSeconds"
+      = some "2592000" ∧
+    (parse "register vitalik.eth for 30 days").confidence = .high
+  := by native_decide
+example :
+    (parse "renew vitalik.eth for 6 weeks").fields.lookup "durationSeconds"
+      = some "3628800"
+  := by native_decide
+example :
+    (parse "register vitalik.eth for 3 months").fields.lookup "durationSeconds"
+      = some "7776000"
+  := by native_decide
+example :
+    (parse "register vitalik.eth for 2 years").fields.lookup "durationSeconds"
+      = some "63072000"
+  := by native_decide
+
+-- Conjunction detection: only fires when no single-leg matcher
+-- consumes the prompt. Prompts where the first token is a known verb
+-- still go through the single-leg path; this branch is for the
+-- residue ("100 USDC and 50 USDT to alice.eth" — no verb in position
+-- 0, no single-leg shape).
+example :
+    (parse "100 USDC and 50 USDT to alice.eth").confidence = .medium ∧
+    (parse "100 USDC and 50 USDT to alice.eth").fields.lookup "conjunction"
+      = some "and"
   := by native_decide
 
 -- Cashtag + suffix end-to-end.

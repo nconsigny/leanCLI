@@ -288,6 +288,34 @@ each matcher having to re-implement the stripping logic. -/
 def isAmountLike (s : String) : Bool :=
   (normalizeAmount s).isSome
 
+/-- Parse a `<lo>-<hi>` range like `"1-2"` or `"0.5-1.5k"` into its
+two normalised endpoints. Returns `none` when the token isn't a
+range (single number with no `-` separator, or shape doesn't match).
+
+Both sides go through `normalizeAmount`, so `"1-2k"` resolves to
+`("1", "2000")` and a downstream matcher can pick min/max as its
+conservative-vs-aggressive policy decides.
+
+We deliberately split on the FIRST `-` so `"1-2-3"` becomes
+`("1", "2-3")` and the second half fails `normalizeAmount` — the
+caller then knows the range was malformed and falls back to the
+single-amount path. -/
+def parseRange (s : String) : Option (String × String) :=
+  match s.splitOn "-" with
+  | [_]       => none  -- not a range
+  | lo :: hiParts =>
+      -- Rejoin the rest in case the user typed "1-2-3"; normalizeAmount
+      -- will reject it correctly.
+      let hi := String.intercalate "-" hiParts
+      match normalizeAmount lo, normalizeAmount hi with
+      | some loN, some hiN => some (loN, hiN)
+      | _, _               => none
+  | []        => none
+
+/-- True when the token is a range. -/
+def isRange (s : String) : Bool :=
+  (parseRange s).isSome
+
 /-! ### Build-time anchors for amount normalisation
 
 `native_decide` checks fixing the canonical decimal form so any
@@ -367,6 +395,25 @@ def indexOfKeyword (toks : List String) (kw : String) : Option Nat :=
 /-- Get the token at index `i`, or `none`. -/
 def at? (toks : List String) (i : Nat) : Option String :=
   toks[i]?
+
+/-- Recognised time-unit tokens. Returns the number of seconds in one
+unit. Months use the conventional 30-day approximation; the encoder
+warns and offers to refine when the user picks "months" for a long
+duration.
+
+* `day`/`days` → 86400
+* `week`/`weeks` → 604_800
+* `month`/`months` → 2_592_000 (= 30 days; approximation)
+* `year`/`years` → 31_536_000 (= 365 days)
+
+Hour/minute granularities are absent because the user-facing surfaces
+(ENS register/renew) cap at year-scale. -/
+def durationUnitSeconds : String → Option Nat
+  | "day"    | "days"    => some 86400
+  | "week"   | "weeks"   => some 604800
+  | "month"  | "months"  => some 2592000
+  | "year"   | "years"   => some 31536000
+  | _                    => none
 
 /-- Single-token version qualifier that disambiguates a protocol name
 (e.g. "aave v3", "morpho blue", "liquity v2"). Tokenizer has already
@@ -557,7 +604,17 @@ def matchRevoke (toks : List String) : Option RegexDraft := do
           else if unresolved.isEmpty then .high else .medium
       }
 
-/-- `swap <amount> <asset> (for|to|into) <asset> [with <N>% slippage]`. -/
+/-- `swap <amount> <asset> (for|to|into) <asset> [with <N>% slippage]
+[minimum <Z> <asset>]`.
+
+Accepts range amounts (`"swap 1-2 ETH for USDC"`) — the lower bound
+goes into `amountIn` and the upper into `amountInMax` for the
+encoder / skill card to surface. Conservative choice: bind the
+trade to the FLOOR so the user never pays more than they typed; if
+they wanted "exactly 2", they'd write 2 not 1-2.
+
+Explicit minOut via `minimum <Z>` / `min <Z>` / `at least <Z>` lands
+in `minAmountOut`; bypasses the slippage-percentage path. -/
 def matchSwap (toks : List String) : Option RegexDraft := do
   let verb ← toks.head?
   if verb ≠ "swap" then none
@@ -567,8 +624,16 @@ def matchSwap (toks : List String) : Option RegexDraft := do
       <|> (indexOfKeyword toks "to")
       <|> (indexOfKeyword toks "into")
   let amountRaw ← at? toks 1
-  if ¬ (isAmountLike amountRaw) then none
-  let amount := (normalizeAmount amountRaw).getD amountRaw
+  -- Range or single amount.
+  let (amount, amountMax?) : String × Option String :=
+    match parseRange amountRaw with
+    | some (lo, hi) => (lo, some hi)
+    | none =>
+        if isAmountLike amountRaw then
+          ((normalizeAmount amountRaw).getD amountRaw, none)
+        else
+          ("", none)
+  if amount.isEmpty then none
   let assetInRaw ← at? toks 2
   let assetIn := stripCashtag assetInRaw
   let assetOutRaw ← at? toks (bridgeIdx + 1)
@@ -577,17 +642,41 @@ def matchSwap (toks : List String) : Option RegexDraft := do
   let slippage : Option String :=
     (indexOfKeyword toks "with").bind (fun i =>
       (at? toks (i + 1)).filter (fun s => s.endsWith "%"))
+  -- Optional explicit "minimum Z" / "min Z" / "at least Z" override.
+  -- Looks for any of those marker positions and takes the token at
+  -- `markerIdx + 1` (or +2 for the two-word "at least") as the minOut
+  -- amount.
+  let minOut? : Option String :=
+    let oneWordIdx : Option (Nat × Nat) :=  -- (markerIdx, offset to amount)
+      ((indexOfKeyword toks "minimum").map (fun i => (i, 1)))
+        |>.orElse (fun _ => (indexOfKeyword toks "min").map (fun i => (i, 1)))
+    -- "at least" tokenises as two tokens; scan for the pair.
+    let twoWordIdx : Option (Nat × Nat) :=
+      (List.range toks.length).find?
+        (fun i =>
+          (decide (at? toks i = some "at")) &&
+          (decide (at? toks (i + 1) = some "least")))
+        |>.map (fun i => (i, 2))
+    let pickIdx : Option (Nat × Nat) := oneWordIdx.orElse (fun _ => twoWordIdx)
+    pickIdx.bind (fun ⟨i, off⟩ =>
+      (at? toks (i + off)).bind normalizeAmount)
   let inOk := isEthLike assetIn ∨ isKnownSymbol assetIn ∨ isAddress assetIn
   let outOk := isEthLike assetOut ∨ isKnownSymbol assetOut ∨ isAddress assetOut
   let unresolved : List String :=
     (if inOk then [] else [s!"tokenIn '{assetIn}' not in known-tokens registry"])
     ++ (if outOk then [] else [s!"tokenOut '{assetOut}' not in known-tokens registry"])
-    ++ (if slippage.isSome then [] else ["slippage not specified — encoder will require explicit minOut"])
+    ++ (if slippage.isSome ∨ minOut?.isSome then []
+        else ["slippage / explicit minOut not specified — encoder will require one"])
+    ++ (match amountMax? with
+        | some hi => [s!"range amountIn 'low={amount} high={hi}' — wallet quotes against the low; user can edit"]
+        | none    => [])
   let fields : List (String × String) :=
     [("verb", verb), ("amountIn", amount), ("tokenIn", assetIn), ("tokenOut", assetOut)]
-    ++ (match slippage with | some s => [("slippage", s)] | none => [])
+    ++ (match amountMax? with | some hi => [("amountInMax", hi)] | none => [])
+    ++ (match slippage with   | some s  => [("slippage", s)]    | none => [])
+    ++ (match minOut?  with   | some m  => [("minAmountOut", m)] | none => [])
   let confidence : Confidence :=
-    if inOk ∧ outOk ∧ slippage.isSome then .high
+    if inOk ∧ outOk ∧ (slippage.isSome ∨ minOut?.isSome) then .high
     else if inOk ∧ outOk then .medium
     else .low
   some { action := .swap, fields := fields, unresolved := unresolved, confidence := confidence }
@@ -960,39 +1049,56 @@ def matchEns (toks : List String) : Option RegexDraft := do
   -- e.g. `register vitalik for X` (which has no ENS context).
   let nameRaw ← at? toks 1
   if ¬ (isEnsName nameRaw) then none
-  -- Walk the rest of the token stream for `for <N> year[s]`. Returns
-  -- the years as a string; "1" if not specified.
-  let yearsStr : String :=
+  -- Walk the rest of the token stream for `for <N> <unit>`. We accept
+  -- days / weeks / months / years and convert to seconds. Returns
+  -- `("1", "year", 31536000)` when not specified (default).
+  let (durationNum, durationUnit, durationSeconds) :
+      String × String × Nat :=
     match indexOfKeyword toks "for" with
-    | none => "1"
+    | none => ("1", "year", 31536000)
+    | some i =>
+        let numTokRaw := (at? toks (i + 1)).getD "1"
+        let numTok := (normalizeAmount (stripCashtag numTokRaw)).getD numTokRaw
+        let unitTok := (at? toks (i + 2)).getD "year"
+        match durationUnitSeconds unitTok, numTok.toNat? with
+        | some perUnit, some n => (numTok, unitTok, n * perUnit)
+        | _, _ =>
+            -- Number didn't parse as Nat (might be fractional, e.g.
+            -- "0.5 year"); fall back to 1 year as the safe default and
+            -- surface the issue in unresolved.
+            ("1", "year", 31536000)
+  -- Confidence: high when both the number AND the unit parsed; medium
+  -- otherwise.
+  let hasFor : Bool := (indexOfKeyword toks "for").isSome
+  let unitRecognised : Bool :=
+    match indexOfKeyword toks "for" with
+    | none => true
+    | some i =>
+        match at? toks (i + 2) with
+        | some u => (durationUnitSeconds u).isSome
+        | none   => false
+  let numRecognised : Bool :=
+    match indexOfKeyword toks "for" with
+    | none => true
     | some i =>
         match at? toks (i + 1) with
         | some s =>
-            -- Accept "1.5" too (RuleParser's normalize handles k/m/b
-            -- but ENS years are bounded — strip the cashtag prefix
-            -- only).
-            let n := (normalizeAmount (stripCashtag s)).getD s
-            if isAmount n then n else "1"
-        | none => "1"
-  -- Validate that the next token after the number is "year" / "years"
-  -- — without that we don't have confidence the parsed number was a
-  -- duration. We don't reject — we mark the draft .medium so the
-  -- skill card asks.
-  let yearsOk : Bool :=
-    match indexOfKeyword toks "for" with
-    | none => true  -- duration omitted, default applied
-    | some i =>
-        match at? toks (i + 2) with
-        | some unit => unit = "year" ∨ unit = "years"
-        | none      => false
-  let conf : Confidence := if yearsOk then .high else .medium
+            ((normalizeAmount (stripCashtag s)).bind String.toNat?).isSome
+        | none => false
+  let conf : Confidence :=
+    if (!hasFor) || (unitRecognised && numRecognised) then .high else .medium
   let unresolved : List String :=
-    (if yearsOk then [] else
-      [s!"could not confirm duration unit (expected 'year' / 'years' after the number)"])
+    (if unitRecognised then [] else
+      [s!"duration unit not recognised (use days/weeks/months/years)"])
+    ++ (if numRecognised then [] else
+      [s!"duration number not a positive integer"])
   some {
     action     := action
     fields     := [
-      ("verb", verb), ("name", nameRaw), ("durationYears", yearsStr)
+      ("verb", verb), ("name", nameRaw),
+      ("durationNum", durationNum),
+      ("durationUnit", durationUnit),
+      ("durationSeconds", toString durationSeconds)
     ] ++ extractFromHint toks
     unresolved := unresolved
     confidence := conf
@@ -1241,6 +1347,37 @@ def matchStake (toks : List String) : Option RegexDraft := do
     confidence := if assetOk then .high else .medium
   }
 
+/-- Detect a multi-leg conjunction phrase ("send X AND Y", "swap A,
+then B"). We don't try to split the legs — that's the LLM's job —
+but we DO emit a `.medium` draft with a note so the LLM picks a
+sensible split rather than treating the whole prompt as one tx.
+
+Trigger words: bare ` and ` between two number-asset clauses, or
+` then ` between two verb-led clauses. Comma-separated lists are
+already split into separate tokens by the tokenizer, so we look for
+explicit conjunctions.
+
+Caller note: this runs LAST in the dispatch chain. If a single-leg
+matcher already matched, we never get here. -/
+def matchConjunction (toks : List String) : Option RegexDraft := do
+  -- Heuristic: must contain at least 2 amount-like tokens AND at
+  -- least one conjunction.
+  let amountCount :=
+    (toks.filter (fun t => isAmountLike t ∨ isRange t)).length
+  if amountCount < 2 then none
+  let hasAnd  := toks.any (fun t => t = "and")
+  let hasThen := toks.any (fun t => t = "then")
+  if ¬ (hasAnd ∨ hasThen) then none
+  some {
+    action     := .unknown
+    fields     := [("conjunction", if hasThen then "then" else "and")]
+    unresolved := [
+      "multi-leg phrase detected — please split into separate prompts",
+      "wallet does not draft batched txs from a single chat line yet"
+    ]
+    confidence := .medium
+  }
+
 /-! ## Top-level entry -/
 
 /-- Politeness/filler tokens that may prefix a real intent. We strip
@@ -1308,6 +1445,9 @@ def parse (input : String) : RegexDraft :=
         , matchSupply toks
         , matchWithdrawBorrowRepay toks
         , matchWrap toks
+        -- Multi-leg conjunctions land LAST. If any single-leg matcher
+        -- consumed the prompt we never get here.
+        , matchConjunction toks
       ]
       match candidates.filterMap id with
       | d :: _ => d
