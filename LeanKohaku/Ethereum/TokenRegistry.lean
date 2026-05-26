@@ -66,29 +66,27 @@ structure TokenInfo where
   deriving Repr
 
 /-- Convert one upstream `Swap.Tokens.Token` into per-chain
-    `TokenInfo` entries — one for mainnet (always present) plus one
-    for Sepolia when the upstream record has `addressSepolia := some
-    _`. Anything else stays a miss so the agent asks the user
-    instead of guessing. -/
+    `TokenInfo` entries — one entry per chain where the token has a
+    registered deployment. A token with `addressMainnet := none` is
+    deliberately absent from the mainnet view (USDC/USDT today);
+    the Sepolia view is independent. -/
 private def fromSwapToken (t : Swap.Tokens.Token) : List TokenInfo :=
-  let mainnet : TokenInfo := {
-    symbol   := t.symbol,
-    name     := t.name,
-    chainId  := 1,
-    address  := t.addressMainnet,
-    decimals := t.decimals,
-    source   := "hardcoded"
-  }
-  match t.addressSepolia with
-  | some addr =>
-      [ mainnet,
-        { symbol   := t.symbol,
-          name     := t.name,
-          chainId  := 11155111,
-          address  := addr,
-          decimals := t.decimals,
-          source   := "hardcoded" } ]
-  | none => [mainnet]
+  let mkInfo (chainId : Nat) (addr : String) : TokenInfo :=
+    { symbol   := t.symbol,
+      name     := t.name,
+      chainId  := chainId,
+      address  := addr,
+      decimals := t.decimals,
+      source   := "hardcoded" }
+  let mainnetEntries :=
+    match t.addressMainnet with
+    | some a => [mkInfo 1 a]
+    | none   => []
+  let sepoliaEntries :=
+    match t.addressSepolia with
+    | some a => [mkInfo 11155111 a]
+    | none   => []
+  mainnetEntries ++ sepoliaEntries
 
 /-- The hand-audited token list, derived from
     `LeanKohaku.Swap.Tokens.registry`. The wallet daemon's swap

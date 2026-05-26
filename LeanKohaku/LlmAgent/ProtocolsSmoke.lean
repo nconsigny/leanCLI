@@ -300,6 +300,16 @@ Every newly-added symbol resolves via `findBySymbol` so the chat
 path's `isKnownSymbol` check accepts the canonical form. Decimals
 are anchored because off-by-12-zeros bugs are catastrophic. -/
 
+-- USDC + USDT: symbol resolves, but mainnet address is deliberately
+-- omitted at curator request. Sepolia entry kept where it exists.
+example : (LeanKohaku.Swap.Tokens.findBySymbol "USDC").isSome := by native_decide
+example : ((LeanKohaku.Swap.Tokens.findBySymbol "USDC").bind
+            (fun t => LeanKohaku.Swap.Tokens.addressOn t .mainnet)) = none := by native_decide
+example : ((LeanKohaku.Swap.Tokens.findBySymbol "USDC").bind
+            (fun t => LeanKohaku.Swap.Tokens.addressOn t .sepolia))
+          = some "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238" := by native_decide
+example : ((LeanKohaku.Swap.Tokens.findBySymbol "USDT").bind
+            (fun t => LeanKohaku.Swap.Tokens.addressOn t .mainnet)) = none := by native_decide
 example : (LeanKohaku.Swap.Tokens.findBySymbol "USDT").map (·.decimals) = some 6  := by native_decide
 example : (LeanKohaku.Swap.Tokens.findBySymbol "GHO").map  (·.decimals) = some 18 := by native_decide
 example : (LeanKohaku.Swap.Tokens.findBySymbol "CRV").map  (·.decimals) = some 18 := by native_decide
