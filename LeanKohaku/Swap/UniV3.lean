@@ -240,7 +240,7 @@ When the chat path or the trusted UI doesn't have the user explicitly
 naming a tier, we pick a reasonable default from the pair's category:
 
 * **stable↔stable** — 100 (0.01%). Stablecoin pairs trade tight; the
-  cheapest tier is canonical (USDC/USDT, DAI/USDC, USDe/USDC).
+  cheapest tier is canonical (USDC/USDT, DAI/USDC).
 * **stable↔ETH-like** — 500 (0.05%). The standard for USDC/ETH,
   USDC/WETH, the deepest pool on mainnet.
 * **ETH-like↔blue-chip** — 500 (0.05%). e.g. WETH/WBTC, WETH/wstETH;
@@ -266,19 +266,18 @@ is conservative — only assets that actually trade as 1:1 USD pegs (no
 volatile LSTs, no commodity-pegged tokens). Lowercase for the
 case-insensitive matcher. -/
 def stablecoinSymbols : List String :=
-  ["usdc", "usdt", "dai", "lusd", "frax", "pyusd", "usde",
+  ["usdc", "usdt", "dai", "lusd", "frax",
    "gho", "usds", "crvusd", "fxusd", "bold", "usdm", "tusd",
-   "rusd", "sdai", "susde"]
+   "rusd", "sdai"]
 
 /-- ETH-like symbols — native ETH plus liquid staking tokens that
 trade near a 1:1 ETH peg over short windows. -/
 def ethLikeSymbols : List String :=
-  ["eth", "weth", "steth", "wsteth", "reth", "cbeth", "weeth",
-   "ezeth", "sfrxeth"]
+  ["eth", "weth", "steth", "wsteth", "reth", "cbeth"]
 
-/-- Blue-chip non-ETH-non-stable assets. Today: BTC variants only. -/
+/-- Blue-chip non-ETH-non-stable assets. Today: BTC only. -/
 def blueChipSymbols : List String :=
-  ["wbtc", "cbbtc"]
+  ["wbtc"]
 
 private def memberCI (xs : List String) (s : String) : Bool :=
   xs.any (· == s.toLower)
@@ -312,7 +311,7 @@ chat path can quote against the wrong pool. -/
 
 example : defaultFeeTier "USDC" "USDT"   = 100  := by native_decide
 example : defaultFeeTier "DAI"  "USDC"   = 100  := by native_decide
-example : defaultFeeTier "USDe" "USDC"   = 100  := by native_decide
+example : defaultFeeTier "GHO"  "USDC"   = 100  := by native_decide
 example : defaultFeeTier "WETH" "USDC"   = 500  := by native_decide
 example : defaultFeeTier "ETH"  "USDC"   = 500  := by native_decide
 example : defaultFeeTier "USDC" "WETH"   = 500  := by native_decide  -- order-independent
@@ -320,7 +319,7 @@ example : defaultFeeTier "WETH" "WBTC"   = 500  := by native_decide
 example : defaultFeeTier "WETH" "wstETH" = 500  := by native_decide
 example : defaultFeeTier "wstETH" "WETH" = 500  := by native_decide
 example : defaultFeeTier "LDO"  "WETH"   = 3000 := by native_decide
-example : defaultFeeTier "MKR"  "USDC"   = 3000 := by native_decide
-example : defaultFeeTier "SNX"  "BAL"    = 3000 := by native_decide
+example : defaultFeeTier "CRV"  "USDC"   = 3000 := by native_decide
+example : defaultFeeTier "LINK" "AAVE"   = 3000 := by native_decide
 
 end LeanKohaku.Swap.UniV3

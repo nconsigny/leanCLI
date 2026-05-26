@@ -304,17 +304,20 @@ example : (LeanKohaku.Swap.Tokens.findBySymbol "USDT").map (·.decimals) = some 
 example : (LeanKohaku.Swap.Tokens.findBySymbol "LINK").map (·.decimals) = some 18 := by native_decide
 example : (LeanKohaku.Swap.Tokens.findBySymbol "LDO").map  (·.decimals) = some 18 := by native_decide
 example : (LeanKohaku.Swap.Tokens.findBySymbol "GHO").map  (·.decimals) = some 18 := by native_decide
-example : (LeanKohaku.Swap.Tokens.findBySymbol "MKR").map  (·.decimals) = some 18 := by native_decide
-example : (LeanKohaku.Swap.Tokens.findBySymbol "SNX").map  (·.decimals) = some 18 := by native_decide
 example : (LeanKohaku.Swap.Tokens.findBySymbol "CRV").map  (·.decimals) = some 18 := by native_decide
-example : (LeanKohaku.Swap.Tokens.findBySymbol "BAL").map  (·.decimals) = some 18 := by native_decide
 example : (LeanKohaku.Swap.Tokens.findBySymbol "LUSD").map (·.decimals) = some 18 := by native_decide
 example : (LeanKohaku.Swap.Tokens.findBySymbol "cbETH").map (·.decimals) = some 18 := by native_decide
-example : (LeanKohaku.Swap.Tokens.findBySymbol "cbBTC").map (·.decimals) = some 8  := by native_decide
-example : (LeanKohaku.Swap.Tokens.findBySymbol "PYUSD").map (·.decimals) = some 6  := by native_decide
 example : (LeanKohaku.Swap.Tokens.findBySymbol "sDAI").map (·.decimals) = some 18  := by native_decide
 example : (LeanKohaku.Swap.Tokens.findBySymbol "USDS").map (·.decimals) = some 18  := by native_decide
-example : (LeanKohaku.Swap.Tokens.findBySymbol "sfrxETH").map (·.decimals) = some 18 := by native_decide
+-- Removed tokens are no longer in the registry:
+example : (LeanKohaku.Swap.Tokens.findBySymbol "MKR").isNone     := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "SNX").isNone     := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "BAL").isNone     := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "cbBTC").isNone   := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "sfrxETH").isNone := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "PYUSD").isNone   := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "weETH").isNone   := by native_decide
+example : (LeanKohaku.Swap.Tokens.findBySymbol "USDe").isNone    := by native_decide
 
 -- Cashtag-prefixed parses still resolve the asset (RuleParser's
 -- isKnownSymbol strips `$` via stripCashtag before findBySymbol).

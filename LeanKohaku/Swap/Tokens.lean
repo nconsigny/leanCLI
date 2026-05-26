@@ -90,10 +90,6 @@ def registry : List Token := [
     addressMainnet := "0xae7ab96520de3a18e5e111b5eaab095312d7fe84",
     addressSepolia := none,
     decimals := 18, name := "Lido Staked Ether" },
-  { symbol := "weETH",
-    addressMainnet := "0xcd5fe23c85820f7b72d0926fc9b05b43e359b7ee",
-    addressSepolia := none,
-    decimals := 18, name := "ether.fi Wrapped ETH" },
   { symbol := "crvUSD",
     -- Curve.Fi USD Stablecoin (crvUSD) on mainnet. Source-verified on
     -- Etherscan (Vyper 0.3.7), 18 decimals.
@@ -103,10 +99,6 @@ def registry : List Token := [
     -- docs list no Sepolia deployment. Leave `none` rather than guess.
     addressSepolia := none,
     decimals := 18, name := "Curve.Fi USD Stablecoin" },
-  { symbol := "USDe",
-    addressMainnet := "0x4c9edd5852cd905f086c759e8383e09bff1e68b3",
-    addressSepolia := none,
-    decimals := 18, name := "Ethena USDe" },
   { symbol := "DAI",
     addressMainnet := "0x6b175474e89094c44da98b954eedeac495271d0f",
     -- Sky/MakerDAO does not publish a canonical Sepolia DAI in the
@@ -142,22 +134,10 @@ def registry : List Token := [
     addressMainnet := "0x40d16fc0246ad3160ccc09b8d0d3a2cd28ae6c2f",
     addressSepolia := some "0xc4bf5cbdabe595361438f8c6a187bdc330539c60",
     decimals := 18, name := "GHO Stablecoin" },
-  { symbol := "MKR",
-    addressMainnet := "0x9f8f72aa9304c8b593d555f12ef6589cc3a579a2",
-    addressSepolia := none,
-    decimals := 18, name := "Maker" },
-  { symbol := "SNX",
-    addressMainnet := "0xc011a73ee8576fb46f5e1c5751ca3b9fe0af2a6f",
-    addressSepolia := none,
-    decimals := 18, name := "Synthetix Network Token" },
   { symbol := "CRV",
     addressMainnet := "0xd533a949740bb3306d119cc777fa900ba034cd52",
     addressSepolia := none,
     decimals := 18, name := "Curve DAO Token" },
-  { symbol := "BAL",
-    addressMainnet := "0xba100000625a3754423978a60c9317c58a424e3d",
-    addressSepolia := none,
-    decimals := 18, name := "Balancer" },
   { symbol := "LUSD",
     addressMainnet := "0x5f98805a4e8be255a32880fdec7f6728c6568ba0",
     addressSepolia := none,
@@ -166,14 +146,6 @@ def registry : List Token := [
     addressMainnet := "0xbe9895146f7af43049ca1c1ae358b0541ea49704",
     addressSepolia := none,
     decimals := 18, name := "Coinbase Wrapped Staked ETH" },
-  { symbol := "cbBTC",
-    addressMainnet := "0xcbb7c0000ab88b473b1f5afd9ef808440eed33bf",
-    addressSepolia := none,
-    decimals := 8, name := "Coinbase Wrapped BTC" },
-  { symbol := "PYUSD",
-    addressMainnet := "0x6c3ea9036406852006290770bedfcaba0e23a0e8",
-    addressSepolia := none,
-    decimals := 6, name := "PayPal USD" },
   { symbol := "sDAI",
     addressMainnet := "0x83f20f44975d03b1b09e64809b757c47f942beea",
     addressSepolia := none,
@@ -182,11 +154,7 @@ def registry : List Token := [
     -- Sky's new DAI-successor stablecoin.
     addressMainnet := "0xdc035d45d973e3ec169d2276ddab16f1e407384f",
     addressSepolia := none,
-    decimals := 18, name := "Sky USDS" },
-  { symbol := "sfrxETH",
-    addressMainnet := "0xac3e018457b222d93114458476f3e3416abbe38f",
-    addressSepolia := none,
-    decimals := 18, name := "Staked Frax Ether" }
+    decimals := 18, name := "Sky USDS" }
 ]
 
 /-- Disambiguate user-typed token variations into a canonical symbol
