@@ -76,7 +76,19 @@ private def toolToSchemaJson (t : Tools.ToolDecl) : Json :=
 
 /-- Build the JSON body POSTed to `/chat/completions`. The `tools`
     list is included only when non-empty; OpenAI-compat servers
-    typically tolerate an empty array but vLLM is stricter. -/
+    typically tolerate an empty array but vLLM is stricter.
+
+    `enable_thinking` is passed two ways for portability:
+
+    * Inside `chat_template_kwargs` — the vLLM-canonical location for
+      passing arguments to a chat template; Qwen3 / Qwen3.5's template
+      reads this flag and skips the `<think>` block when false.
+    * At the top level — some Qwen-specific OpenAI-compat forks expose
+      it directly. Backends that don't recognize the field discard it.
+
+    The field tracks `s.cfg.enableThinking` so an operator can flip it
+    per invocation. See `AgentConfig.enableThinking` for the rationale
+    on defaulting to false. -/
 def buildRequestBody
     (s : AgentState) (tools : List Tools.ToolDecl) : String :=
   let baseFields : Array (String × Json) := #[
@@ -84,7 +96,11 @@ def buildRequestBody
     ("max_tokens",  .num (Int.ofNat s.cfg.maxTokens)),
     ("temperature", .num 0), -- explicit; deterministic mode
     ("stream",      .bool false),
-    ("messages",    .arr (s.messages.map messageToJson))
+    ("messages",    .arr (s.messages.map messageToJson)),
+    ("enable_thinking", .bool s.cfg.enableThinking),
+    ("chat_template_kwargs", .obj #[
+      ("enable_thinking", .bool s.cfg.enableThinking)
+    ])
   ]
   let toolFields : Array (String × Json) :=
     if tools.isEmpty then #[]

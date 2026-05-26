@@ -85,6 +85,21 @@ structure AgentConfig where
   /-- Tool names the operator allowed for this invocation. Anything
       outside this list is rejected before the daemon is contacted. -/
   toolAllowlist  : List String
+  /-- Qwen3 / Qwen3.5 "thinking" toggle. When false (the default), the
+      chat-completions request body carries
+      `chat_template_kwargs.enable_thinking = false` so the model emits
+      tool calls / final answers without the pre-output `<think>...</think>`
+      block. Thinking is wall-clock expensive (10-30s per turn) and the
+      wallet's safety doesn't depend on the model's reasoning — every
+      tool call is validated by `Tools.dispatch` (chain pin, allowlist),
+      every Intent is hard-rejected by `IntentParser`, and every
+      signing decision terminates at `ConfirmGate`. Flip to true only
+      for diagnosis of a model that's pattern-matching badly.
+
+      Lean-side default chosen per a 2026-05-26 product decision; vLLM
+      ignores unknown `chat_template_kwargs` entries so emitting this
+      against a non-Qwen backend is a no-op rather than an error. -/
+  enableThinking : Bool  := false
 
 /-- Mutable per-loop state. The loop body in `Agent.Loop` consumes and
     returns this with `steps` advanced. -/
