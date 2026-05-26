@@ -113,8 +113,8 @@ private def formatGweiNat (n : Nat) : String :=
   if frac = 0 then s!"{whole} gwei"
   else
     let str := toString frac
-    let pad := String.mk (List.replicate (9 - str.length) '0')
-    let trimmed := (pad ++ str).dropRightWhile (· = '0')
+    let pad := String.ofList (List.replicate (9 - str.length) '0')
+    let trimmed := ((pad ++ str).dropEndWhile (· = '0')).toString
     s!"{whole}.{trimmed} gwei"
 
 private def formatEthNat (n : Nat) : String :=
@@ -123,8 +123,8 @@ private def formatEthNat (n : Nat) : String :=
   if frac = 0 then s!"{whole} ETH"
   else
     let str := toString frac
-    let pad := String.mk (List.replicate (18 - str.length) '0')
-    let trimmed := (pad ++ str).dropRightWhile (· = '0')
+    let pad := String.ofList (List.replicate (18 - str.length) '0')
+    let trimmed := ((pad ++ str).dropEndWhile (· = '0')).toString
     s!"{whole}.{trimmed} ETH"
 
 private def humanEth (weiNat : Nat) : String :=
@@ -914,7 +914,7 @@ private def paramNatOrHexStr (params : Json) (key : String) : Except RpcError Na
   | some (.num n) =>
       if n ≥ 0 then .ok n.toNat else .error invalidParams
   | some (.str s) =>
-      let trimmed := s.trim
+      let trimmed := s.trimAscii.toString
       if trimmed.isEmpty then .error invalidParams
       else if trimmed.startsWith "0x" || trimmed.startsWith "0X" then
         match parseHexQuantity trimmed with
@@ -1770,7 +1770,7 @@ private def broadcastTimeoutSecs : IO Nat := do
 /-- Parse a `0x`-prefixed transaction hash printed by cast's --async
     output. cast prints the hex on a line by itself. -/
 private def extractTxHash (stdout : String) : Option String := do
-  let lines := (stdout.splitOn "\n").map String.trim
+  let lines := (stdout.splitOn "\n").map (·.trimAscii.toString)
   lines.find? (fun line =>
     line.startsWith "0x" && line.length == 66 &&
       ((line.toList.drop 2).all (fun c =>
@@ -1782,7 +1782,7 @@ private def extractTxHash (stdout : String) : Option String := do
     longer than a 32-byte hash (so we don't confuse it with an extra
     txhash line some cast builds may emit). -/
 private def extractRawSignedTx (stdout : String) : Option String := do
-  let lines := (stdout.splitOn "\n").map String.trim
+  let lines := (stdout.splitOn "\n").map (·.trimAscii.toString)
   lines.find? (fun line =>
     line.startsWith "0x" && line.length > 66 && line.length % 2 == 0 &&
       ((line.toList.drop 2).all (fun c =>
@@ -1849,7 +1849,7 @@ private def r1SendFlow (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       { code := -32040,
         message := "r1 digest preparation failed",
         data := some (.str (prepOut ++ prepErr)) }
-  let tokens := prepOut.trim.splitOn " " |>.filter (fun t => t.trim != "")
+  let tokens := prepOut.trimAscii.toString.splitOn " " |>.filter (fun t => t.trimAscii.toString != "")
   match tokens with
   | digest :: account :: wei :: _ =>
       -- Step 2: native TPM2 sign with PIN auth value (live notifications).
@@ -2037,6 +2037,52 @@ private def extractProposeSendFromTrace (trace : Json) :
   match trace with
   | .arr items => scanProposeSend items.toList
   | _ => none
+
+/-- Map a 4-byte function selector to the canonical Intent action tag
+    the TUI / skill-picker keys on. Used by the `agent-propose-send`
+    branch of `chat.draft` so the response label reflects what the
+    model's calldata actually does (e.g. "aaveV3Supply") rather than
+    falling back to the regex's `.unknown` when the chat path went
+    through the agent loop.
+
+    This is the cheap side of the cross-validate gate (Phase 2 / PR 4
+    of the privacy slice): we DO NOT walk the full ERC-7730 descriptor
+    here — that's the sidecar's job — we just look up the selector
+    against the set of selectors the wallet itself emits through its
+    `prepare_*` tools + the standard ERC-20 surface. Unknown selectors
+    return `none`; callers fall back to a generic label and the
+    user still goes through `tx.simulate` + ConfirmGate before
+    signing. -/
+private def selectorToActionTag (data : String) : Option String :=
+  -- A 4-byte selector occupies 8 hex chars; strip the leading `0x` and
+  -- normalize to lowercase before lookup. `data` may legitimately be
+  -- shorter than 10 chars for native ETH transfers ("0x") — fall
+  -- through to `none` in that case.
+  if data.length < 10 then none
+  else
+    let sel := (data.take 10).toString.toLower
+    match sel with
+    -- ERC-20 standard surface (Erc20.encodeTransfer / encodeApprove).
+    | "0xa9059cbb" => some "erc20Transfer"
+    | "0x095ea7b3" => some "erc20Approve"
+    -- Uniswap V3 SwapRouter02 — token→token exact-input single-pool.
+    | "0x414bf389" => some "uniswapV3SwapSingle"
+    -- Aave V3 Pool surface (see LeanKohaku/Aave/V3Pool.lean).
+    | "0x617ba037" => some "aaveV3Supply"
+    | "0x69328dec" => some "aaveV3Withdraw"
+    | "0xa415bcad" => some "aaveV3Borrow"
+    | "0x573ade81" => some "aaveV3Repay"
+    | "0x5a3b74b9" => some "aaveV3SetCollateral"
+    -- Tornado Cash deposit / withdraw (sidecar-emitted; here for the
+    -- day the bridge integration lands and propose_send carries
+    -- tornado calldata).
+    | "0xb214faa5" => some "shielded.tornado.deposit"
+    | "0xb438689f" => some "shielded.tornado.withdraw"
+    -- Smart-wallet batched output (see Wallet/ExecuteBatch.lean) —
+    -- common shape for SCWs combining approve + supply into one
+    -- ConfirmGate prompt.
+    | "0x34fcd5be" => some "executeBatch"
+    | _ => none
 
 /-- Build the `chat.draft` response JSON for a parsed/synthesized Intent.
 
@@ -2898,7 +2944,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
         let address ←
           if ← addrFile.pathExists then
             let raw ← IO.FS.readFile addrFile
-            pure raw.trim
+            pure raw.trimAscii.toString
           else pure ""
         entries := entries.push <| .obj #[
           ("name", .str name),
@@ -2950,7 +2996,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                 paramString req.params "data",
                 paramString req.params "pin" with
           | .ok to, .ok value, .ok data, .ok pin =>
-              let trimmed := data.trim
+              let trimmed := data.trimAscii.toString
               if !(trimmed.startsWith "0x" || trimmed.startsWith "0X") then
                 pure (.error invalidParams)
               else if trimmed.length ≤ 2 then
@@ -4170,7 +4216,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                           else
                             -- last 20 bytes (40 hex chars) of the 32-byte word
                             let addrHex : String :=
-                              "0x" ++ (cleaned.toList.drop (cleaned.length - 40)).asString
+                              "0x" ++ String.ofList (cleaned.toList.drop (cleaned.length - 40))
                             try
                               LeanKohaku.Wallet.SphincsHybridStore.writeRecord
                                 { rec with smartAccountAddress := some addrHex }
@@ -6093,10 +6139,21 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                           match ps.sender with
                           | some s => #[("sender", .str s)]
                           | none   => #[]
+                        -- Decode the propose_send selector so the TUI's
+                        -- chat-chip surfaces what the agent's calldata
+                        -- actually does — e.g. "aaveV3Supply" — instead
+                        -- of falling back to the regex's `.unknown` /
+                        -- `.rejected` when the chat went through the
+                        -- LLM. Unknown selectors get a coarse
+                        -- "agent.rawCall" label that still beats
+                        -- "unknown · regex=rejected".
+                        let actionTag : String :=
+                          (selectorToActionTag ps.data).getD "agent.rawCall"
                         some <| .obj <| #[
-                          ("regex",   regexJson),
-                          ("llmRaw",  .str rawStr),
-                          ("backend", .str "agent-propose-send"),
+                          ("regex",          regexJson),
+                          ("llmRaw",         .str rawStr),
+                          ("backend",        .str "agent-propose-send"),
+                          ("intentActionTag",.str actionTag),
                           ("encoded", .obj <| #[
                             ("to",      .str ps.to),
                             ("value",   .num (Int.ofNat ps.value)),
@@ -7334,7 +7391,7 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
               let topic0 := "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
               let padAddr (a : String) : String :=
                 let raw := stripHexPrefix a |>.toLower
-                "0x" ++ String.mk (List.replicate (64 - raw.length) '0') ++ raw
+                "0x" ++ String.ofList (List.replicate (64 - raw.length) '0') ++ raw
               -- Reset cancellation flag for this scan. Why: `chain.cancel`
               -- sets it to `true`; if a previous run set it and was never
               -- consumed, we'd abort before doing any work.
