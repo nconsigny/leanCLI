@@ -107,7 +107,14 @@ def tokenize (s : String) : List String :=
 
 /-- Action verbs the parser knows. Order matters when verbs overlap
 ("deposit" is an alias for "supply"). Returns the canonical action tag
-or `none`. -/
+or `none`.
+
+This is the **protocol-less** default — matchers that don't extract a
+protocol qualifier (`matchSendOrTransfer`, `matchApprove`, etc.) consult
+this map. Matchers that DO extract a protocol qualifier (the lending
+verbs, the shielded verbs) go through `actionFor` instead so the choice
+between Aave vs Morpho vs Liquity (or Privacy Pool vs Railgun) is made
+in one declarative table. -/
 def verbToAction : String → Option Action
   | "send"      => some .nativeTransfer  -- refined if asset ≠ ETH
   | "transfer"  => some .nativeTransfer
@@ -127,6 +134,50 @@ def verbToAction : String → Option Action
   | "unwrap"    => some .unwrap
   | "bridge"    => some .bridge
   | _           => none
+
+/-- Central `(verb, protocol?) → Action` dispatch table.
+
+Single source of truth for verbs that disambiguate by a protocol
+qualifier (`supply X to aave v3`, `borrow X from morpho`, `shield X
+with railgun`). New protocol slices register their verbs here instead
+of touching the individual matchers — see [[reference_prepare_protocol_template]].
+
+* `protocol = none` is the bare-verb fall-through: keeps the historical
+  default (lending verbs → Aave, shield verbs → Privacy Pool when no
+  provider is named) so back-compat is preserved.
+* `protocol = some "aave v3"` etc. matches the *joined* token form
+  produced by `extractProtocolName` — version qualifiers like `v3`,
+  `blue`, `pool` are concatenated. ASCII lowercase by construction
+  (the tokenizer lowercased upstream).
+* Unknown `(verb, protocol)` pairs return `none`; the caller falls
+  through to the LLM. -/
+def actionFor : String → Option String → Option Action
+  -- Aave V3 — bare verb default + explicit `aave [v3]` qualifier.
+  | "supply",   none
+  | "supply",   some "aave"
+  | "supply",   some "aave v3"
+  | "deposit",  none
+  | "deposit",  some "aave"
+  | "deposit",  some "aave v3"        => some .aaveSupply
+  | "withdraw", none
+  | "withdraw", some "aave"
+  | "withdraw", some "aave v3"        => some .aaveWithdraw
+  | "borrow",   none
+  | "borrow",   some "aave"
+  | "borrow",   some "aave v3"        => some .aaveBorrow
+  | "repay",    none
+  | "repay",    some "aave"
+  | "repay",    some "aave v3"        => some .aaveRepay
+  -- Shielded verbs — provider tag picks the daemon RPC at chat.draft
+  -- prepare time. The Privacy Pool default applies only when an
+  -- explicit `privacy pool` qualifier is present in the prompt; the
+  -- bare `shield`/`unshield` case is handled separately in
+  -- `matchShielded` (it asks which provider).
+  | "shield",   some "privacy pool"   => some .shieldedDeposit
+  | "unshield", some "privacy pool"   => some .shieldedWithdraw
+  | "shield",   some "railgun"        => some .railgunShield
+  | "unshield", some "railgun"        => some .railgunUnshield
+  | _, _ => none
 
 /-- Is this token a decimal number (e.g. "0.5", "100")? Returns the
 original (lowercased) string when so, since the regex draft preserves
@@ -537,8 +588,14 @@ def matchSwap (toks : List String) : Option RegexDraft := do
 `protocol` is read as up to two adjacent tokens so `"... to aave v3"`
 and `"... to morpho blue"` resolve to the joined form, not the bare
 first word. `extractProtocolName` only joins a second token when it's a
-known version/family qualifier — random suffixes do not get pulled in. -/
-def matchProtocolAction (toks : List String) (verb : String) (action : Action)
+known version/family qualifier — random suffixes do not get pulled in.
+
+The Action is looked up via `actionFor verb protocolName?` — that table
+is the single place to register new protocol/verb pairs. Returns
+`none` when the verb itself doesn't match this template, when the
+amount/asset slots aren't filled, OR when `actionFor` doesn't recognize
+the (verb, protocol) pair (the LLM still runs in that case). -/
+def matchProtocolAction (toks : List String) (verb : String)
     (preposition : String) : Option RegexDraft := do
   let v ← toks.head?
   if v ≠ verb then none
@@ -549,6 +606,14 @@ def matchProtocolAction (toks : List String) (verb : String) (action : Action)
   let assetRaw ← at? toks 2
   let asset := stripCashtag assetRaw
   let protocol ← extractProtocolName toks (prepIdx + 1)
+  -- Drive the action from the central dispatch table. If the
+  -- (verb, protocol) pair isn't explicitly registered, fall back to
+  -- the bare-verb default (`actionFor verb none`) so an unrecognized
+  -- protocol like "morpho blue" still lands on the historical Aave
+  -- tag until a per-protocol slice replaces it (PR 2+). The LLM
+  -- always sees the `protocol` field in the regex seed regardless.
+  let action ←
+    (actionFor verb (some protocol)) <|> (actionFor verb none)
   let assetOk := isEthLike asset ∨ isKnownSymbol asset ∨ isAddress asset
   let unresolved : List String :=
     if assetOk then [] else [s!"asset '{asset}' not in known-tokens registry"]
@@ -561,18 +626,21 @@ def matchProtocolAction (toks : List String) (verb : String) (action : Action)
     confidence := confidence
   }
 
-/-- `supply / deposit <amount> <asset> (to|on) <protocol>`. -/
+/-- `supply / deposit <amount> <asset> (to|on) <protocol>`. The action
+tag is decided by `actionFor` from the resolved protocol, so adding a
+new lending protocol (Morpho, Liquity, fxUSD) is one row in the table
+rather than a new matcher here. -/
 def matchSupply (toks : List String) : Option RegexDraft :=
-  (matchProtocolAction toks "supply" .aaveSupply "to")
-    <|> (matchProtocolAction toks "supply" .aaveSupply "on")
-    <|> (matchProtocolAction toks "deposit" .aaveSupply "to")
-    <|> (matchProtocolAction toks "deposit" .aaveSupply "on")
+  (matchProtocolAction toks "supply" "to")
+    <|> (matchProtocolAction toks "supply" "on")
+    <|> (matchProtocolAction toks "deposit" "to")
+    <|> (matchProtocolAction toks "deposit" "on")
 
 /-- `withdraw / borrow / repay <amount> <asset> from <protocol>`. -/
 def matchWithdrawBorrowRepay (toks : List String) : Option RegexDraft :=
-  (matchProtocolAction toks "withdraw" .aaveWithdraw "from")
-    <|> (matchProtocolAction toks "borrow" .aaveBorrow "from")
-    <|> (matchProtocolAction toks "repay" .aaveRepay "to")
+  (matchProtocolAction toks "withdraw" "from")
+    <|> (matchProtocolAction toks "borrow"   "from")
+    <|> (matchProtocolAction toks "repay"    "to")
 
 /-- Privacy Pools deposit / withdraw atom extractor.
 
@@ -649,12 +717,40 @@ def matchShielded (toks : List String) : Option RegexDraft := do
       confidence := .rejected
     }
   if isCanonical ∧ hasRailgun then
+    -- Railgun chat shortcut is live (PR 1). Route to .railgunShield /
+    -- .railgunUnshield so chat.draft's prepare envelope dispatches the
+    -- correct daemon RPC. The unshield recipient is extracted by the
+    -- same `to` lookup as the Privacy Pool unshield below — Railgun
+    -- needs a destination address for unshield just like PP does.
+    let recipient? : Option String :=
+      if canonicalVerb = "unshield" then
+        let isNoiseToken : String → Bool := fun s =>
+          s = "the" ∨ s = "pool" ∨ s = "pools" ∨ s = "privacy"
+            ∨ s = "shielded" ∨ s = "a" ∨ s = "an" ∨ s = "railgun"
+        (indexOfKeyword toks "to").bind (fun i =>
+          (at? toks (i + 1)).filter (fun c => !(isNoiseToken c)))
+      else none
+    let action : Action :=
+      if canonicalVerb = "unshield" then .railgunUnshield else .railgunShield
+    let fields : List (String × String) :=
+      [("verb", canonicalVerb), ("amount", amount), ("asset", asset),
+       ("protocol", "railgun")]
+      ++ (match recipient? with
+          | some r => [("to", r)]
+          | none   => [])
+    let unresolved : List String :=
+      if assetOk then [] else [s!"asset '{asset}' not recognized for railgun shield/unshield"]
     return {
-      action     := .unknown
-      fields     := [("verb", canonicalVerb), ("amount", amount), ("asset", asset),
-                     ("protocol", "railgun")]
-      unresolved := [s!"Railgun {canonicalVerb} via chat shortcut is coming soon. Use 'Privacy → Railgun' from the wallet menu to {canonicalVerb} via the @kohaku-eth/railgun SDK, or rephrase as '{canonicalVerb} {amount} {asset} with privacy pool' to use the Privacy Pool shortcut."]
-      confidence := .rejected
+      action     := action
+      fields     := fields
+      unresolved := unresolved
+      confidence :=
+        if !assetOk then .medium
+        else if canonicalVerb = "shield" then .high
+        else
+          match recipient? with
+          | some _ => .high
+          | none   => .medium
     }
   if isCanonical ∧ ¬ hasPrivacyPool then
     return {
@@ -793,6 +889,73 @@ def matchWrap (toks : List String) : Option RegexDraft := do
     confidence := if assetOk then .high else .medium
   }
 
+/-- `register|renew <name>.eth [for <N> year[s]]`.
+
+Recognises both legs of the user-facing ENS surface. `register` is the
+second leg of the commit/reveal pair — the skill card walks the user
+through the commit + 60-second wait before the daemon drafts this
+register tx. `renew` is one-shot.
+
+Duration parsing supports the natural forms users type:
+* `for 1 year`     → 365 days = 31_536_000 seconds
+* `for 2 years`    → 63_072_000
+* `for 10 years`   → 315_360_000
+* (omitted)        → defaults to 1 year so the seed has a value the
+  skill card can edit; explicit user input always wins.
+
+The ENS name argument is captured verbatim (lowercase, `.eth` suffix
+preserved) so the encoder can hand it straight to the controller.
+-/
+def matchEns (toks : List String) : Option RegexDraft := do
+  let verb ← toks.head?
+  let action ←
+    match verb with
+    | "register" => some Action.ensRegister
+    | "renew"    => some Action.ensRenew
+    | _          => none
+  -- Token 1 is the .eth name. We don't accept any other shape (no
+  -- bare labels) — the bot would not be able to disambiguate from
+  -- e.g. `register vitalik for X` (which has no ENS context).
+  let nameRaw ← at? toks 1
+  if ¬ (isEnsName nameRaw) then none
+  -- Walk the rest of the token stream for `for <N> year[s]`. Returns
+  -- the years as a string; "1" if not specified.
+  let yearsStr : String :=
+    match indexOfKeyword toks "for" with
+    | none => "1"
+    | some i =>
+        match at? toks (i + 1) with
+        | some s =>
+            -- Accept "1.5" too (RuleParser's normalize handles k/m/b
+            -- but ENS years are bounded — strip the cashtag prefix
+            -- only).
+            let n := (normalizeAmount (stripCashtag s)).getD s
+            if isAmount n then n else "1"
+        | none => "1"
+  -- Validate that the next token after the number is "year" / "years"
+  -- — without that we don't have confidence the parsed number was a
+  -- duration. We don't reject — we mark the draft .medium so the
+  -- skill card asks.
+  let yearsOk : Bool :=
+    match indexOfKeyword toks "for" with
+    | none => true  -- duration omitted, default applied
+    | some i =>
+        match at? toks (i + 2) with
+        | some unit => unit = "year" ∨ unit = "years"
+        | none      => false
+  let conf : Confidence := if yearsOk then .high else .medium
+  let unresolved : List String :=
+    (if yearsOk then [] else
+      [s!"could not confirm duration unit (expected 'year' / 'years' after the number)"])
+  some {
+    action     := action
+    fields     := [
+      ("verb", verb), ("name", nameRaw), ("durationYears", yearsStr)
+    ] ++ extractFromHint toks
+    unresolved := unresolved
+    confidence := conf
+  }
+
 /-! ## Top-level entry -/
 
 /-- Politeness/filler tokens that may prefix a real intent. We strip
@@ -828,11 +991,15 @@ def parse (input : String) : RegexDraft :=
         -- on a privacy-hint check, so non-privacy Aave deposits/
         -- withdraws fall through to the Aave matchers unchanged.
         matchShielded toks
-        -- audit / fresh have unique enough trigger sets ("approvals",
-        -- "fresh", "new EOA", etc.) that they don't collide with any
-        -- other template; order among themselves is irrelevant.
+        -- audit / fresh / ens have unique enough trigger sets
+        -- ("approvals", "fresh", ".eth", "register", "renew") that they
+        -- don't collide with any other template; order among themselves
+        -- is irrelevant. `matchEns` MUST appear before transfer matchers
+        -- so "register vitalik.eth" doesn't get pattern-matched as a
+        -- bare verb-noun phrase by anything else.
         , matchAuditApprovals toks
         , matchFreshAddress toks
+        , matchEns toks
         , matchSendOrTransfer toks
         , matchApprove toks
         , matchRevoke toks

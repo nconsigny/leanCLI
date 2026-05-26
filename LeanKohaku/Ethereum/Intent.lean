@@ -187,6 +187,31 @@ inductive Intent where
       (amountWei : Amount)
       (recipient : Address)
       (viaRelayer : Bool)
+  /-- Railgun shield. ETH leaves the user's EOA and enters the Railgun
+  shielded balance under the user's viewing/spending keys. The
+  chat-path handler routes this to `shielded.railgun.prepareShield`
+  (which uses the @kohaku-eth/railgun SDK over the bridge sidecar to
+  generate the userOp + paymaster sponsorship and returns a single
+  prepared tx). The prepared tx still flows through `tx.simulate` +
+  ConfirmGate before signing.
+
+  Distinct from `.shieldedDeposit` (which targets the 0xbow Privacy
+  Pool contract) so the regex parser can route per-provider chat
+  shortcuts to the right prepare RPC. Shields take minutes-to-hours
+  to become spendable as the POI tree updates — the prepare RPC
+  surfaces that delay in its response. -/
+  | railgunShield
+      (chainId : ChainId)
+      (amountWei : Amount)
+  /-- Railgun unshield. The shielded balance is unshielded back to a
+  user-supplied `recipient`. Railgun handles relayer selection
+  internally (no `viaRelayer` toggle here), so the field is absent.
+  Routed to the daemon's existing `shielded.railgun.unshield` RPC
+  via the standard chat.draft prepare envelope. -/
+  | railgunUnshield
+      (chainId : ChainId)
+      (amountWei : Amount)
+      (recipient : Address)
   /-- Read-only listing of outgoing ERC-20 allowances for `wallet` (or
   the default wallet when omitted). The chat-path handler walks
   `chain.scanTransfers` for `Approval` events over a configurable
@@ -195,6 +220,35 @@ inductive Intent where
   | approvalsAudit
       (chainId : ChainId)
       (wallet : Option Address)
+  /-- ENS `register` — second leg of the commit/reveal flow. The chat
+  path drafts this AFTER the user has already paid for the corresponding
+  `commit(commitment)` and the commit-age gate (~60s on mainnet) has
+  elapsed. The wallet is responsible for recomputing the same commitment
+  the user committed to; the encoder pulls the persisted `secret` and
+  resolver / data fields from the wallet's local registration state.
+
+  * `name` — bare label (no `.eth` suffix). Encoder validates length
+    against `ETHRegistrarController.minCommitmentAge` rules.
+  * `durationSeconds` — registration period. The encoder MUST reject
+    durations < the controller's `minRegistrationDuration`.
+  * `owner` — address the name is registered to.
+
+  The other `register(...)` arguments (`secret`, `resolver`, `data`,
+  `reverseRecord`, `ownerControlledFuses`) live in the wallet's
+  registration-state record and are not part of the `Intent` because
+  they're not chosen by the user inline — they're fixed once at
+  commit time. -/
+  | ensRegister
+      (chainId : ChainId)
+      (name : String)
+      (owner : Address)
+      (durationSeconds : Amount)
+  /-- ENS `renew` — one-shot, no commit phase. Pays the renewal fee to
+  extend the name's registration. -/
+  | ensRenew
+      (chainId : ChainId)
+      (name : String)
+      (durationSeconds : Amount)
   /-- Generate a new local wallet. **Not a chain action** — `chainId` is
   recorded only as request context (some R1 deployment flows are
   chain-specific, and we may surface the chain in the wallet's label).
@@ -225,7 +279,11 @@ def Intent.chainId : Intent → ChainId
   | .rawCall        cid _ _ _ _          => cid
   | .shieldedDeposit  cid _              => cid
   | .shieldedWithdraw cid _ _ _          => cid
+  | .railgunShield    cid _              => cid
+  | .railgunUnshield  cid _ _            => cid
   | .approvalsAudit   cid _              => cid
+  | .ensRegister      cid _ _ _          => cid
+  | .ensRenew         cid _ _            => cid
   | .freshAddress     cid _ _ _          => cid
 
 /-- Coarse action category. Used by the regex parser (which hasn't
@@ -251,7 +309,23 @@ inductive Action where
   -- and the chat.draft picker.
   | shieldedDeposit
   | shieldedWithdraw
+  -- Provider-specific shield variants. `.shieldedDeposit/Withdraw`
+  -- remain bound to the 0xbow Privacy Pool surface (the canonical
+  -- `shield <amount> <asset>` chat shortcut). The Railgun chat
+  -- shortcut routes here so the prepare-envelope picks the Railgun
+  -- daemon RPC instead of the Privacy Pool one.
+  | railgunShield
+  | railgunUnshield
   | approvalsAudit
+  -- ENS chat-side actions. `ensRegister` is the second-leg-of-
+  -- commit/reveal `register(...)` call; the prior `commit(...)`
+  -- transaction is orchestrated by the skill card, not modelled as
+  -- its own Intent variant — `commit` produces no user-visible state
+  -- change beyond the commitment hash, and the user signs both txs
+  -- through the same ConfirmGate path with the skill card providing
+  -- the timing copy in between.
+  | ensRegister
+  | ensRenew
   | freshAddress
   | unknown
   deriving Repr, DecidableEq
@@ -318,7 +392,11 @@ def Action.toString : Action → String
   | .rawCall           => "rawCall"
   | .shieldedDeposit   => "shielded.deposit"
   | .shieldedWithdraw  => "shielded.withdraw"
+  | .railgunShield     => "shielded.railgun.shield"
+  | .railgunUnshield   => "shielded.railgun.unshield"
   | .approvalsAudit    => "approvals.audit"
+  | .ensRegister       => "ens.register"
+  | .ensRenew          => "ens.renew"
   | .freshAddress      => "address.fresh"
   | .unknown           => "unknown"
 
@@ -330,10 +408,14 @@ examples break the build before the daemon ever sees a real prompt —
 matching the project convention in `Util/Units.lean`. -/
 
 example : Action.toString .nativeTransfer    = "nativeTransfer"     := by native_decide
-example : Action.toString .shieldedDeposit   = "shielded.deposit"   := by native_decide
-example : Action.toString .shieldedWithdraw  = "shielded.withdraw"  := by native_decide
-example : Action.toString .approvalsAudit    = "approvals.audit"    := by native_decide
-example : Action.toString .freshAddress      = "address.fresh"      := by native_decide
+example : Action.toString .shieldedDeposit   = "shielded.deposit"          := by native_decide
+example : Action.toString .shieldedWithdraw  = "shielded.withdraw"         := by native_decide
+example : Action.toString .railgunShield     = "shielded.railgun.shield"   := by native_decide
+example : Action.toString .railgunUnshield   = "shielded.railgun.unshield" := by native_decide
+example : Action.toString .approvalsAudit    = "approvals.audit"            := by native_decide
+example : Action.toString .ensRegister       = "ens.register"               := by native_decide
+example : Action.toString .ensRenew          = "ens.renew"                  := by native_decide
+example : Action.toString .freshAddress      = "address.fresh"              := by native_decide
 example : WalletKind.toString .eoa           = "eoa"                := by native_decide
 example : WalletKind.toString .r1            = "r1"                 := by native_decide
 

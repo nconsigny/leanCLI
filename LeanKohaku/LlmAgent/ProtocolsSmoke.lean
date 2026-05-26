@@ -58,22 +58,48 @@ example : (parse "shield 0.05 ETH with privacy pool").action = .shieldedDeposit 
 example : (parse "unshield 0.05 ETH with privacy pool to 0x0000000000000000000000000000000000000001").action
         = .shieldedWithdraw := by native_decide
 
--- Tornado Cash — currently routed to `.unknown` with a "coming soon" note.
+-- Tornado Cash — still routed to `.unknown` with a "coming soon" note
+-- (PR 2 will lift this).
 example : (parse "shield 1 ETH with tornado cash").action = .unknown := by native_decide
 
--- Railgun — same gating: canonical `shield` without a known protocol
--- protocol stays `.unknown` so the user gets routed to the Privacy menu.
-example : (parse "shield 1 ETH with railgun").action = .unknown := by native_decide
+-- Railgun chat shortcut (PR 1) — `shield <amount> ETH with railgun`
+-- now routes to `.railgunShield`; the unshield variant carries the
+-- recipient address through to the `to` field for DirectSynth.
+example : (parse "shield 1 ETH with railgun").action = .railgunShield := by native_decide
+example :
+    (parse "shield 1 ETH with railgun").fields.lookup "protocol" = some "railgun" ∧
+    (parse "shield 1 ETH with railgun").fields.lookup "amount"   = some "1"
+  := by native_decide
+example :
+    (parse "unshield 0.05 ETH with railgun to 0x0000000000000000000000000000000000000001").action
+      = .railgunUnshield ∧
+    (parse "unshield 0.05 ETH with railgun to 0x0000000000000000000000000000000000000001").fields.lookup "to"
+      = some "0x0000000000000000000000000000000000000001"
+  := by native_decide
 
 -- fxUSD — chat path treats f(x) as a supply-style flow.
 example : (parse "supply 1 wstETH to fxusd").action = .aaveSupply := by native_decide
 example : (parse "supply 1 wstETH to fxusd").fields.lookup "protocol"
         = some "fxusd" := by native_decide
 
--- ENS — register / renew currently flow through `.unknown` (the chat
--- doesn't draft ENS calldata yet), but we anchor that the verbs don't
--- get mis-classified as transfers.
-example : (parse "register vitalik.eth").action = .unknown := by native_decide
+-- ENS — register / renew now have a chat-side draft path that the
+-- skill card orchestrates through the commit/reveal pair. Drafts
+-- carry the verb + ENS name + duration in years.
+example : (parse "register vitalik.eth").action = .ensRegister := by native_decide
+example :
+    (parse "register vitalik.eth for 2 years").fields.lookup "name"
+      = some "vitalik.eth" ∧
+    (parse "register vitalik.eth for 2 years").fields.lookup "durationYears"
+      = some "2" ∧
+    (parse "register vitalik.eth for 2 years").confidence = .high
+  := by native_decide
+example : (parse "renew vitalik.eth for 1 year").action = .ensRenew := by native_decide
+example :
+    (parse "renew vitalik.eth for 1 year").fields.lookup "durationYears" = some "1"
+  := by native_decide
+-- Duration without the "year(s)" unit lowers confidence so the skill
+-- card asks for clarification.
+example : (parse "register vitalik.eth for 5").confidence = .medium := by native_decide
 
 -- Cashtag + suffix end-to-end.
 example :

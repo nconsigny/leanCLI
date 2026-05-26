@@ -140,6 +140,21 @@ def toCanonicalString : Intent → String
         s!"viaRelayer: {viaRelayer}",
         "note:       recipient should be a FRESH address with no link to the deposit source"
       ]
+  | .railgunShield chainId amountWei =>
+      String.intercalate "\n" [
+        "action:     shielded.railgun.shield",
+        s!"chain:      {chainId}",
+        s!"amountWei:  {amountWei}",
+        "note:       deposit enters Railgun under your viewing/spending keys; spendable after POI tree updates (minutes to hours)"
+      ]
+  | .railgunUnshield chainId amountWei recipient =>
+      String.intercalate "\n" [
+        "action:     shielded.railgun.unshield",
+        s!"chain:      {chainId}",
+        s!"amountWei:  {amountWei}",
+        s!"recipient:  {addrHex recipient}",
+        "note:       recipient should be a FRESH address; Railgun handles relayer selection internally"
+      ]
   | .approvalsAudit chainId wallet =>
       let walletStr : String :=
         match wallet with
@@ -150,6 +165,22 @@ def toCanonicalString : Intent → String
         s!"chain:      {chainId}",
         s!"wallet:     {walletStr}",
         "note:       READ-ONLY; no signing"
+      ]
+  | .ensRegister chainId name owner durationSeconds =>
+      String.intercalate "\n" [
+        "action:     ens.register",
+        s!"chain:      {chainId}",
+        s!"name:       {name}",
+        s!"owner:      {addrHex owner}",
+        s!"durationS:  {durationSeconds}",
+        "note:       SECOND leg of commit/reveal; the commit tx must already be on-chain and past the commit-age gate"
+      ]
+  | .ensRenew chainId name durationSeconds =>
+      String.intercalate "\n" [
+        "action:     ens.renew",
+        s!"chain:      {chainId}",
+        s!"name:       {name}",
+        s!"durationS:  {durationSeconds}"
       ]
   | .freshAddress chainId kind label deployImmediately =>
       let labelStr := label.getD "(unnamed)"
@@ -173,7 +204,11 @@ def actionTag : Intent → String
   | .rawCall        _ _ _ _ _          => "rawCall"
   | .shieldedDeposit  _ _              => "shielded.deposit"
   | .shieldedWithdraw _ _ _ _          => "shielded.withdraw"
+  | .railgunShield    _ _              => "shielded.railgun.shield"
+  | .railgunUnshield  _ _ _            => "shielded.railgun.unshield"
   | .approvalsAudit   _ _              => "approvals.audit"
+  | .ensRegister      _ _ _ _          => "ens.register"
+  | .ensRenew         _ _ _            => "ens.renew"
   | .freshAddress     _ _ _ _          => "address.fresh"
 
 end LeanKohaku.Ethereum.IntentCanonical

@@ -149,8 +149,16 @@ def encode : Intent → Except String EncodedTx
       .error "shielded.deposit: not leaf-encodable; route via daemon RPC shielded.prepareDeposit"
   | .shieldedWithdraw _ _ _ _ =>
       .error "shielded.withdraw: not leaf-encodable; route via daemon RPC shielded.prepareWithdraw"
+  | .railgunShield _ _ =>
+      .error "shielded.railgun.shield: not leaf-encodable; route via daemon RPC shielded.railgun.prepareShield"
+  | .railgunUnshield _ _ _ =>
+      .error "shielded.railgun.unshield: not leaf-encodable; route via daemon RPC shielded.railgun.unshield"
   | .approvalsAudit _ _ =>
       .error "approvals.audit: read-only action; no encoded tx"
+  | .ensRegister _ _ _ _ =>
+      .error "ens.register: not leaf-encodable here; route via daemon RPC ens.prepareRegister so the persisted commit-secret is loaded and the calldata reconstructs the same commitment the user already committed to"
+  | .ensRenew _ _ _ =>
+      .error "ens.renew: not leaf-encodable here; route via daemon RPC ens.prepareRenew so the controller's renew fee can be quoted via eth_call before signing"
   | .freshAddress _ _ _ _ =>
       .error "address.fresh: local wallet creation; no encoded tx"
 
