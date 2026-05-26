@@ -159,6 +159,39 @@ private def excerptForError (txt : String) : String :=
   if txt.length ≤ cap then txt
   else (txt.take cap).toString ++ s!"…[+{txt.length - cap} more]"
 
+/-- Loose substring check. Matches the `(.splitOn pat).length > 1`
+    idiom already used in `LlmAgent/IntentParser.lean` — Lean 4 core
+    has no `String.containsSubstr`. -/
+private def stringHas (haystack pat : String) : Bool :=
+  (haystack.splitOn pat).length > 1
+
+/-- Pretty-print a `missing 'choices'` failure with as much actionable
+    context as we can extract from the response body.
+
+    Two common shapes for `{"error":{...}}` bodies in the wild:
+    1. `llama.cpp`'s tool-call grammar bails at HTTP 500 when the
+       model's tool-call arguments JSON gets truncated mid-string at
+       `max_tokens`. The body's inner message starts with
+       `Failed to parse tool call arguments as JSON: …missing closing
+       quote…`. Recoverable by raising `AgentState.maxTokens` — this
+       error mode is the entire reason we bumped the default to 2048.
+    2. Generic backend error (context overflow, model not loaded, …).
+       Surfacing the inner `error.message` is still strictly better
+       than the historical "missing 'choices'" — operators can act on
+       it without grepping journalctl for the dumped body. -/
+private def diagnoseMissingChoices (resp : Json) (rawTxt : String) : String :=
+  match getField "error" resp >>= getField "message" >>= asString with
+  | some inner =>
+      let truncationHint :=
+        if stringHas inner "Failed to parse tool call arguments"
+           || (stringHas inner "missing closing quote"
+               && stringHas inner "parse error")
+        then " — looks like the model's tool-call output was truncated " ++
+             "at the per-call token ceiling; raising AgentState.maxTokens may help"
+        else ""
+      s!"llm backend returned an error: {inner}{truncationHint}"
+  | none => s!"chat response missing 'choices'; body: {excerptForError rawTxt}"
+
 /-- Decode the first `choices[0].message` of a chat-completions
     response into our `AgentMessage` shape. `rawTxt` is the original
     response body, passed through so protocol-shape errors can
@@ -169,7 +202,7 @@ private def excerptForError (txt : String) : String :=
 def decodeChoiceMessage (resp : Json) (rawTxt : String) :
     Except Error AgentMessage := do
   let some choicesJ := getField "choices" resp
-    | .error (.protocol s!"chat response missing 'choices'; body: {excerptForError rawTxt}")
+    | .error (.protocol (diagnoseMissingChoices resp rawTxt))
   let some choices := asArray choicesJ
     | .error (.protocol s!"chat response 'choices' not array; body: {excerptForError rawTxt}")
   let some choice := choices[0]?

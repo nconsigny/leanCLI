@@ -67,14 +67,18 @@ structure AgentConfig where
       question, bounded by the per-call timeout. Tune downward only
       after watching real sessions. -/
   maxSteps       : Nat   := 16
-  /-- Per-call output ceiling sent to the LLM as `max_tokens`. 1024
-      bounds a single turn to ~18s at 55 t/s (typical local-MoE
-      generation rate) so multi-tool flows feel snappy. The Brief
-      Mode bullet in `Prompt.operationalRules` reinforces the cap
-      behaviourally so the model emits structured output rather than
-      essays. Raise to 2048+ if a hard question genuinely needs more
-      room. -/
-  maxTokens      : Nat   := 1024
+  /-- Per-call output ceiling sent to the LLM as `max_tokens`. 2048
+      bounds a single turn to ~37s at 55 t/s (typical local-MoE
+      generation rate) — still snappy for multi-tool flows while
+      leaving the model enough room to emit a full `propose_send`
+      tool-call payload (132-hex calldata for `approve` alone runs
+      ~280 chars of tool-call JSON; the 1024 ceiling was hitting
+      mid-string on llama-server, which then returned HTTP 500 with
+      `Failed to parse tool call arguments as JSON` instead of a
+      usable partial response). The Brief Mode bullet in
+      `Prompt.operationalRules` still nudges the model to be
+      structured rather than discursive. -/
+  maxTokens      : Nat   := 2048
   temperature    : Float := 0.2
   timeoutMs      : Nat   := 30000
   /-- Allowed chain ids for any tool that takes one. Phase 0 ships
