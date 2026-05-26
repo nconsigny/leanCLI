@@ -40,11 +40,15 @@ import fs from "node:fs";
 
 const PROTOCOL_VERSION = "0.0.1";
 
-// chainId -> Helios NetworkKind. @a16z/helios accepts these literals.
-const CHAIN_TO_KIND = new Map([
-  [1, "mainnet"],
-  [11155111, "sepolia"],
-  [17000, "holesky"],
+// chainId -> { network, kind } per @a16z/helios v0.11.x. `kind` is the
+// family the second arg to createHeliosProvider takes; `network` is the
+// specific chain literal that goes into the config. Defaults pick a
+// public lightclientdata.org consensus endpoint where one is well-known;
+// callers can override per-request via params.consensusRpc.
+const CHAIN_TO_NET = new Map([
+  [1,        { network: "mainnet",  kind: "ethereum", defaultConsensusRpc: "https://www.lightclientdata.org" }],
+  [11155111, { network: "sepolia",  kind: "ethereum", defaultConsensusRpc: null }],
+  [17000,    { network: "holesky",  kind: "ethereum", defaultConsensusRpc: null }],
 ]);
 
 function jsonReplacer(_k, v) {
@@ -63,29 +67,43 @@ function err(id, code, message, data) {
   return JSON.stringify({ jsonrpc: "2.0", id: id ?? null, error: e });
 }
 
-// Keyed by `${chainId}|${executionRpc}` so changing either provisions a
-// fresh client. In --listen mode the map persists for the process lifetime.
+// Keyed by `${chainId}|${executionRpc}|${consensusRpc}` so changing any
+// of them provisions a fresh client. In --listen mode the map persists
+// for the process lifetime.
 const clients = new Map();
 
-async function getClient(chainId, executionRpc) {
-  const key = `${chainId}|${executionRpc}`;
+async function getClient(chainId, executionRpc, consensusRpcOverride) {
+  const meta = CHAIN_TO_NET.get(chainId);
+  if (!meta) {
+    throw new Error(`helios: unsupported chainId=${chainId} (known: ${[...CHAIN_TO_NET.keys()].join(", ")})`);
+  }
+  if (typeof executionRpc !== "string" || !executionRpc.length) {
+    throw new Error("helios: executionRpc is required");
+  }
+  const consensusRpc = consensusRpcOverride ?? meta.defaultConsensusRpc;
+  if (!consensusRpc) {
+    throw new Error(`helios: consensusRpc is required for chainId=${chainId} (no built-in default; pass params.consensusRpc)`);
+  }
+
+  const key = `${chainId}|${executionRpc}|${consensusRpc}`;
   let entry = clients.get(key);
   if (entry) return entry;
 
-  const kind = CHAIN_TO_KIND.get(chainId);
-  if (!kind) {
-    throw new Error(`helios: unsupported chainId=${chainId} (known: ${[...CHAIN_TO_KIND.keys()].join(", ")})`);
-  }
-  if (typeof executionRpc !== "string" || !executionRpc.length) {
-    throw new Error("helios: executionRpc is required (a16z/helios needs an execution RPC for blob/log fallback)");
-  }
-
-  const config = { executionRpc };
-  const provider = await createHeliosProvider(config, kind);
-  // sync() blocks until the sync committee has caught up; cold-start is
-  // typically a few seconds on mainnet, faster on sepolia/holesky.
-  await provider.sync();
-  entry = { provider, executionRpc, chainId };
+  // dbType: "config" — the default "localstorage" only works in browsers
+  // and throws under Node. "config" tells helios to persist checkpoints
+  // through the in-process config object (and the helios cache dir on
+  // disk that the daemon confines via cwd in Helios.Persistent).
+  const config = {
+    executionRpc,
+    consensusRpc,
+    network: meta.network,
+    dbType: "config",
+  };
+  const provider = await createHeliosProvider(config, meta.kind);
+  // waitSynced() blocks until the sync committee has caught up; cold-start
+  // is typically a few seconds.
+  await provider.waitSynced();
+  entry = { provider, executionRpc, consensusRpc, chainId };
   clients.set(key, entry);
   return entry;
 }
@@ -137,8 +155,8 @@ async function dispatch(method, params, id) {
       if (typeof params.method !== "string") {
         return err(id, -32602, "params.method must be a string");
       }
-      if (!CHAIN_TO_KIND.has(chainId)) {
-        return err(id, -32602, `params.chainId=${chainId} unsupported (known: ${[...CHAIN_TO_KIND.keys()].join(", ")})`);
+      if (!CHAIN_TO_NET.has(chainId)) {
+        return err(id, -32602, `params.chainId=${chainId} unsupported (known: ${[...CHAIN_TO_NET.keys()].join(", ")})`);
       }
       if (typeof params.executionRpc !== "string" || !params.executionRpc.length) {
         return err(id, -32602, "params.executionRpc must be a non-empty string");
@@ -149,7 +167,7 @@ async function dispatch(method, params, id) {
           const result = await logsBypass(params.executionRpc, inner);
           return ok(id, result);
         }
-        const { provider } = await getClient(chainId, params.executionRpc);
+        const { provider } = await getClient(chainId, params.executionRpc, params.consensusRpc);
         const result = await provider.request({ method: params.method, params: inner });
         return ok(id, result);
       } catch (e) {
@@ -168,8 +186,8 @@ async function dispatch(method, params, id) {
       if (!Number.isFinite(chainId) || chainId <= 0) {
         return err(id, -32602, "params.chainId must be a positive integer");
       }
-      if (!CHAIN_TO_KIND.has(chainId)) {
-        return err(id, -32602, `params.chainId=${chainId} unsupported (known: ${[...CHAIN_TO_KIND.keys()].join(", ")})`);
+      if (!CHAIN_TO_NET.has(chainId)) {
+        return err(id, -32602, `params.chainId=${chainId} unsupported (known: ${[...CHAIN_TO_NET.keys()].join(", ")})`);
       }
       if (typeof params.executionRpc !== "string" || !params.executionRpc.length) {
         return err(id, -32602, "params.executionRpc must be a non-empty string");
@@ -188,7 +206,7 @@ async function dispatch(method, params, id) {
       }
       const block = params.block ?? "latest";
       try {
-        const { provider } = await getClient(chainId, params.executionRpc);
+        const { provider } = await getClient(chainId, params.executionRpc, params.consensusRpc);
         // eth_call returns the raw return data or throws with revert info.
         // Helios executes both via the embedded REVM against verified state.
         let returnValue = null;
@@ -289,7 +307,7 @@ if (listenIdx !== -1 && argv[listenIdx + 1]) {
   const shutdown = () => {
     try { server.close(); } catch {}
     for (const c of clients.values()) {
-      try { c.provider.destroy?.(); } catch {}
+      try { c.provider.shutdown?.(); } catch {}
     }
     try { fs.unlinkSync(socketPath); } catch {}
     process.exit(0);
@@ -310,7 +328,7 @@ if (listenIdx !== -1 && argv[listenIdx + 1]) {
     process.stdout.write(out);
     process.stdout.write("\n");
     for (const c of clients.values()) {
-      try { c.provider.destroy?.(); } catch {}
+      try { c.provider.shutdown?.(); } catch {}
     }
   } catch (e) {
     process.stdout.write(
