@@ -880,6 +880,320 @@ private def opSearch (st : DaemonState) (params : Json) : IO Json := do
   catch e =>
     return errResp "io" (toString e)
 
+/-- Parse session metadata JSON if present, return the chainId field if
+    it is a non-negative integer. Tolerant: malformed JSON, missing
+    field, and a non-numeric chainId all collapse to `none`. -/
+private def metadataChainId (metadataJson : String) : Option Nat :=
+  if metadataJson.isEmpty then none
+  else
+    match parse metadataJson with
+    | .ok j   => getField "chainId" j >>= asNat
+    | .error _ => none
+
+/-- Parse session metadata JSON for a sessionKey string. Same
+    tolerance rules as `metadataChainId`. -/
+private def metadataSessionKey (metadataJson : String) : Option String :=
+  if metadataJson.isEmpty then none
+  else
+    match parse metadataJson with
+    | .ok j   => getField "sessionKey" j >>= asString
+    | .error _ => none
+
+/-- True iff the session was tagged `{"incognito": true}` at create
+    time. Used to filter history-surface results so a leave-no-trace
+    session never appears in `list_sessions` / `get_session` /
+    `list_proposed_txs`. -/
+private def metadataIsIncognito (metadataJson : String) : Bool :=
+  if metadataJson.isEmpty then false
+  else
+    match parse metadataJson with
+    | .ok j   => (getField "incognito" j >>= asBool).getD false
+    | .error _ => false
+
+/-- Render a single `SessionMeta` as the wire shape consumed by the
+    TUI's history-list view. `chainId` / `sessionKey` are emitted only
+    when the on-disk metadata carries them (older rows simply omit). -/
+private def sessionMetaToJson (m : Session.SessionMeta) : Json :=
+  let mdChain := metadataChainId m.metadataJson
+  let mdKey   := metadataSessionKey m.metadataJson
+  let chainField : Array (String × Json) :=
+    match mdChain with
+    | some c => #[("chainId", .num (Int.ofNat c))]
+    | none   => #[]
+  let keyField : Array (String × Json) :=
+    match mdKey with
+    | some k => #[("sessionKey", .str k)]
+    | none   => #[]
+  let promptField : Array (String × Json) :=
+    match m.firstUserPrompt with
+    | some s => #[("firstUserPrompt", .str s)]
+    | none   => #[]
+  let lastField : Array (String × Json) :=
+    match m.lastTurnAt with
+    | some t => #[("lastTurnAt", .num (Int.ofNat t))]
+    | none   => #[]
+  .obj <| #[
+    ("sessionId", .num (Int.ofNat m.sessionId)),
+    ("createdAt", .num (Int.ofNat m.createdAt)),
+    ("turnCount", .num (Int.ofNat m.turnCount))
+  ] ++ chainField ++ keyField ++ promptField ++ lastField
+
+/-- Render a single message row as the wire shape consumed by the
+    history-detail view. Mirrors the existing `AgentMessage` shape used
+    by the `chat.draft` reply's trace: `role` is a string, `content` is
+    a string (possibly empty), `toolCalls` is the raw JSON-encoded
+    array (the agent loop's storage format; the TUI parses it the same
+    way it parses the live-turn trace). -/
+private def messageRowToJson (r : Session.MessageRow) : Json :=
+  let toolCallsField : Array (String × Json) :=
+    if r.toolCalls.isEmpty then #[]
+    else #[("toolCallsJson", .str r.toolCalls)]
+  let toolCallIdField : Array (String × Json) :=
+    if r.toolCallId.isEmpty then #[]
+    else #[("toolCallId", .str r.toolCallId)]
+  .obj <| #[
+    ("seq",        .num (Int.ofNat r.seq)),
+    ("appendedAt", .num (Int.ofNat r.appendedAt)),
+    ("role",       .str r.role),
+    ("content",    .str r.content)
+  ] ++ toolCallsField ++ toolCallIdField
+
+/-- Default `limit` for `list_sessions`. The list view paints fast at
+    50; callers wanting more pass it explicitly. -/
+private def defaultListSessionsLimit : Nat := 50
+
+/-- Default `limit` for `list_proposed_txs`. Higher than the session
+    list because the propose_send index is sparser (one row per signing
+    intent, not one per chat turn). -/
+private def defaultListProposedTxsLimit : Nat := 100
+
+/-- Handle `list_sessions`. Read-only enumeration of the session store,
+    newest-first, with optional `chainId` / `sessionKey` filters that
+    are applied AFTER row decode (the filters live inside the
+    `metadata` JSON column, not in dedicated columns).
+
+    Incognito sessions never appear in the result — their metadata
+    carries `{"incognito": true}` at create time, and this op filters
+    them out unconditionally. -/
+private def opListSessions (st : DaemonState) (params : Json) : IO Json := do
+  let limit : Nat :=
+    (getField "limit" params >>= asNat).getD defaultListSessionsLimit
+  let chainFilter? : Option Nat := getField "chainId" params >>= asNat
+  let keyFilter? : Option String := getField "sessionKey" params >>= asString
+  try
+    -- Over-fetch when filtering so the post-filter result still tries
+    -- to honor `limit`. A 10x multiplier is a cheap safety margin —
+    -- 500 rows is still a millisecond-scale read.
+    let fetchN := if chainFilter?.isSome ∨ keyFilter?.isSome then limit * 10 else limit
+    let rows ← Session.listSessions st.db fetchN
+    let filtered : Array Session.SessionMeta := rows.filter fun m =>
+      let notIncog := !metadataIsIncognito m.metadataJson
+      let chainOk : Bool :=
+        match chainFilter? with
+        | none => true
+        | some c =>
+            match metadataChainId m.metadataJson with
+            | some c' => c == c'
+            | none    => false
+      let keyOk : Bool :=
+        match keyFilter? with
+        | none => true
+        | some k =>
+            match metadataSessionKey m.metadataJson with
+            | some k' => k == k'
+            | none    => false
+      notIncog ∧ chainOk ∧ keyOk
+    let truncated := filtered.extract 0 limit
+    let arr : Array Json := truncated.map sessionMetaToJson
+    return okResp <| .obj #[("sessions", .arr arr)]
+  catch e =>
+    return errResp "io" (toString e)
+
+/-- Handle `get_session`. Read-only fetch of one session's full
+    transcript, ordered by `seq`. Refuses incognito sessions with a
+    structured `kind:"incognito"` error envelope so the TUI can render
+    a clear "no rows stored" message. -/
+private def opGetSession (st : DaemonState) (params : Json) : IO Json := do
+  let some sidJ := getField "session_id" params
+    | return errResp "bad_request" "get_session requires session_id"
+  let some sidN := asNat sidJ
+    | return errResp "bad_request" "session_id must be a non-negative integer"
+  try
+    -- Find the session in the listing to recover createdAt + metadata.
+    -- One extra round-trip avoided by reusing the listing's projection
+    -- in the absence of a dedicated single-session helper; the cost is
+    -- O(rows in DB) per call but the DB is small and this view is not
+    -- a hot path. If listings ever stop fitting in memory, swap to a
+    -- targeted `SELECT … WHERE id = ?`.
+    let rows ← Session.listSessions st.db 100000
+    match rows.find? (·.sessionId = sidN) with
+    | none => return errResp "not_found" s!"session {sidN} not found"
+    | some sm =>
+        if metadataIsIncognito sm.metadataJson then
+          return errResp "incognito" "session was incognito; no rows stored"
+        let msgs ← Session.loadSessionRows st.db sidN
+        let chainField : Array (String × Json) :=
+          match metadataChainId sm.metadataJson with
+          | some c => #[("chainId", .num (Int.ofNat c))]
+          | none   => #[]
+        let keyField : Array (String × Json) :=
+          match metadataSessionKey sm.metadataJson with
+          | some k => #[("sessionKey", .str k)]
+          | none   => #[]
+        let turns : Array Json := msgs.map messageRowToJson
+        return okResp <| .obj <| #[
+          ("sessionId", .num (Int.ofNat sidN)),
+          ("createdAt", .num (Int.ofNat sm.createdAt)),
+          ("turns",     .arr turns)
+        ] ++ chainField ++ keyField
+  catch e =>
+    return errResp "io" (toString e)
+
+/-- A propose_send call extracted from a session's tool-call log. -/
+private structure ProposedTx where
+  sessionId         : Session.SessionId
+  sessionCreatedAt  : Nat
+  turnIndex         : Nat
+  ts                : Nat
+  chainId           : Nat
+  to                : String
+  value             : String
+  data              : String
+  sender            : Option String
+  summaryFromTool   : Option String
+
+/-- Render a `ProposedTx` as the wire shape consumed by the TUI's
+    Transactions tab. `value` and `data` are passed through verbatim
+    (hex strings as the model emitted them); the daemon is not in the
+    business of re-rendering these for display. -/
+private def proposedTxToJson (p : ProposedTx) : Json :=
+  let senderField : Array (String × Json) :=
+    match p.sender with
+    | some s => #[("sender", .str s)]
+    | none   => #[]
+  let summaryField : Array (String × Json) :=
+    match p.summaryFromTool with
+    | some s => #[("summaryFromTool", .str s)]
+    | none   => #[]
+  .obj <| #[
+    ("sessionId",        .num (Int.ofNat p.sessionId)),
+    ("sessionCreatedAt", .num (Int.ofNat p.sessionCreatedAt)),
+    ("turnIndex",        .num (Int.ofNat p.turnIndex)),
+    ("ts",               .num (Int.ofNat p.ts)),
+    ("chainId",          .num (Int.ofNat p.chainId)),
+    ("to",               .str p.to),
+    ("value",            .str p.value),
+    ("data",             .str p.data)
+  ] ++ senderField ++ summaryField
+
+/-- Walk one session's messages, extract every `propose_send` tool
+    call, and return a `ProposedTx` per match. Tolerant: a malformed
+    `argsJson` (or a row from an older session that emitted a now-
+    deprecated shape) is skipped silently rather than failing the
+    whole walk. We need both the assistant turn carrying the tool call
+    AND the matching tool-result turn (to recover `summary`); the
+    walker pairs by tool_call_id, falling back to "no summary" when
+    the result is missing. -/
+private def extractProposedTxs
+    (sid : Session.SessionId) (createdAt : Nat) (rows : Array Session.MessageRow) :
+    Array ProposedTx := Id.run do
+  -- First pass: build an alist of tool_call_id → summary from the
+  -- tool-role rows. We avoid HashMap to keep this build's import
+  -- surface tight; the cardinality per session is small (10s).
+  let mut summaries : List (String × String) := []
+  for r in rows do
+    if r.role = "tool" ∧ !r.toolCallId.isEmpty then
+      let summary : String :=
+        if r.content.isEmpty then ""
+        else
+          match parse r.content with
+          | .ok j =>
+              match getField "summary" j with
+              | some (.str s) => s
+              | _ => r.content
+          | .error _ => r.content
+      summaries := (r.toolCallId, summary) :: summaries
+  -- Second pass: every assistant turn with a non-empty tool_calls
+  -- string is parsed for `propose_send` calls. `turnIndex` tracks the
+  -- chat-position of the assistant turn so the TUI can jump back to
+  -- the right place.
+  let mut out : Array ProposedTx := #[]
+  let mut turnIdx : Nat := 0
+  for r in rows do
+    if r.role = "assistant" then
+      turnIdx := turnIdx + 1
+      if !r.toolCalls.isEmpty then
+        match parse r.toolCalls with
+        | .ok (.arr arr) =>
+            for tc in arr do
+              let name := (getField "name" tc >>= asString).getD ""
+              if name = "propose_send" then
+                let argsStr := (getField "argsJson" tc >>= asString).getD ""
+                let id      := (getField "id" tc >>= asString).getD ""
+                if !argsStr.isEmpty then
+                  match parse argsStr with
+                  | .ok argsJ =>
+                      let chainId := (getField "chainId" argsJ >>= asNat).getD 0
+                      let to      := (getField "to" argsJ >>= asString).getD ""
+                      let value   := (getField "value" argsJ >>= asString).getD "0x0"
+                      let data    := (getField "data" argsJ >>= asString).getD "0x"
+                      let sender  := getField "sender" argsJ >>= asString
+                      let summary? : Option String :=
+                        (summaries.find? (fun (k, _) => k = id)).map Prod.snd
+                      out := out.push {
+                        sessionId := sid,
+                        sessionCreatedAt := createdAt,
+                        turnIndex := turnIdx,
+                        ts := r.appendedAt,
+                        chainId := chainId,
+                        to := to,
+                        value := value,
+                        data := data,
+                        sender := sender,
+                        summaryFromTool := summary?
+                      }
+                  | .error _ => pure ()
+                else pure ()
+              else pure ()
+        | _ => pure ()
+  out
+
+/-- Handle `list_proposed_txs`. Walks every non-incognito session,
+    extracts every `propose_send` tool call, and returns the merged
+    list newest-first. Optional `chainId` filter applies to the
+    extracted chainId (the one the model passed to the tool, not the
+    session's metadata chainId — the model can target a different
+    chain than the chat opened on, and the daemon's chain whitelist
+    pins per call). -/
+private def opListProposedTxs (st : DaemonState) (params : Json) : IO Json := do
+  let limit : Nat :=
+    (getField "limit" params >>= asNat).getD defaultListProposedTxsLimit
+  let chainFilter? : Option Nat := getField "chainId" params >>= asNat
+  try
+    let sessions ← Session.listSessions st.db 100000
+    let mut all : Array ProposedTx := #[]
+    for m in sessions do
+      if metadataIsIncognito m.metadataJson then
+        pure ()
+      else
+        try
+          let rows ← Session.loadSessionRows st.db m.sessionId
+          let txs := extractProposedTxs m.sessionId m.createdAt rows
+          all := all ++ txs
+        catch _ => pure ()
+    -- Sort newest-first by `ts`. `Array.qsort` is in scope without
+    -- additional imports; comparison is on `Nat`.
+    let sorted := all.qsort (fun a b => a.ts > b.ts)
+    let filtered : Array ProposedTx :=
+      match chainFilter? with
+      | none   => sorted
+      | some c => sorted.filter (·.chainId = c)
+    let truncated := filtered.extract 0 limit
+    let arr : Array Json := truncated.map proposedTxToJson
+    return okResp <| .obj #[("txs", .arr arr)]
+  catch e =>
+    return errResp "io" (toString e)
+
 /-- Handle `reload`. Re-walks the on-disk skills directory and swaps
     the `IO.Ref` under all active readers. SIGHUP-equivalent — Lean
     4 v4.29.1 lacks POSIX signal APIs, so operators trigger this
@@ -925,6 +1239,12 @@ def dispatch (st : DaemonState) (req : Json) : IO Json := do
       opUpdateMemory st req
   | "show_memory" =>
       opShowMemory st req
+  | "list_sessions" =>
+      opListSessions st req
+  | "get_session" =>
+      opGetSession st req
+  | "list_proposed_txs" =>
+      opListProposedTxs st req
   | "" =>
       pure (errResp "bad_request" "missing op")
   | other =>

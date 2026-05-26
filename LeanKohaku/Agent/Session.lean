@@ -93,6 +93,35 @@ structure SearchHit where
   snippet   : String
   deriving Repr
 
+/-- Lightweight session-row projection used by the read-only history
+    surface (`list_sessions` agentd op). Carries the column subset the
+    TUI's session-list view needs without forcing a full transcript
+    load. `metadataJson` is the raw JSON the session was created with
+    (chainId / sessionKey live inside); the caller parses it. Older
+    rows whose metadata column is `NULL` surface as `""`. -/
+structure SessionMeta where
+  sessionId      : SessionId
+  createdAt      : Nat
+  metadataJson   : String
+  turnCount      : Nat
+  firstUserPrompt : Option String
+  lastTurnAt     : Option Nat
+  deriving Repr, Inhabited
+
+/-- Per-message row used by `loadSessionRows` / the agentd's
+    `get_session` op. Carries the wire fields the TUI's session-detail
+    view needs (`ts` for sort/display, plus the raw `tool_calls` and
+    `tool_call_id` strings). `appendedAt` is the on-disk `ts` column
+    in milliseconds. -/
+structure MessageRow where
+  seq        : Nat
+  appendedAt : Nat
+  role       : String
+  content    : String
+  toolCalls  : String
+  toolCallId : String
+  deriving Repr, Inhabited
+
 /-- Run a no-result SQL statement against a handle. -/
 private def exec (h : Handle) (sql : String) : IO Unit :=
   sqliteExec h.ptr sql
@@ -309,6 +338,115 @@ def loadSession (h : Handle) (sid : SessionId) : IO (Array AgentMessage) := do
           toolCallId := if toolCallId.isEmpty then none else some toolCallId
         }
         out := out.push m
+      else
+        loop := false
+    pure out
+
+/-- Display-only cap on `firstUserPrompt` in the session-list view.
+    Matches the wire spec for the agentd's `list_sessions` op. -/
+def firstUserPromptCap : Nat := 140
+
+/-- Truncate `s` to at most `firstUserPromptCap` characters, appending
+    an ellipsis when truncated. Pure, no IO. Used only for the list
+    projection — the session-detail view still shows the full content. -/
+def truncatePromptForList (s : String) : String :=
+  if s.length ≤ firstUserPromptCap then s
+  else String.ofList (s.toList.take firstUserPromptCap) ++ "…"
+
+/-- Enumerate sessions newest-first. The filtering predicate is run in
+    Lean after row decode rather than in SQL because the `chainId` /
+    `sessionKey` live inside the metadata JSON column; parsing in Lean
+    is straightforward and avoids depending on SQLite's `json_extract`.
+
+    Older rows whose `metadata` column is `NULL` (or whose JSON is
+    malformed) survive the listing — they just surface with
+    `metadataJson := ""` and the caller treats their chainId /
+    sessionKey as absent.
+
+    The per-session aggregate (turn count, first user prompt, last
+    `ts`) is computed with a single grouped query so listing N sessions
+    is O(N) row fetches rather than 3N. `limit` caps the result set. -/
+def listSessions (h : Handle) (limit : Nat) : IO (Array SessionMeta) := do
+  withStmt h
+    ("SELECT s.id, s.created_at, COALESCE(s.metadata, ''),\n" ++
+     "       COALESCE(c.cnt, 0),\n" ++
+     "       (SELECT m.content FROM messages m\n" ++
+     "          WHERE m.session_id = s.id AND m.role = 'user'\n" ++
+     "          ORDER BY m.seq ASC LIMIT 1) AS first_user,\n" ++
+     "       c.last_ts\n" ++
+     "  FROM sessions s\n" ++
+     "  LEFT JOIN (\n" ++
+     "    SELECT session_id, COUNT(*) AS cnt, MAX(ts) AS last_ts\n" ++
+     "      FROM messages GROUP BY session_id\n" ++
+     "  ) c ON c.session_id = s.id\n" ++
+     "  ORDER BY s.created_at DESC LIMIT ?;") fun s => do
+    sqliteBindInt64 s.ptr 1 limit.toUInt64
+    let mut out : Array SessionMeta := #[]
+    let mut loop := true
+    while loop do
+      let rc ← sqliteStep s.ptr
+      if rc == stepRow then
+        let sid       ← sqliteColumnInt64 s.ptr 0
+        let createdAt ← sqliteColumnInt64 s.ptr 1
+        let metaJson  ← sqliteColumnText s.ptr 2
+        let cnt       ← sqliteColumnInt64 s.ptr 3
+        let firstUser ← sqliteColumnText s.ptr 4
+        let lastTs    ← sqliteColumnInt64 s.ptr 5
+        -- SQLite NULL via the lk_sqlite_column_text_ffi shim arrives as
+        -- the empty string; preserve that so the caller can distinguish
+        -- "no user message yet" from a real empty content.
+        let firstUserOpt : Option String :=
+          if firstUser.isEmpty then none
+          else some (truncatePromptForList firstUser)
+        -- A 0 from MAX(ts) means "no rows" (the LEFT JOIN gave us a
+        -- NULL, mapped to 0 by the shim). Surface it as `none` so the
+        -- TUI does not render a 1970 epoch timestamp.
+        let lastTsOpt : Option Nat :=
+          if lastTs.toNat = 0 then none else some lastTs.toNat
+        out := out.push {
+          sessionId := sid.toNat,
+          createdAt := createdAt.toNat,
+          metadataJson := metaJson,
+          turnCount := cnt.toNat,
+          firstUserPrompt := firstUserOpt,
+          lastTurnAt := lastTsOpt
+        }
+      else
+        loop := false
+    pure out
+
+/-- Read all message rows for `sid` in `seq` order, preserving every
+    column the wire-shape consumers need (including `ts` and the raw
+    `tool_calls` / `tool_call_id` strings).
+
+    Companion to `loadSession`, which projects directly into
+    `AgentMessage` and drops `seq`/`ts`. The history surface wants both
+    the turn index and the appended-at timestamp for display, so a
+    separate projection is cheaper than reshaping the agent-loop type. -/
+def loadSessionRows (h : Handle) (sid : SessionId) : IO (Array MessageRow) := do
+  withStmt h
+    ("SELECT seq, ts, role, content, tool_calls, tool_call_id\n" ++
+     "  FROM messages WHERE session_id = ? ORDER BY seq ASC;") fun s => do
+    sqliteBindInt64 s.ptr 1 sid.toUInt64
+    let mut out : Array MessageRow := #[]
+    let mut loop := true
+    while loop do
+      let rc ← sqliteStep s.ptr
+      if rc == stepRow then
+        let seq        ← sqliteColumnInt64 s.ptr 0
+        let ts         ← sqliteColumnInt64 s.ptr 1
+        let role       ← sqliteColumnText s.ptr 2
+        let content    ← sqliteColumnText s.ptr 3
+        let toolCalls  ← sqliteColumnText s.ptr 4
+        let toolCallId ← sqliteColumnText s.ptr 5
+        out := out.push {
+          seq := seq.toNat,
+          appendedAt := ts.toNat,
+          role := role,
+          content := content,
+          toolCalls := toolCalls,
+          toolCallId := toolCallId
+        }
       else
         loop := false
     pure out

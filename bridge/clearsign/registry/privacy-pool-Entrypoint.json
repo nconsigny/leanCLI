@@ -1,0 +1,46 @@
+{
+  "$schema": "../../specs/erc7730-v2.schema.json",
+  "context": {
+    "contract": {
+      "deployments": [
+        { "chainId": 1, "address": "0x6818809EefCe719E480a7526D76bD3e561526b46" },
+        { "chainId": 11155111, "address": "0x9D8D4cdfeD605293DC8826BC2D2A2c7Fb867Edd0" }
+      ]
+    }
+  },
+  "metadata": {
+    "owner": "0xbow Privacy Pool",
+    "info": { "url": "https://docs.privacypools.com/" }
+  },
+  "display": {
+    "formats": {
+      "deposit(uint256 _precommitment)": {
+        "intent": "Shield ETH into Privacy Pool",
+        "fields": [
+          { "label": "Pre-commitment", "format": "raw", "path": "#._precommitment", "visible": "always" }
+        ]
+      },
+      "deposit(address _asset,uint256 _value,uint256 _precommitment)": {
+        "intent": "Shield ERC-20 into Privacy Pool",
+        "fields": [
+          { "label": "Asset",          "format": "addressName", "params": { "types": ["token"] }, "path": "#._asset", "visible": "always" },
+          { "label": "Amount",         "format": "raw",         "path": "#._value", "visible": "always" },
+          { "label": "Pre-commitment", "format": "raw",         "path": "#._precommitment", "visible": "always" }
+        ]
+      },
+      "relay((address processooor,bytes data) _withdrawal,(uint256[2] pA,uint256[2][2] pB,uint256[2] pC,uint256[8] pubSignals) _proof,uint256 _scope)": {
+        "intent": "Withdraw / forward from Privacy Pool via relayer",
+        "fields": [
+          {
+            "path": "#._withdrawal",
+            "fields": [
+              { "label": "Processor", "format": "addressName", "params": { "types": ["contract"] }, "path": "processooor", "visible": "always" },
+              { "label": "Forward data", "format": "raw", "path": "data" }
+            ]
+          },
+          { "label": "Scope", "format": "raw", "path": "#._scope", "visible": "always" }
+        ]
+      }
+    }
+  }
+}

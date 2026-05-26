@@ -2036,6 +2036,38 @@ private def chatDraftIntentResponse
           ])
         ])
       ]
+  | .railgunShield _ amountWei =>
+      -- Railgun shield: route to the existing `shielded.railgun.prepareShield`
+      -- RPC. The Lean side has done amount parsing + dust-floor checks
+      -- (see [[project_railgun_poi]] for the paymaster/POI constraints
+      -- the sidecar still enforces).
+      let amountEth := LeanKohaku.Util.Units.formatUnits amountWei 18
+      .obj <| commonFields ++ #[
+        ("prepare", .obj #[
+          ("rpc",    .str "shielded.railgun.prepareShield"),
+          ("params", .obj #[
+            ("amountEth", .str amountEth),
+            ("chainId",   .num (Int.ofNat chainId))
+          ])
+        ])
+      ]
+  | .railgunUnshield _ amountWei recipient =>
+      -- Railgun unshield: route to `shielded.railgun.unshield`. Unlike
+      -- the Privacy Pool path there is no `prepareUnshield` step — the
+      -- bridge SDK builds the unshield userOp in one pass. The
+      -- daemon's `shielded.railgun.unshield` still returns prepared
+      -- (unsigned) calldata, so the TUI's ConfirmGate is preserved.
+      let amountEth := LeanKohaku.Util.Units.formatUnits amountWei 18
+      .obj <| commonFields ++ #[
+        ("prepare", .obj #[
+          ("rpc",    .str "shielded.railgun.unshield"),
+          ("params", .obj #[
+            ("amountEth", .str amountEth),
+            ("recipient", addrJson recipient),
+            ("chainId",   .num (Int.ofNat chainId))
+          ])
+        ])
+      ]
   | .approvalsAudit _ wallet =>
       let walletEntry : Array (String × Json) :=
         match wallet with
@@ -3494,6 +3526,17 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       -- calldata-producing surface.
       let chainIdParam :=
         ((getField "chainId" req.params) >>= asNat).getD cfg.chainId
+      -- Optional `accountKind` hint. When "r1Smart" / "sphincsHybrid"
+      -- the daemon collapses a `needs_approval` two-leg result into a
+      -- single `executeBatch` call against the sender (the smart wallet
+      -- itself). Defaults to "eoa" — keeps the EOA-shape pass-through
+      -- for plain accounts and external callers.
+      let accountKind : LeanKohaku.Wallet.ExecuteBatch.AccountKindHint :=
+        match getField "accountKind" req.params >>= asString with
+        | some s =>
+            (LeanKohaku.Wallet.ExecuteBatch.AccountKindHint.parse? s).getD
+              LeanKohaku.Wallet.ExecuteBatch.AccountKindHint.eoa
+        | none => LeanKohaku.Wallet.ExecuteBatch.AccountKindHint.eoa
       match paramString req.params "action",
             paramString req.params "sender",
             paramString req.params "asset" with
@@ -3569,7 +3612,9 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                 | other =>
                     pure (.err "unknown_action"
                       s!"aave.prepare: 'action' must be supply|withdraw|borrow|repay|setCollateral, got: {other}")
-              pure <| .ok (LeanKohaku.Aave.Prepare.PrepareResult.toJson result)
+              let finalResult :=
+                LeanKohaku.Aave.Prepare.maybeBatch sender chainIdParam accountKind result
+              pure <| .ok (LeanKohaku.Aave.Prepare.PrepareResult.toJson finalResult)
       | _, _, _ => pure (.error invalidParams)
   | "chain.sendRawTransaction" =>
       match paramString req.params "raw" with
@@ -5671,6 +5716,12 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
             -- anonymous").
             | "shielded.deposit"  => "shield-eth"
             | "shielded.withdraw" => "unshield-eth"
+            -- Railgun chat shortcut (PR 1). Both shield/unshield share
+            -- the `railgun` skill so the model sees the SDK-specific
+            -- guidance (paymaster, POI delay, viewing keys) when it
+            -- needs to clarify post-DirectSynth.
+            | "shielded.railgun.shield"   => "railgun"
+            | "shielded.railgun.unshield" => "railgun"
             | "approvals.audit"   => "audit-approvals"
             | "address.fresh"     => "fresh-address"
             | "swap"              => "swap-uniswap-v3"
@@ -6015,6 +6066,43 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           let sessionKey : String := paramStringD req.params "sessionKey" ""
           let resp ← LeanKohaku.LlmAgent.Bridge.rolloverChatSession chainId sessionKey
           pure <| .ok <| LeanKohaku.LlmAgent.Bridge.responseToJson resp
+  | "chat.listSessions" =>
+      -- Read-only enumeration of the agentd's SQLite session store.
+      -- Pure proxy — the agentd applies the `chainId` / `sessionKey`
+      -- filters and the incognito mask; this RPC adds no business
+      -- logic. Trust: produces no calldata, never gates a signing
+      -- decision.
+      let limit?   : Option Nat    := getField "limit" req.params >>= asNat
+      let chainId? : Option Nat    := getField "chainId" req.params >>= asNat
+      let key?     : Option String := getField "sessionKey" req.params >>= asString
+      let resp ← LeanKohaku.LlmAgent.Bridge.listSessions limit? chainId? key?
+      pure <| .ok <| LeanKohaku.LlmAgent.Bridge.responseToJson resp
+  | "chat.getSession" =>
+      -- Read-only fetch of one session's full transcript. Refuses
+      -- incognito sessions with a structured `kind:"incognito"`
+      -- envelope, surfaced verbatim via the bridge's `data.kind`. The
+      -- TUI uses this to render a "no rows stored" notice rather than
+      -- a transport error.
+      match getField "session_id" req.params >>= asNat with
+      | none =>
+          pure <| .error { code := -32602
+                         , message := "chat.getSession: session_id (Nat) required"
+                         , data := none }
+      | some sid =>
+          let resp ← LeanKohaku.LlmAgent.Bridge.getSession sid
+          pure <| .ok <| LeanKohaku.LlmAgent.Bridge.responseToJson resp
+  | "chat.listProposedTxs" =>
+      -- Read-only walk of every non-incognito session's tool-call log
+      -- to extract `propose_send` invocations. The agentd does the
+      -- extraction; this RPC is a pure proxy. Trust: the listed txs
+      -- have already traversed (or failed to traverse) ConfirmGate at
+      -- the time they were proposed; surfacing them here adds no new
+      -- signing authority — re-executing requires a fresh decode →
+      -- simulate → confirm cycle.
+      let limit?   : Option Nat := getField "limit" req.params >>= asNat
+      let chainId? : Option Nat := getField "chainId" req.params >>= asNat
+      let resp ← LeanKohaku.LlmAgent.Bridge.listProposedTxs limit? chainId?
+      pure <| .ok <| LeanKohaku.LlmAgent.Bridge.responseToJson resp
   | "llm.parseIntent" =>
       -- Forward the prompt + regex seed + chainId to the LLM sidecar,
       -- which returns the raw model output (a JSON string) unchanged.

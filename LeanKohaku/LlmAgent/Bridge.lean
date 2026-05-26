@@ -475,6 +475,89 @@ def rolloverChatSession (chainId : Nat) (sessionKey : String) : IO Response := d
         ("sessionKey", .str sessionKey)
       ]))
 
+/-- Helper for the read-only history surface: send a single
+    pre-built agentd op frame and forward the structured envelope as a
+    JSON-RPC `Response`. Mode-aware — non-persistent bridges reject
+    with `-32601` because there is no session store to enumerate. -/
+private def callHistoryOp (frame : String) : IO Response := do
+  match ← resolveMode with
+  | Mode.persistent =>
+      let sock ← resolveAgentSocket
+      match ← socketCall sock frame with
+      | .error e => pure (Response.crash s!"agentd transport: {e}" 0)
+      | .ok line =>
+          match parse line with
+          | .error e => pure (Response.crash s!"agentd parse: {e}: {line}" 0)
+          | .ok j =>
+              match getField "ok" j with
+              | some (.bool true) =>
+                  let r := (getField "result" j).getD .null
+                  pure (Response.ok r)
+              | _ =>
+                  let errJ := (getField "error" j).getD .null
+                  let kind := (getField "kind" errJ >>= asString).getD "agent"
+                  let msg  := (getField "msg" errJ >>= asString).getD "agent error"
+                  -- Surface the structured kind back to the caller as
+                  -- `data.kind` so the TUI can branch on `incognito`
+                  -- vs `not_found` vs generic `io` without parsing the
+                  -- message.
+                  pure (Response.err (-32000) msg
+                    (some <| .obj #[("kind", .str kind)]))
+  | Mode.oneshot | Mode.legacy =>
+      pure (Response.err (-32601) "history available only in persistent mode" none)
+
+/-- Read-only session listing. Forwards `{limit, chainId, sessionKey}`
+    (each optional) to the agentd's `list_sessions` op. Wire envelope is
+    a `result.sessions` array; see `LeanKohaku/App/AgentDaemonMain.lean`
+    for the field set. -/
+def listSessions (limit? : Option Nat)
+    (chainId? : Option Nat) (sessionKey? : Option String) : IO Response := do
+  let limitField : Array (String × Json) :=
+    match limit? with
+    | some n => #[("limit", .num (Int.ofNat n))]
+    | none   => #[]
+  let chainField : Array (String × Json) :=
+    match chainId? with
+    | some n => #[("chainId", .num (Int.ofNat n))]
+    | none   => #[]
+  let keyField : Array (String × Json) :=
+    match sessionKey? with
+    | some s => #[("sessionKey", .str s)]
+    | none   => #[]
+  let frame : String :=
+    compact <| .obj <| #[("op", .str "list_sessions")] ++
+                       limitField ++ chainField ++ keyField
+  callHistoryOp frame
+
+/-- Read-only single-session fetch. Mode-aware. Returns the agentd's
+    structured `kind:"incognito"` envelope verbatim (via the
+    `Response.err` `data` field) when the session was tagged incognito
+    at create time. -/
+def getSession (sessionId : Nat) : IO Response := do
+  let frame : String :=
+    compact <| .obj #[
+      ("op", .str "get_session"),
+      ("session_id", .num (Int.ofNat sessionId))
+    ]
+  callHistoryOp frame
+
+/-- Read-only propose_send index. Walks every non-incognito session,
+    extracts every `propose_send` tool call, returns newest-first. -/
+def listProposedTxs (limit? : Option Nat) (chainId? : Option Nat) :
+    IO Response := do
+  let limitField : Array (String × Json) :=
+    match limit? with
+    | some n => #[("limit", .num (Int.ofNat n))]
+    | none   => #[]
+  let chainField : Array (String × Json) :=
+    match chainId? with
+    | some n => #[("chainId", .num (Int.ofNat n))]
+    | none   => #[]
+  let frame : String :=
+    compact <| .obj <| #[("op", .str "list_proposed_txs")] ++
+                       limitField ++ chainField
+  callHistoryOp frame
+
 /-- Dispatch to the chosen mode. Persistent mode that fails to
     contact the agent does NOT silently fall back — an operator who
     asked for persistent would rather see a clear failure than have

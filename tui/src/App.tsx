@@ -32,6 +32,7 @@ import ImportEoaFlow from "./screens/ImportEoaFlow.js";
 import CreateWalletPicker, { CreateKind } from "./screens/CreateWalletPicker.js";
 import DecodeIntentFlow from "./screens/DecodeIntentFlow.js";
 import LlmChatFlow from "./screens/LlmChatFlow.js";
+import HistoryFlow from "./screens/HistoryFlow.js";
 import MasterUnlockGate from "./screens/MasterUnlockGate.js";
 import MasterInitGate from "./screens/MasterInitGate.js";
 import RpcSetupGate from "./screens/RpcSetupGate.js";
@@ -48,6 +49,7 @@ import RailgunMenu from "./screens/RailgunMenu.js";
 import NetworkScreen from "./screens/NetworkScreen.js";
 import NetworkMonitor from "./screens/NetworkMonitor.js";
 import StatusFlow from "./screens/StatusFlow.js";
+import TrustedRegistryFlow from "./screens/TrustedRegistryFlow.js";
 import { NavContext, type NavApi } from "./nav.js";
 import {
   LockToggleFlow,
@@ -111,11 +113,13 @@ type Screen =
   | { kind: "network" }
   | { kind: "network-monitor" }
   | { kind: "status" }
+  | { kind: "trusted-registry" }
   | { kind: "resolve" }
   | { kind: "daemon" }
   | { kind: "more" }
   | { kind: "decode-intent" }
   | { kind: "llm-chat" }
+  | { kind: "chat-history" }
   | { kind: "decode-typed-data" }
   | { kind: "archived-accounts" }
   | {
@@ -472,9 +476,12 @@ export default function App() {
       return (
         <StatusFlow
           onLiveMonitor={() => push({ kind: "network-monitor" })}
+          onTrustedRegistry={() => push({ kind: "trusted-registry" })}
           onBack={pop}
         />
       );
+    case "trusted-registry":
+      return <TrustedRegistryFlow onBack={pop} />;
     case "resolve":
       return <ResolveFlow onDone={pop} />;
     case "daemon":
@@ -511,8 +518,15 @@ export default function App() {
             // owning the canonical label vocabulary.
             push({ kind: kind === "eoa" ? "create-eoa" : "create-r1" });
           }}
+          onOpenHistory={() => push({ kind: "chat-history" })}
         />
       );
+    case "chat-history":
+      // Read-only chat-history surface. Pure reader — never produces
+      // calldata, never re-signs. Sources are the agentd's read-only
+      // ops (`list_sessions` / `get_session` / `list_proposed_txs`);
+      // see HistoryFlow.tsx for the trust contract.
+      return <HistoryFlow onDone={pop} />;
     case "send-raw":
       return (
         <SendRawFlow

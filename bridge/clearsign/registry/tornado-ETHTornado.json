@@ -1,0 +1,39 @@
+{
+  "$schema": "../../specs/erc7730-v2.schema.json",
+  "context": {
+    "contract": {
+      "deployments": [
+        { "chainId": 1, "address": "0x12D66f87A04A9E220743712cE6d9bB1B5616B8Fc" },
+        { "chainId": 1, "address": "0x47CE0C6eD5B0Ce3d3A51fdb1C52DC66a7c3c2936" },
+        { "chainId": 1, "address": "0x910Cbd523D972eb0a6f4cAe4618aD62622b39DbF" },
+        { "chainId": 1, "address": "0xA160cdAB225685dA1d56aa342Ad8841c3b53f291" }
+      ]
+    }
+  },
+  "metadata": {
+    "owner": "Tornado Cash (historical)",
+    "info": { "url": "https://github.com/tornadocash/tornado-core" }
+  },
+  "display": {
+    "formats": {
+      "deposit(bytes32 _commitment)": {
+        "intent": "Shield ETH into Tornado pool",
+        "fields": [
+          { "label": "Commitment", "format": "raw", "path": "#._commitment", "visible": "always" }
+        ]
+      },
+      "withdraw(bytes _proof,bytes32 _root,bytes32 _nullifierHash,address _recipient,address _relayer,uint256 _fee,uint256 _refund)": {
+        "intent": "Withdraw from Tornado pool",
+        "fields": [
+          { "label": "Proof",         "format": "raw",         "path": "#._proof" },
+          { "label": "Merkle root",   "format": "raw",         "path": "#._root" },
+          { "label": "Nullifier",     "format": "raw",         "path": "#._nullifierHash", "visible": "always" },
+          { "label": "Recipient",     "format": "addressName", "params": { "types": ["wallet", "eoa"] }, "path": "#._recipient", "visible": "always" },
+          { "label": "Relayer",       "format": "addressName", "params": { "types": ["eoa", "contract"] }, "path": "#._relayer" },
+          { "label": "Relayer fee",   "format": "raw",         "path": "#._fee" },
+          { "label": "Gas refund",    "format": "raw",         "path": "#._refund" }
+        ]
+      }
+    }
+  }
+}

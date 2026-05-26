@@ -50,6 +50,11 @@ type Props = {
    *  need a passphrase / TPM PIN prompt that the existing flow already
    *  handles correctly (with confirm + masking). */
   onCreateWallet?: (kind: "eoa" | "r1", label: string | undefined) => void;
+  /** Open the read-only `HistoryFlow` screen. Wired to `/history`
+   *  typed in chat — same silent-handoff pattern as `/clear`. The
+   *  parent is expected to push HistoryFlow onto its navigation stack
+   *  and return to chat when the user Escs out. */
+  onOpenHistory?: () => void;
 };
 
 type OwnershipStatus =
@@ -277,7 +282,7 @@ function newSessionKey(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-export default function LlmChatFlow({ onDone, onApprove, onCreateWallet }: Props) {
+export default function LlmChatFlow({ onDone, onApprove, onCreateWallet, onOpenHistory }: Props) {
   const [phase, setPhase] = useState<Phase>({ kind: "boot" });
   // Top-5 wallet balances shown in the header. Fetched lazily — chat
   // is usable before this returns. Empty list = "we haven't tried yet".
@@ -629,6 +634,15 @@ export default function LlmChatFlow({ onDone, onApprove, onCreateWallet }: Props
         // block the rotation — the new sessionKey alone is enough to
         // route subsequent turns to a fresh agentd session.
         const firstToken = text.split(/\s+/, 1)[0];
+        // `/history` interception. Silent handoff to the read-only
+        // history screen — same shape as `/clear`: not echoed as a
+        // chat turn, input cleared, no LLM round-trip. The parent
+        // owns navigation; chat state survives so Esc returns here.
+        if (firstToken === "/history") {
+          setPhase({ ...phase, input: "" });
+          onOpenHistory?.();
+          return;
+        }
         if (firstToken === "/clear") {
           const oldKey = phase.sessionKey;
           // Eagerly clear UI + mint new key so the user sees the
@@ -1070,7 +1084,7 @@ function ChatBody({
             ? "tab — toggle focus · enter — act on focused element · "
             : "enter — send · "}
           {latestTraceIdx !== null ? "ctrl+t — toggle trace · " : ""}
-          /clear — new session ·{" "}
+          /clear — new session · /history — past sessions ·{" "}
           esc — leave chat
         </Text>
       </Box>

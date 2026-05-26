@@ -339,3 +339,87 @@ export async function call<T = unknown>(
   }
   return callOnce<T>(method, params, opts);
 }
+
+/* -------------------------------------------------------------------------- *
+ * Read-only chat-history surface.
+ *
+ * These three stubs proxy to the agent daemon's `list_sessions` /
+ * `get_session` / `list_proposed_txs` ops. All three are READ-ONLY — they
+ * never produce calldata and never gate a signing decision. The wallet
+ * daemon's handlers are pure proxies; the agentd applies the chainId /
+ * sessionKey filters and the incognito mask.
+ *
+ * Persistent agent mode is required. On `kohaku-agent` one-shot or the
+ * legacy Node bridge these calls return -32601 ("history available only in
+ * persistent mode") — the TUI surfaces a clear message in that case.
+ * -------------------------------------------------------------------------- */
+
+/** One session as returned by `chat.listSessions`. `chainId` and
+ *  `sessionKey` are omitted when the on-disk metadata did not carry them
+ *  (older rows). `firstUserPrompt` is truncated to 140 chars + ellipsis. */
+export type SessionListEntry = {
+  sessionId: number;
+  createdAt: number;
+  turnCount: number;
+  chainId?: number;
+  sessionKey?: string;
+  firstUserPrompt?: string;
+  lastTurnAt?: number;
+};
+
+/** One message row inside a `chat.getSession` reply. `toolCallsJson` is
+ *  the raw JSON-encoded array as stored on disk; the renderer parses it
+ *  the same way the live-turn trace renderer does. */
+export type SessionTurn = {
+  seq: number;
+  appendedAt: number;
+  role: "system" | "user" | "assistant" | "tool" | string;
+  content: string;
+  toolCallsJson?: string;
+  toolCallId?: string;
+};
+
+/** One propose_send extracted from a session's tool-call log. */
+export type ProposedTxEntry = {
+  sessionId: number;
+  sessionCreatedAt: number;
+  turnIndex: number;
+  ts: number;
+  chainId: number;
+  to: string;
+  value: string;
+  data: string;
+  sender?: string;
+  summaryFromTool?: string;
+};
+
+/** Read-only listing of recent sessions. Filters apply only when provided. */
+export function chatListSessions(params: {
+  limit?: number;
+  chainId?: number;
+  sessionKey?: string;
+}): Promise<RpcResult<{ sessions: SessionListEntry[] }>> {
+  return call<{ sessions: SessionListEntry[] }>("chat.listSessions", params, {
+    timeoutMs: 15_000,
+  });
+}
+
+/** Read-only fetch of one session's full transcript. The wallet daemon
+ *  surfaces incognito sessions as a structured error with `data.kind ===
+ *  "incognito"`; callers should branch on that. */
+export function chatGetSession(
+  sessionId: number,
+): Promise<RpcResult<{ sessionId: number; createdAt: number; turns: SessionTurn[]; chainId?: number; sessionKey?: string }>> {
+  return call("chat.getSession", { session_id: sessionId }, { timeoutMs: 15_000 });
+}
+
+/** Read-only walk of every non-incognito session's tool-call log to
+ *  surface propose_send invocations newest-first. */
+export function chatListProposedTxs(params: {
+  limit?: number;
+  chainId?: number;
+}): Promise<RpcResult<{ txs: ProposedTxEntry[] }>> {
+  return call<{ txs: ProposedTxEntry[] }>("chat.listProposedTxs", params, {
+    timeoutMs: 30_000,
+  });
+}
