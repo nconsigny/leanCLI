@@ -142,7 +142,7 @@ def summarise
   let s : AgentState := { messages := msgs, cfg := cfg }
   match ← Llm.chat s [] with
   | .error e => pure (.error s!"summarise: llm error: {repr e}")
-  | .ok asst => pure (.ok (asst.content.getD ""))
+  | .ok (asst, _) => pure (.ok (asst.content.getD ""))
 
 /-- Determine whether `msgs` is already in compressed form, i.e.
     has exactly one system-role message at the head AND

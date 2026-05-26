@@ -366,7 +366,7 @@ def extract
   match ← Llm.chat s [] with
   | .error e =>
       pure (.error s!"extract: llm error: {repr e}")
-  | .ok assistant =>
+  | .ok (assistant, _) =>
       let content := assistant.content.getD ""
       let candidate : Except String String :=
         match parseMemoryEnvelope content with

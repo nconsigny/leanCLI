@@ -31,6 +31,30 @@ inductive Error where
   | protocol  (msg : String)
   deriving Repr
 
+/-- Per-call cost stats parsed from the chat-completions response's
+    optional `usage` block. Every field is `Option` because:
+
+    * Some OpenAI-compat forks (notably older llama.cpp builds) omit the
+      `usage` object entirely on streamed-and-then-flattened responses.
+    * Even when the block is present, individual fields can be missing
+      depending on backend version.
+
+    `Loop` pairs these with the wall-clock duration it measured around
+    the `chat` call and pushes the combined `TraceItem.llmCall` into the
+    per-turn trace. Pure data — never gates a signing decision. -/
+structure CallStats where
+  promptTokens     : Option Nat := none
+  completionTokens : Option Nat := none
+  totalTokens      : Option Nat := none
+  deriving Repr, Inhabited
+
+namespace CallStats
+
+/-- Empty stats — used when the backend omitted the `usage` block. -/
+def empty : CallStats := {}
+
+end CallStats
+
 private def roleToWire : Role → String
   | .system    => "system"
   | .user      => "user"
@@ -167,11 +191,23 @@ def decodeChoiceMessage (resp : Json) (rawTxt : String) :
     reasoning := reasoning
   }
 
+/-- Decode the optional `usage` block on a chat-completions response.
+    Missing fields stay `none` — the backend gets to omit them and the
+    consumer (the agent loop) records only what it was actually told. -/
+def decodeUsage (resp : Json) : CallStats :=
+  match getField "usage" resp with
+  | some u =>
+      { promptTokens     := getField "prompt_tokens" u >>= asNat,
+        completionTokens := getField "completion_tokens" u >>= asNat,
+        totalTokens      := getField "total_tokens" u >>= asNat }
+  | none => CallStats.empty
+
 /-- One chat-completions round-trip. Returns the assistant message
-    parsed from `choices[0].message`. -/
+    parsed from `choices[0].message` paired with the `usage` block
+    parsed from the same response. -/
 def chat
     (s : AgentState) (tools : List Tools.ToolDecl) :
-    IO (Except Error AgentMessage) := do
+    IO (Except Error (AgentMessage × CallStats)) := do
   let body := buildRequestBody s tools
   match ← Http.postJson s.cfg.llmUrl body s.cfg.timeoutMs with
   | .error (.transport m) => return .error (.transport s!"http transport: {m}")
@@ -192,9 +228,10 @@ def chat
               -- without restarting the daemon. The user-facing error
               -- carries only the truncated prefix.
               match result with
-              | .error (.protocol _) =>
+              | .error (.protocol m) =>
                   IO.eprintln s!"[llm] protocol error; full response body follows:\n{txt}"
-              | _ => pure ()
-              return result
+                  return .error (.protocol m)
+              | .error e => return .error e
+              | .ok msg  => return .ok (msg, decodeUsage j)
 
 end LeanKohaku.Agent.Llm

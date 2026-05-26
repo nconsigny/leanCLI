@@ -1,0 +1,15 @@
+{
+  "name": "aave-supply-eth-sepolia",
+  "prompt": "supply 0.1 ETH to aave v3",
+  "chainId": 11155111,
+  "expect": {
+    "backend": "agent-propose-send",
+    "minToolCalls": 2,
+    "maxToolCalls": 10,
+    "mustContainTrace": [
+      "prepare_aave_supply",
+      "propose_send"
+    ]
+  },
+  "notes": "Aave V3 supply requires market parameter lookup, so DirectSynth declines (Aave is on the LLM path per DirectSynth.lean §40). The agent's prepare_aave_supply tool wraps the daemon RPC; the LLM only picks the action + fills arguments."
+}

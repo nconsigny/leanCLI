@@ -374,16 +374,18 @@ private def maybeRefreshRegistry
             regRef.set (some fresh)
             pure (some fresh)
 
-/-- Build the rebuild callback that produces the next system prompt.
-    Reads the live registry, memory ref, and trusted-registry snapshot
-    off `st` so a `reload`, `update_memory`, or seed rotation between
-    turns propagates immediately. -/
+/-- Build the rebuild callback that produces the next system prompt
+    and a `SkillReport` summarising which skills + optional blocks
+    were rendered. Reads the live registry, memory ref, and trusted-
+    registry snapshot off `st` so a `reload`, `update_memory`, or seed
+    rotation between turns propagates immediately. The report is what
+    the loop pushes into the per-turn trace as `TraceItem.skills`. -/
 private def mkRebuildSystem
     (regRef : ToolDefs.Protocols.RegistryRef)
     (memRef : IO.Ref Memory.Memory)
     (registryRef : IO.Ref (Option ToolDefs.TrustedRegistry.Snapshot))
     (walletSocket : String) :
-    AgentState → IO String := fun s => do
+    AgentState → IO (String × Trace.SkillReport) := fun s => do
   let reg ← regRef.get
   let mem ← memRef.get
   let trustedSnap ← maybeRefreshRegistry registryRef walletSocket
@@ -401,20 +403,29 @@ private def mkRebuildSystem
         if snap.addresses.isEmpty then ""
         else ToolDefs.TrustedRegistry.renderForPrompt snap
     | none => ""
+  let alwaysOnNames : Array String :=
+    alwaysOn.map (fun sk => sk.frontmatter.name)
+  let triggeredNames : Array String :=
+    (triggered.map (fun sk => sk.frontmatter.name)).toArray
+  let report : Trace.SkillReport :=
+    { alwaysOn := alwaysOnNames,
+      triggered := triggeredNames,
+      memoryActive := !memoryRendered.isEmpty,
+      trustedRegistryActive := !trustedRendered.isEmpty }
   -- Optional one-line stderr trace so operators can see what fired.
   -- Gated behind KOHAKU_LOG_PROMPT so the daemon log does not blow up
   -- on every turn.
   match ← IO.getEnv "KOHAKU_LOG_PROMPT" with
   | some v =>
       if v != "" && v != "0" then
-        let names := (alwaysOn.toList.map (fun s => s.frontmatter.name)) ++
-                     (triggered.map (fun s => s.frontmatter.name))
+        let names := (alwaysOnNames ++ triggeredNames).toList
         let memTag := if memoryRendered.isEmpty then "no" else "yes"
         let regTag := if trustedRendered.isEmpty then "no" else "yes"
         IO.eprintln s!"[skills] active: {String.intercalate "," names} memory={memTag} trustedRegistry={regTag}"
   | none => pure ()
-  pure (Prompt.buildSystemPromptFull s.cfg visibleTools
-          memoryRendered trustedRendered alwaysOnRendered triggeredRendered)
+  let body := Prompt.buildSystemPromptFull s.cfg visibleTools
+          memoryRendered trustedRendered alwaysOnRendered triggeredRendered
+  pure (body, report)
 
 /-- Build a prompt transcript by loading session history and appending
     the new user prompt. Returns the message array plus the

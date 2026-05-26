@@ -1,0 +1,15 @@
+{
+  "name": "native-send-eth-explicit-address-sepolia",
+  "prompt": "send 0.01 ETH to 0x000000000000000000000000000000000000dEaD",
+  "chainId": 11155111,
+  "expect": {
+    "backend": "wallet-direct",
+    "intent": "nativeTransfer",
+    "encoded": {
+      "to": "0x000000000000000000000000000000000000dead",
+      "value": 10000000000000000,
+      "dataPrefix": "0x"
+    },
+    "maxToolCalls": 0
+  }
+}

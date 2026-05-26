@@ -1,0 +1,13 @@
+{
+  "name": "erc20-approve-fixed-amount-usdc-sepolia",
+  "prompt": "approve 100 USDC for 0x2222222222222222222222222222222222222222",
+  "chainId": 11155111,
+  "expect": {
+    "backend": "wallet-direct",
+    "intent": "erc20Approve",
+    "encoded": {
+      "dataPrefix": "0x095ea7b3"
+    },
+    "maxToolCalls": 0
+  }
+}

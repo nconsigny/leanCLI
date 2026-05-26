@@ -1,0 +1,13 @@
+{
+  "name": "erc20-transfer-usdc-explicit-address-sepolia",
+  "prompt": "send 5 USDC to 0x000000000000000000000000000000000000dEaD",
+  "chainId": 11155111,
+  "expect": {
+    "backend": "wallet-direct",
+    "intent": "erc20Transfer",
+    "encoded": {
+      "dataPrefix": "0xa9059cbb"
+    },
+    "maxToolCalls": 0
+  }
+}

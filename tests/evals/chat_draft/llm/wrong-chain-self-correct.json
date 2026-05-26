@@ -1,0 +1,14 @@
+{
+  "name": "wrong-chain-self-correct-sepolia-pin",
+  "prompt": "swap 0.01 ETH for USDC on mainnet",
+  "chainId": 11155111,
+  "expect": {
+    "backend": "agent-propose-send",
+    "minToolCalls": 2,
+    "maxToolCalls": 16,
+    "mustContainTrace": [
+      "chain_denied"
+    ]
+  },
+  "notes": "User asked for mainnet but the daemon's chat.draft passed activeChainId=11155111. Agent.Prompt narrows the chain whitelist to [chainId], so any tool call with chainId=1 hits Tools.dispatch's chain_denied envelope. The model should self-correct on the next round and re-issue with 11155111. This case exercises the active-chain pin specifically — a regression where the pin stops working would show up as backend=lean-agent + gaveUp=true."
+}

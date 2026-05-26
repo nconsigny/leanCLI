@@ -45,7 +45,7 @@ private def stateWithMessages : AgentState := {
   match parse raw with
   | .error e => throw <| IO.userError s!"raw not JSON: {e}"
   | .ok j =>
-      match decodeChoiceMessage j with
+      match decodeChoiceMessage j raw with
       | .error e => throw <| IO.userError s!"decode failed: {repr e}"
       | .ok msg =>
           if msg.content = some "ok" && msg.toolCalls.isEmpty then pure ()
@@ -58,7 +58,7 @@ private def stateWithMessages : AgentState := {
   match parse raw with
   | .error e => throw <| IO.userError s!"raw not JSON: {e}"
   | .ok j =>
-      match decodeChoiceMessage j with
+      match decodeChoiceMessage j raw with
       | .error e => throw <| IO.userError s!"decode failed: {repr e}"
       | .ok msg =>
           match msg.toolCalls with

@@ -64,20 +64,23 @@ partial def runOneShot
 where
   /-- Variant accepting an optional `rebuildSystem` callback. When
       present, the callback is invoked before every `Llm.chat` round
-      and its result replaces the system-role head message. This is
-      how Phase-1b skill activation is wired in `kohaku-agentd`
-      without coupling the Phase-0 one-shot binary to the skills
-      registry.
+      and its result replaces the system-role head message. The
+      callback also returns a `Trace.SkillReport` describing which
+      always-on / triggered skills + memory + trusted-registry blocks
+      were rendered; the loop pushes that as a `TraceItem.skills`
+      entry before each LLM call.
 
       Returns the final assistant message and a `Trace` of everything
-      that happened during this turn — assistant messages (with
-      optional `reasoning`), every tool call the model made, and
+      that happened during this turn — pre-call skills snapshot,
+      assistant messages (with optional `reasoning`), per-call
+      `usage` + wall-clock cost, every tool call the model made, and
       every tool reply. The trace is display-only (see
       `Agent.Trace`) and is what the TUI's foldable per-turn trace
       block consumes via `chat.draft`'s `agentTrace` field. -/
   runOneShotWithRebuildTraced
       (s₀ : AgentState) (registry : ToolRegistry)
-      (rebuildSystem : Option (AgentState → IO String)) :
+      (rebuildSystem :
+        Option (AgentState → IO (String × Trace.SkillReport))) :
       IO (Except String (AgentMessage × Trace)) := do
     let mut s := s₀
     let mut trace : Trace := #[]
@@ -106,16 +109,27 @@ where
       match rebuildSystem with
       | none => pure ()
       | some f =>
-          let fresh ← f s
+          let (fresh, report) ← f s
           s := { s with messages := replaceSystemHead s.messages fresh }
+          trace := trace.push <| TraceItem.skills
+            report.alwaysOn report.triggered
+            report.memoryActive report.trustedRegistryActive
+      let tStart ← IO.monoMsNow
       match ← Llm.chat s tools with
       | .error e => return .error s!"llm error: {repr e}"
-      | .ok resp =>
+      | .ok (resp, stats) =>
+          let tEnd ← IO.monoMsNow
+          let durationMs := tEnd - tStart
           -- Record the assistant turn (its content + optional
           -- reasoning) before any tool dispatch so the trace order
-          -- mirrors wire order.
+          -- mirrors wire order. The matching `.llmCall` entry follows
+          -- the `.assistant` entry by position so consumers can pair
+          -- them without a join key.
           trace := trace.push <|
             TraceItem.assistant (resp.content.getD "") resp.reasoning
+          trace := trace.push <|
+            TraceItem.llmCall stats.promptTokens stats.completionTokens
+              stats.totalTokens durationMs
           if resp.toolCalls.isEmpty then
             return .ok (resp, trace)
           let mut s' : AgentState :=
@@ -133,10 +147,13 @@ where
     return .error s!"agent budget exceeded ({s₀.cfg.maxSteps} steps)"
 
 /-- Top-level entry exposing the rebuild callback. Convenience
-    wrapper so callers don't have to peer into `runOneShot.where`. -/
+    wrapper so callers don't have to peer into `runOneShot.where`. The
+    callback returns the rendered system-prompt body plus a
+    `Trace.SkillReport` describing what it included. -/
 def runOneShotWithRebuild
     (s₀ : AgentState) (registry : ToolRegistry)
-    (rebuildSystem : Option (AgentState → IO String)) :
+    (rebuildSystem :
+      Option (AgentState → IO (String × Trace.SkillReport))) :
     IO (Except String (AgentMessage × Trace)) :=
   runOneShot.runOneShotWithRebuildTraced s₀ registry rebuildSystem
 

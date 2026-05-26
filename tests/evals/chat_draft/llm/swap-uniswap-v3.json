@@ -1,0 +1,15 @@
+{
+  "name": "swap-eth-for-usdc-uniswap-v3-sepolia",
+  "prompt": "swap 0.01 ETH for USDC",
+  "chainId": 11155111,
+  "expect": {
+    "backend": "agent-propose-send",
+    "minToolCalls": 3,
+    "maxToolCalls": 12,
+    "mustContainTrace": [
+      "prepare_uniswap_v3_swap",
+      "propose_send"
+    ]
+  },
+  "notes": "RuleParser tags this as a swap action but lacks pool selection + quote, so DirectSynth fails over and the LLM is invoked. The agent should call prepare_uniswap_v3_swap (one-shot builder) rather than hand-rolling calldata. propose_send terminates the loop."
+}

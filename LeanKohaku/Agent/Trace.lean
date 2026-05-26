@@ -45,10 +45,43 @@ inductive TraceItem where
   /-- The reply we fed back for `idx`. `summary` is truncated to
       `summaryCapBytes`; the loop's internal result is unaffected. -/
   | toolResult (idx : Nat) (ok : Bool) (summary : String)
+  /-- One `/v1/chat/completions` round-trip. `durationMs` is wall-clock
+      measured by `Loop` around the `Llm.chat` call; the token counts
+      come from the response's `usage` block when the backend emits one
+      (OpenAI, llama.cpp, and vLLM all do; some forks omit it, hence
+      `Option`). Emitted by `Loop` immediately after the matching
+      `.assistant` item so consumers can pair them by position. -/
+  | llmCall    (promptTokens completionTokens totalTokens : Option Nat)
+               (durationMs : Nat)
+  /-- The set of skills + memory/trusted-registry blocks active for the
+      next LLM call. Emitted by `Loop` before every `Llm.chat` round so
+      a harness can attribute outcomes to skill activation without log
+      scraping. Pure observability — never gates a signing decision. -/
+  | skills     (alwaysOn triggered : Array String)
+               (memoryActive trustedRegistryActive : Bool)
   deriving Repr, Inhabited
 
 /-- Append-only log built inline as the loop runs. -/
 abbrev Trace := Array TraceItem
+
+/-- Structured report returned by the rebuild-system callback alongside
+    the rendered system prompt. Carries the names of the skills the
+    callback chose to include and whether the optional memory + trusted-
+    registry blocks were non-empty. Plain data — no IO. -/
+structure SkillReport where
+  alwaysOn              : Array String := #[]
+  triggered             : Array String := #[]
+  memoryActive          : Bool := false
+  trustedRegistryActive : Bool := false
+  deriving Repr, Inhabited
+
+namespace SkillReport
+
+/-- Empty report — the rebuild callback returns this when no skills,
+    memory, or registry block were rendered. -/
+def empty : SkillReport := {}
+
+end SkillReport
 
 /-- Truncate `s` to at most `summaryCapBytes` characters and append a
     `…[N bytes]` marker so the user can see the original size at a
@@ -91,6 +124,26 @@ def itemToJson : TraceItem → Json
         ("idx",     .num (Int.ofNat idx)),
         ("ok",      .bool ok),
         ("summary", .str summary)
+      ]
+  | .llmCall promptTokens completionTokens totalTokens durationMs =>
+      let optNat (k : String) : Option Nat → Array (String × Json)
+        | some n => #[(k, .num (Int.ofNat n))]
+        | none   => #[]
+      .obj <| #[
+        ("kind",       .str "llm_call"),
+        ("durationMs", .num (Int.ofNat durationMs))
+      ] ++ optNat "promptTokens" promptTokens
+        ++ optNat "completionTokens" completionTokens
+        ++ optNat "totalTokens" totalTokens
+  | .skills alwaysOn triggered memoryActive trustedRegistryActive =>
+      let strArr (xs : Array String) : Json :=
+        .arr (xs.map (fun s => Json.str s))
+      .obj #[
+        ("kind",                  .str "skills"),
+        ("alwaysOn",              strArr alwaysOn),
+        ("triggered",             strArr triggered),
+        ("memoryActive",          .bool memoryActive),
+        ("trustedRegistryActive", .bool trustedRegistryActive)
       ]
 
 /-- Encode an entire `Trace` as a JSON array. -/

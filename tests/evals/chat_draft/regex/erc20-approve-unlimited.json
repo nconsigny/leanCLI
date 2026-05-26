@@ -1,0 +1,13 @@
+{
+  "name": "erc20-approve-unlimited-usdc-sepolia",
+  "prompt": "approve unlimited USDC for 0x1111111111111111111111111111111111111111",
+  "chainId": 11155111,
+  "expect": {
+    "backend": "wallet-direct",
+    "intent": "erc20Approve",
+    "encoded": {
+      "dataPrefix": "0x095ea7b3"
+    },
+    "maxToolCalls": 0
+  }
+}
