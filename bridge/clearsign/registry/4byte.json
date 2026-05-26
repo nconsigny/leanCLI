@@ -266,5 +266,34 @@
     "0x709a1cc2": "collectRewards(bytes looksRareClaim)",
     "0x24856bc3": "execute(bytes commands,bytes[] inputs)",
     "0x3593564c": "execute(bytes commands,bytes[] inputs,uint256 deadline)"
+  },
+  "Privacy Pool": {
+    "0x0efe6a8b": "deposit(address _asset,uint256 _value,uint256 _precommitment)",
+    "0xb6b55f25": "deposit(uint256 _precommitment)",
+    "0x2f2ff15d": "grantRole(bytes32 role,address account)",
+    "0x485cc955": "initialize(address _owner,address _postman)",
+    "0xc30b48cf": "registerPool(address _asset,address _pool,uint256 _minimumDepositAmount,uint256 _vettingFeeBPS,uint256 _maxRelayFeeBPS)",
+    "0x8a44121e": "relay((address processooor,bytes data) _withdrawal,(uint256[2] pA,uint256[2][2] pB,uint256[2] pC,uint256[8] pubSignals) _proof,uint256 _scope)",
+    "0x3b7d0946": "removePool(address _asset)",
+    "0x36568abe": "renounceRole(bytes32 role,address callerConfirmation)",
+    "0xd547741f": "revokeRole(bytes32 role,address account)",
+    "0x7c0ed021": "updatePoolConfiguration(address _asset,uint256 _minimumDepositAmount,uint256 _vettingFeeBPS,uint256 _maxRelayFeeBPS)",
+    "0x87bf00f0": "updateRoot(uint256 _root,string _ipfsCID)",
+    "0x4f1ef286": "upgradeToAndCall(address newImplementation,bytes data)",
+    "0x5e33debb": "windDownPool(address _pool)",
+    "0xf2555278": "withdrawFees(address _asset,address _recipient)"
+  },
+  "Railgun": {
+    "0xf71a55f8": "addToBlocklist(address[] _tokens)",
+    "0x6cefafaa": "addVector(uint256 vector)",
+    "0xcc1f73fd": "changeFee(uint120 _shieldFee,uint120 _unshieldFee,uint256 _nftFee)",
+    "0xb14f2a39": "changeTreasury(address _treasury)",
+    "0x0804a4ee": "checkSafetyVectors()",
+    "0xa33952a9": "initializeRailgunLogic(address _treasury,uint120 _shieldFee,uint120 _unshieldFee,uint256 _nftFee,address _owner)",
+    "0xab63e69c": "removeFromBlocklist(address[] _tokens)",
+    "0xdc7c9a1f": "removeVector(uint256 vector)",
+    "0x2ec0f359": "setVerificationKey(uint256 _nullifiers,uint256 _commitments,(string artifactsIPFSHash,(uint256 x,uint256 y) alpha1,(uint256[2] x,uint256[2] y) beta2,(uint256[2] x,uint256[2] y) gamma2,(uint256[2] x,uint256[2] y) delta2,(uint256 x,uint256 y)[] ic) _verifyingKey)",
+    "0x044a40c3": "shield(((bytes32 npk,(uint8 tokenType,address tokenAddress,uint256 tokenSubID) token,uint120 value) preimage,(bytes32[3] encryptedBundle,bytes32 shieldKey) ciphertext)[] _shieldRequests)",
+    "0xd8ae136a": "transact((((uint256 x,uint256 y) a,(uint256[2] x,uint256[2] y) b,(uint256 x,uint256 y) c) proof,bytes32 merkleRoot,bytes32[] nullifiers,bytes32[] commitments,(uint16 treeNumber,uint72 minGasPrice,uint8 unshield,uint64 chainID,address adaptContract,bytes32 adaptParams,(bytes32[4] ciphertext,bytes32 blindedSenderViewingKey,bytes32 blindedReceiverViewingKey,bytes annotationData,bytes memo)[] commitmentCiphertext) boundParams,(bytes32 npk,(uint8 tokenType,address tokenAddress,uint256 tokenSubID) token,uint120 value) unshieldPreimage)[] _transactions)"
   }
 }

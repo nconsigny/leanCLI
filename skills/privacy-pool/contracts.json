@@ -1,19 +1,21 @@
 {
+  "_note": "Users send calldata to the Entrypoint PROXY address. The ABI that describes that calldata is the implementation's, fetched via EIP-1967 slot resolution and saved as abi/EntrypointImpl.json.",
   "mainnet": {
     "Entrypoint": {
       "address": "0x6818809EefCe719E480a7526D76bD3e561526b46",
-      "abi": "abi/Entrypoint.json",
+      "abi": "abi/EntrypointImpl.json",
       "verified": true,
-      "source": "https://docs.privacypools.com/"
+      "source": "https://docs.privacypools.com/",
+      "_impl": "0x15e355024de1cdc74addea7ebdf98418ba5b1a2c"
     }
   },
   "sepolia": {
     "Entrypoint": {
       "address": "0x9D8D4cdfeD605293DC8826BC2D2A2c7Fb867Edd0",
-      "abi": "abi/Entrypoint.json",
+      "abi": "abi/EntrypointImpl.json",
       "verified": true,
       "source": "https://docs.privacypools.com/",
-      "_note": "TODO(curator): confirm Sepolia Entrypoint address vs current 0xbow deployment table"
+      "_impl_note": "Sepolia impl assumed to match mainnet shape; re-verify before drafting on testnet"
     }
   }
 }

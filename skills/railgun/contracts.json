@@ -1,16 +1,12 @@
 {
+  "_note": "Users send calldata to the RailgunSmartWalletProxy address. The ABI that describes that calldata is the implementation's, fetched via EIP-1967 slot resolution and saved as abi/RailgunLogic.json.",
   "mainnet": {
     "RailgunSmartWalletProxy": {
       "address": "0xfa7093CDD9EE6932B4EB2C9E1CdE7Ce00B1FA4B9",
-      "abi": "abi/RailgunSmartWallet.json",
-      "verified": true,
-      "source": "https://docs.railgun.org/developer-guide/contract/contract-addresses"
-    },
-    "RailgunLogic": {
-      "address": "0x4d2A481a31d7d4F2937A20a309c4d71FdFD498B6",
       "abi": "abi/RailgunLogic.json",
       "verified": true,
-      "source": "https://docs.railgun.org/developer-guide/contract/contract-addresses"
+      "source": "https://docs.railgun.org/developer-guide/contract/contract-addresses",
+      "_impl": "0xb4f2d77bd12c6b548ae398244d7fad4abce4d89b"
     }
   },
   "sepolia": {},
