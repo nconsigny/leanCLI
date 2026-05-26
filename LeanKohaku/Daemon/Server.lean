@@ -6019,8 +6019,25 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
             | some n =>
                 let lower := n.toLower
                 (walletEntries.find? (fun kv => kv.fst.toLower = lower)).map (fun e => e.snd.fst)
+          -- When the user explicitly named a wallet via "from <slot>"
+          -- (or the "using <slot>" synonym), the resolveLocal pass
+          -- earlier in chat.draft has already rewritten the regex's
+          -- `from` field to a 0x address. Honor that over the daemon's
+          -- default wallet: the user just told us which wallet to sign
+          -- with, and DirectSynth shouldn't reach past that. If the
+          -- from-field is present but unresolved (raw slot name still),
+          -- fall back to defaultSenderAddr? — DirectSynth would refuse
+          -- a raw name via its parseAddr check anyway, but better to
+          -- surface a clean wallet-direct path than to bail on a name
+          -- the daemon already has the answer for.
+          let isResolvedAddr (s : String) : Bool :=
+            (s.startsWith "0x" || s.startsWith "0X") && s.length = 42
+          let effectiveSenderAddr? : Option String :=
+            match regex.field? "from" with
+            | some s => if isResolvedAddr s then some s else defaultSenderAddr?
+            | none   => defaultSenderAddr?
           let earlyReturn : Option Json :=
-            match LeanKohaku.LlmAgent.DirectSynth.synth regex chainId defaultSenderAddr? with
+            match LeanKohaku.LlmAgent.DirectSynth.synth regex chainId effectiveSenderAddr? with
             | .error _ => none
             | .ok intent =>
                 some <| chatDraftIntentResponse
