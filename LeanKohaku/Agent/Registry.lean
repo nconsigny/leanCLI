@@ -10,6 +10,7 @@ import LeanKohaku.Agent.ToolDefs.Tokens
 import LeanKohaku.Agent.ToolDefs.UniV3Swap
 import LeanKohaku.Agent.ToolDefs.Aave
 import LeanKohaku.Agent.ToolDefs.Numeric
+import LeanKohaku.Agent.ToolDefs.Shielded
 
 /-!
 # Default tool registry
@@ -74,7 +75,16 @@ def default : ToolRegistry := [
   -- and basis-point slippage math instead of doing prose arithmetic.
   Numeric.hexToUint,
   Numeric.uintToHex,
-  Numeric.applySlippage
+  Numeric.applySlippage,
+  -- Shielded action tools (PR 3 of the privacy slice). Privacy Pool +
+  -- Railgun typed wrappers around the existing `shielded.*` daemon
+  -- RPCs so the LLM-driven path doesn't need to free-form propose_send
+  -- hex for shielded calldata. Tornado tools land in PR 2.
+  Shielded.preparePrivacyPoolDeposit,
+  Shielded.preparePrivacyPoolWithdraw,
+  Shielded.prepareRailgunShield,
+  Shielded.prepareRailgunUnshield,
+  Shielded.prepareRailgunTransfer
 ]
 
 /-- Phase-1b registry: the Phase-0 surface plus the two
