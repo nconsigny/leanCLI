@@ -335,6 +335,27 @@ def chainEndpointFor (cfg : Config) (params : Json) (chainId : Nat) :
   | .ok ep => ep
   | .error _ => cfg.rpcEndpoint
 
+/-- Merge defaults from the daemon's configured endpoint into a helios
+    request's params object. Adds `executionRpc` (from `endpoint.url`)
+    and `chainId` (from `endpoint.chainId`, falling back to `cfg.chainId`)
+    only when the caller did not already supply them. Non-object params
+    pass through unchanged so the sidecar's own validation surfaces the
+    error. `consensusRpc` is helios-specific (beacon API, not in
+    `Endpoint`) and stays caller-supplied; the sidecar defaults mainnet
+    to `lightclientdata.org` and requires an explicit value otherwise. -/
+private def mergeHeliosDefaults
+    (params : Json) (endpoint : LeanKohaku.RPC.Outbound.Endpoint) (fallbackChainId : Nat) :
+    Json :=
+  match params with
+  | .obj fields =>
+      let has (k : String) : Bool := fields.any (fun (key, _) => key == k)
+      let cid : Nat := endpoint.chainId.getD fallbackChainId
+      let toAdd : Array (String × Json) :=
+        (if has "executionRpc" then #[] else #[("executionRpc", .str endpoint.url)])
+        ++ (if has "chainId" then #[] else #[("chainId", .num (Int.ofNat cid))])
+      .obj (fields ++ toAdd)
+  | other => other
+
 /-- ERC-20 `Transfer(address,address,uint256)` event signature. -/
 private def transferEventTopic : String :=
   "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
@@ -6446,35 +6467,54 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       -- trustless light client that verifies execution state against
       -- sync-committee proofs and runs eth_call / eth_estimateGas in an
       -- embedded REVM. Prefers the persistent client when running; falls
-      -- back to a fresh one-shot spawn otherwise. The sidecar requires
-      -- `executionRpc` in `req.params` (helios uses it for eth_getLogs and
-      -- a few non-verifiable fallbacks). UNTRUSTED for signing decisions
-      -- — ConfirmGate uses output as confirmation copy; the signed tx is
-      -- re-decoded in Lean before broadcast.
-      match ← LeanKohaku.Daemon.State.heliosClient? state with
-      | some c =>
-          let resp ← LeanKohaku.Helios.Persistent.call c "tx.simulate" req.params
-          pure <| .ok <| LeanKohaku.Helios.Persistent.responseToJson resp
-      | none =>
-          let resp ← LeanKohaku.Helios.Bridge.call
-            { method := "tx.simulate", params := req.params, id := 0 }
-          pure <| .ok <| LeanKohaku.Helios.Bridge.responseToJson resp
+      -- back to a fresh one-shot spawn otherwise. UNTRUSTED for signing
+      -- decisions — ConfirmGate uses output as confirmation copy; the
+      -- signed tx is re-decoded in Lean before broadcast.
+      --
+      -- executionRpc and chainId are injected from the daemon's configured
+      -- endpoint (cfg.rpcEndpoint via endpointForChain) when the caller
+      -- omits them; explicit params win so a caller can target a specific
+      -- network or RPC without reconfiguring the daemon. consensusRpc is
+      -- helios-specific (beacon API) and stays caller-supplied with the
+      -- mainnet built-in default.
+      let chain? := getField "chain" req.params >>= asString
+      match endpointForChain cfg chain? with
+      | .error e =>
+          pure <| .error { code := -32021, message := "unknown chain", data := some (.str e) }
+      | .ok endpoint =>
+          let injected := mergeHeliosDefaults req.params endpoint cfg.chainId
+          match ← LeanKohaku.Daemon.State.heliosClient? state with
+          | some c =>
+              let resp ← LeanKohaku.Helios.Persistent.call c "tx.simulate" injected
+              pure <| .ok <| LeanKohaku.Helios.Persistent.responseToJson resp
+          | none =>
+              let resp ← LeanKohaku.Helios.Bridge.call
+                { method := "tx.simulate", params := injected, id := 0 }
+              pure <| .ok <| LeanKohaku.Helios.Bridge.responseToJson resp
   | "eth.proxyHelios" =>
       -- Why: generic helios-backed read surface. Same shape as
       -- `eth.proxyVerified` (Colibri) but routes through the helios
       -- sidecar. Available only when the persistent helios client is
       -- running; returns a clear error otherwise so callers can fall
       -- back to the configured RPC or to the colibri-verified path.
-      match ← LeanKohaku.Daemon.State.heliosClient? state with
-      | some c =>
-          let resp ← LeanKohaku.Helios.Persistent.call c "eth.proxy" req.params
-          pure <| .ok <| LeanKohaku.Helios.Persistent.responseToJson resp
-      | none =>
-          pure <| .error {
-            code := -32099,
-            message := "helios client not running",
-            data := some (.str "call daemon.helios.toggle { enable: true } first")
-          }
+      -- executionRpc and chainId default to the configured endpoint
+      -- (see `tx.simulateHelios` for rationale).
+      let chain? := getField "chain" req.params >>= asString
+      match endpointForChain cfg chain? with
+      | .error e =>
+          pure <| .error { code := -32021, message := "unknown chain", data := some (.str e) }
+      | .ok endpoint =>
+          let injected := mergeHeliosDefaults req.params endpoint cfg.chainId
+          match ← LeanKohaku.Daemon.State.heliosClient? state with
+          | some c =>
+              let resp ← LeanKohaku.Helios.Persistent.call c "eth.proxy" injected
+              pure <| .ok <| LeanKohaku.Helios.Persistent.responseToJson resp
+          | none =>
+              pure <| .error {
+                code := -32099,
+                message := "helios client not running",
+                data := some (.str "call daemon.helios.toggle { enable: true } first")
+              }
   | "daemon.helios.toggle" =>
       -- Why: spawn or tear down the persistent helios client at runtime.
       -- Idempotent. Spawning is cheap (consensus sync deferred until the

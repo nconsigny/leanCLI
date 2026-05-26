@@ -72,7 +72,28 @@ function err(id, code, message, data) {
 // for the process lifetime.
 const clients = new Map();
 
-async function getClient(chainId, executionRpc, consensusRpcOverride) {
+// Fetch the current finalized block root from a beacon RPC and use it as
+// helios's checkpoint. Without this, helios falls back to the checkpoint
+// it was published with (months stale), which crashes sync with
+// "invalid sync committee period" once a few periods have rolled over.
+// The endpoint shape is the canonical Beacon API: GET /eth/v1/beacon/headers/finalized
+// → { data: { root: "0x...", header: { ... } } }.
+async function fetchFinalizedCheckpoint(consensusRpc) {
+  const base = consensusRpc.replace(/\/+$/, "");
+  const url = `${base}/eth/v1/beacon/headers/finalized`;
+  const res = await fetch(url, { headers: { accept: "application/json" } });
+  if (!res.ok) {
+    throw new Error(`checkpoint fetch failed: HTTP ${res.status} on ${url}`);
+  }
+  const j = await res.json();
+  const root = j?.data?.root;
+  if (typeof root !== "string" || !root.startsWith("0x")) {
+    throw new Error(`checkpoint fetch: unexpected response shape from ${url}`);
+  }
+  return root;
+}
+
+async function getClient(chainId, executionRpc, consensusRpcOverride, checkpointOverride) {
   const meta = CHAIN_TO_NET.get(chainId);
   if (!meta) {
     throw new Error(`helios: unsupported chainId=${chainId} (known: ${[...CHAIN_TO_NET.keys()].join(", ")})`);
@@ -89,6 +110,8 @@ async function getClient(chainId, executionRpc, consensusRpcOverride) {
   let entry = clients.get(key);
   if (entry) return entry;
 
+  const checkpoint = checkpointOverride ?? await fetchFinalizedCheckpoint(consensusRpc);
+
   // dbType: "config" — the default "localstorage" only works in browsers
   // and throws under Node. "config" tells helios to persist checkpoints
   // through the in-process config object (and the helios cache dir on
@@ -96,6 +119,7 @@ async function getClient(chainId, executionRpc, consensusRpcOverride) {
   const config = {
     executionRpc,
     consensusRpc,
+    checkpoint,
     network: meta.network,
     dbType: "config",
   };
@@ -103,7 +127,7 @@ async function getClient(chainId, executionRpc, consensusRpcOverride) {
   // waitSynced() blocks until the sync committee has caught up; cold-start
   // is typically a few seconds.
   await provider.waitSynced();
-  entry = { provider, executionRpc, consensusRpc, chainId };
+  entry = { provider, executionRpc, consensusRpc, chainId, checkpoint };
   clients.set(key, entry);
   return entry;
 }
@@ -167,7 +191,7 @@ async function dispatch(method, params, id) {
           const result = await logsBypass(params.executionRpc, inner);
           return ok(id, result);
         }
-        const { provider } = await getClient(chainId, params.executionRpc, params.consensusRpc);
+        const { provider } = await getClient(chainId, params.executionRpc, params.consensusRpc, params.checkpoint);
         const result = await provider.request({ method: params.method, params: inner });
         return ok(id, result);
       } catch (e) {
@@ -206,7 +230,7 @@ async function dispatch(method, params, id) {
       }
       const block = params.block ?? "latest";
       try {
-        const { provider } = await getClient(chainId, params.executionRpc, params.consensusRpc);
+        const { provider } = await getClient(chainId, params.executionRpc, params.consensusRpc, params.checkpoint);
         // eth_call returns the raw return data or throws with revert info.
         // Helios executes both via the embedded REVM against verified state.
         let returnValue = null;
