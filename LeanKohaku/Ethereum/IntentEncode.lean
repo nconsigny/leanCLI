@@ -153,6 +153,10 @@ def encode : Intent → Except String EncodedTx
       .error "shielded.railgun.shield: not leaf-encodable; route via daemon RPC shielded.railgun.prepareShield"
   | .railgunUnshield _ _ _ =>
       .error "shielded.railgun.unshield: not leaf-encodable; route via daemon RPC shielded.railgun.unshield"
+  | .tornadoDeposit _ _ =>
+      .error "shielded.tornado.deposit: not leaf-encodable; route via daemon RPC shielded.tornado.prepareDeposit (sidecar generates the Pedersen-hashed commitment)"
+  | .tornadoWithdraw _ _ _ _ =>
+      .error "shielded.tornado.withdraw: not leaf-encodable; route via daemon RPC shielded.tornado.prepareWithdraw (sidecar generates the ZK proof from the user's saved note + current merkle state)"
   | .approvalsAudit _ _ =>
       .error "approvals.audit: read-only action; no encoded tx"
   | .ensRegister _ _ _ _ =>

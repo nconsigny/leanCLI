@@ -725,6 +725,80 @@ async function shieldedUnshieldDrain(env, params) {
   };
 }
 
+// ----------------------------------------------------------------------
+// Tornado Cash — drafting stubs (PR 2)
+//
+// The Lean side (daemon, agent tools, chat.draft envelope, IntentParser
+// validation) lands the full chat-path infrastructure for Tornado in
+// PR 2. This file is the bridge-side counterpart and is intentionally
+// a stub: the deposit path needs Baby Jubjub Pedersen hashing for the
+// commitment, and the withdraw path needs snarkjs to generate the
+// withdraw ZK proof against the pool's merkle tree. Both will live in
+// a follow-up that adds:
+//
+//   bridge/tornado/
+//   ├── deposit.mjs    — note + commitment generation + deposit calldata
+//   ├── withdraw.mjs   — merkle tree sync + ZK proof + withdraw calldata
+//   ├── pools.json     — chainId × denomination → pool address
+//   └── README.md      — integration notes (snarkjs + circomlibjs deps)
+//
+// Until then these stubs return a structured "not yet implemented"
+// error so chat.draft surfaces an actionable message instead of an
+// opaque "method not found".
+// ----------------------------------------------------------------------
+
+function tornadoNotImplemented(verb) {
+  return {
+    ok: false,
+    error: {
+      code: -32099,
+      message:
+        `shielded.tornado.${verb}: bridge integration pending (snarkjs + ` +
+        `Baby Jubjub Pedersen for deposit, ZK proof generation for ` +
+        `withdraw). Lean side is wired end-to-end; see bridge/tornado/` +
+        ` README.md when the sidecar implementation lands.`,
+    },
+  };
+}
+
+async function shieldedTornadoPrepareDeposit(_env, params) {
+  // Future implementation outline (do not act on this yet):
+  //   1. Validate params.amountEth ∈ {"0.1", "1", "10", "100"} and the
+  //      caller's chainId has a deployed pool at that denomination.
+  //   2. Generate 31 bytes of nullifier + 31 bytes of secret via
+  //      crypto.randomBytes (browser-equivalent CSPRNG).
+  //   3. commitment = pedersenHash(nullifier || secret) using
+  //      circomlibjs's Baby Jubjub Pedersen wrapper.
+  //   4. Encode `deposit(bytes32 commitment)` selector 0xb214faa5.
+  //   5. Return { commitment, note, to, value, data, calldata } —
+  //      where `note` is the user-savable string
+  //      `tornado-note-eth-<denom>-<base58(secret||nullifier)>`.
+  //
+  // For now: bail with a clear pointer.
+  void params;
+  return tornadoNotImplemented("prepareDeposit");
+}
+
+async function shieldedTornadoPrepareWithdraw(_env, params) {
+  // Future implementation outline:
+  //   1. Parse params.note → (denomination, secret, nullifier).
+  //   2. Validate the parsed denomination matches params.amountEth and
+  //      the recipient is a 20-byte hex address.
+  //   3. Re-derive the deposit commitment from (secret || nullifier),
+  //      then scan the pool contract's Deposit log from genesis to
+  //      build the merkle tree containing the user's commitment.
+  //   4. Generate a merkle inclusion proof for the user's leaf.
+  //   5. Run snarkjs to produce the withdraw ZK proof against the
+  //      tornado withdraw circuit (uses the pool's reference verifier
+  //      key shipped with circomlibjs).
+  //   6. Encode `withdraw(proof, root, nullifierHash, recipient,
+  //      relayer, fee, refund)` selector 0xb438689f.
+  //
+  // For now: bail with a clear pointer.
+  void params;
+  return tornadoNotImplemented("prepareWithdraw");
+}
+
 async function dispatch(req) {
   const { method, params, id } = req;
   const env = process.env;
@@ -746,6 +820,12 @@ async function dispatch(req) {
         protocols: [
           { name: "privacy-pools", status: "live", chains: [11155111, 1] },
           { name: "railgun", status: "live", chains: [11155111, 1] },
+          // Tornado Cash chat-drafting is wired through the daemon and
+          // agent layers in PR 2, but the sidecar implementation
+          // (snarkjs + Baby Jubjub Pedersen for deposit, ZK proof gen
+          // for withdraw) is pending. Status flips to "live" once
+          // tornado-deposit.mjs + tornado-withdraw.mjs land.
+          { name: "tornado-cash", status: "scaffolded", chains: [1] },
         ],
       });
     case "shielded.balance":
@@ -764,6 +844,10 @@ async function dispatch(req) {
       return jsonifyResult(id, await shieldedRailgunUnshield(env, params));
     case "shielded.railgun.transfer":
       return jsonifyResult(id, await shieldedRailgunTransfer(env, params));
+    case "shielded.tornado.prepareDeposit":
+      return jsonifyResult(id, await shieldedTornadoPrepareDeposit(env, params));
+    case "shielded.tornado.prepareWithdraw":
+      return jsonifyResult(id, await shieldedTornadoPrepareWithdraw(env, params));
     default:
       return methodNotFound(id, method);
   }

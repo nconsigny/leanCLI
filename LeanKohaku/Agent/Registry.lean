@@ -84,7 +84,12 @@ def default : ToolRegistry := [
   Shielded.preparePrivacyPoolWithdraw,
   Shielded.prepareRailgunShield,
   Shielded.prepareRailgunUnshield,
-  Shielded.prepareRailgunTransfer
+  Shielded.prepareRailgunTransfer,
+  -- Tornado Cash drafting (PR 2). Sidecar is stubbed until snarkjs +
+  -- Baby Jubjub Pedersen lands; the typed tools surface a clear
+  -- daemon_error until then.
+  Shielded.prepareTornadoDeposit,
+  Shielded.prepareTornadoWithdraw
 ]
 
 /-- Phase-1b registry: the Phase-0 surface plus the two

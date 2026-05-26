@@ -105,6 +105,8 @@ def parseActionTag (s : String) : Except String String :=
   | "shielded.withdraw"
   | "shielded.railgun.shield"
   | "shielded.railgun.unshield"
+  | "shielded.tornado.deposit"
+  | "shielded.tornado.withdraw"
   | "approvals.audit"
   | "address.fresh" => .ok s
   | _ => .error s!"unknown intent action tag: {s}"
@@ -220,6 +222,21 @@ def parseIntent (j : Json) : Except String Intent := do
       let amountWei ← natField j "amountWei"
       let recipient ← addrField j "recipient"
       .ok (.railgunUnshield chainId amountWei recipient)
+  | "shielded.tornado.deposit" =>
+      -- Tornado deposit: just (chainId, denominationWei). IntentParser
+      -- enforces the denomination ∈ {0.1, 1, 10, 100 ETH} restriction;
+      -- structural parser doesn't need to know about that yet.
+      let denominationWei ← natField j "denominationWei"
+      .ok (.tornadoDeposit chainId denominationWei)
+  | "shielded.tornado.withdraw" =>
+      -- Tornado withdraw: (chainId, denominationWei, recipient, note).
+      -- The note is the user's saved spending secret — the JSON
+      -- structural parser passes it through verbatim. IntentParser
+      -- validates the "tornado-note-" prefix.
+      let denominationWei ← natField j "denominationWei"
+      let recipient ← addrField j "recipient"
+      let note ← strField j "note"
+      .ok (.tornadoWithdraw chainId denominationWei recipient note)
   | "approvals.audit" =>
       -- `wallet` is optional — daemon defaults to the user's default
       -- wallet when omitted.

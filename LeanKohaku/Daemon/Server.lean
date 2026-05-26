@@ -2114,6 +2114,41 @@ private def chatDraftIntentResponse
           ])
         ])
       ]
+  | .tornadoDeposit _ denominationWei =>
+      -- Tornado deposit: route to `shielded.tornado.prepareDeposit`.
+      -- The bridge sidecar generates the spending note + Pedersen-
+      -- hashed commitment and returns deposit calldata. PR 2 ships
+      -- the sidecar as a stub; the user sees a clear "Tornado SDK
+      -- not yet integrated" error in the TUI until snarkjs + Baby
+      -- Jubjub Pedersen lands.
+      let amountEth := LeanKohaku.Util.Units.formatUnits denominationWei 18
+      .obj <| commonFields ++ #[
+        ("prepare", .obj #[
+          ("rpc",    .str "shielded.tornado.prepareDeposit"),
+          ("params", .obj #[
+            ("amountEth", .str amountEth),
+            ("chainId",   .num (Int.ofNat chainId))
+          ])
+        ])
+      ]
+  | .tornadoWithdraw _ denominationWei recipient note =>
+      -- Tornado withdraw: route to `shielded.tornado.prepareWithdraw`.
+      -- The bridge sidecar consumes the saved deposit note, fetches
+      -- the pool's current merkle state, generates the ZK proof, and
+      -- returns withdraw calldata. Same stub status as deposit until
+      -- the sidecar lands.
+      let amountEth := LeanKohaku.Util.Units.formatUnits denominationWei 18
+      .obj <| commonFields ++ #[
+        ("prepare", .obj #[
+          ("rpc",    .str "shielded.tornado.prepareWithdraw"),
+          ("params", .obj #[
+            ("amountEth", .str amountEth),
+            ("recipient", addrJson recipient),
+            ("note",      .str note),
+            ("chainId",   .num (Int.ofNat chainId))
+          ])
+        ])
+      ]
   | .approvalsAudit _ wallet =>
       let walletEntry : Array (String × Json) :=
         match wallet with
@@ -5773,6 +5808,11 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
             -- needs to clarify post-DirectSynth.
             | "shielded.railgun.shield"   => "railgun"
             | "shielded.railgun.unshield" => "railgun"
+            -- Tornado Cash chat shortcut (PR 2). Same skill for both
+            -- legs; the skill body covers the fixed-denomination
+            -- constraint + the note-handling caveats.
+            | "shielded.tornado.deposit"  => "tornado-cash"
+            | "shielded.tornado.withdraw" => "tornado-cash"
             | "approvals.audit"   => "audit-approvals"
             | "address.fresh"     => "fresh-address"
             | "swap"              => "swap-uniswap-v3"
@@ -6775,6 +6815,38 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                         (rgDelegatingKeyHex? := some delegatingKeyHex)
                         (rgSeedHex? := some seedHex)
       | _, _, _, _ => pure (.error invalidParams)
+  | "shielded.tornado.prepareDeposit" =>
+      -- Tornado Cash deposit drafting (PR 2). The bridge sidecar
+      -- generates the user's spending note + Pedersen-hashed
+      -- commitment and returns `deposit(commitment)` calldata for
+      -- the pool contract that matches `amountEth`. Fixed-denomination
+      -- enforcement happens both here (sidecar validates) and at the
+      -- Intent layer (`IntentParser.tornadoDeposit`). PR 2 ships a
+      -- bridge stub that returns a structured "SDK not yet wired"
+      -- error until the snarkjs + Baby Jubjub Pedersen layer lands.
+      match paramString req.params "amountEth" with
+      | .error err => pure (.error err)
+      | .ok amountEth =>
+          shieldedBridgeCall cfg "shielded.tornado.prepareDeposit"
+            (.obj #[("amountEth", .str amountEth)]) none req
+  | "shielded.tornado.prepareWithdraw" =>
+      -- Tornado Cash withdraw drafting. Bridge sidecar consumes the
+      -- user's saved deposit note + current pool merkle state and
+      -- emits `withdraw(proof, root, nullifierHash, recipient,
+      -- relayer, fee, refund)` calldata. Note + recipient are
+      -- required; the bridge stub returns the same "not yet wired"
+      -- error pending sidecar implementation.
+      match paramString req.params "amountEth",
+            paramString req.params "recipient",
+            paramString req.params "note" with
+      | .ok amountEth, .ok recipient, .ok note =>
+          shieldedBridgeCall cfg "shielded.tornado.prepareWithdraw"
+            (.obj #[
+              ("amountEth", .str amountEth),
+              ("recipient", .str recipient),
+              ("note",      .str note)
+            ]) none req
+      | _, _, _ => pure (.error invalidParams)
   | "shielded.prepareDeposit" =>
       match paramString req.params "amountEth" with
       | .error err => pure (.error err)

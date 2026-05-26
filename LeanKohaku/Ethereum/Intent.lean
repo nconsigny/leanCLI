@@ -212,6 +212,35 @@ inductive Intent where
       (chainId : ChainId)
       (amountWei : Amount)
       (recipient : Address)
+  /-- Tornado Cash deposit. ETH leaves the user's EOA and enters one
+  of the four fixed-denomination mixer pools (0.1 / 1 / 10 / 100 ETH).
+  The IntentParser rejects denominations outside that set; passing
+  `denominationWei = 0.5 ETH` would silently mis-route to the
+  wrong pool. The chat-path handler routes this to
+  `shielded.tornado.prepareDeposit` (which uses snarkjs + Baby
+  Jubjub Pedersen-hashing to generate the note + commitment in the
+  bridge sidecar) and surfaces the resulting deposit note for the
+  user to save. The prepared tx still flows through `tx.simulate` +
+  ConfirmGate before signing. -/
+  | tornadoDeposit
+      (chainId : ChainId)
+      (denominationWei : Amount)
+  /-- Tornado Cash withdraw. Spends a previously-deposited note for a
+  fresh recipient address. Withdrawal requires the user's saved
+  deposit `note` (the secret + nullifier the bridge handed back at
+  deposit time) plus current merkle-tree state from the pool's
+  on-chain logs. The bridge sidecar generates the ZK proof and
+  returns the `withdraw(...)` calldata.
+
+  `note` is an opaque ASCII string (canonical form
+  `tornado-note-<chain>-<denomination>-<base58>`). Treated as a
+  secret — the canonical render elides the middle so screenshots
+  don't leak the spending key. -/
+  | tornadoWithdraw
+      (chainId : ChainId)
+      (denominationWei : Amount)
+      (recipient : Address)
+      (note : String)
   /-- Read-only listing of outgoing ERC-20 allowances for `wallet` (or
   the default wallet when omitted). The chat-path handler walks
   `chain.scanTransfers` for `Approval` events over a configurable
@@ -281,6 +310,8 @@ def Intent.chainId : Intent → ChainId
   | .shieldedWithdraw cid _ _ _          => cid
   | .railgunShield    cid _              => cid
   | .railgunUnshield  cid _ _            => cid
+  | .tornadoDeposit   cid _              => cid
+  | .tornadoWithdraw  cid _ _ _          => cid
   | .approvalsAudit   cid _              => cid
   | .ensRegister      cid _ _ _          => cid
   | .ensRenew         cid _ _            => cid
@@ -316,6 +347,13 @@ inductive Action where
   -- daemon RPC instead of the Privacy Pool one.
   | railgunShield
   | railgunUnshield
+  -- Tornado Cash variants. Fixed-denomination mixer; chat shortcut
+  -- routes via `shielded.tornado.prepare{Deposit,Withdraw}`. The
+  -- sidecar owns Pedersen hashing + ZK proof generation; the Lean
+  -- core only validates denominations + surfaces the result through
+  -- the normal ConfirmGate pipeline.
+  | tornadoDeposit
+  | tornadoWithdraw
   | approvalsAudit
   -- ENS chat-side actions. `ensRegister` is the second-leg-of-
   -- commit/reveal `register(...)` call; the prior `commit(...)`
@@ -394,6 +432,8 @@ def Action.toString : Action → String
   | .shieldedWithdraw  => "shielded.withdraw"
   | .railgunShield     => "shielded.railgun.shield"
   | .railgunUnshield   => "shielded.railgun.unshield"
+  | .tornadoDeposit    => "shielded.tornado.deposit"
+  | .tornadoWithdraw   => "shielded.tornado.withdraw"
   | .approvalsAudit    => "approvals.audit"
   | .ensRegister       => "ens.register"
   | .ensRenew          => "ens.renew"
@@ -412,6 +452,8 @@ example : Action.toString .shieldedDeposit   = "shielded.deposit"          := by
 example : Action.toString .shieldedWithdraw  = "shielded.withdraw"         := by native_decide
 example : Action.toString .railgunShield     = "shielded.railgun.shield"   := by native_decide
 example : Action.toString .railgunUnshield   = "shielded.railgun.unshield" := by native_decide
+example : Action.toString .tornadoDeposit    = "shielded.tornado.deposit"  := by native_decide
+example : Action.toString .tornadoWithdraw   = "shielded.tornado.withdraw" := by native_decide
 example : Action.toString .approvalsAudit    = "approvals.audit"            := by native_decide
 example : Action.toString .ensRegister       = "ens.register"               := by native_decide
 example : Action.toString .ensRenew          = "ens.renew"                  := by native_decide

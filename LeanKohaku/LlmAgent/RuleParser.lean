@@ -177,6 +177,15 @@ def actionFor : String → Option String → Option Action
   | "unshield", some "privacy pool"   => some .shieldedWithdraw
   | "shield",   some "railgun"        => some .railgunShield
   | "unshield", some "railgun"        => some .railgunUnshield
+  -- Tornado Cash — accept both the bare "tornado" token and the
+  -- two-token "tornado cash" form (extractProtocolName joins them
+  -- when `cash` is the qualifier). Fixed-denomination mixer; the
+  -- IntentParser validates denomination ∈ {0.1, 1, 10, 100 ETH} —
+  -- the regex does not.
+  | "shield",   some "tornado"
+  | "shield",   some "tornado cash"   => some .tornadoDeposit
+  | "unshield", some "tornado"
+  | "unshield", some "tornado cash"   => some .tornadoWithdraw
   | _, _ => none
 
 /-- Is this token a decimal number (e.g. "0.5", "100")? Returns the
@@ -709,12 +718,45 @@ def matchShielded (toks : List String) : Option RegexDraft := do
   -- privacy pool") inherently imply Privacy Pool and skip these
   -- gates — they only match when hasPrivacyHint is set.
   if isCanonical ∧ hasTornado then
+    -- Tornado chat shortcut (PR 2). Routes to .tornadoDeposit /
+    -- .tornadoWithdraw. Same recipient-extraction pattern as Railgun.
+    -- Note (PR 2 scope): the bridge sidecar's Tornado integration is
+    -- a stub today — the chat path is wired end-to-end, but the
+    -- sidecar returns "not yet implemented" until the snarkjs + Baby
+    -- Jubjub Pedersen layer lands. The user sees that error in the
+    -- TUI rather than an opaque "coming soon" clarification, so the
+    -- next-step is concrete.
+    let isNoiseToken : String → Bool := fun s =>
+      s = "the" ∨ s = "pool" ∨ s = "pools" ∨ s = "privacy"
+        ∨ s = "shielded" ∨ s = "a" ∨ s = "an"
+        ∨ s = "tornado" ∨ s = "cash" ∨ s = "tornadocash"
+        ∨ s = "tornado-cash"
+    let recipient? : Option String :=
+      if canonicalVerb = "unshield" then
+        (indexOfKeyword toks "to").bind (fun i =>
+          (at? toks (i + 1)).filter (fun c => !(isNoiseToken c)))
+      else none
+    let action : Action :=
+      if canonicalVerb = "unshield" then .tornadoWithdraw else .tornadoDeposit
+    let fields : List (String × String) :=
+      [("verb", canonicalVerb), ("amount", amount), ("asset", asset),
+       ("protocol", "tornado cash")]
+      ++ (match recipient? with
+          | some r => [("to", r)]
+          | none   => [])
+    let unresolved : List String :=
+      if assetOk then [] else [s!"asset '{asset}' not recognized for tornado shield/unshield"]
     return {
-      action     := .unknown
-      fields     := [("verb", canonicalVerb), ("amount", amount), ("asset", asset),
-                     ("protocol", "tornado-cash")]
-      unresolved := ["Tornado Cash is coming soon. For now use 'Privacy → Privacy Pool' or 'Privacy → Railgun' from the wallet menu."]
-      confidence := .rejected
+      action     := action
+      fields     := fields
+      unresolved := unresolved
+      confidence :=
+        if !assetOk then .medium
+        else if canonicalVerb = "shield" then .high
+        else
+          match recipient? with
+          | some _ => .high
+          | none   => .medium
     }
   if isCanonical ∧ hasRailgun then
     -- Railgun chat shortcut is live (PR 1). Route to .railgunShield /

@@ -20,9 +20,13 @@ chat path has a structured surface instead of free-forming
 | `prepare_railgun_shield`          | `shielded.railgun.prepareShield`    | Returns prepared txns; no broadcast.   |
 | `prepare_railgun_unshield`        | `shielded.railgun.unshield`         | Bundler path: signs + broadcasts via SDK. |
 | `prepare_railgun_transfer`        | `shielded.railgun.transfer`         | 0zk → 0zk internal; ERC-20 only.      |
+| `prepare_tornado_deposit`         | `shielded.tornado.prepareDeposit`   | Fixed denominations; bridge stub.     |
+| `prepare_tornado_withdraw`        | `shielded.tornado.prepareWithdraw`  | Needs user's saved deposit note.      |
 
-Tornado Cash tools are deliberately omitted here — they land in PR 2
-once the daemon-side `shielded.tornado.*` RPCs exist.
+PR 2 lands the Tornado wrappers + daemon RPCs + chat.draft envelope.
+The bridge SDK integration (snarkjs + Baby Jubjub Pedersen) is a
+follow-up; the typed tools surface a clear `daemon_error` until the
+sidecar implementation lands.
 
 ## Trust model
 
@@ -109,6 +113,16 @@ private def tokenAddressProp : Json := .obj #[
   ("type", .str "string"),
   ("description",
     .str "Optional ERC-20 token address. Omit for native ETH (the bridge will wrap internally for Railgun).")
+]
+private def tornadoNoteProp : Json := .obj #[
+  ("type", .str "string"),
+  ("description",
+    .str "The user's saved Tornado deposit note. Canonical form `tornado-note-eth-<denom>-<base58>` — the value the prepare_tornado_deposit tool handed back at deposit time. NEVER fabricate one; if the user hasn't supplied a note, ask for it before calling.")
+]
+private def tornadoDenominationEthProp : Json := .obj #[
+  ("type", .str "string"),
+  ("description",
+    .str "Tornado pool denomination as a decimal-ETH string. MUST be exactly \"0.1\", \"1\", \"10\", or \"100\" — Tornado pools are fixed-denomination and any other value mis-routes to the wrong contract.")
 ]
 private def nameProp : Json := .obj #[
   ("type", .str "string"),
@@ -289,6 +303,82 @@ def prepareRailgunUnshield : ToolDecl := {
                         | none   => #[])
                 callDaemon cfg "prepare_railgun_unshield"
                   "shielded.railgun.unshield" params
+}
+
+/-- Tornado Cash deposit. Fixed-denomination mixer; the bridge sidecar
+    generates the spending note + Pedersen-hashed commitment and
+    returns `deposit(commitment)` calldata. PR 2 ships a bridge stub
+    until the snarkjs + Baby Jubjub Pedersen layer lands; users see a
+    clear "not yet implemented" `daemon_error` in that interim. -/
+def prepareTornadoDeposit : ToolDecl := {
+  name := "prepare_tornado_deposit",
+  description :=
+    "Prepare an unsigned Tornado Cash deposit of native ETH into one \
+     of the fixed-denomination pools (0.1 / 1 / 10 / 100 ETH). The \
+     bridge sidecar generates and returns the spending note — the user \
+     MUST save it; the wallet cannot reconstruct the note from the \
+     on-chain commitment alone. Any amountEth outside the canonical \
+     set is rejected.",
+  paramSchema := .obj #[
+    ("type", .str "object"),
+    ("required", .arr #[.str "chainId", .str "amountEth"]),
+    ("properties", .obj #[
+      ("chainId",   chainIdProp),
+      ("amountEth", tornadoDenominationEthProp)
+    ])
+  ],
+  classify := .read,
+  invoke := fun cfg args => do
+    match requireString "prepare_tornado_deposit" "amountEth" args with
+    | .error e => pure e
+    | .ok amountEth =>
+        let params : Json := .obj #[("amountEth", .str amountEth)]
+        callDaemon cfg "prepare_tornado_deposit"
+          "shielded.tornado.prepareDeposit" params
+}
+
+/-- Tornado Cash withdraw. Consumes the user's saved deposit note and
+    builds withdraw calldata with a ZK proof against the pool's
+    current merkle tree. The bridge sidecar owns the proof generation;
+    PR 2's stub returns a `daemon_error` pending implementation. -/
+def prepareTornadoWithdraw : ToolDecl := {
+  name := "prepare_tornado_withdraw",
+  description :=
+    "Prepare an unsigned Tornado Cash withdrawal. Requires the user's \
+     saved deposit `note` from a prior prepare_tornado_deposit call \
+     (the bridge cannot recover a note from the chain — only the user \
+     has it). Recipient should be a FRESH address with no on-chain \
+     link to the deposit source; otherwise the mix is defeated.",
+  paramSchema := .obj #[
+    ("type", .str "object"),
+    ("required",
+      .arr #[.str "chainId", .str "amountEth",
+             .str "recipient", .str "note"]),
+    ("properties", .obj #[
+      ("chainId",   chainIdProp),
+      ("amountEth", tornadoDenominationEthProp),
+      ("recipient", recipientProp),
+      ("note",      tornadoNoteProp)
+    ])
+  ],
+  classify := .read,
+  invoke := fun cfg args => do
+    match requireString "prepare_tornado_withdraw" "amountEth" args with
+    | .error e => pure e
+    | .ok amountEth =>
+        match requireString "prepare_tornado_withdraw" "recipient" args with
+        | .error e => pure e
+        | .ok recipient =>
+            match requireString "prepare_tornado_withdraw" "note" args with
+            | .error e => pure e
+            | .ok note =>
+                let params : Json := .obj #[
+                  ("amountEth", .str amountEth),
+                  ("recipient", .str recipient),
+                  ("note",      .str note)
+                ]
+                callDaemon cfg "prepare_tornado_withdraw"
+                  "shielded.tornado.prepareWithdraw" params
 }
 
 /-- Railgun internal transfer (0zk → 0zk). ERC-20 only at the SDK

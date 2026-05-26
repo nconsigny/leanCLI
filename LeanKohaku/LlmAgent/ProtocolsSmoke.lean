@@ -58,9 +58,23 @@ example : (parse "shield 0.05 ETH with privacy pool").action = .shieldedDeposit 
 example : (parse "unshield 0.05 ETH with privacy pool to 0x0000000000000000000000000000000000000001").action
         = .shieldedWithdraw := by native_decide
 
--- Tornado Cash — still routed to `.unknown` with a "coming soon" note
--- (PR 2 will lift this).
-example : (parse "shield 1 ETH with tornado cash").action = .unknown := by native_decide
+-- Tornado Cash chat shortcut (PR 2) — `shield <amount> ETH with
+-- tornado [cash]` now routes to .tornadoDeposit; the unshield variant
+-- carries the recipient + needs the user's saved deposit note (passed
+-- via tool args at the agent layer, not via regex). The bridge sidecar
+-- integration is a stub until snarkjs + Baby Jubjub Pedersen lands.
+example : (parse "shield 1 ETH with tornado cash").action = .tornadoDeposit := by native_decide
+example : (parse "shield 1 ETH with tornado").action = .tornadoDeposit := by native_decide
+example :
+    (parse "shield 1 ETH with tornado cash").fields.lookup "protocol" = some "tornado cash" ∧
+    (parse "shield 1 ETH with tornado cash").fields.lookup "amount"   = some "1"
+  := by native_decide
+example :
+    (parse "unshield 1 ETH with tornado to 0x0000000000000000000000000000000000000001").action
+      = .tornadoWithdraw ∧
+    (parse "unshield 1 ETH with tornado to 0x0000000000000000000000000000000000000001").fields.lookup "to"
+      = some "0x0000000000000000000000000000000000000001"
+  := by native_decide
 
 -- Railgun chat shortcut (PR 1) — `shield <amount> ETH with railgun`
 -- now routes to `.railgunShield`; the unshield variant carries the
@@ -120,7 +134,11 @@ example : resolve "Aave"          .mainnet = some "0x87870bca3f3fd6335c3f4ce8392
 example : resolve "aave v3"       .mainnet = some "0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2" := by native_decide
 example : resolve "Morpho Blue"   .mainnet = some "0xbbbbbbbbbb9cc5e90e3b3af64bdaf62c37eeffcb" := by native_decide
 example : resolve "ENS"           .mainnet = some "0x253553366da8546fc250f225fe3d25d0c782303b" := by native_decide
-example : resolve "Liquity V2"    .mainnet = some "0x4231ec00a82bdd00f7dc9b2d3aa01ff8e51fb01e" := by native_decide
+-- Liquity V2 BorrowerOperations (ETH branch). Bare slug resolves to
+-- the ETH-collateral branch per liquityV2BorrowerOpsFor_ETH; the
+-- per-branch addresses (wstETH / rETH) have their own anchors in
+-- KnownProtocols.lean.
+example : resolve "Liquity V2"    .mainnet = some "0x372abd1810eaf23cb9d941bbe7596dfb2c46bc65" := by native_decide
 example : resolve "Railgun"       .mainnet = some "0xfa7093cdd9ee6932b4eb2c9e1cde7ce00b1fa4b9" := by native_decide
 example : resolve "privacy pool"  .mainnet = some "0x6818809eefce719e480a7526d76bd3e561526b46" := by native_decide
 -- Default Tornado pool resolves to the 1-ETH instance (not the
