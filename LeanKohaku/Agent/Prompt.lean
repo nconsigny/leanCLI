@@ -109,8 +109,10 @@ def operationalRules (cfg : AgentConfig) : String :=
   others.
 - Surface tool errors verbatim instead of paraphrasing them.
 - Final answer for any send is a single `propose_send` tool call
-  whose payload is `\{to, value, data, chainId}`. Never inline a
-  signature.
+  whose payload is `\{to, value, data, chainId, sender}`. Always
+  include `sender` (the address `slot_lookup` returned for the
+  user's wallet); the TUI uses it to skip the wallet picker.
+  Never inline a signature.
 "
 
 /-- One-line addition to the operational rules used in the seed-locked

@@ -52,6 +52,7 @@ import LeanKohaku.Registry.KnownProtocols
 import LeanKohaku.Swap.Tokens
 import LeanKohaku.Swap.UniV3
 import LeanKohaku.Swap.Prepare
+import LeanKohaku.Aave.Prepare
 import LeanKohaku.Util.Units
 import LeanKohaku.Invariants.Swap
 
@@ -1901,20 +1902,29 @@ private def r1SendFlow (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           message := "r1 digest preparation produced unexpected output",
           data := some (.str prepOut) }
 
-/-- Walk the agent's `trace` array for the LAST `propose_send`
-    tool call and parse its `argsJson` into `(chainId, to, value, data)`.
-    The agent's `propose_send` tool has already validated the shape
-    on its side; this is the canonical signal "the model has reached
-    its final answer". When present, it overrides the prose-text path
-    in `chat.draft` — the model's final assistant content is then
-    informational rather than the source of intent.
+/-! Walk the agent's `trace` array for the LAST `propose_send` tool
+call. The agent's `propose_send` has already validated the shape on
+its side; this is the canonical signal "the model has reached its
+final answer". When present in the trace, `extractProposeSendFromTrace`
+returns the decoded args and `chat.draft` uses it as the intent,
+overriding the prose-text path (the model's final assistant content
+is then informational rather than the source of intent). A
+malformed propose_send is treated as `none` rather than an error so
+the existing IntentParser path runs as a fallback. -/
 
-    Returns `none` when no propose_send call appears in the trace,
-    when the trace isn't an array, or when the args can't be parsed.
-    A malformed propose_send is treated as `none` rather than an
-    error so the existing IntentParser path runs as a fallback. -/
-private def parseProposeArgs (args : Json) :
-    Option (Nat × String × Nat × String) :=
+/-- Decoded shape of a propose_send tool call lifted out of the
+    trace. `sender` is optional: the agent passes it whenever
+    slot_lookup resolved a wallet for the user, which lets the TUI's
+    SendRawFlow skip its wallet picker. -/
+structure ProposeSendArgs where
+  chainId : Nat
+  to      : String
+  value   : Nat
+  data    : String
+  sender  : Option String
+  deriving Repr
+
+private def parseProposeArgs (args : Json) : Option ProposeSendArgs :=
   match getField "chainId" args >>= asNat with
   | none => none
   | some cid =>
@@ -1924,10 +1934,14 @@ private def parseProposeArgs (args : Json) :
           let val : Nat := ((getField "value" args).bind asNat).getD 0
           let data : String :=
             ((getField "data" args).bind asString).getD "0x"
-          some (cid, to, val, data)
+          let sender : Option String :=
+            (getField "sender" args).bind asString
+          some {
+            chainId := cid, to := to, value := val,
+            data := data, sender := sender
+          }
 
-private def proposeSendFromItem (item : Json) :
-    Option (Nat × String × Nat × String) :=
+private def proposeSendFromItem (item : Json) : Option ProposeSendArgs :=
   match item with
   | .obj fields =>
       let kind  := (fields.find? (·.1 == "kind")     |>.map (·.2)).getD .null
@@ -1942,7 +1956,7 @@ private def proposeSendFromItem (item : Json) :
   | _ => none
 
 private partial def scanProposeSend :
-    List Json → Option (Nat × String × Nat × String)
+    List Json → Option ProposeSendArgs
   | [] => none
   | item :: rest =>
       match scanProposeSend rest with
@@ -1950,7 +1964,7 @@ private partial def scanProposeSend :
       | none => proposeSendFromItem item
 
 private def extractProposeSendFromTrace (trace : Json) :
-    Option (Nat × String × Nat × String) :=
+    Option ProposeSendArgs :=
   match trace with
   | .arr items => scanProposeSend items.toList
   | _ => none
@@ -3470,6 +3484,93 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
               let result ← LeanKohaku.Swap.Prepare.prepareUniswapV3Swap request shim
               pure <| .ok (LeanKohaku.Swap.Prepare.PrepareResult.toJson result)
       | _, _, _, _ => pure (.error invalidParams)
+  | "aave.prepare" =>
+      -- Why: one daemon RPC for all five Aave V3 Pool user-facing
+      -- actions. The agent exposes five typed tools (one per action)
+      -- that each call this method with the appropriate `action` tag.
+      -- All chain reads go through `Outbound.ethCall` (policy-gated);
+      -- the resulting calldata flows through `decodeIntent → simulate
+      -- → ConfirmGate` before signing, identical to every other
+      -- calldata-producing surface.
+      let chainIdParam :=
+        ((getField "chainId" req.params) >>= asNat).getD cfg.chainId
+      match paramString req.params "action",
+            paramString req.params "sender",
+            paramString req.params "asset" with
+      | .ok action, .ok sender, .ok asset =>
+          let chainName : Option String :=
+            if chainIdParam = 1 then some "mainnet"
+            else if chainIdParam = 11155111 then some "sepolia"
+            else getField "chain" req.params >>= asString
+          match endpointForChain cfg chainName with
+          | .error err =>
+              pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
+          | .ok ep =>
+              let shim : LeanKohaku.Aave.Prepare.ChainEthCallShim :=
+                fun to data chainIdForCall => do
+                  let via? ← colibriVia state chainIdForCall
+                  match ← LeanKohaku.RPC.Outbound.ethCall cfg.policy ep to data "latest" via? with
+                  | .ok ret =>
+                      match asString ret with
+                      | some hex => pure (.ok hex)
+                      | none => pure (.error "non-string return from eth_call")
+                  | .error e => pure (.error e)
+              let result ←
+                match action with
+                | "supply" =>
+                    let onBehalfOf := paramStringD req.params "onBehalfOf" sender
+                    match getField "amount" req.params >>= asNat with
+                    | some amount =>
+                        LeanKohaku.Aave.Prepare.prepareSupply
+                          chainIdParam sender onBehalfOf asset amount shim
+                    | none =>
+                        pure (.err "bad_request" "aave.prepare supply: missing or non-numeric 'amount'")
+                | "withdraw" =>
+                    let recipient := paramStringD req.params "recipient" sender
+                    match getField "amount" req.params >>= asNat with
+                    | some amount =>
+                        LeanKohaku.Aave.Prepare.prepareWithdraw
+                          chainIdParam sender recipient asset amount shim
+                    | none =>
+                        pure (.err "bad_request" "aave.prepare withdraw: missing or non-numeric 'amount'")
+                | "borrow" =>
+                    let onBehalfOf := paramStringD req.params "onBehalfOf" sender
+                    let rateModeStr := paramStringD req.params "rateMode" "variable"
+                    match getField "amount" req.params >>= asNat,
+                          LeanKohaku.Aave.V3Pool.InterestRateMode.parse? rateModeStr with
+                    | some amount, some rateMode =>
+                        LeanKohaku.Aave.Prepare.prepareBorrow
+                          chainIdParam sender onBehalfOf asset amount rateMode shim
+                    | none, _ =>
+                        pure (.err "bad_request" "aave.prepare borrow: missing or non-numeric 'amount'")
+                    | _, none =>
+                        pure (.err "invalid_rate_mode"
+                          s!"aave.prepare borrow: 'rateMode' must be 'stable' or 'variable', got: {rateModeStr}")
+                | "repay" =>
+                    let onBehalfOf := paramStringD req.params "onBehalfOf" sender
+                    let rateModeStr := paramStringD req.params "rateMode" "variable"
+                    match getField "amount" req.params >>= asNat,
+                          LeanKohaku.Aave.V3Pool.InterestRateMode.parse? rateModeStr with
+                    | some amount, some rateMode =>
+                        LeanKohaku.Aave.Prepare.prepareRepay
+                          chainIdParam sender onBehalfOf asset amount rateMode shim
+                    | none, _ =>
+                        pure (.err "bad_request" "aave.prepare repay: missing or non-numeric 'amount'")
+                    | _, none =>
+                        pure (.err "invalid_rate_mode"
+                          s!"aave.prepare repay: 'rateMode' must be 'stable' or 'variable', got: {rateModeStr}")
+                | "setCollateral" =>
+                    let useAsCollateral :=
+                      match getField "useAsCollateral" req.params with
+                      | some (.bool b) => b
+                      | _ => true
+                    LeanKohaku.Aave.Prepare.prepareSetCollateral
+                      chainIdParam sender asset useAsCollateral shim
+                | other =>
+                    pure (.err "unknown_action"
+                      s!"aave.prepare: 'action' must be supply|withdraw|borrow|repay|setCollateral, got: {other}")
+              pure <| .ok (LeanKohaku.Aave.Prepare.PrepareResult.toJson result)
+      | _, _, _ => pure (.error invalidParams)
   | "chain.sendRawTransaction" =>
       match paramString req.params "raw" with
       | .error err => pure (.error err)
@@ -5822,17 +5923,21 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                 match getField "trace" llmResult with
                 | some t =>
                     match extractProposeSendFromTrace t with
-                    | some (cid, to, val, data) =>
+                    | some ps =>
+                        let senderEntry : Array (String × Json) :=
+                          match ps.sender with
+                          | some s => #[("sender", .str s)]
+                          | none   => #[]
                         some <| .obj <| #[
                           ("regex",   regexJson),
                           ("llmRaw",  .str rawStr),
                           ("backend", .str "agent-propose-send"),
-                          ("encoded", .obj #[
-                            ("to",      .str to),
-                            ("value",   .num (Int.ofNat val)),
-                            ("data",    .str data),
-                            ("chainId", .num (Int.ofNat cid))
-                          ])
+                          ("encoded", .obj <| #[
+                            ("to",      .str ps.to),
+                            ("value",   .num (Int.ofNat ps.value)),
+                            ("data",    .str ps.data),
+                            ("chainId", .num (Int.ofNat ps.chainId))
+                          ] ++ senderEntry)
                         ] ++ traceField
                     | none => none
                 | none => none

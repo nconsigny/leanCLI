@@ -31,7 +31,7 @@ private def is0x40 (s : String) : Bool :=
   isHexString s && s.length = 42 -- 0x + 40 hex chars (20 bytes)
 
 private def validateArgs (cfg : AgentConfig) (args : Json) :
-    Except String (Nat × String × Nat × String) := do
+    Except String (Nat × String × Nat × String × Option String) := do
   let some chainJ := getField "chainId" args
     | .error "propose_send: missing 'chainId'"
   let some chainId := asNat chainJ
@@ -57,7 +57,24 @@ private def validateArgs (cfg : AgentConfig) (args : Json) :
   if !isHexString dataStr then
     .error s!"propose_send: 'data' is not 0x-hex: {dataStr}"
   else
-    .ok (chainId, toStr, valueNat, dataStr)
+  -- Optional `sender` (a.k.a. "from"): when the agent already knows
+  -- which wallet should sign, it should include this so the TUI's
+  -- SendRawFlow can skip the wallet picker. Address-shaped; rejected
+  -- if malformed rather than silently dropped so a typo is loud.
+  let senderOpt : Except String (Option String) :=
+    match getField "sender" args with
+    | none => .ok none
+    | some (.str "") => .ok none
+    | some j =>
+        match asString j with
+        | some s =>
+            if is0x40 s then .ok (some s)
+            else .error s!"propose_send: 'sender' is not a 20-byte address: {s}"
+        | none => .error "propose_send: 'sender' must be a string"
+  match senderOpt with
+  | .error e => .error e
+  | .ok senderField =>
+    .ok (chainId, toStr, valueNat, dataStr, senderField)
 
 /-- `propose_send` — returns a draft transaction payload to the
     caller. This tool *never* contacts the daemon: it packages the
@@ -80,25 +97,36 @@ def proposeSend : ToolDecl := {
       ("value",   .obj #[("type", .str "integer"),
                          ("description", .str "Wei. Defaults to 0.")]),
       ("data",    .obj #[("type", .str "string"),
-                         ("description", .str "0x-hex calldata. Defaults to 0x.")])
+                         ("description", .str "0x-hex calldata. Defaults to 0x.")]),
+      ("sender",  .obj #[("type", .str "string"),
+                         ("description",
+                           .str "OPTIONAL 20-byte 0x-prefixed address of the wallet that should sign. When set, the TUI skips the wallet picker. Always include this when slot_lookup resolved the sender for the user.")])
     ])
   ],
   classify := .propose,
   invoke := fun cfg args => do
     match validateArgs cfg args with
     | .error e => pure { ok := false, data := .obj #[("error", .str e)] }
-    | .ok (chainId, to, valueNat, dataStr) =>
-        let payload : Json := .obj #[
+    | .ok (chainId, to, valueNat, dataStr, senderOpt) =>
+        let senderField : Array (String × Json) :=
+          match senderOpt with
+          | some s => #[("sender", .str s)]
+          | none   => #[]
+        let payload : Json := .obj <| #[
           ("kind",    .str "propose_send"),
           ("chainId", .num (Int.ofNat chainId)),
           ("to",      .str to),
           ("value",   .num (Int.ofNat valueNat)),
           ("data",    .str dataStr)
-        ]
+        ] ++ senderField
+        let summaryText :=
+          match senderOpt with
+          | some s => s!"draft tx → {to} (chain {chainId}, value {valueNat} wei, signer {s})"
+          | none   => s!"draft tx → {to} (chain {chainId}, value {valueNat} wei)"
         pure {
           ok := true,
           data := payload,
-          summary := some s!"draft tx → {to} (chain {chainId}, value {valueNat} wei)"
+          summary := some summaryText
         }
 }
 

@@ -98,7 +98,7 @@ type DraftResponse = {
   // Standard leaf-encodable response — model emits a tx-shaped Intent
   // and the daemon's encoder returns the {to, value, data} the TUI
   // routes through tx.simulate + ConfirmGate.
-  encoded?: { to: string; value: number; data: string; chainId: number };
+  encoded?: { to: string; value: number; data: string; chainId: number; sender?: string };
   encodeError?: string;
   modelAsk?: { error: string; question: string };
   // New non-tx-encoded action directives. Returned by chat.draft for
@@ -569,15 +569,22 @@ export default function LlmChatFlow({ onDone, onApprove, onCreateWallet }: Props
   const proceedWith = (turn: Extract<Turn, { kind: "assistant" }>) => {
     if (!turn.result?.encoded || !onApprove) return;
     const enc = turn.result.encoded;
-    // If the regex captured + chat.draft resolved a `from` hint (e.g.
-    // "approve … from leanWallet"), pre-select that wallet for signing
-    // so SendRawFlow skips the picker. Match by address (resolveLocal
-    // rewrote the name to the 0x form before returning). Case-insensitive
-    // because addresses round-trip through lowercased forms in places.
-    const fromField = turn.result.regex?.fields?.find((kv) => kv.k === "from")?.v;
+    // Pre-select the signing wallet so SendRawFlow skips its picker.
+    // Source preference (most reliable first):
+    //   1. `encoded.sender` — populated when the agent's `propose_send`
+    //      tool call carried a `sender` field (which it should whenever
+    //      `slot_lookup` resolved the user's wallet earlier in the
+    //      conversation).
+    //   2. `regex.fields.from` — the regex layer's resolved "from" hint
+    //      (e.g. "approve X from leanWallet" parses it directly).
+    // Match by address, case-insensitive (addresses round-trip through
+    // lowercase in some places).
+    const senderHint =
+      enc.sender ??
+      turn.result.regex?.fields?.find((kv) => kv.k === "from")?.v;
     const preselected = (() => {
-      if (!fromField) return undefined;
-      const want = fromField.toLowerCase();
+      if (!senderHint) return undefined;
+      const want = senderHint.toLowerCase();
       const w = wallets.find((wb) => wb.address.toLowerCase() === want);
       if (!w) return undefined;
       return { kind: w.kind, name: w.name, address: w.address };
