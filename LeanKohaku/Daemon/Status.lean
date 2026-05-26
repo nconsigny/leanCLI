@@ -156,7 +156,7 @@ private def sandboxJson : IO Json := do
   -- user to grep the daemon log for `[sandbox]`.
   let hint :=
     if usableBool then ""
-    else "Restore the sandbox on Ubuntu 23.10+: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+    else "Ubuntu 23.10+: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 . Nested-container host (systemd-nspawn / rootless Docker / Podman / Flatpak / GHA): no equivalent knob — run the daemon on the bare host."
   pure <| .obj #[
     ("mode", .str mode),
     ("unshareUsable", .bool usableBool),

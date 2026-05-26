@@ -59,22 +59,32 @@ ConfirmGate stays the load-bearing safety net. This module narrows
 * `require` — refuse to spawn the sidecar if `unshare` is not usable.
               Use in production deployments to enforce the floor.
 
-## Runtime probe (Ubuntu 23.10+ / AppArmor caveat)
+## Runtime probe (Ubuntu 23.10+ / AppArmor + nested-container caveat)
 
 `auto` mode used to degrade only when `unshare(1)` was missing from
 PATH. That left a silent-failure window on hosts where `unshare(1)` is
-installed but
-`kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu 23.10+ default)
-or `kernel.unprivileged_userns_clone=0` (hardened kernels) refuses the
-write to `/proc/self/uid_map`. Every sidecar spawn returned exit-1
-with empty stderr, and the daemon surfaced `{ok:false, crash:...}` to
-the TUI without any user-visible explanation of why.
+installed but the kernel refuses one of the flags we actually use.
+Two real-world cases:
 
-The probe now runs `unshare --user --map-current-user -- true` once per
-daemon process (cached in a ref). If it exits non-zero, the rest of the
-session takes the warn-once-and-skip path — same code path as
-"unshare not installed". The warning includes the sysctl knob to restore
-the sandbox on Ubuntu 23.10+.
+* `--user --map-current-user` refused —
+  `kernel.apparmor_restrict_unprivileged_userns=1` (Ubuntu 23.10+
+  default), `kernel.unprivileged_userns_clone=0` (hardened kernels).
+* `--mount-proc` refused — nested container runtimes
+  (systemd-nspawn, rootless Docker/Podman, Flatpak/Snap, GitHub
+  Actions container jobs) where the outer userns / mount policy
+  forbids mounting a fresh procfs in a nested PID namespace.
+
+In both cases every sidecar spawn returned exit-1 with empty stderr,
+and the daemon surfaced `{ok:false, crash:...}` to the TUI without any
+user-visible explanation of why.
+
+The probe now exercises the *full base flag set* (`baseUnshareFlags`)
+that real spawns will use, once per daemon process (cached in a ref).
+If it exits non-zero, the rest of the session takes the warn-once-and-
+skip path — same code path as "unshare not installed". The warning
+names both failure modes so the operator can tell whether the sysctl
+knob will help (Ubuntu) or whether the daemon needs to move off a
+nested-container host.
 
 Reference: [[reference-vitalik-secure-llms]] ("Sandbox everything. Be
 paranoid about what exploits and threats rest on the outside internet.")
@@ -133,11 +143,33 @@ initialize usableUnshareRef : IO.Ref (Option (Option String)) ← IO.mkRef none
     once per sidecar spawn. -/
 initialize sandboxWarnedRef : IO.Ref Bool ← IO.mkRef false
 
-/-- Probe `unshare --user --map-current-user -- true` once and cache the
-    result. Returns the path to a usable `unshare` binary, or `none` if
-    either `unshare(1)` is missing or the syscall is refused at runtime
-    (AppArmor unprivileged-userns restriction on Ubuntu 23.10+,
-    `kernel.unprivileged_userns_clone=0` on hardened kernels, etc.). -/
+/-- Flags shared by every sandboxed spawn: user + PID + procfs + UTS +
+IPC. The network namespace is added per-spec by `unshareFlags`. Kept as
+a single source of truth so `probeUsableUnshare` exercises the *exact*
+set that will be requested at spawn time. -/
+private def baseUnshareFlags : Array String :=
+  #["--user", "--map-current-user", "--pid", "--fork", "--mount-proc", "--uts", "--ipc"]
+
+/-- Probe the full base flag set once and cache the result. Returns the
+    path to a usable `unshare` binary, or `none` if `unshare(1)` is
+    missing or any base flag is refused at runtime. Failure modes the
+    probe must cover:
+
+    * `--user --map-current-user` refused — AppArmor unprivileged-userns
+      restriction on Ubuntu 23.10+, `kernel.unprivileged_userns_clone=0`
+      on hardened kernels.
+    * `--mount-proc` refused — nested container hosts (systemd-nspawn,
+      rootless Docker/Podman, Flatpak/Snap, GitHub Actions container
+      jobs) where the outer userns / mount policy forbids mounting a
+      fresh procfs in a nested PID namespace.
+
+    Probing only `--user --map-current-user` (as an earlier version did)
+    lied on nested-container hosts: the probe said sandbox was usable,
+    then every real sidecar spawn died with `unshare: mount /proc
+    failed: Operation not permitted` and the daemon surfaced an opaque
+    crash to the TUI. Exercising the full base set here makes the
+    failure observable and routes it through the warn-once-and-degrade
+    path the same way the Ubuntu AppArmor case is handled. -/
 def probeUsableUnshare : IO (Option String) := do
   match ← usableUnshareRef.get with
   | some cached => pure cached
@@ -149,14 +181,16 @@ def probeUsableUnshare : IO (Option String) := do
             try
               let child ← IO.Process.spawn {
                 cmd := path,
-                args := #["--user", "--map-current-user", "--", "true"],
+                args := baseUnshareFlags ++ #["--", "true"],
                 stdin := .null,
                 stdout := .null,
                 -- Probe noise (e.g. "unshare: write failed
-                -- /proc/self/uid_map: Operation not permitted") would
-                -- otherwise hit the daemon journal on every fresh boot.
-                -- The diagnostic gets printed by `warnSandboxDisabled`
-                -- below in user-friendly form instead.
+                -- /proc/self/uid_map: Operation not permitted" or
+                -- "unshare: mount /proc failed: Operation not
+                -- permitted") would otherwise hit the daemon journal
+                -- on every fresh boot. The diagnostic gets printed by
+                -- `warnSandboxDisabled` below in user-friendly form
+                -- instead.
                 stderr := .null
               }
               let code ← child.wait
@@ -165,25 +199,24 @@ def probeUsableUnshare : IO (Option String) := do
       usableUnshareRef.set (some result)
       pure result
 
-/-- Print the "sandbox disabled" warning once per process. Includes the
-    sysctl knob to restore the sandbox on the most common blocking host
-    config (Ubuntu 23.10+ AppArmor). -/
+/-- Print the "sandbox disabled" warning once per process. Names the
+    two common blocking host configs (Ubuntu 23.10+ AppArmor and
+    nested-container runtimes) so the operator knows whether the
+    sysctl knob will help. -/
 private def warnSandboxDisabled (cmd : String) : IO Unit := do
   unless (← sandboxWarnedRef.get) do
     sandboxWarnedRef.set true
-    IO.eprintln s!"[sandbox] WARNING: `unshare --user --map-current-user` is not usable on this host (missing or refused by AppArmor/kernel). Spawning {cmd} and subsequent sidecars without OS-level sandboxing. The cryptographic trust model is unchanged — the daemon still re-decodes every signed tx before broadcast — but a compromised sidecar has more reach at the OS level. Set LEAN_KOHAKU_SANDBOX=require to fail-fast instead. To restore sandboxing on Ubuntu 23.10+: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0"
+    IO.eprintln s!"[sandbox] WARNING: full unshare base set is not usable on this host (missing `unshare(1)`, AppArmor/kernel refusing unprivileged userns, or a nested container runtime — systemd-nspawn / rootless Docker / Podman / Flatpak / GitHub Actions — refusing `--mount-proc` in a nested PID namespace). Spawning {cmd} and subsequent sidecars without OS-level sandboxing. The cryptographic trust model is unchanged — the daemon still re-decodes every signed tx before broadcast — but a compromised sidecar has more reach at the OS level. Set LEAN_KOHAKU_SANDBOX=require to fail-fast instead. To restore sandboxing on Ubuntu 23.10+: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 . Nested-container hosts have no equivalent knob — run the daemon on the bare host."
 
-/-- Build the `unshare` arg prefix. PID + UTS + IPC are always
+/-- Build the `unshare` arg prefix. PID + UTS + IPC + procfs are always
 unshared; the network namespace is unshared unless the sidecar needs
 loopback TCP to host services. `--user --map-current-user` is required
 so an unprivileged daemon can unshare the other namespaces without
 CAP_SYS_ADMIN; UID mapping is preserved so the sidecar still runs as
 the daemon's UID inside the namespace. -/
 private def unshareFlags (spec : SidecarSpec) : Array String :=
-  let base : Array String :=
-    #["--user", "--map-current-user", "--pid", "--fork", "--mount-proc", "--uts", "--ipc"]
-  if spec.needsTcpLoopback then base
-  else base ++ #["--net"]
+  if spec.needsTcpLoopback then baseUnshareFlags
+  else baseUnshareFlags ++ #["--net"]
 
 /-- Wrap a sidecar spawn for sandboxing. Returns the (cmd, args) to
 hand to `IO.Process.spawn`. The caller's existing env / stdin / stdout
@@ -210,7 +243,7 @@ def wrap (spec : SidecarSpec) : IO (String × Array String) := do
           match mode with
           | .require =>
               throw <| IO.userError
-                "LEAN_KOHAKU_SANDBOX=require but `unshare --user --map-current-user` is not usable on this host (missing or refused — e.g. AppArmor unprivileged-userns restriction on Ubuntu 23.10+; lift with: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0)"
+                "LEAN_KOHAKU_SANDBOX=require but the unshare base flag set (user + pid + mount-proc + uts + ipc) is not usable on this host. Likely causes: (1) AppArmor unprivileged-userns restriction on Ubuntu 23.10+ — lift with: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 ; (2) nested-container runtime (systemd-nspawn / rootless Docker / Podman / Flatpak / GitHub Actions) refusing --mount-proc — no knob, run the daemon on the bare host."
           | _ =>
               warnSandboxDisabled spec.cmd
               pure (spec.cmd, spec.args)
