@@ -35,10 +35,10 @@ namespace LeanKohaku.Util.DotEnv
 @[extern "lk_setenv_if_absent"]
 private opaque setenvIfAbsentRaw (name : @& String) (value : @& String) : IO Unit
 
-/-- Trim leading/trailing ASCII whitespace via the stable `Substring` API,
-    which doesn't shift between releases the way `String.trim` did. -/
+/-- Trim leading/trailing ASCII whitespace. Wraps `String.trimAscii`
+    (which returns a `String.Slice`) back into a `String`. -/
 private def trimS (s : String) : String :=
-  s.toSubstring.trim.toString
+  s.trimAscii.toString
 
 /-- Strip a single layer of matching surrounding quotes (`"..."` or `'...'`).
     No escape processing — value taken literally between the quotes. -/
@@ -46,7 +46,7 @@ private def stripQuotes (s : String) : String :=
   if s.length < 2 then s
   else if (s.startsWith "\"" && s.endsWith "\"") ||
           (s.startsWith "'"  && s.endsWith "'") then
-    ((s.drop 1).dropRight 1).toString
+    ((s.drop 1).dropEnd 1).toString
   else s
 
 /-- Parse a single `.env` line. Returns `none` for blank lines, comment

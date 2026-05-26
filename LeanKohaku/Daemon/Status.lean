@@ -232,7 +232,7 @@ private def resolveCheckoutRoot : IO (Option System.FilePath) := do
       if (← indexFile.pathExists) then
         try
           let raw ← IO.FS.readFile indexFile
-          let p := System.FilePath.mk raw.toSubstring.trim.toString
+          let p := System.FilePath.mk raw.trimAscii.toString
           if (← (p / "lakefile.lean").pathExists) then return some p
           else return none
         catch _ => return none
@@ -335,7 +335,7 @@ private def resolveIpv4 (host : String) : IO String := do
     -- We want the first dotted-quad token of the first line.
     let firstLine := (stdout.splitOn "\n").headD ""
     let firstTok  := (firstLine.splitOn " ").headD ""
-    return firstTok.trim
+    return firstTok.trimAscii.toString
   catch _ => return ""
 
 /-- Resolve a binary by trying well-known absolute paths, then falling

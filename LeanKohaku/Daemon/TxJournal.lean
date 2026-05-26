@@ -200,7 +200,7 @@ def appendStatus (slotName txHash status : String)
 private partial def parseLines : List String → Array Json → Array Json
   | [], acc => acc
   | line :: rest, acc =>
-      let trimmed := line.trim
+      let trimmed := line.trimAscii.toString
       if trimmed.isEmpty then parseLines rest acc
       else
         match parse trimmed with

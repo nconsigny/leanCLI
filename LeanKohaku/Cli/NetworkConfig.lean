@@ -231,13 +231,13 @@ def humanReport : IO String := do
           inner.find? (fun (k, _) => k = chain) |>.bind fun (_, entry) =>
             match entry with
             | .str u =>
-                let t := u.trim
+                let t := u.trimAscii.toString
                 if t.isEmpty then none else some t
             | .obj sub =>
                 sub.findSome? fun (k, v') =>
                   if k = "url" then
                     asString v' |>.bind fun s =>
-                      let t := s.trim
+                      let t := s.trimAscii.toString
                       if t.isEmpty then none else some t
                   else none
             | _ => none
@@ -254,7 +254,7 @@ def humanReport : IO String := do
   let envRpc ← IO.getEnv "LEANKOHAKU_RPC_URL"
   -- Same fallback chain as the daemon: namespaced env > generic env.
   let trim? (s : String) : Option String :=
-    let t := s.trim
+    let t := s.trimAscii.toString
     if t.isEmpty then none else some t
   let envEnsRaw ← IO.getEnv "LEANKOHAKU_ENS_RPC_URL"
   let envEnsNs ← IO.getEnv "LEANKOHAKU_RPC_URL_MAINNET"
@@ -310,7 +310,7 @@ def humanReport : IO String := do
   let envChainUrl (chain : String) : IO (Option (String × String)) := do
     let upper := chain.toUpper
     let trim? (raw : String) : Option String :=
-      let t := raw.trim
+      let t := raw.trimAscii.toString
       if t.isEmpty then none else some t
     match (← IO.getEnv s!"LEANKOHAKU_RPC_URL_{upper}").bind trim? with
     | some v => pure (some (v, s!"env: LEANKOHAKU_RPC_URL_{upper}"))

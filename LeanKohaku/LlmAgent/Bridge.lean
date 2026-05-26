@@ -156,7 +156,7 @@ private def callOneShot (req : Request) : IO Response := do
     let exitCode ← child.wait
     if exitCode == 0 then
       pure (parseResponse stdout)
-    else if !stdout.trim.isEmpty then
+    else if !stdout.trimAscii.toString.isEmpty then
       pure (parseResponse stdout)
     else
       pure (Response.crash s!"llm exited with code {exitCode}" exitCode)

@@ -83,7 +83,7 @@ def resolverSelector : String := "0178b8bf"
 def addrSelector : String := "3b3b57de"
 
 private def zeroAddressHex : String :=
-  "0x" ++ String.mk (List.replicate 40 '0')
+  "0x" ++ String.ofList (List.replicate 40 '0')
 
 /-- Parse a 32-byte ABI word (right-aligned address) into a 20-byte address hex
     string with `0x` prefix and lowercase hex. Returns `none` for malformed

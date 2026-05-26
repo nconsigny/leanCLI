@@ -59,7 +59,7 @@ private def yamlScalar (lines : List String) (key : String) : Option String :=
           let v := raw.trimAscii.toString
           -- Strip optional surrounding quotes.
           let v := if v.startsWith "\"" && v.endsWith "\"" then
-                     ((v.drop 1).dropRight 1).toString
+                     ((v.drop 1).dropEnd 1).toString
                    else v
           some v
         else none) none

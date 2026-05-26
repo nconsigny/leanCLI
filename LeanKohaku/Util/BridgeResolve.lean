@@ -57,7 +57,7 @@ private def fromRecordedCheckout (relPath : System.FilePath) : IO (Option String
   let indexFile := kohakuHome / "checkout"
   if !(← indexFile.pathExists) then return none
   let raw ← IO.FS.readFile indexFile
-  let checkout := System.FilePath.mk raw.toSubstring.trim.toString
+  let checkout := System.FilePath.mk raw.trimAscii.toString
   let candidate := checkout / relPath
   if (← candidate.pathExists) then pure (some candidate.toString) else pure none
 

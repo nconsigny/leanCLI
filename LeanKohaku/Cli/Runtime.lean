@@ -160,7 +160,7 @@ def runR1WalletCreate (keyName : String) : IO UInt32 := do
       if createCode ≠ 0 then return createCode
       IO.print s!"\nDeploy R1 account for '{keyName}' on Sepolia now? [Y/n] "
       (← IO.getStdout).flush
-      let answer := (← (← IO.getStdin).getLine).trim.toLower
+      let answer := (← (← IO.getStdin).getLine).trimAscii.toString.toLower
       if answer = "" || answer = "y" || answer = "yes" then
         IO.println "→ deploying…"
         runR1WalletDeploy keyName "sepolia"
@@ -325,8 +325,8 @@ private def formatGwei (n : Nat) : String :=
   if frac = 0 then s!"{whole} gwei"
   else
     let s := toString frac
-    let pad := String.mk (List.replicate (9 - s.length) '0')
-    let trimmed := (pad ++ s).dropRightWhile (· = '0')
+    let pad := String.ofList (List.replicate (9 - s.length) '0')
+    let trimmed := ((pad ++ s).dropEndWhile (· = '0')).toString
     s!"{whole}.{trimmed} gwei"
 
 private def formatEth (n : Nat) : String :=
@@ -335,8 +335,8 @@ private def formatEth (n : Nat) : String :=
   if frac = 0 then s!"{whole} ETH"
   else
     let s := toString frac
-    let pad := String.mk (List.replicate (18 - s.length) '0')
-    let trimmed := (pad ++ s).dropRightWhile (· = '0')
+    let pad := String.ofList (List.replicate (18 - s.length) '0')
+    let trimmed := ((pad ++ s).dropEndWhile (· = '0')).toString
     s!"{whole}.{trimmed} ETH"
 
 private def printFeeField (method field : String) : IO UInt32 := do
@@ -383,7 +383,7 @@ private def renderJsonField (j : LeanKohaku.Encoding.Json.Json) : String :=
 
 open LeanKohaku.Encoding.Json in
 private def formatNetEvent (rawLine : String) : String :=
-  let line := rawLine.trimRight
+  let line := rawLine.trimAsciiEnd.toString
   match parse line with
   | .error _ => line
   | .ok json =>
@@ -502,7 +502,7 @@ def systemctlIsActive : IO String := do
     let out ← IO.Process.output
       { cmd := "systemctl",
         args := #["--user", "is-active", "kohaku-daemon"] }
-    pure out.stdout.trim
+    pure out.stdout.trimAscii.toString
   catch _ =>
     pure "unknown"
 
@@ -1020,7 +1020,7 @@ private def runWalletHistoryFor (name : String) (scanLogs : Bool)
     let block := getStr "blockNumber"
     let status := getStr "status"
     let truncH := if txHash.length ≤ 14 then txHash
-                  else (txHash.toList.take 10 |> String.mk) ++ "…"
+                  else (txHash.toList.take 10 |> String.ofList) ++ "…"
     IO.println s!"  {ts}  [{kind}]  {truncH}  {fromA} → {toAddr}  {formatEth valueWei}  block={block}  status={status}"
   let allEntries ←
     match ← DaemonClient.call "chain.history"
@@ -1092,7 +1092,7 @@ private def runR1WalletHistoryFor (name : String) (scanLogs : Bool)
     let block := getStr "blockNumber"
     let status := getStr "status"
     let truncH := if txHash.length ≤ 14 then txHash
-                  else (txHash.toList.take 10 |> String.mk) ++ "…"
+                  else (txHash.toList.take 10 |> String.ofList) ++ "…"
     IO.println s!"  {ts}  [{kind}]  {truncH}  {fromA} → {toAddr}  {formatEth valueWei}  block={block}  status={status}"
   let allEntries ←
     match ← DaemonClient.call "chain.history"
@@ -1204,8 +1204,8 @@ private def formatBaseUnits (n decimals : Nat) : String :=
   if decimals = 0 || frac = 0 then toString whole
   else
     let str := toString frac
-    let pad := String.mk (List.replicate (decimals - str.length) '0')
-    let trimmed := (pad ++ str).dropRightWhile (· = '0')
+    let pad := String.ofList (List.replicate (decimals - str.length) '0')
+    let trimmed := ((pad ++ str).dropEndWhile (· = '0')).toString
     if trimmed.isEmpty then toString whole
     else s!"{whole}.{trimmed}"
 
@@ -1440,7 +1440,7 @@ private def resolveBalancesChain (chain? : Option String) :
 
 private def padRight (s : String) (n : Nat) : String :=
   if s.length ≥ n then s
-  else s ++ String.mk (List.replicate (n - s.length) ' ')
+  else s ++ String.ofList (List.replicate (n - s.length) ' ')
 
 private def runBalances
     (chain? : Option String) (address? : Option String) (json : Bool) :
@@ -1535,7 +1535,7 @@ def run (args : List String) : IO UInt32 := do
           runR1WalletDeploy name chain
   | .walletList =>
       let padName (name : String) : String :=
-        let pad := if name.length < 16 then String.mk (List.replicate (16 - name.length) ' ') else ""
+        let pad := if name.length < 16 then String.ofList (List.replicate (16 - name.length) ' ') else ""
         name ++ pad
       IO.println "TYPE  NAME              ADDRESS                                       LOCKED"
       match ← DaemonClient.call "eoa.list" with
@@ -1944,7 +1944,7 @@ def run (args : List String) : IO UInt32 := do
           IO.eprint s!"   Type the wallet name '{name}' to confirm: "
           let stdin ← IO.getStdin
           let confirm ← stdin.getLine
-          let typed := confirm.trimRight
+          let typed := confirm.trimAsciiEnd.toString
           if typed != name then
             IO.eprintln "aborted: confirmation did not match wallet name."
             return 2
@@ -2164,7 +2164,7 @@ def run (args : List String) : IO UInt32 := do
         let block := getStr "blockNumber"
         let status := getStr "status"
         let truncH := if txHash.length ≤ 14 then txHash
-                      else (txHash.toList.take 10 |> String.mk) ++ "…"
+                      else (txHash.toList.take 10 |> String.ofList) ++ "…"
         IO.println s!"  {ts}  [{kind}]  {truncH}  {fromA} → {toAddr}  {formatEth valueWei}  block={block}  status={status}"
       -- Layer 1: read local journal.
       let allEntries ←
@@ -2393,7 +2393,7 @@ def run (args : List String) : IO UInt32 := do
           IO.println s!"  [{kind}] {nameCol} (no address; deploy first){lockTag}"
           pure 0
       let padName (name : String) : String :=
-        let pad := if name.length < 16 then String.mk (List.replicate (16 - name.length) ' ') else ""
+        let pad := if name.length < 16 then String.ofList (List.replicate (16 - name.length) ' ') else ""
         name ++ pad
       let eoaResult ← DaemonClient.call "eoa.list"
       let tpmResult ← DaemonClient.call "tpm.listSepoliaAddresses"
@@ -2486,7 +2486,7 @@ def run (args : List String) : IO UInt32 := do
       pure 0
   | .listAll =>
       let padName (name : String) : String :=
-        let pad := if name.length < 20 then String.mk (List.replicate (20 - name.length) ' ') else ""
+        let pad := if name.length < 20 then String.ofList (List.replicate (20 - name.length) ' ') else ""
         name ++ pad
       IO.println "Wallets:"
       IO.println ""
@@ -3091,7 +3091,7 @@ def run (args : List String) : IO UInt32 := do
             let ensSuffix := match ens? with
               | some n => s!"  ({n})"
               | none => ""
-            let pad := if label.length < 16 then String.mk (List.replicate (16 - label.length) ' ') else ""
+            let pad := if label.length < 16 then String.ofList (List.replicate (16 - label.length) ' ') else ""
             IO.println s!"{label}{pad} {addr}  [{src}]{ensSuffix}"
           return 0
   | .bookAdd label addr tag? =>
@@ -3223,8 +3223,8 @@ def run (args : List String) : IO UInt32 := do
             | [a] =>
                 if a.startsWith "0x" && a.length > 42 then
                   let chars := a.toList
-                  let addr := String.mk (chars.take 42)
-                  let tail := String.mk (chars.drop 42)
+                  let addr := String.ofList (chars.take 42)
+                  let tail := String.ofList (chars.drop 42)
                   some (addr, tail)
                 else none
             | _ => none

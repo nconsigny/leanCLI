@@ -97,13 +97,13 @@ def configChainRpcUrl? (fileCfg : Option Json) (chain : String) : Option String 
   fileCfg.bind (getField "rpc_urls") |>.bind (getField chain) |>.bind fun entry =>
     match entry with
     | .str url =>
-        let trimmed := url.trim
+        let trimmed := url.trimAscii.toString
         if trimmed.isEmpty then none else some trimmed
     | .obj sub =>
         sub.findSome? fun (k, v) =>
           if k = "url" then
             asString v |>.bind fun s =>
-              let t := s.trim
+              let t := s.trimAscii.toString
               if t.isEmpty then none else some t
           else none
     | _ => none
@@ -146,7 +146,7 @@ def envChainUrl? (chain : String) : IO (Option (String × ChainUrlSource)) := do
   let readTrimmed (key : String) : IO (Option String) := do
     match ← IO.getEnv key with
     | some raw =>
-        let trimmed := raw.trim
+        let trimmed := raw.trimAscii.toString
         if trimmed.isEmpty then pure none else pure (some trimmed)
     | none => pure none
   let envNs ← readTrimmed ("LEANKOHAKU_RPC_URL_" ++ chain.toUpper)
@@ -225,7 +225,7 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
       configString? fileCfg "rpcEndpoint"
     ] with
     | some url =>
-        let trimmed := url.trim
+        let trimmed := url.trimAscii.toString
         if trimmed.isEmpty then
           throw <| IO.userError
             "no rpc_url configured: set LEANKOHAKU_RPC_URL or 'rpc_url' in daemon.json (empty value rejected)"
@@ -282,7 +282,7 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
       envMainnetUrl?
     ] with
     | some url =>
-        let trimmed := url.trim
+        let trimmed := url.trimAscii.toString
         if trimmed.isEmpty then
           throw <| IO.userError
             "no ens_rpc_url configured: set a mainnet RPC via `kohaku network set-rpc-chain mainnet <url>` (or LEANKOHAKU_ENS_RPC_URL / ens_rpc_url for an explicit override; empty value rejected)"
@@ -298,14 +298,14 @@ def resolve : IO LeanKohaku.Daemon.Server.Config := do
         fields.filterMap fun (name, value) =>
           match value with
           | .str url =>
-              let trimmed := url.trim
+              let trimmed := url.trimAscii.toString
               if trimmed.isEmpty then none
               else some (name, endpointFromUrl trimmed none (LeanKohaku.RPC.Outbound.chainNameToId name))
           | .obj sub =>
               match sub.findSome? (fun (k, v) =>
                   if k = "url" then asString v else none) with
               | some url =>
-                  let trimmed := url.trim
+                  let trimmed := url.trimAscii.toString
                   if trimmed.isEmpty then none
                   else
                     let t? := sub.findSome? (fun (k, v) =>

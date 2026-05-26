@@ -95,7 +95,7 @@ def contains (addr : String) : IO Bool := do
       let mut hit := false
       for line in text.splitOn "\n" do
         if hit then break
-        let trimmed := line.trim
+        let trimmed := line.trimAscii.toString
         if trimmed.isEmpty then continue
         match parse trimmed with
         | .ok j =>
@@ -118,7 +118,7 @@ def list : IO (Array Json) := do
       let text ← IO.FS.readFile path
       let mut acc : Array Json := #[]
       for line in text.splitOn "\n" do
-        let trimmed := line.trim
+        let trimmed := line.trimAscii.toString
         if trimmed.isEmpty then continue
         match parse trimmed with
         | .ok j => acc := acc.push j

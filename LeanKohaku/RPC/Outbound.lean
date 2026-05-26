@@ -91,7 +91,7 @@ helper exists for ad-hoc IO sites. No localhost fallback. -/
 def resolveEndpoint : IO Endpoint := do
   let url ← match ← IO.getEnv "LEANKOHAKU_RPC_URL" with
     | some url =>
-        let trimmed := url.trim
+        let trimmed := url.trimAscii.toString
         if trimmed.isEmpty then
           throw <| IO.userError
             "no rpc_url configured: set LEANKOHAKU_RPC_URL (empty value rejected)"
@@ -273,7 +273,7 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
             IO.eprintln s!"leankohaku-daemon: colibri verified-reads disabled ({reason}); falling back to HTTP for {method.asString}. Re-enable with `daemon.colibri.toggle` once the sidecar is back."
             -- fall through
   | none => pure ()
-  if endpoint.url.trim.isEmpty then
+  if endpoint.url.trimAscii.toString.isEmpty then
     return .error "no rpc_url configured: refusing to dial (set LEANKOHAKU_RPC_URL or 'rpc_url' in daemon.json)"
   let host := hostOfUrl endpoint.url
   unless requestAllowed policy endpoint method do

@@ -49,7 +49,7 @@ private def bytesToNat (bytes : ByteArray) : Nat :=
 /-- Decode an ABI return for `decimals()`: a uint8 right-padded to 32 bytes.
     Returns `none` on malformed input. -/
 def decodeDecimalsReturn (hex : String) : Option Nat := do
-  let bytes ← Hex.decode (hex.stripPrefix "0x")
+  let bytes ← Hex.decode (hex.dropPrefix "0x").toString
   if bytes.size < 32 then none
   else
     let n := bytesToNat (take bytes 0 32)
@@ -63,7 +63,7 @@ def decodeDecimalsReturn (hex : String) : Option Nat := do
     both: if the first 32-byte word is exactly `0x20` (offset to data) we
     interpret as `string`; otherwise as `bytes32` with trailing-null trim. -/
 def decodeSymbolReturn (hex : String) : Option String := do
-  let bytes ← Hex.decode (hex.stripPrefix "0x")
+  let bytes ← Hex.decode (hex.dropPrefix "0x").toString
   if bytes.size < 32 then none
   else
     let firstWord := bytesToNat (take bytes 0 32)

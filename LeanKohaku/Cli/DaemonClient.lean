@@ -207,14 +207,14 @@ def renderNotification (params : Json) : IO Unit := do
       IO.println s!"✓ PIN accepted{opLabel}"
   | some "pin-auth-failed" =>
       let reason := (getField "stderr" data >>= asString).getD ""
-      let trimmed := reason.trim
+      let trimmed := reason.trimAscii.toString
       if trimmed.isEmpty then
         IO.println s!"✗ PIN rejected by TPM{opLabel}"
       else
         IO.println s!"✗ PIN rejected by TPM{opLabel}: {trimmed}"
   | some "pin-locked-out" =>
       let reason := (getField "stderr" data >>= asString).getD ""
-      let trimmed := reason.trim
+      let trimmed := reason.trimAscii.toString
       if trimmed.isEmpty then
         IO.println s!"⛔ TPM dictionary-attack lockout — wait for the lockout to elapse{opLabel}"
       else
@@ -257,8 +257,8 @@ def renderNotification (params : Json) : IO Unit := do
         if priceGweiFrac = 0 then s!"{priceGweiWhole} gwei"
         else
           let s := toString priceGweiFrac
-          let pad := String.mk (List.replicate (9 - s.length) '0')
-          let trimmed := (pad ++ s).dropRightWhile (· = '0')
+          let pad := String.ofList (List.replicate (9 - s.length) '0')
+          let trimmed := ((pad ++ s).dropEndWhile (· = '0')).toString
           s!"{priceGweiWhole}.{trimmed} gwei"
       IO.println s!"✓ Mined in block {block} — gasUsed={gasUsed}, effectivePrice={priceStr}, status={status}"
   | some name =>
@@ -302,7 +302,7 @@ partial def processFrames :
     List String → IO (Option (Except RpcError Json))
   | [] => pure none
   | frame :: rest => do
-      match ← consumeFrame frame.trim with
+      match ← consumeFrame frame.trimAscii.toString with
       | some result => pure (some result)
       | none => processFrames rest
 
