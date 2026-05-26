@@ -21,8 +21,11 @@ type Props = {
   title: string;
   /** Optional one-line subtitle (e.g. "from: bbqTest"). */
   subtitle?: string;
-  /** Called when user presses Enter or Esc on the result screen. */
-  onDone: (success: boolean) => void;
+  /** Called when user presses Enter or Esc on the result screen. The
+   *  raw RPC result (when the call succeeded) is forwarded as the second
+   *  arg so callers can extract domain fields like `txHash` / `status`
+   *  without needing to mirror the result back through their own state. */
+  onDone: (success: boolean, result?: unknown) => void;
   /** Optional custom items to show in place of the default "Continue" item
    *  when the RPC succeeded. Each item's `onSelect` fires on Enter. Used by
    *  flows that want a "Deploy now" / "Skip" branching after creation. The
@@ -70,7 +73,9 @@ export default function RpcRunner({
   // ink-text-input in the same tree, so SelectInput is the reliable path.
   useInput((_, key) => {
     if (state.kind === "running") return;
-    if (key.escape) onDone(state.kind === "ok");
+    if (key.escape) {
+      onDone(state.kind === "ok", state.kind === "ok" ? state.result : undefined);
+    }
   });
 
   return (
@@ -128,7 +133,12 @@ export default function RpcRunner({
               ) : (
                 <Select
                   items={[{ label: "Continue", value: "continue" }]}
-                  onSelect={() => onDone(state.kind === "ok")}
+                  onSelect={() =>
+                    onDone(
+                      state.kind === "ok",
+                      state.kind === "ok" ? state.result : undefined,
+                    )
+                  }
                 />
               )}
             </Box>

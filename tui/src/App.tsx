@@ -31,7 +31,11 @@ import ManageWalletScreen from "./screens/ManageWalletScreen.js";
 import ImportEoaFlow from "./screens/ImportEoaFlow.js";
 import CreateWalletPicker, { CreateKind } from "./screens/CreateWalletPicker.js";
 import DecodeIntentFlow from "./screens/DecodeIntentFlow.js";
-import LlmChatFlow from "./screens/LlmChatFlow.js";
+import LlmChatFlow, {
+  type Phase as ChatPhase,
+  type Turn as ChatTurn,
+  type WalletBalance as ChatWalletBalance,
+} from "./screens/LlmChatFlow.js";
 import HistoryFlow from "./screens/HistoryFlow.js";
 import MasterUnlockGate from "./screens/MasterUnlockGate.js";
 import MasterInitGate from "./screens/MasterInitGate.js";
@@ -132,6 +136,52 @@ type Screen =
       wallet?: { kind: "eoa" | "tpm"; name: string; address: string };
     };
 
+/** Turn the raw RPC result from a sign+broadcast into a single in-chat
+ *  system turn. Success rows carry the tx hash and (when present) mined
+ *  status / block number; cancellation produces a dim notice; we never
+ *  fabricate fields when the result blob is shaped unexpectedly — the
+ *  fallback says exactly that. Display-only — never gates further action. */
+function broadcastResultToTurn(
+  success: boolean,
+  result: unknown,
+): ChatTurn | null {
+  if (!success) {
+    return {
+      kind: "system",
+      tone: "info",
+      text: "(send-raw cancelled — no transaction was broadcast)",
+    };
+  }
+  const r =
+    result && typeof result === "object" ? (result as Record<string, unknown>) : {};
+  const txHash = typeof r.txHash === "string" ? r.txHash : undefined;
+  const status = typeof r.status === "string" ? r.status : undefined;
+  const blockNumber =
+    typeof r.blockNumber === "number"
+      ? r.blockNumber
+      : typeof r.blockNumber === "string"
+        ? r.blockNumber
+        : undefined;
+  if (!txHash) {
+    // Some surfaces (sphincs UserOps in particular) return a different
+    // shape; we still want SOME confirmation rendered rather than a
+    // silent no-op, so fall through to a generic ok marker.
+    return {
+      kind: "system",
+      tone: "ok",
+      text: "✓ broadcast complete (no txHash in result)",
+    };
+  }
+  const parts: string[] = [`✓ broadcast ${txHash}`];
+  if (blockNumber !== undefined) parts.push(`block ${blockNumber}`);
+  if (status !== undefined) parts.push(`status ${status}`);
+  return {
+    kind: "system",
+    tone: status === "success" ? "ok" : status === "reverted" ? "err" : "info",
+    text: parts.join(" · "),
+  };
+}
+
 /** Stack-based screen navigator. Push on navigate, pop on Esc/back; the
  *  bottom of the stack is the main menu so Quit always exits the app. */
 export default function App() {
@@ -170,6 +220,19 @@ export default function App() {
   // with the daemon. The bump is unconditional (we don't know whether the
   // user actually unlocked or Esc'd out); a redundant refetch is cheap.
   const [masterStatusKey, setMasterStatusKey] = useState(0);
+
+  // `LlmChatFlow` mounts only while `top.kind === "llm-chat"`. Approving a
+  // drafted tx pushes `send-raw` on top, which unmounts the chat — and
+  // without lifting its state the conversation, sessionKey, balances etc.
+  // are all destroyed on the round-trip. We hold them here so the chat
+  // simply remounts with everything intact when SendRawFlow pops back.
+  // The `chatExitKey` is a fresh-mount nonce that lets us preserve state
+  // across send-raw round-trips but discard it on full Esc-out — bumping
+  // it forces React to remount LlmChatFlow with the (just-reset) initial
+  // state instead of re-rendering with the same instance.
+  const [chatPhase, setChatPhase] = useState<ChatPhase>({ kind: "boot" });
+  const [chatWallets, setChatWallets] = useState<ChatWalletBalance[]>([]);
+  const [chatExitKey, setChatExitKey] = useState(0);
 
   // Defer the Colibri status probe until BootGate finishes. This used to
   // run unconditionally at mount, which triggered daemon auto-spawn
@@ -546,7 +609,27 @@ export default function App() {
     case "llm-chat":
       return (
         <LlmChatFlow
-          onDone={pop}
+          key={chatExitKey}
+          phase={chatPhase}
+          setPhase={setChatPhase}
+          wallets={chatWallets}
+          setWallets={setChatWallets}
+          onDone={(_success) => {
+            // Full exit from the chat — drop conversation state so the
+            // next `/le-chat` entry starts at boot with a fresh
+            // sessionKey. The send-raw round-trip uses `pop()` too but
+            // routes through the dedicated `send-raw` case below, which
+            // does NOT reset; only THIS handler (the chat's own Esc/
+            // back path) does.
+            setChatPhase({ kind: "boot" });
+            setChatWallets([]);
+            // Bump the key so React remounts a fresh LlmChatFlow on the
+            // next entry; otherwise the boot useEffect (which only fires
+            // on `phase.kind === "boot"`) might race with the same
+            // instance still holding stale internal child state.
+            setChatExitKey((k) => k + 1);
+            pop();
+          }}
           onApprove={(tx, chainId, wallet) =>
             push({ kind: "send-raw", tx, chainId, wallet })
           }
@@ -575,7 +658,25 @@ export default function App() {
           tx={top.tx}
           chainId={top.chainId}
           wallet={top.wallet}
-          onDone={finishAction}
+          onDone={(success, result) => {
+            // If the user reached send-raw FROM the chat (llm-chat sits
+            // underneath us on the stack), surface the broadcast outcome
+            // back into the conversation as a single system turn. Lets
+            // the user "see the confirmation inside the chat" rather
+            // than just bouncing back to an unchanged conversation
+            // — which would leave them wondering whether the tx
+            // actually went out.
+            const fromChat = stack.some((s) => s.kind === "llm-chat");
+            if (fromChat) {
+              const turn = broadcastResultToTurn(success, result);
+              if (turn) {
+                setChatPhase((p) =>
+                  p.kind === "chat" ? { ...p, turns: [...p.turns, turn] } : p,
+                );
+              }
+            }
+            finishAction();
+          }}
         />
       );
     case "decode-typed-data":

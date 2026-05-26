@@ -37,7 +37,12 @@ type Props = {
    *  flow skips the picker, prompts for the TPM PIN once, and routes
    *  through `r1.sendRawSepolia` with the PIN in the request params. */
   wallet?: SendRawWallet;
-  onDone: (success: boolean) => void;
+  /** Called when the flow ends. `success=true` only fires after the user
+   *  dismisses the post-broadcast result screen; in that case `result`
+   *  carries the raw RPC payload (`eoa.send` / `r1.sendRawSepolia` /
+   *  `sphincs.account.send`) so callers can extract `txHash` / `status`
+   *  for chat-side confirmation rendering. */
+  onDone: (success: boolean, result?: unknown) => void;
 };
 
 /** What signing path the daemon dispatches to in the final phase.

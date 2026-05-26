@@ -33,6 +33,16 @@ import { formatEth, hexToBigInt } from "../format.js";
  */
 
 type Props = {
+  /** Lifted chat state. Owned by `App.tsx` so it survives the round-trip
+   *  through `SendRawFlow` (which unmounts this component while it is
+   *  on top of the navigation stack). `App.tsx` resets the pair when
+   *  the user Esc's out of the chat, so a fresh `/le-chat` entry starts
+   *  clean; preserving it across the send-raw round-trip is the whole
+   *  point of the lift. */
+  phase: Phase;
+  setPhase: React.Dispatch<React.SetStateAction<Phase>>;
+  wallets: WalletBalance[];
+  setWallets: React.Dispatch<React.SetStateAction<WalletBalance[]>>;
   onDone: (s: boolean) => void;
   onApprove?: (
     tx: { to: string; value: string; data: string; rationale?: string; canonical?: string },
@@ -167,10 +177,10 @@ type DispatchState =
   | { kind: "createHandedOff"; walletKind: "eoa" | "r1"; label?: string }
   | { kind: "error"; message: string };
 
-type Turn =
+export type Turn =
   | { kind: "user"; text: string }
   | { kind: "assistant"; status: "pending" | "done"; result?: DraftResponse; error?: string; dispatch?: DispatchState }
-  | { kind: "system"; text: string; tone?: "info" | "warn" | "err" };
+  | { kind: "system"; text: string; tone?: "info" | "warn" | "err" | "ok" };
 
 /** A configured per-chain endpoint, as returned by network.show. We
  *  display every chain the user already has an RPC for so they can
@@ -184,7 +194,7 @@ type ConfiguredChain = {
 
 /** Compact wallet+balance card shown in the chat header so the user
  *  has running context (top 5 wallets) without leaving the screen. */
-type WalletBalance = {
+export type WalletBalance = {
   kind: "eoa" | "tpm";
   name: string;
   address: string;
@@ -247,7 +257,7 @@ function buildChatHistory(turns: Turn[]): { role: "user" | "assistant"; content:
   return out.slice(-TUI_HISTORY_CAP);
 }
 
-type Phase =
+export type Phase =
   | { kind: "boot" } // initial ensureUp + chains fetch
   | { kind: "needChain"; chains: ConfiguredChain[]; modelName?: string }
   | {
@@ -282,11 +292,16 @@ function newSessionKey(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
 }
 
-export default function LlmChatFlow({ onDone, onApprove, onCreateWallet, onOpenHistory }: Props) {
-  const [phase, setPhase] = useState<Phase>({ kind: "boot" });
-  // Top-5 wallet balances shown in the header. Fetched lazily — chat
-  // is usable before this returns. Empty list = "we haven't tried yet".
-  const [wallets, setWallets] = useState<WalletBalance[]>([]);
+export default function LlmChatFlow({
+  phase,
+  setPhase,
+  wallets,
+  setWallets,
+  onDone,
+  onApprove,
+  onCreateWallet,
+  onOpenHistory,
+}: Props) {
 
   // Boot: ensureUp + fetch configured chains from the daemon.
   useEffect(() => {
@@ -1121,7 +1136,10 @@ function TurnRow({
   }
   if (turn.kind === "system") {
     const color =
-      turn.tone === "err" ? theme.err : turn.tone === "warn" ? theme.warn : theme.dim;
+      turn.tone === "err"  ? theme.err
+      : turn.tone === "warn" ? theme.warn
+      : turn.tone === "ok"   ? theme.ok
+      : theme.dim;
     return (
       <Box marginBottom={1}>
         <Text color={color}>· {turn.text}</Text>
