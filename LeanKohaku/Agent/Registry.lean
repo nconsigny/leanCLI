@@ -8,6 +8,7 @@ import LeanKohaku.Agent.ToolDefs.TrustedRegistry
 import LeanKohaku.Agent.ToolDefs.SlotLookup
 import LeanKohaku.Agent.ToolDefs.Tokens
 import LeanKohaku.Agent.ToolDefs.UniV3Swap
+import LeanKohaku.Agent.ToolDefs.Aave
 import LeanKohaku.Agent.ToolDefs.Numeric
 
 /-!
@@ -59,6 +60,15 @@ def default : ToolRegistry := [
   -- plan): forwards to daemon RPC `swap.prepareUniswapV3` so the LLM
   -- never recomputes a quote, allowance, or swap calldata by hand.
   UniV3Swap.prepareUniswapV3Swap,
+  -- Aave V3 Pool actions. Five typed tools (supply / withdraw / borrow
+  -- / repay / setCollateral), all forwarded to daemon RPC `aave.prepare`
+  -- so the daemon owns allowance reads + ABI encoding and the LLM only
+  -- chooses a tool + fills its arguments.
+  Aave.prepareAaveSupply,
+  Aave.prepareAaveWithdraw,
+  Aave.prepareAaveBorrow,
+  Aave.prepareAaveRepay,
+  Aave.prepareAaveSetCollateral,
   -- Pure numeric utilities. No IO, no daemon round-trip — they exist
   -- so the model has somewhere to hand off hex/decimal conversions
   -- and basis-point slippage math instead of doing prose arithmetic.

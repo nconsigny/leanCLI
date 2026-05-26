@@ -18,6 +18,7 @@ import LeanKohaku.Colibri.Bridge
 import LeanKohaku.Colibri.Persistent
 import LeanKohaku.Daemon.Preflight
 import LeanKohaku.Daemon.TokenMeta
+import LeanKohaku.Daemon.EnsNames
 import LeanKohaku.LlmAgent.Bridge
 import LeanKohaku.LlmAgent.DirectSynth
 import LeanKohaku.LlmAgent.IntentParser
@@ -597,6 +598,51 @@ private def paramNatD (params : Json) (key : String) (default : Nat) : Nat :=
   match getField key params >>= asNat with
   | some value => value
   | none => default
+
+/-- Resolve the account-kind hint for an address by scanning the daemon's
+    local stores. Used by prepare-style RPCs to decide whether to collapse
+    a multi-leg result into a single `executeBatch` call.
+
+    Scan order — first hit wins:
+    1. TPM2 R1 deployments at `.leankohaku/keystore/tpm2/<name>/r1-account-address.txt`
+    2. SPHINCs- hybrid records' `smartAccountAddress`
+    3. (no EOA scan — `.eoa` is the default fall-through anyway)
+
+    Address comparison is case-insensitive on the hex body. Empty / missing
+    files are skipped without erroring; this is a best-effort hint, so any
+    IO failure quietly falls through to `.eoa` rather than blocking the
+    surrounding RPC.
+
+    Caller note: when the JSON-RPC params already carry an explicit
+    `accountKind` the caller wins — this helper is only invoked as the
+    fallback. -/
+private def discoverAccountKind (addr : String) :
+    IO LeanKohaku.Wallet.ExecuteBatch.AccountKindHint := do
+  let target := addr.toLower
+  let tpmStateDir : System.FilePath := ".leankohaku/keystore/tpm2"
+  try
+    let tpmNames ← listSepoliaKeys
+    for n in tpmNames do
+      let addrFile := tpmStateDir / n / "r1-account-address.txt"
+      if ← addrFile.pathExists then
+        let raw ← (try IO.FS.readFile addrFile catch _ => pure "")
+        let trimmed := raw.trimAscii.toString.toLower
+        if !trimmed.isEmpty && trimmed = target then
+          return LeanKohaku.Wallet.ExecuteBatch.AccountKindHint.r1Smart
+  catch _ => pure ()
+  try
+    let sphincsNames ← LeanKohaku.Wallet.SphincsHybridStore.listSlotNames
+    for n in sphincsNames do
+      match ← LeanKohaku.Wallet.SphincsHybridStore.readRecord n with
+      | .error _ => pure ()
+      | .ok r =>
+          match r.smartAccountAddress with
+          | some a =>
+              if a.toLower = target then
+                return LeanKohaku.Wallet.ExecuteBatch.AccountKindHint.sphincsHybrid
+          | none => pure ()
+  catch _ => pure ()
+  return LeanKohaku.Wallet.ExecuteBatch.AccountKindHint.eoa
 
 private def mnemonicFromPhrase (phrase : String) : LeanKohaku.Wallet.Mnemonic.Mnemonic :=
   { words := phrase.splitOn " " |>.filter (fun word => word != "") }
@@ -3529,18 +3575,23 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       -- Optional `accountKind` hint. When "r1Smart" / "sphincsHybrid"
       -- the daemon collapses a `needs_approval` two-leg result into a
       -- single `executeBatch` call against the sender (the smart wallet
-      -- itself). Defaults to "eoa" — keeps the EOA-shape pass-through
-      -- for plain accounts and external callers.
-      let accountKind : LeanKohaku.Wallet.ExecuteBatch.AccountKindHint :=
-        match getField "accountKind" req.params >>= asString with
-        | some s =>
-            (LeanKohaku.Wallet.ExecuteBatch.AccountKindHint.parse? s).getD
-              LeanKohaku.Wallet.ExecuteBatch.AccountKindHint.eoa
-        | none => LeanKohaku.Wallet.ExecuteBatch.AccountKindHint.eoa
+      -- itself). If absent, fall back to `discoverAccountKind` which
+      -- scans the local R1 + sphincsHybrid stores by address — that
+      -- way the LLM doesn't have to know its own account kind. Both
+      -- explicit kind and the discovered kind quietly fall through to
+      -- `.eoa` when nothing matches, so external callers and plain
+      -- EOAs still get the sequential two-leg shape.
       match paramString req.params "action",
             paramString req.params "sender",
             paramString req.params "asset" with
       | .ok action, .ok sender, .ok asset =>
+          let accountKind : LeanKohaku.Wallet.ExecuteBatch.AccountKindHint ←
+            match getField "accountKind" req.params >>= asString with
+            | some s =>
+                pure <|
+                  (LeanKohaku.Wallet.ExecuteBatch.AccountKindHint.parse? s).getD
+                    LeanKohaku.Wallet.ExecuteBatch.AccountKindHint.eoa
+            | none => discoverAccountKind sender
           let chainName : Option String :=
             if chainIdParam = 1 then some "mainnet"
             else if chainIdParam = 11155111 then some "sepolia"
@@ -6416,11 +6467,19 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                 LeanKohaku.Daemon.TokenMeta.toJson m)
           | none => pure ()
       let tokenMeta : Json := .obj tokenMetaPairs
+      -- ENS namehash → name session cache. Empty in the MVP — the
+      -- shape is in place so the sidecar's `ensName` formatter has
+      -- something to consult; population from observed register/renew
+      -- calls + chain.ensReverseLookup is a follow-up.
+      let ensNamesJson : Json :=
+        LeanKohaku.Daemon.EnsNames.forDecodeRequest
+          LeanKohaku.Daemon.EnsNames.emptyCache chainIdParam toParam dataParam
       let augmented : Json :=
         match req.params with
         | .obj fields =>
-            .obj (fields.filter (fun (k, _) => k != "tokenMetadata")
-              ++ #[("tokenMetadata", tokenMeta)])
+            .obj (fields.filter (fun (k, _) =>
+                k != "tokenMetadata" ∧ k != "ensNames")
+              ++ #[("tokenMetadata", tokenMeta), ("ensNames", ensNamesJson)])
         | other => other
       let resp ← LeanKohaku.Clearsign.Bridge.call
         { method := "tx.decodeIntent", params := augmented, id := 0 }
