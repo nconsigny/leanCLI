@@ -1,0 +1,171 @@
+{
+  "$schema": "../../specs/erc7730-v2.schema.json",
+  "context": {
+    "contract": {
+      "deployments": [
+        {
+          "chainId": 1,
+          "address": "0xe7b9c7c9cA85340b8c06fb805f7775e3015108dB"
+        }
+      ]
+    }
+  },
+  "metadata": {
+    "owner": "f(x) Protocol \u2014 ezETH market",
+    "info": {
+      "url": "https://docs.aladdin.club/fx-protocol/"
+    },
+    "constants": {
+      "baseToken": "0xbf5495Efe5DB9ce00f80364C8B423567e58d2110",
+      "fToken": "0x085780639CC2cACd35E474e71f4d000e2405d8f6",
+      "xToken": "0x085780639CC2cACd35E474e71f4d000e2405d8f6",
+      "baseTicker": "ezETH",
+      "fTicker": "fxUSD",
+      "xTicker": "xezETH"
+    }
+  },
+  "display": {
+    "formats": {
+      "mintFToken(uint256 baseIn,address recipient,uint256 minFTokenMinted)": {
+        "intent": "Mint fxUSD with ezETH",
+        "fields": [
+          {
+            "label": "Collateral in",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.baseToken"
+            },
+            "path": "#.baseIn",
+            "visible": "always"
+          },
+          {
+            "label": "fxUSD recipient",
+            "format": "addressName",
+            "params": {
+              "types": [
+                "eoa",
+                "wallet"
+              ]
+            },
+            "path": "#.recipient",
+            "visible": "always"
+          },
+          {
+            "label": "Min fxUSD out",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.fToken"
+            },
+            "path": "#.minFTokenMinted",
+            "visible": "always"
+          }
+        ]
+      },
+      "mintXToken(uint256 baseIn,address recipient,uint256 minXTokenMinted)": {
+        "intent": "Mint xezETH (leveraged ETH) with ezETH",
+        "fields": [
+          {
+            "label": "Collateral in",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.baseToken"
+            },
+            "path": "#.baseIn",
+            "visible": "always"
+          },
+          {
+            "label": "xezETH recipient",
+            "format": "addressName",
+            "params": {
+              "types": [
+                "eoa",
+                "wallet"
+              ]
+            },
+            "path": "#.recipient",
+            "visible": "always"
+          },
+          {
+            "label": "Min xezETH out",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.xToken"
+            },
+            "path": "#.minXTokenMinted",
+            "visible": "always"
+          }
+        ]
+      },
+      "redeemFToken(uint256 fTokenIn,address recipient,uint256 minBaseOut)": {
+        "intent": "Redeem fxUSD for ezETH",
+        "fields": [
+          {
+            "label": "fxUSD in",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.fToken"
+            },
+            "path": "#.fTokenIn",
+            "visible": "always"
+          },
+          {
+            "label": "Collateral recipient",
+            "format": "addressName",
+            "params": {
+              "types": [
+                "eoa",
+                "wallet"
+              ]
+            },
+            "path": "#.recipient",
+            "visible": "always"
+          },
+          {
+            "label": "Min ezETH out",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.baseToken"
+            },
+            "path": "#.minBaseOut",
+            "visible": "always"
+          }
+        ]
+      },
+      "redeemXToken(uint256 xTokenIn,address recipient,uint256 minBaseOut)": {
+        "intent": "Redeem xezETH for ezETH",
+        "fields": [
+          {
+            "label": "xezETH in",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.xToken"
+            },
+            "path": "#.xTokenIn",
+            "visible": "always"
+          },
+          {
+            "label": "Collateral recipient",
+            "format": "addressName",
+            "params": {
+              "types": [
+                "eoa",
+                "wallet"
+              ]
+            },
+            "path": "#.recipient",
+            "visible": "always"
+          },
+          {
+            "label": "Min ezETH out",
+            "format": "tokenAmount",
+            "params": {
+              "token": "$.metadata.constants.baseToken"
+            },
+            "path": "#.minBaseOut",
+            "visible": "always"
+          }
+        ]
+      }
+    }
+  }
+}

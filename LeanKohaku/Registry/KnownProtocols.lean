@@ -151,19 +151,47 @@ def tornadoCashDefaultFor : ChainId → Option String
   | .mainnet => some tornadoCashEth1Mainnet
   | .sepolia => none
 
-/-! ## fxUSD — wstETH branch (the primary user-facing market). Other
-    branches (sfrxETH, weETH, etc.) will be added when drafting ships. -/
+/-! ## fxUSD — multi-branch markets. Each collateral branch has its own
+    `FxMarketV2` proxy at a different address. The chat path can route
+    either to a default branch (wstETH) or to a named branch when the
+    user mentions a specific collateral.
 
-def fxUsdTokenMainnet : String := "0x085780639cc2cacd35e474e71f4d000e2405d8f6"
-def fxUsdWstethMarketMainnet : String := "0xad9a0e7c08bc9f747df97a3e7e7f620632cb6155"
-def fxUsdWstethTreasuryMainnet : String := "0xed803540037b0ae069c93420f89cd653b6e3df1f"
+    Source: AladdinDAO/aladdin-v3-contracts/deployments/mainnet/Fx.FxUSD.json. -/
+
+def fxUsdTokenMainnet           : String := "0x085780639cc2cacd35e474e71f4d000e2405d8f6"
+def fxUsdWstethMarketMainnet    : String := "0xad9a0e7c08bc9f747df97a3e7e7f620632cb6155"
+def fxUsdWstethTreasuryMainnet  : String := "0xed803540037b0ae069c93420f89cd653b6e3df1f"
+def fxUsdSfrxethMarketMainnet   : String := "0x714b853b3ba73e439c652cfe79660f329e6ebb42"
+def fxUsdSfrxethTreasuryMainnet : String := "0xcfeeff214b256063110d3236ea12db49d2df2359"
+def fxUsdWeethMarketMainnet     : String := "0x267c6a96db7422faa60aa7198ffeeec4169cd65f"
+def fxUsdWeethTreasuryMainnet   : String := "0x781ba968d5cc0b40eb592d5c8a9a3a4000063885"
+def fxUsdEzethMarketMainnet     : String := "0xe7b9c7c9ca85340b8c06fb805f7775e3015108db"
+def fxUsdEzethTreasuryMainnet   : String := "0xc0c3700a8a5b5e6783c50ea93ce47c337be3e73d"
 
 def fxUsdTokenFor : ChainId → Option String
   | .mainnet => some fxUsdTokenMainnet
   | .sepolia => none
 
+/-- Default fxUSD market when no collateral branch is specified — the
+wstETH market is the primary user-facing entry point. -/
 def fxUsdMarketFor : ChainId → Option String
   | .mainnet => some fxUsdWstethMarketMainnet
+  | .sepolia => none
+
+def fxUsdMarketFor_wstETH : ChainId → Option String
+  | .mainnet => some fxUsdWstethMarketMainnet
+  | .sepolia => none
+
+def fxUsdMarketFor_sfrxETH : ChainId → Option String
+  | .mainnet => some fxUsdSfrxethMarketMainnet
+  | .sepolia => none
+
+def fxUsdMarketFor_weETH : ChainId → Option String
+  | .mainnet => some fxUsdWeethMarketMainnet
+  | .sepolia => none
+
+def fxUsdMarketFor_ezETH : ChainId → Option String
+  | .mainnet => some fxUsdEzethMarketMainnet
   | .sepolia => none
 
 /-! ## Name resolution -/
@@ -228,9 +256,17 @@ def resolve (name : String) (chain : ChainId) : Option String :=
   -- Tornado Cash
   | "tornado" | "tornado cash" | "tornadocash"
       => tornadoCashDefaultFor chain
-  -- fxUSD
+  -- fxUSD — bare slug or "wstETH" branch (default).
   | "fxusd" | "fx usd" | "f(x)" | "fx protocol" | "fxusd market"
-      => fxUsdMarketFor chain
+  | "fxusd wsteth" | "fx usd wsteth"
+      => fxUsdMarketFor_wstETH chain
+  -- fxUSD — non-default collateral branches.
+  | "fxusd sfrxeth" | "fx usd sfrxeth" | "f(x) sfrxeth"
+      => fxUsdMarketFor_sfrxETH chain
+  | "fxusd weeth"   | "fx usd weeth"   | "f(x) weeth"
+      => fxUsdMarketFor_weETH chain
+  | "fxusd ezeth"   | "fx usd ezeth"   | "f(x) ezeth"
+      => fxUsdMarketFor_ezETH chain
   | "fxusd token"
       => fxUsdTokenFor chain
   | _ => none
@@ -255,6 +291,9 @@ example : resolve "privacy pool"  .sepolia = some privacyPoolEntrypointSepolia :
 example : resolve "tornado cash"  .mainnet = some tornadoCashEth1Mainnet := by native_decide
 example : resolve "fxUSD"         .mainnet = some fxUsdWstethMarketMainnet := by native_decide
 example : resolve "fx protocol"   .mainnet = some fxUsdWstethMarketMainnet := by native_decide
+example : resolve "fxUSD sfrxETH" .mainnet = some fxUsdSfrxethMarketMainnet := by native_decide
+example : resolve "fxUSD weETH"   .mainnet = some fxUsdWeethMarketMainnet := by native_decide
+example : resolve "fxUSD ezETH"   .mainnet = some fxUsdEzethMarketMainnet := by native_decide
 example : resolve "unknown"       .mainnet = none := by native_decide
 
 end LeanKohaku.Registry.KnownProtocols
