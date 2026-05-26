@@ -47,12 +47,25 @@ const PROTOCOL_VERSION = "0.0.1";
 // callers can override per-request via params.consensusRpc.
 // Default beacon endpoints match upstream helios @ 0.11.1 (see helios
 // issue #710: lightclientdata.org died, a16z migrated everything to
-// operationsolarstorm.org). The verifiableApi variant is what they
-// actually run; the plain consensus RPC at the same domain is fine too.
+// operationsolarstorm.org). Per-chain notes:
+//
+//  - mainnet: operationsolarstorm.org's light-client API is the only
+//    public one verified to be helios-compatible (publicnode + Ankr
+//    Premium both return /light_client/updates payloads that helios
+//    rejects with `InvalidPeriod`). Helios's baked-in default checkpoint
+//    is still served here, so no auto-fetch is needed and we explicitly
+//    do NOT pass one (a freshly-finalized root can sit mid-period and
+//    force the first update to skip, which itself triggers InvalidPeriod).
+//
+//  - sepolia: OSS does not host Sepolia, but publicnode's Sepolia beacon
+//    does serve a working light-client API. Helios's baked-in Sepolia
+//    checkpoint (0x4065...) has been pruned by every public beacon we
+//    tried (HTTP 404 "Sync committee branch ... not found"), so we MUST
+//    pass a fresh checkpoint. autoCheckpoint=true triggers a finalized-
+//    header lookup via the supplied consensusRpc before client init.
 const CHAIN_TO_NET = new Map([
-  [1,        { network: "mainnet",  kind: "ethereum", defaultConsensusRpc: "https://ethereum.operationsolarstorm.org" }],
-  [11155111, { network: "sepolia",  kind: "ethereum", defaultConsensusRpc: "https://sepolia.operationsolarstorm.org" }],
-  [17000,    { network: "holesky",  kind: "ethereum", defaultConsensusRpc: null }],
+  [1,        { network: "mainnet", kind: "ethereum", defaultConsensusRpc: "https://ethereum.operationsolarstorm.org",            autoCheckpoint: false }],
+  [11155111, { network: "sepolia", kind: "ethereum", defaultConsensusRpc: "https://ethereum-sepolia-beacon-api.publicnode.com", autoCheckpoint: true  }],
 ]);
 
 function jsonReplacer(_k, v) {
@@ -114,13 +127,18 @@ async function getClient(chainId, executionRpc, consensusRpcOverride, checkpoint
   let entry = clients.get(key);
   if (entry) return entry;
 
-  // Checkpoint policy: pass-through only when the caller supplied one.
-  // Auto-fetching the finalized root (what we tried first) backfires —
-  // helios's verify_update rejects update sequences whose period jumps
-  // > +1 from the stored period, and a freshly-finalized root can sit
-  // mid-period, forcing such a jump on the first update. Helios's own
-  // built-in checkpoint (baked into the release) is the safe default.
-  const checkpoint = checkpointOverride;
+  // Checkpoint policy:
+  //  - Caller-supplied wins.
+  //  - Otherwise, use the chain's autoCheckpoint flag: true means fetch
+  //    the current finalized root from the consensus RPC (required when
+  //    helios's baked-in checkpoint has been pruned by the beacon, which
+  //    is what happens on Sepolia). false leaves it unset so helios
+  //    falls back to its release-time default — preferred for mainnet,
+  //    where the default is still served and a fresh finalized root can
+  //    race the chain advancing into the next sync-committee period
+  //    between bootstrap and the first update.
+  const checkpoint = checkpointOverride
+    ?? (meta.autoCheckpoint ? await fetchFinalizedCheckpoint(consensusRpc) : undefined);
 
   // dbType: "config" — the default "localstorage" only works in browsers
   // and throws under Node. "config" tells helios to persist checkpoints
