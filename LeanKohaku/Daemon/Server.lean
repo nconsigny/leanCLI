@@ -5758,12 +5758,21 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           -- can pin the model's tool calls to a single chain. `chainId`
           -- is preserved for legacy sidecar callers that look only at
           -- the historical field name; the two MUST agree.
+          -- Forward the TUI's opaque per-chat-open `sessionKey` to the
+          -- agent bridge so the agentd's sticky-session cache is keyed
+          -- by `(chainId, sessionKey)` instead of `chainId` alone. An
+          -- absent/empty key collapses to the legacy
+          -- single-sticky-session-per-chainId behavior — backward
+          -- compatible for callers that have not yet plumbed it.
+          -- Trust: opaque bookkeeping, never gates a signing decision.
+          let sessionKey : String := paramStringD req.params "sessionKey" ""
           let llmReq : Json :=
             .obj <| #[
               ("prompt",        .str prompt),
               ("seed",          regexJson),
               ("chainId",       .num (Int.ofNat chainId)),
               ("activeChainId", .num (Int.ofNat chainId)),
+              ("sessionKey",    .str sessionKey),
               ("chainContext",  chainContextJson),
               ("walletContext", walletContextJson)
             ] ++ historyField ++ (match skillBody? with
@@ -5881,6 +5890,26 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
           pure (.error msg)
       | _, none =>
           pure <| .error { code := -32602, message := "chat.draft: chainId (Nat) required", data := none }
+  | "chat.rolloverSession" =>
+      -- Explicit rotation of the agentd's sticky-chat cache entry for
+      -- `(chainId, sessionKey)`. Wired to the TUI's `/clear` command:
+      -- the TUI fires this best-effort, then mints a new sessionKey and
+      -- clears its visible turns. The agentd closes the underlying
+      -- session id (running `runExtraction` if the message floor is
+      -- met) and drops the cache entry.
+      --
+      -- Idempotent: a missing entry succeeds with `closed:false`.
+      -- Trust: this RPC produces no calldata and never gates a signing
+      -- decision; ConfirmGate stays the trust anchor.
+      match getField "chainId" req.params >>= asNat with
+      | none =>
+          pure <| .error { code := -32602
+                         , message := "chat.rolloverSession: chainId (Nat) required"
+                         , data := none }
+      | some chainId =>
+          let sessionKey : String := paramStringD req.params "sessionKey" ""
+          let resp ← LeanKohaku.LlmAgent.Bridge.rolloverChatSession chainId sessionKey
+          pure <| .ok <| LeanKohaku.LlmAgent.Bridge.responseToJson resp
   | "llm.parseIntent" =>
       -- Forward the prompt + regex seed + chainId to the LLM sidecar,
       -- which returns the raw model output (a JSON string) unchanged.

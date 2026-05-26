@@ -35,21 +35,39 @@ Trust contract (unchanged from Phase 0):
 Single-flight per session: a second concurrent `run_turn` for the
 same session id returns `kind:"busy"` rather than racing.
 
-## Sticky chat sessions (Phase 1d)
+## Sticky chat sessions
 
-`acquire_chat_session` returns a session id keyed by `chainId`. The
-agentd remembers `(chainId, session_id, estimatedTokens)` for the
-process lifetime; the wallet daemon's `chat.draft` path asks for the
-sticky id once per turn and the same SQLite-backed session
-accumulates messages across many user turns. Once a session crosses
-`chatTokenBudget` (≈12k tokens, measured by a `chars/4` heuristic),
-the next `acquire_chat_session` call closes the stale session — which
-triggers the standard memory-extraction path inside `opCloseSession`
-— and hands out a fresh session id. This is the mechanism by which
-`MEMORY.md` actually grows: a one-shot `create_session` / `run_turn` /
-walk-away cycle never accumulates enough history to clear
-`autoExtractMinMessages`, so prior to Phase 1d every chat turn was
-extraction-skipped.
+`acquire_chat_session` returns a session id keyed by `(chainId, sessionKey)`.
+`sessionKey` is an opaque caller-supplied string (the TUI uses a
+per-chat-open UUID; callers that omit it pass `""`, which collapses to
+the legacy single-sticky-session-per-chainId behavior — backward
+compatible). The agentd remembers
+`((chainId, sessionKey), session_id, estimatedTokens)` for the process
+lifetime; the wallet daemon's `chat.draft` path asks for the sticky id
+once per turn and the same SQLite-backed session accumulates messages
+across many user turns. Once a session crosses `chatTokenBudget` (≈12k
+tokens, measured by a `chars/4` heuristic), the next
+`acquire_chat_session` call closes the stale session — which triggers
+the standard memory-extraction path inside `opCloseSession` — and
+hands out a fresh session id.
+
+Two ways the cache rotates out from under a sticky session:
+
+* **Automatic per-open** — the TUI generates a fresh `sessionKey` each
+  time the chat screen opens. A previous session keyed by the old
+  `sessionKey` is left in the cache until token-budget rollover; the
+  new screen gets a fresh session immediately. (Practical upshot: a
+  failed swap turn never pollutes the next chat open.)
+* **Explicit `/clear`** — the TUI's `/clear` command issues
+  `rollover_chat_session({chainId, sessionKey})`, which closes the
+  cached session id (running `runExtraction` for non-incognito
+  sessions) and removes the cache entry. The TUI then mints a NEW
+  `sessionKey` and continues.
+
+Sticky sessions are also how `MEMORY.md` actually grows: a one-shot
+`create_session` / `run_turn` / walk-away cycle never accumulates
+enough history to clear `autoExtractMinMessages`, so without sticky
+sessions every chat turn was extraction-skipped.
 
 Incognito sessions bypass the sticky cache entirely (see the
 `incognito` branch in `LlmAgent/Bridge.lean`'s persistent path):
@@ -187,14 +205,21 @@ private def chmodSessionDb (path : String) : IO Unit := do
     `create_session` and refreshed when the seed fingerprint
     changes between turns). `none` means seed is locked.
 
-    `chatSessions` (Phase 1d) maps `chainId` → `(session_id, est_tokens)`
+    `chatSessions` maps `(chainId, sessionKey)` → `(session_id, est_tokens)`
     for sticky chat sessions. Each `acquire_chat_session` op consults
-    this alist (small, <10 chainIds in practice) and either reuses an
+    this alist (small, <10 entries in practice) and either reuses an
     under-budget session or rolls it over. A list-of-tuples is
     deliberately preferred over `Std.HashMap` here: the cardinality is
-    tiny, `BEq Nat` is decidable, and `modifyGet` over a list keeps the
-    rollover transition atomic w.r.t. the ref without pulling in a
-    container type whose internals we do not need to reason about. -/
+    tiny, `BEq Nat` / `BEq String` is decidable, and `modifyGet` over a
+    list keeps the rollover transition atomic w.r.t. the ref without
+    pulling in a container type whose internals we do not need to reason
+    about.
+
+    `sessionKey` is opaque bookkeeping — the wallet daemon forwards it
+    verbatim from the caller (the TUI uses a per-chat-open UUID; a
+    caller that omits it gets `""`, which preserves the legacy
+    single-sticky-session-per-chainId semantics). It NEVER gates a
+    signing decision; ConfirmGate stays the trust anchor. -/
 private structure DaemonState where
   db           : Session.Handle
   inFlight     : IO.Ref (List Session.SessionId)
@@ -202,7 +227,7 @@ private structure DaemonState where
   memoryRef    : IO.Ref Memory.Memory
   incognito    : IO.Ref (List Session.SessionId)
   registryRef  : IO.Ref (Option ToolDefs.TrustedRegistry.Snapshot)
-  chatSessions : IO.Ref (List (Nat × Session.SessionId × Nat))
+  chatSessions : IO.Ref (List ((Nat × String) × Session.SessionId × Nat))
 
 /-- Mark `sid` busy if it isn't already. Returns `true` when the
     caller has acquired the per-session lock; `false` if another
@@ -241,8 +266,8 @@ private def appendIfNotIncognito
 private def bumpChatSessionTokens
     (st : DaemonState) (sid : Session.SessionId) (delta : Nat) : IO Unit :=
   st.chatSessions.modify fun xs =>
-    xs.map fun (cid, s', toks) =>
-      if s' = sid then (cid, s', toks + delta) else (cid, s', toks)
+    xs.map fun (key, s', toks) =>
+      if s' = sid then (key, s', toks + delta) else (key, s', toks)
 
 private def okResp (result : Json) : Json :=
   .obj #[("ok", .bool true), ("result", result)]
@@ -637,12 +662,17 @@ private def opCloseSession (st : DaemonState) (params : Json) : IO Json := do
   catch e =>
     return errResp "io" (toString e)
 
-/-- Find the cached `(sessionId, tokens)` entry for `chainId`, if any. -/
-private def lookupChatSession (st : DaemonState) (chainId : Nat) :
+/-- Find the cached `(sessionId, tokens)` entry for the key
+    `(chainId, sessionKey)`, if any. The pair is matched structurally
+    so callers passing `sessionKey := ""` get the legacy
+    per-chainId-only behavior (a cache miss until the same `""` key
+    rolls over). -/
+private def lookupChatSession (st : DaemonState)
+    (chainId : Nat) (sessionKey : String) :
     IO (Option (Session.SessionId × Nat)) := do
   let xs ← st.chatSessions.get
-  pure (xs.findSome? (fun (cid, sid, toks) =>
-    if cid == chainId then some (sid, toks) else none))
+  pure (xs.findSome? (fun ((cid, k), sid, toks) =>
+    if cid == chainId ∧ k == sessionKey then some (sid, toks) else none))
 
 /-- Close a stale sticky session: record `closed_at`, run extraction
     (sticky sessions are never incognito, so the gate is unconditional),
@@ -658,31 +688,43 @@ private def rolloverStaleSession
   let _ ← runExtraction st sid
   IO.eprintln s!"[chat-session] rolled over session {sid} at ~{tokens} estimated tokens"
 
-/-- Replace the cache entry for `chainId` with `(sid, tokens)`. Drops
-    any prior entry for the same `chainId` (rollover) before prepending
-    the new one. -/
+/-- Replace the cache entry for `(chainId, sessionKey)` with
+    `(sid, tokens)`. Drops any prior entry for the same key (rollover)
+    before prepending the new one. Other keys on the same chainId
+    survive — that is the whole point of per-`sessionKey` scoping:
+    a stale entry from a closed TUI chat does not prevent a freshly
+    opened chat on the same chain from getting its own session. -/
 private def setChatSession
-    (st : DaemonState) (chainId : Nat) (sid : Session.SessionId) (tokens : Nat) : IO Unit :=
+    (st : DaemonState) (chainId : Nat) (sessionKey : String)
+    (sid : Session.SessionId) (tokens : Nat) : IO Unit :=
   st.chatSessions.modify fun xs =>
-    (chainId, sid, tokens) :: xs.filter (fun (cid, _, _) => cid ≠ chainId)
+    ((chainId, sessionKey), sid, tokens) ::
+      xs.filter (fun ((cid, k), _, _) => ¬ (cid = chainId ∧ k = sessionKey))
 
 /-- Handle `acquire_chat_session`. Returns a session id sticky-keyed by
-    `chainId`. If the cached session is still under `chatTokenBudget`,
+    `(chainId, sessionKey)`. `sessionKey` is optional in `params`; when
+    absent or empty it falls back to `""`, which preserves the legacy
+    single-sticky-session-per-chainId behavior for callers that have
+    not yet plumbed a per-open key.
+
+    If the cached session for the key is still under `chatTokenBudget`,
     it is reused and `reused:true` is reported. Otherwise the stale
     session is closed (triggering memory extraction via `runExtraction`)
     and a fresh session is created and cached.
 
-    Phase 1d entry point — see this file's top docstring for the
-    rationale (`MEMORY.md` only grows when sessions actually close with
-    enough messages, and sticky sessions are how that happens). -/
+    See this file's top docstring for the rationale (`MEMORY.md` only
+    grows when sessions actually close with enough messages, and sticky
+    sessions are how that happens). -/
 private def opAcquireChatSession (st : DaemonState) (params : Json) : IO Json := do
   let some chainJ := getField "chainId" params
     | return errResp "bad_request" "acquire_chat_session requires chainId"
   let some chainId := asNat chainJ
     | return errResp "bad_request" "chainId must be a non-negative integer"
+  let sessionKey : String :=
+    (getField "sessionKey" params >>= asString).getD ""
   -- Inspect the cache atomically. We snapshot to a local first so the
   -- creation path below sees a consistent view.
-  let cached ← lookupChatSession st chainId
+  let cached ← lookupChatSession st chainId sessionKey
   match cached with
   | some (sid, toks) =>
       if toks < chatTokenBudget then
@@ -690,6 +732,7 @@ private def opAcquireChatSession (st : DaemonState) (params : Json) : IO Json :=
           ("session_id", .num (Int.ofNat sid)),
           ("reused",     .bool true),
           ("chainId",    .num (Int.ofNat chainId)),
+          ("sessionKey", .str sessionKey),
           ("tokens",     .num (Int.ofNat toks))
         ]
       else
@@ -698,11 +741,12 @@ private def opAcquireChatSession (st : DaemonState) (params : Json) : IO Json :=
         try
           let metadata : Json := .obj #[("chainId", .num (Int.ofNat chainId))]
           let newSid ← Session.createSession st.db metadata
-          setChatSession st chainId newSid 0
+          setChatSession st chainId sessionKey newSid 0
           return okResp <| .obj #[
             ("session_id", .num (Int.ofNat newSid)),
             ("reused",     .bool false),
             ("chainId",    .num (Int.ofNat chainId)),
+            ("sessionKey", .str sessionKey),
             ("rolledFrom", .num (Int.ofNat sid))
           ]
         catch e =>
@@ -711,14 +755,60 @@ private def opAcquireChatSession (st : DaemonState) (params : Json) : IO Json :=
       try
         let metadata : Json := .obj #[("chainId", .num (Int.ofNat chainId))]
         let newSid ← Session.createSession st.db metadata
-        setChatSession st chainId newSid 0
+        setChatSession st chainId sessionKey newSid 0
         return okResp <| .obj #[
           ("session_id", .num (Int.ofNat newSid)),
           ("reused",     .bool false),
-          ("chainId",    .num (Int.ofNat chainId))
+          ("chainId",    .num (Int.ofNat chainId)),
+          ("sessionKey", .str sessionKey)
         ]
       catch e =>
         return errResp "io" (toString e)
+
+/-- Handle `rollover_chat_session`. Looks up the cached entry for
+    `(chainId, sessionKey)`, closes its session id (triggering
+    `runExtraction` on non-incognito sessions, gated by the existing
+    `autoExtractMinMessages` floor — a brand-new chat that is
+    immediately `/clear`'d will not extract, by design), and removes
+    the cache entry.
+
+    Idempotent: when no entry exists, succeeds with
+    `result.closed:false` and `wasInCache:false`. The TUI's `/clear`
+    command is best-effort and fires this op every time; getting a
+    no-op on a stale key is the right shape.
+
+    Trust: this op does not produce calldata and never gates a signing
+    decision. It is bookkeeping for the agentd's per-process cache. -/
+private def opRolloverChatSession (st : DaemonState) (params : Json) : IO Json := do
+  let some chainJ := getField "chainId" params
+    | return errResp "bad_request" "rollover_chat_session requires chainId"
+  let some chainId := asNat chainJ
+    | return errResp "bad_request" "chainId must be a non-negative integer"
+  let sessionKey : String :=
+    (getField "sessionKey" params >>= asString).getD ""
+  let cached ← lookupChatSession st chainId sessionKey
+  match cached with
+  | none =>
+      return okResp <| .obj #[
+        ("closed",     .bool false),
+        ("wasInCache", .bool false),
+        ("chainId",    .num (Int.ofNat chainId)),
+        ("sessionKey", .str sessionKey)
+      ]
+  | some (sid, toks) =>
+      -- Drop the cache entry FIRST so a concurrent acquire on the same
+      -- key cannot observe the about-to-close session id.
+      st.chatSessions.modify fun xs =>
+        xs.filter (fun ((cid, k), _, _) => ¬ (cid = chainId ∧ k = sessionKey))
+      rolloverStaleSession st sid toks
+      return okResp <| .obj #[
+        ("closed",     .bool true),
+        ("wasInCache", .bool true),
+        ("sessionId",  .num (Int.ofNat sid)),
+        ("chainId",    .num (Int.ofNat chainId)),
+        ("sessionKey", .str sessionKey),
+        ("tokens",     .num (Int.ofNat toks))
+      ]
 
 /-- Handle `extract_memory`. Forces an extraction round for the
     given session id (or the latest closed session when omitted).
@@ -821,6 +911,8 @@ def dispatch (st : DaemonState) (req : Json) : IO Json := do
       opCloseSession st (req)
   | "acquire_chat_session" =>
       opAcquireChatSession st req
+  | "rollover_chat_session" =>
+      opRolloverChatSession st req
   | "run_turn" =>
       opRunTurn st req
   | "search" =>
@@ -978,10 +1070,13 @@ def main (args : List String) : IO UInt32 := do
   -- by the first `create_session` and refreshed when the seed
   -- fingerprint changes between turns.
   let registryRef ← IO.mkRef (none : Option ToolDefs.TrustedRegistry.Snapshot)
-  -- Phase 1d: sticky chat-session cache keyed by chainId. Populated
+  -- Sticky chat-session cache keyed by `(chainId, sessionKey)`. Populated
   -- lazily by `acquire_chat_session`; rolls a session over once it
-  -- crosses `chatTokenBudget` so memory extraction actually fires.
-  let chatSessions ← IO.mkRef ([] : List (Nat × Session.SessionId × Nat))
+  -- crosses `chatTokenBudget` so memory extraction actually fires. The
+  -- TUI mints a fresh `sessionKey` per chat open and may `/clear`
+  -- explicitly via `rollover_chat_session`.
+  let chatSessions ← IO.mkRef
+    ([] : List ((Nat × String) × Session.SessionId × Nat))
   let st : DaemonState := {
     db := db, inFlight := inFlight, skills := skillsRef,
     memoryRef := memoryRef, incognito := incognito,

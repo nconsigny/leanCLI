@@ -305,11 +305,20 @@ private def callPersistent (req : Request) : IO Response := do
             let t := v.trimAscii.toString
             pure (t ≠ "" && t ≠ "0")
       let chainIdJ? : Option Json := getField "chainId" req.params
+      -- Forward an opaque per-chat-open key from the caller. Missing
+      -- or non-string → "". The agentd treats "" as the legacy
+      -- single-sticky-session-per-chainId mode so older callers keep
+      -- working unchanged. New callers (the TUI's `LlmChatFlow`) mint
+      -- a UUID per chat open so a failed turn on one open cannot
+      -- pollute the next open on the same chain.
+      let sessionKey : String :=
+        (getField "sessionKey" req.params >>= asString).getD ""
       -- Acquire the session id. Three branches, all converging on
       -- `sid : Nat`:
       --   1. incognito → fresh transient session via create_session
       --      (no chainId metadata, no incognito-tagged sticky cache).
-      --   2. non-incognito with chainId → acquire_chat_session.
+      --   2. non-incognito with chainId → acquire_chat_session
+      --      (passing `sessionKey` for per-open scoping).
       --   3. non-incognito without chainId → fresh transient session,
       --      so callers that have not yet plumbed chainId still work.
       let acquireSid : IO (Except Response Nat) := do
@@ -346,7 +355,8 @@ private def callPersistent (req : Request) : IO Response := do
               let frame : String :=
                 compact <| .obj #[
                   ("op", .str "acquire_chat_session"),
-                  ("chainId", .num (Int.ofNat chainId))
+                  ("chainId", .num (Int.ofNat chainId)),
+                  ("sessionKey", .str sessionKey)
                 ]
               match ← socketCall sock frame with
               | .error e =>
@@ -414,6 +424,56 @@ private def callPersistent (req : Request) : IO Response := do
                       pure (Response.err (-32000) msg none)
   | other =>
       pure (Response.crash s!"persistent bridge has no opcode for method: {other}" 0)
+
+/-- Close the agentd's sticky-chat cache entry for
+    `(chainId, sessionKey)` and trigger memory extraction on the
+    closed session id (the agentd's `runExtraction` floor still
+    applies — a brand-new session with fewer than
+    `autoExtractMinMessages` messages will not extract, which is
+    correct for an immediate-on-open `/clear`).
+
+    Mode-aware: only meaningful on `Mode.persistent`. On oneshot or
+    legacy bridges this returns a success no-op — there is no sticky
+    cache to roll over, and the caller (the wallet daemon's
+    `chat.rolloverSession` RPC) should never have to special-case the
+    mode.
+
+    Trust: this is bookkeeping. It produces no calldata, never gates
+    a signing decision, and ConfirmGate stays the trust anchor. -/
+def rolloverChatSession (chainId : Nat) (sessionKey : String) : IO Response := do
+  match ← resolveMode with
+  | Mode.persistent =>
+      let sock ← resolveAgentSocket
+      let frame : String :=
+        compact <| .obj #[
+          ("op", .str "rollover_chat_session"),
+          ("chainId", .num (Int.ofNat chainId)),
+          ("sessionKey", .str sessionKey)
+        ]
+      match ← socketCall sock frame with
+      | .error e => pure (Response.crash s!"agentd rollover_chat_session: {e}" 0)
+      | .ok line =>
+          match parse line with
+          | .error e => pure (Response.crash s!"agentd rollover_chat_session parse: {e}" 0)
+          | .ok j =>
+              match getField "ok" j with
+              | some (.bool true) =>
+                  let r := (getField "result" j).getD .null
+                  pure (Response.ok r)
+              | _ =>
+                  let errJ := (getField "error" j).getD .null
+                  let msg := (getField "msg" errJ >>= asString).getD "agent error"
+                  pure (Response.err (-32000) msg none)
+  | Mode.oneshot | Mode.legacy =>
+      -- No sticky cache to roll over in non-persistent modes; report
+      -- success with `mode` so the wallet daemon can surface a hint.
+      pure (Response.ok (.obj #[
+        ("closed",     .bool false),
+        ("wasInCache", .bool false),
+        ("mode",       .str "non-persistent"),
+        ("chainId",    .num (Int.ofNat chainId)),
+        ("sessionKey", .str sessionKey)
+      ]))
 
 /-- Dispatch to the chosen mode. Persistent mode that fails to
     contact the agent does NOT silently fall back — an operator who

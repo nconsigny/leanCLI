@@ -245,8 +245,37 @@ function buildChatHistory(turns: Turn[]): { role: "user" | "assistant"; content:
 type Phase =
   | { kind: "boot" } // initial ensureUp + chains fetch
   | { kind: "needChain"; chains: ConfiguredChain[]; modelName?: string }
-  | { kind: "chat"; chainId: number; chainName: string; modelName?: string; turns: Turn[]; input: string; busy: boolean }
+  | {
+      kind: "chat";
+      chainId: number;
+      chainName: string;
+      modelName?: string;
+      turns: Turn[];
+      input: string;
+      busy: boolean;
+      /** Opaque per-chat-open key forwarded to the agentd's sticky
+       *  cache. Minted with `crypto.randomUUID()` when the chat opens
+       *  (and rotated on `/clear`). The agentd keys its sticky-session
+       *  cache by `(chainId, sessionKey)`, so a failed turn on one
+       *  open cannot pollute the next open or the next `/clear` cycle.
+       *  Never used as a secret — collision resistance is enough. */
+      sessionKey: string;
+    }
   | { kind: "fatal"; message: string };
+
+/** Mint a fresh, opaque per-chat-open key. Prefers Node's built-in
+ *  `crypto.randomUUID()` (available since 14.17 — the TUI ships on
+ *  modern Node) and falls back to a time+random concatenation when
+ *  the runtime omits it. Not used as a secret. */
+function newSessionKey(): string {
+  try {
+    const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
+    if (c && typeof c.randomUUID === "function") return c.randomUUID();
+  } catch {
+    // fall through
+  }
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
 
 export default function LlmChatFlow({ onDone, onApprove, onCreateWallet }: Props) {
   const [phase, setPhase] = useState<Phase>({ kind: "boot" });
@@ -430,6 +459,12 @@ export default function LlmChatFlow({ onDone, onApprove, onCreateWallet }: Props
             turns: [],
             input: "",
             busy: false,
+            // Fresh per-chat-open key. The agentd's sticky cache is
+            // keyed by (chainId, sessionKey), so a previous chat open
+            // on the same chain — even one that ended on a failed
+            // swap turn — cannot pollute this open. Token-budget
+            // rollover and `/clear` both rotate this key further.
+            sessionKey: newSessionKey(),
           })
         }
       />
@@ -577,6 +612,53 @@ export default function LlmChatFlow({ onDone, onApprove, onCreateWallet }: Props
         // affordance has moved to a separate Tab-focusable button
         // above this bar (see ChatBody). Empty enter is a no-op.
         if (text.length === 0) return;
+        // `/clear` interception. Silent handoff: the literal `/clear`
+        // is NOT echoed as a chat turn. We fire-and-await a best-effort
+        // rollover RPC (the agentd closes the cached session id and
+        // runs the standard memory extraction, gated by the existing
+        // `autoExtractMinMessages` floor), mint a fresh sessionKey, and
+        // replace the visible turns with a single in-chat marker.
+        // Errors are logged via the resulting `system` notice but never
+        // block the rotation — the new sessionKey alone is enough to
+        // route subsequent turns to a fresh agentd session.
+        const firstToken = text.split(/\s+/, 1)[0];
+        if (firstToken === "/clear") {
+          const oldKey = phase.sessionKey;
+          // Eagerly clear UI + mint new key so the user sees the
+          // rotation regardless of the RPC outcome.
+          const newKey = newSessionKey();
+          setPhase({
+            ...phase,
+            input: "",
+            sessionKey: newKey,
+            turns: [
+              { kind: "system", text: "(context cleared — new mission)", tone: "info" },
+            ],
+          });
+          const r = await call<unknown>(
+            "chat.rolloverSession",
+            { chainId: phase.chainId, sessionKey: oldKey },
+            { timeoutMs: 10_000 },
+          );
+          if (!r.ok) {
+            setPhase((p) =>
+              p.kind === "chat"
+                ? {
+                    ...p,
+                    turns: [
+                      ...p.turns,
+                      {
+                        kind: "system",
+                        tone: "warn",
+                        text: `rollover RPC failed (${r.error.message}); new turns still use a fresh sessionKey`,
+                      },
+                    ],
+                  }
+                : p,
+            );
+          }
+          return;
+        }
         // Build history from prior turns (NOT including the user turn
         // we're about to send — that goes in `prompt`). Each assistant
         // turn is summarised to a short string; the sidecar caps the
@@ -598,7 +680,16 @@ export default function LlmChatFlow({ onDone, onApprove, onCreateWallet }: Props
         // wants to bail rather than wait.
         const r = await call<DraftResponse>(
           "chat.draft",
-          { prompt: text, chainId: phase.chainId, history },
+          {
+            prompt: text,
+            chainId: phase.chainId,
+            // Forward the opaque per-chat-open key so the agentd's
+            // sticky cache scopes by (chainId, sessionKey). Older
+            // daemons (or non-persistent agent modes) ignore this
+            // field; the call works either way.
+            sessionKey: phase.sessionKey,
+            history,
+          },
           { timeoutMs: 300_000 },
         );
         const finished: Turn = r.ok
@@ -972,6 +1063,7 @@ function ChatBody({
             ? "tab — toggle focus · enter — act on focused element · "
             : "enter — send · "}
           {latestTraceIdx !== null ? "ctrl+t — toggle trace · " : ""}
+          /clear — new session ·{" "}
           esc — leave chat
         </Text>
       </Box>
