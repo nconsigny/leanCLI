@@ -168,6 +168,21 @@ def securityChecks (raw : Json) (expectedChainId : Nat) (intent : Intent) :
       if amountWei = 0 then
         throw "shielded.withdraw: amountWei = 0 refused (no movement, leaks timing)"
       else .ok ()
+  | .railgunShield _ amountWei =>
+      -- Railgun anonymity set fragments below ~0.001 ETH the same way
+      -- Privacy Pool does, and the POI tree treats dust deposits as
+      -- high-friction. Apply the same dust-floor reject we use for
+      -- `.shieldedDeposit`. The model's only Railgun-specific path
+      -- through this validator: don't let it shield 0 or near-0
+      -- amounts that defeat the surface's purpose.
+      let dustFloor : Nat := 1_000_000_000_000_000
+      if amountWei < dustFloor then
+        throw s!"shielded.railgun.shield: amountWei {amountWei} below the 0.001 ETH dust floor (anonymity set is empty at this amount)"
+      else .ok ()
+  | .railgunUnshield _ amountWei _ =>
+      if amountWei = 0 then
+        throw "shielded.railgun.unshield: amountWei = 0 refused (no movement, leaks timing)"
+      else .ok ()
   | .approvalsAudit _ _ =>
       -- Read-only action; no signing, no chain side-effects to gate.
       .ok ()

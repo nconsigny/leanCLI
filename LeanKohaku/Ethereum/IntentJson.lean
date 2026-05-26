@@ -103,6 +103,8 @@ def parseActionTag (s : String) : Except String String :=
   | "rawCall"
   | "shielded.deposit"
   | "shielded.withdraw"
+  | "shielded.railgun.shield"
+  | "shielded.railgun.unshield"
   | "approvals.audit"
   | "address.fresh" => .ok s
   | _ => .error s!"unknown intent action tag: {s}"
@@ -204,6 +206,20 @@ def parseIntent (j : Json) : Except String Intent := do
       -- the chain level and partially defeats the shield.
       let viaRelayer := optBoolField j "viaRelayer" true
       .ok (.shieldedWithdraw chainId amountWei recipient viaRelayer)
+  | "shielded.railgun.shield" =>
+      -- Railgun shield: just (chainId, amountWei). The bridge sidecar
+      -- handles paymaster + 7702 stamping at prepare time; no fields
+      -- live in the Intent that the model could fabricate wrong.
+      let amountWei ← natField j "amountWei"
+      .ok (.railgunShield chainId amountWei)
+  | "shielded.railgun.unshield" =>
+      -- Railgun unshield: (chainId, amountWei, recipient). Recipient
+      -- is the destination 0x20 address (should be a fresh address to
+      -- preserve anonymity-set linkage). No viaRelayer toggle —
+      -- Railgun chooses its relayer internally.
+      let amountWei ← natField j "amountWei"
+      let recipient ← addrField j "recipient"
+      .ok (.railgunUnshield chainId amountWei recipient)
   | "approvals.audit" =>
       -- `wallet` is optional — daemon defaults to the user's default
       -- wallet when omitted.

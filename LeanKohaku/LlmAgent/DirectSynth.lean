@@ -216,6 +216,35 @@ def synth (draft : RegexDraft) (chainId : Nat) (senderAddr? : Option String := n
         let recipient ← parseAddr "recipient" recipStr
         let _ := chain
         pure (.shieldedWithdraw chainId amount recipient true)
+  | .railgunShield =>
+      -- Railgun shield. ETH-only like the Privacy Pool path. The
+      -- prepare RPC (`shielded.railgun.prepareShield`) does paymaster
+      -- sponsorship + 7702 stamping at the bridge sidecar — never
+      -- here. We MUST NOT fabricate a custom 7702 delegate; the
+      -- paymaster rejects any code() ≠ the hardcoded IMPL constant
+      -- (see [[project_railgun_poi]]).
+      let sym ← fieldOrErr draft "asset"
+      if sym.toLower ≠ "eth" then
+        .error s!"DirectSynth: railgun shield only supports native ETH; got '{sym}'"
+      else
+        let amtStr ← fieldOrErr draft "amountBase"
+        let amount ← natOrErr "amountBase" amtStr
+        let _ := chain
+        pure (.railgunShield chainId amount)
+  | .railgunUnshield =>
+      -- Railgun unshield. ETH-only + amountBase + recipient. Railgun
+      -- handles relayer selection internally so there's no
+      -- `viaRelayer` field to carry.
+      let sym ← fieldOrErr draft "asset"
+      if sym.toLower ≠ "eth" then
+        .error s!"DirectSynth: railgun unshield only supports native ETH; got '{sym}'"
+      else
+        let amtStr    ← fieldOrErr draft "amountBase"
+        let amount    ← natOrErr "amountBase" amtStr
+        let recipStr  ← fieldOrErr draft "to"
+        let recipient ← parseAddr "recipient" recipStr
+        let _ := chain
+        pure (.railgunUnshield chainId amount recipient)
   | .approvalsAudit =>
       -- Read-only. The optional `wallet` field is a 0x address by the
       -- time the chat.draft wallet-resolver has run; if it's absent,
