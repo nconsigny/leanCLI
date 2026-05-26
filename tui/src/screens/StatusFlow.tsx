@@ -379,7 +379,7 @@ function NetworkPanel({ network }: { network: Snapshot["network"] }) {
         <Text color={theme.accent}>{"→ "}</Text>
         <Text color={theme.dim}>press </Text>
         <Text color={theme.highlight} bold>m</Text>
-        <Text color={theme.dim}> for live RPC monitor (cypherpunk trace)</Text>
+        <Text color={theme.dim}> for live monitor</Text>
       </Box>
     </Section>
   );
