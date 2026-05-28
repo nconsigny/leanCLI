@@ -3203,7 +3203,7 @@ def run (args : List String) : IO UInt32 := do
             IO.eprintln "Is `node` (≥20) installed and on PATH?"
             pure 2
   | .install    => runKohakuspawn #[]
-  | .update     => runKohakuspawn #["--pull"]
+  | .update     => runKohakuspawn #["--pull", "--restart"]
   | .uninstall  => runKohakuspawn #["--uninstall"]
   | .memoryShow              => MemoryCmd.cmdShow
   | .memoryEdit              => MemoryCmd.cmdEdit

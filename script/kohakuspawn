@@ -136,6 +136,15 @@ Options:
   --rebuild-helpers   Force rebuilding native helpers even when present in
                       .lake/build/bin/. Pair with --pull when the HACL or
                       secp256k1 pinned revision has moved.
+  --restart           After install, restart kohaku-daemon and kohaku-agentd
+                      via `systemctl --user restart`. Only restarts units
+                      that were already active — never starts a stopped
+                      daemon. `kohaku update` passes this implicitly.
+  --full              Shortcut for --pull --rebuild-tui --rebuild-bridges
+                      --rebuild-helpers --restart. The "do-everything"
+                      update for when you want a clean rebuild of all
+                      pieces in one command (slower; rebuilds HACL +
+                      secp256k1 from source which takes minutes).
   --no-modify-path    Do not append the kohaku bin dir to your shell rc.
   --no-completion     Skip installing shell-completion files. By default,
                       completion is installed for bash, zsh, AND fish so
@@ -166,6 +175,7 @@ BUILD_LEAN=1
 BUILD_TUI=auto        # auto | always | never
 BUILD_BRIDGES=auto    # auto | always | never
 BUILD_HELPERS=auto    # auto | always | never — HACL + secp256k1 native helpers
+RESTART_DAEMONS=0     # restart kohaku-daemon + kohaku-agentd at end (only if active)
 MODIFY_PATH=1
 INSTALL_COMPLETION=1
 RUN_INIT_WIZARD=1
@@ -182,6 +192,14 @@ while [[ $# -gt 0 ]]; do
     --rebuild-bridges) BUILD_BRIDGES=always; shift;;
     --no-helpers) BUILD_HELPERS=never; shift;;
     --rebuild-helpers) BUILD_HELPERS=always; shift;;
+    --restart) RESTART_DAEMONS=1; shift;;
+    --full)
+      PULL=1
+      BUILD_TUI=always
+      BUILD_BRIDGES=always
+      BUILD_HELPERS=always
+      RESTART_DAEMONS=1
+      shift;;
     --no-modify-path) MODIFY_PATH=0; shift;;
     --no-completion) INSTALL_COMPLETION=0; shift;;
     --no-init) RUN_INIT_WIZARD=0; shift;;
@@ -1673,7 +1691,28 @@ finalize_systemd_handoff() {
   fi
 }
 
+# Restart kohaku-daemon and/or kohaku-agentd if --restart was passed AND
+# the unit is currently active. Avoids starting a daemon the user
+# intentionally stopped. Quiet pass-through on hosts without systemctl.
+restart_daemons_if_requested() {
+  if [[ "$RESTART_DAEMONS" -ne 1 ]]; then return 0; fi
+  if ! command -v systemctl >/dev/null 2>&1; then
+    echo "kohakuspawn: --restart requested but systemctl not on PATH; skipped" >&2
+    return 0
+  fi
+  for unit in kohaku-daemon kohaku-agentd; do
+    if systemctl --user is-active --quiet "$unit" 2>/dev/null; then
+      if systemctl --user restart "$unit" 2>/dev/null; then
+        echo "==> systemctl --user restart $unit"
+      else
+        echo "kohakuspawn: failed to restart $unit (manual: 'systemctl --user restart $unit')" >&2
+      fi
+    fi
+  done
+}
+
 finalize_systemd_handoff
+restart_daemons_if_requested
 
 # Footer.
 #
