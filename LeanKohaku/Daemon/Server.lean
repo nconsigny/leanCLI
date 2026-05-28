@@ -338,14 +338,35 @@ def run (cfg : Config) : IO Unit := do
       IO.eprintln s!"leankohaku-daemon: helios enabled (socket={heliosSocket})"
     catch e =>
       IO.eprintln s!"leankohaku-daemon: helios auto-enable failed ({e}); use daemon.helios.toggle to retry"
+  -- Opt-in safenode (TDX-attested ORAM proxy). Only spawned when the
+  -- operator opts in via `KOHAKU_SAFE_NODE_URL`; failure to attest is
+  -- non-fatal — the daemon keeps serving with helios reading directly
+  -- from the configured `rpcEndpoint`. When safenode IS attested, helios
+  -- transparently routes through it (see `Endpoints.heliosEndpointFor`).
+  match ← IO.getEnv "KOHAKU_SAFE_NODE_URL" with
+  | none => pure ()
+  | some _ =>
+      let runtimeRoot ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
+        | some d => pure d
+        | none =>
+            match ← IO.getEnv "TMPDIR" with
+            | some d => pure d
+            | none => pure "/tmp"
+      let safeNodeSocket := s!"{runtimeRoot}/leankohaku/safenode.sock"
+      try
+        let _ ← LeanKohaku.Daemon.State.safeNodeEnable state safeNodeSocket
+        IO.eprintln s!"leankohaku-daemon: safenode attested + enabled (socket={safeNodeSocket})"
+      catch e =>
+        IO.eprintln s!"leankohaku-daemon: safenode auto-enable failed ({e}); helios reads will use the configured RPC. Use daemon.safeNode.toggle to retry."
   try
     acceptLoop cfg state listener
   finally
     -- Tear down persistent sidecars before releasing the listener so we
-    -- don't leak the colibri.sock / helios.sock files (and the Node
-    -- children) on shutdown.
+    -- don't leak the colibri.sock / helios.sock / safenode.sock files
+    -- (and the Node children) on shutdown.
     LeanKohaku.Daemon.State.colibriDisable state
     LeanKohaku.Daemon.State.heliosDisable state
+    LeanKohaku.Daemon.State.safeNodeDisable state
     LeanKohaku.Daemon.Uds.closeListener listener
     if ownsSocket then
       removeSocketFile cfg.socketPath

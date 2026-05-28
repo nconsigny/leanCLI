@@ -123,6 +123,10 @@ def dispatch (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                         { method := "tx.simulate", params := cParams, id := 0 }
                       pure <| .ok <| LeanKohaku.Colibri.Bridge.responseToJson resp
               | .helios =>
+                  -- When safenode is running, substitute its TDX-pinned
+                  -- proxy URL for executionRpc on mainnet/sepolia so
+                  -- proofs are fetched obliviously. No-op otherwise.
+                  let endpoint ← applySafeNodeOverride state endpoint cfg.chainId
                   let hParams := mergeHeliosDefaults req.params endpoint cfg.chainId
                   match ← LeanKohaku.Daemon.State.heliosClient? state with
                   | some c =>
@@ -344,6 +348,7 @@ def dispatch (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       | .error e =>
           pure <| .error { code := -32021, message := "unknown chain", data := some (.str e) }
       | .ok endpoint =>
+          let endpoint ← applySafeNodeOverride state endpoint cfg.chainId
           let injected := mergeHeliosDefaults req.params endpoint cfg.chainId
           match ← LeanKohaku.Daemon.State.heliosClient? state with
           | some c =>
@@ -366,6 +371,7 @@ def dispatch (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
       | .error e =>
           pure <| .error { code := -32021, message := "unknown chain", data := some (.str e) }
       | .ok endpoint =>
+          let endpoint ← applySafeNodeOverride state endpoint cfg.chainId
           let injected := mergeHeliosDefaults req.params endpoint cfg.chainId
           match ← LeanKohaku.Daemon.State.heliosClient? state with
           | some c =>

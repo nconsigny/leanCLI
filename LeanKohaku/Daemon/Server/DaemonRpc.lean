@@ -9,6 +9,7 @@ import LeanKohaku.Daemon.Status
 import LeanKohaku.Encoding.Json
 import LeanKohaku.Keystore.Tpm2Runtime
 import LeanKohaku.RPC.Server
+import LeanKohaku.SafeNode.Persistent
 
 /-!
 # Daemon server: `daemon.*` / `status.*` / `network.*` RPC family
@@ -191,6 +192,86 @@ def dispatch (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                     else s!"preflight denied: {LeanKohaku.Cli.Commands.actionSummary action}")),
             ("plan", .str (LeanKohaku.Cli.Commands.planSummary plan))
           ]
+  | "daemon.safeNode.toggle" =>
+      -- Why: spawn or tear down the persistent safenode sidecar at
+      -- runtime. Idempotent. Spawning runs the full TDX verify flow
+      -- (Rust quote verifier + RTMR3 replay + attested-TLS pin); a
+      -- few seconds of latency is expected. Failure to attest =>
+      -- error to caller, no state mutation. When enabled, helios
+      -- transparently routes through the TDX-pinned proxy via
+      -- `Endpoints.applySafeNodeOverride`.
+      let enable := ((getField "enable" req.params) >>= asBool).getD true
+      if enable then
+        let runtimeRoot ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
+          | some d => pure d
+          | none =>
+              match ← IO.getEnv "TMPDIR" with
+              | some d => pure d
+              | none => pure "/tmp"
+        let socketPath := s!"{runtimeRoot}/leankohaku/safenode.sock"
+        try
+          let c ← LeanKohaku.Daemon.State.safeNodeEnable state socketPath
+          let proxy ← LeanKohaku.SafeNode.Persistent.getProxyUrl c
+          pure <| .ok <| .obj #[
+            ("ok", .bool true),
+            ("running", .bool true),
+            ("socket", .str socketPath),
+            ("proxyUrl", match proxy with
+              | some u => .str u
+              | none => .null)
+          ]
+        catch e =>
+          pure <| .error {
+            code := -32099,
+            message := s!"failed to start safenode (TDX attestation may have failed): {e}",
+            data := some (.str "check stderr for verify_client_tdx output; ensure KOHAKU_SAFE_NODE_URL / KOHAKU_SAFE_NODE_API_KEY / TDX_QUOTE_VERIFIER_BIN are set"),
+          }
+      else
+        LeanKohaku.Daemon.State.safeNodeDisable state
+        pure <| .ok <| .obj #[("ok", .bool true), ("running", .bool false)]
+  | "daemon.safeNode.status" =>
+      match ← LeanKohaku.Daemon.State.safeNodeClient? state with
+      | some c =>
+          -- Forward to the sidecar's safenode.status; it owns the
+          -- attestation metadata (pin, mrtd, rtmr*).
+          let resp ← LeanKohaku.SafeNode.Persistent.call c "safenode.status" (.obj #[])
+          match resp with
+          | .ok j =>
+              pure <| .ok <| .obj #[
+                ("running", .bool true),
+                ("socket", .str c.socket),
+                ("attestation", j)
+              ]
+          | .err code msg _ =>
+              pure <| .ok <| .obj #[
+                ("running", .bool true),
+                ("socket", .str c.socket),
+                ("error", .obj #[("code", .num code), ("message", .str msg)])
+              ]
+          | .crash reason | .transportCrash reason =>
+              pure <| .ok <| .obj #[
+                ("running", .bool true),
+                ("socket", .str c.socket),
+                ("crash", .str reason)
+              ]
+      | none =>
+          pure <| .ok <| .obj #[("running", .bool false)]
+  | "daemon.safeNode.verify" =>
+      -- Re-run the TDX verify flow against the live sidecar. Useful
+      -- to confirm the enclave is still attesting (and refresh the
+      -- pin if the cert rotated). On attestation failure we do NOT
+      -- tear safenode down — that's the operator's call via toggle.
+      match ← LeanKohaku.Daemon.State.safeNodeClient? state with
+      | none =>
+          pure <| .error {
+            code := -32099,
+            message := "safenode is not running",
+            data := some (.str "call daemon.safeNode.toggle { enable: true } first"),
+          }
+      | some c =>
+          let resp ← LeanKohaku.SafeNode.Persistent.call c "safenode.verify" (.obj #[])
+          let _ ← LeanKohaku.SafeNode.Persistent.refreshProxyUrl c
+          pure <| .ok <| LeanKohaku.SafeNode.Persistent.responseToJson resp
   | m =>
       pure <| .error { code := -32601, message := s!"method not found: {m}", data := none }
 

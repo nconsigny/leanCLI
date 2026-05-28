@@ -1,0 +1,17 @@
+{
+  "name": "leankohaku-safenode-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "TDX-attested oblivious-RPC proxy. Verifies the safe-node enclave at boot, pins the attested TLS public key, and forwards JSON-RPC from a local HTTP endpoint to the upstream ORAM server with strict certificate pinning. Helios's executionRpc points at this sidecar so eth_getProof reads are private (ORAM) AND verified (Helios + the consensus state root).",
+  "type": "module",
+  "main": "bridge.mjs",
+  "bin": {
+    "leankohaku-safenode-bridge": "./bridge.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "undici": "^6.19.0"
+  }
+}

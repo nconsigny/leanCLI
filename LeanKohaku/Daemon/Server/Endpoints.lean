@@ -123,4 +123,39 @@ def mergeHeliosDefaults
       .obj (fields ++ toAdd)
   | other => other
 
+/-- State-aware post-process on a resolved endpoint for helios calls.
+    When the safenode sidecar is running and the effective chainId is
+    mainnet (1) or sepolia (11155111), substitute the safenode local
+    HTTP proxy URL for `endpoint.url`. Helios will then receive that
+    URL as `executionRpc`, and every `eth_getProof` lookup tunnels
+    through the TDX-pinned channel — i.e. fetched obliviously.
+
+    Critical invariants:
+
+    1. ONLY `endpoint.url` is rewritten. `endpoint.chainId` and any
+       caller-supplied `consensusRpc` / `executionRpc` overrides are
+       untouched (and `mergeHeliosDefaults` already preserves caller
+       overrides via its `has` guard).
+
+    2. Helios's consensus verification is independent of the
+       execution-RPC source: it Merkle-verifies every proof against
+       the sync-committee-attested state root regardless of who served
+       it. So swapping the URL strengthens privacy without weakening
+       integrity.
+
+    3. Only mainnet + sepolia are routed in v1 (matching the dev
+       safe-node deployment scope). Other chainIds (L2s etc.) bypass
+       safenode and use the configured endpoint, so the daemon stays
+       multi-chain while safenode is enabled. -/
+def applySafeNodeOverride (state : LeanKohaku.Daemon.State.Shared)
+    (endpoint : LeanKohaku.RPC.Outbound.Endpoint) (fallbackChainId : Nat) :
+    IO LeanKohaku.RPC.Outbound.Endpoint := do
+  let cid : Nat := endpoint.chainId.getD fallbackChainId
+  if cid = 1 || cid = 11155111 then
+    match ← LeanKohaku.Daemon.State.safeNodeProxyUrl? state with
+    | some url => pure { endpoint with url := url }
+    | none => pure endpoint
+  else
+    pure endpoint
+
 end LeanKohaku.Daemon.Server

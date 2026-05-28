@@ -1,5 +1,6 @@
 import LeanKohaku.Colibri.Persistent
 import LeanKohaku.Helios.Persistent
+import LeanKohaku.SafeNode.Persistent
 import LeanKohaku.RPC.Outbound
 
 /-!
@@ -111,6 +112,16 @@ structure DaemonState where
   `heliosRespawn` parity with Colibri; not yet exercised because the
   initial helios surface does not auto-substitute into verified reads. -/
   heliosSocket : Option String := none
+  /-- Long-running safenode sidecar (TDX-attested ORAM proxy). `none`
+  when safenode is off (the default — only spawned when
+  `KOHAKU_SAFE_NODE_URL` is set in the env). When present, helios
+  call sites substitute the sidecar's local HTTP proxy URL for
+  `executionRpc`, so every `eth_getProof` lookup tunnels through the
+  TDX-pinned channel and is fetched obliviously. -/
+  safeNode : Option LeanKohaku.SafeNode.Persistent.Client := none
+  /-- Socket path used to spawn `safeNode`. Cached so a respawn after
+  a transport-level death has it available. -/
+  safeNodeSocket : Option String := none
   /-- Daemon-wide default backend for `tx.simulate` and future unified
   read RPCs. Initial value is `KOHAKU_READ_BACKEND` from the env (or
   `.helios` when unset — helios is the default because it's the most
@@ -318,6 +329,49 @@ def heliosDisable (state : Shared) : IO Unit := do
 /-- Read the current Helios client without spawning. -/
 def heliosClient? (state : Shared) : IO (Option LeanKohaku.Helios.Persistent.Client) := do
   pure (← state.get).helios
+
+/-- Spawn the persistent safenode sidecar and store it in shared state.
+    Idempotent: if a client is already running, returns it. Throws on
+    spawn / connect failure (caller decides whether to surface or fall
+    back). Symmetric with `heliosEnable`. The sidecar runs the full TDX
+    verify flow before binding its sockets, so this call blocks for a
+    few seconds on first spawn; subsequent enables are fast (the
+    sidecar caches its attested pin). -/
+def safeNodeEnable (state : Shared) (socketPath : String) :
+    IO LeanKohaku.SafeNode.Persistent.Client := do
+  let s ← state.get
+  match s.safeNode with
+  | some c => pure c
+  | none =>
+      let c ← LeanKohaku.SafeNode.Persistent.start socketPath
+      state.modify (fun s => { s with safeNode := some c, safeNodeSocket := some socketPath })
+      -- Prime the cached proxy URL so the first `safeNodeProxyUrl?` read
+      -- in the helios path doesn't pay a UDS round-trip.
+      let _ ← LeanKohaku.SafeNode.Persistent.getProxyUrl c
+      pure c
+
+/-- Tear down the persistent safenode sidecar. Idempotent. -/
+def safeNodeDisable (state : Shared) : IO Unit := do
+  let s ← state.get
+  match s.safeNode with
+  | none => pure ()
+  | some c =>
+      try LeanKohaku.SafeNode.Persistent.close c catch _ => pure ()
+      state.modify (fun s => { s with safeNode := none, safeNodeSocket := none })
+
+/-- Read the current safenode client without spawning. -/
+def safeNodeClient? (state : Shared) : IO (Option LeanKohaku.SafeNode.Persistent.Client) := do
+  pure (← state.get).safeNode
+
+/-- Read the safenode sidecar's local HTTP proxy URL if it is running.
+    The daemon substitutes this URL for `executionRpc` on helios calls
+    when present, so every `eth_getProof` is tunneled through the
+    TDX-pinned channel. Returns `none` when safenode is off (helios then
+    falls back to the configured `rpcEndpoint`). -/
+def safeNodeProxyUrl? (state : Shared) : IO (Option String) := do
+  match (← state.get).safeNode with
+  | none => pure none
+  | some c => LeanKohaku.SafeNode.Persistent.getProxyUrl c
 
 /-- Read the daemon's current default read backend. -/
 def getReadBackend (state : Shared) : IO ReadBackend := do
