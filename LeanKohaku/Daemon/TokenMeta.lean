@@ -142,4 +142,72 @@ def toJson (m : TokenMeta) : LeanKohaku.Encoding.Json.Json :=
     ("symbol",   .str m.symbol)
   ]
 
+/-- Fetch decimals + symbol over **direct RPC** (never Colibri) with the two
+    `eth_call`s issued concurrently, returning the decoded `TokenMeta` WITHOUT
+    touching the cache. Used by `batchLookupJson` where many tokens are fetched
+    in parallel: the cache write (`setMeta` → `state.modify`) is not safe to run
+    from worker threads, so we keep fetching pure and let the joining loop cache
+    serially. `via? := none` mirrors `swap.balances`, which deliberately keeps
+    fan-out off the single shared Colibri UDS. Token metadata is display-only
+    (it renders decimals/ticker), so the non-verified read path is appropriate. -/
+def fetchOnlyDirect
+    (policy : LeanKohaku.Privacy.NetworkPolicy.Policy)
+    (endpoint : LeanKohaku.RPC.Outbound.Endpoint)
+    (_chainId : Nat) (address : String) : IO (Option TokenMeta) := do
+  let decTask ← IO.asTask
+    (LeanKohaku.RPC.Outbound.ethCall policy endpoint address decimalsSelector "latest" none)
+  let symTask ← IO.asTask
+    (LeanKohaku.RPC.Outbound.ethCall policy endpoint address symbolSelector "latest" none)
+  let decR ← IO.wait decTask
+  let symR ← IO.wait symTask
+  match decR, symR with
+  | .ok (.ok decJson), .ok (.ok symJson) =>
+      let decHex := (LeanKohaku.Encoding.Json.asString decJson).getD ""
+      let symHex := (LeanKohaku.Encoding.Json.asString symJson).getD ""
+      match decodeDecimalsReturn decHex, decodeSymbolReturn symHex with
+      | some decimals, some symbol => pure (some { decimals, symbol })
+      | _, _ => pure none
+  | _, _ => pure none
+
+/-- Resolve metadata for a batch of addresses, returning
+    `(lowercasedAddress, toJson meta)` pairs for every address that resolves.
+    Deduplicates by lowercased address. Cache hits are read serially (cheap);
+    misses are fetched **concurrently** (one task per token, each fetching
+    decimals ∥ symbol) then cached serially on join — `setMeta` mutates shared
+    state and must not run on worker threads. This replaces the per-token
+    serial `lookupOrFetch` loops in `tx.simulate` (trace) and `tx.decodeIntent`,
+    collapsing `2·K` sequential `eth_call`s into one round-trip's worth of wall
+    time. Failures are dropped silently, exactly like the loops it replaces. -/
+def batchLookupJson
+    (state : LeanKohaku.Daemon.State.Shared)
+    (policy : LeanKohaku.Privacy.NetworkPolicy.Policy)
+    (endpoint : LeanKohaku.RPC.Outbound.Endpoint)
+    (chainId : Nat) (addresses : Array String) :
+    IO (Array (String × LeanKohaku.Encoding.Json.Json)) := do
+  -- Dedup, first-seen order (output is a JSON map so order is cosmetic).
+  let mut order : Array String := #[]
+  let mut seen : Array String := #[]
+  for raw in addresses do
+    let lo := raw.toLower
+    unless seen.contains lo do
+      seen := seen.push lo
+      order := order.push raw
+  -- Cache hits resolved inline; misses spawned as concurrent fetch tasks.
+  let mut out : Array (String × LeanKohaku.Encoding.Json.Json) := #[]
+  let mut tasks : Array (String × Task (Except IO.Error (Option TokenMeta))) := #[]
+  for raw in order do
+    match ← lookup state chainId raw with
+    | some m => out := out.push (raw.toLower, toJson m)
+    | none =>
+        let t ← IO.asTask (fetchOnlyDirect policy endpoint chainId raw)
+        tasks := tasks.push (raw, t)
+  -- Join misses; cache + accumulate serially.
+  for (raw, t) in tasks do
+    match ← IO.wait t with
+    | .ok (some m) =>
+        setMeta state chainId raw m
+        out := out.push (raw.toLower, toJson m)
+    | _ => pure ()
+  pure out
+
 end LeanKohaku.Daemon.TokenMeta

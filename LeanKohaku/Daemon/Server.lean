@@ -6340,10 +6340,20 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                 -- The opt-in tx.simulateColibri method covers the verified
                 -- case explicitly. Keep this path on direct RPC.
                 let via? : Option LeanKohaku.RPC.Outbound.VerifyVia := none
-                let callRes ← LeanKohaku.RPC.Outbound.call cfg.policy endpoint
-                  .call (.arr #[txObj, .str block]) via?
-                let gasRes ← LeanKohaku.RPC.Outbound.estimateGas
-                  cfg.policy endpoint txObj block via?
+                let traceFlag := ((getField "trace" req.params) >>= asBool).getD false
+                let chainIdForMeta :=
+                  ((getField "chainId" req.params) >>= asNat).getD cfg.chainId
+                -- Fire the independent node round-trips concurrently: eth_call,
+                -- eth_estimateGas, and (optionally) debug_traceCall don't depend
+                -- on each other, so we dispatch them as tasks and join below.
+                -- Was serial → wall time = SUM of RTTs; now = MAX. Mirrors the
+                -- swap.balances fan-out (IO.asTask + IO.wait). `via? := none`
+                -- keeps this on direct RPC, so no shared Colibri UDS is touched.
+                let callTask ← IO.asTask
+                  (LeanKohaku.RPC.Outbound.call cfg.policy endpoint
+                    .call (.arr #[txObj, .str block]) via?)
+                let gasTask ← IO.asTask
+                  (LeanKohaku.RPC.Outbound.estimateGas cfg.policy endpoint txObj block via?)
                 -- Opt-in `debug_traceCall` with the callTracer + log capture.
                 -- Many public RPCs don't expose `debug_*` namespaces; we
                 -- surface the failure as `traceUnavailable` so callers can
@@ -6351,44 +6361,47 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
                 -- itself is returned raw — TUI consumers parse Transfer events
                 -- (topic[0] = 0xddf252ad...) downstream to render which
                 -- tokens move pre-sign.
-                let traceFlag := ((getField "trace" req.params) >>= asBool).getD false
-                let chainIdForMeta :=
-                  ((getField "chainId" req.params) >>= asNat).getD cfg.chainId
-                -- traceField holds either `[("trace", ...)]`, `[("trace",...),
-                -- ("tokenMetadata", ...)]`, or `[("traceUnavailable", ...)]`.
-                let traceField : Array (String × Json) ←
+                let traceTask? ←
                   if traceFlag then
                     let traceCfg : Json := .obj #[
                       ("tracer", .str "callTracer"),
                       ("tracerConfig", .obj #[("withLog", .bool true)])
                     ]
                     let traceParams : Json := .arr #[txObj, .str block, traceCfg]
-                    match ← LeanKohaku.RPC.Outbound.call cfg.policy endpoint
-                        .debugTraceCall traceParams with
-                    | .ok traceJson =>
-                        -- Prefetch metadata for every token that emits a
-                        -- Transfer log inside the trace. Dedup by lowercased
-                        -- address so we make one eth_call per token, not per
-                        -- transfer event. Failures are silent — TransfersBlock
-                        -- gracefully falls back to raw uint256 + short addr.
-                        let allTokens := collectTransferTokens traceJson
-                        let mut seen : Array String := #[]
-                        let mut tmObj : Array (String × Json) := #[]
-                        for raw in allTokens do
-                          let lo := raw.toLower
-                          if seen.contains lo then continue
-                          seen := seen.push lo
-                          match ← LeanKohaku.Daemon.TokenMeta.lookupOrFetch
-                              state cfg.policy endpoint chainIdForMeta raw with
-                          | some m =>
-                              tmObj := tmObj.push (lo,
-                                LeanKohaku.Daemon.TokenMeta.toJson m)
-                          | none => pure ()
-                        pure #[("trace", traceJson),
-                               ("tokenMetadata", .obj tmObj)]
-                    | .error e => pure #[("traceUnavailable", Json.str e)]
-                  else
-                    pure #[]
+                    let t ← IO.asTask
+                      (LeanKohaku.RPC.Outbound.call cfg.policy endpoint
+                        .debugTraceCall traceParams)
+                    pure (some t)
+                  else pure none
+                -- Join eth_call + eth_estimateGas. `Outbound.call` swallows its
+                -- own exceptions, so the task's outer `IO.Error` layer is just
+                -- flattened defensively (mirrors swap.balances).
+                let callWaited ← IO.wait callTask
+                let callRes : Except String Json :=
+                  match callWaited with | .error e => .error e.toString | .ok r => r
+                let gasWaited ← IO.wait gasTask
+                let gasRes : Except String Json :=
+                  match gasWaited with | .error e => .error e.toString | .ok r => r
+                -- traceField holds either `[]`, `[("trace",...),("tokenMetadata",
+                -- ...)]`, or `[("traceUnavailable", ...)]`.
+                let traceField : Array (String × Json) ←
+                  match traceTask? with
+                  | none => pure #[]
+                  | some tt =>
+                      match ← IO.wait tt with
+                      | .error e => pure #[("traceUnavailable", Json.str e.toString)]
+                      | .ok (.error e) => pure #[("traceUnavailable", Json.str e)]
+                      | .ok (.ok traceJson) =>
+                          -- Prefetch metadata for every token that emits a
+                          -- Transfer log inside the trace. batchLookupJson
+                          -- dedups by lowercased address and fetches misses
+                          -- concurrently; failures drop silently — TransfersBlock
+                          -- falls back to raw uint256 + short addr.
+                          let tmObj ← LeanKohaku.Daemon.TokenMeta.batchLookupJson
+                            state cfg.policy endpoint chainIdForMeta
+                            (collectTransferTokens traceJson)
+                          pure #[("trace", traceJson),
+                                 ("tokenMetadata", .obj tmObj)]
                 let okBool := match callRes with | .ok _ => true | .error _ => false
                 let returnField : Array (String × Json) := match callRes with
                   | .ok j => #[("returnData", j)]
@@ -6674,32 +6687,17 @@ def methodHandler (cfg : Config) (state : LeanKohaku.Daemon.State.Shared)
         ((getField "to" req.params) >>= asString).getD ""
       let dataParam :=
         ((getField "data" req.params) >>= asString).getD ""
-      let mut tokenMetaPairs : Array (String × Json) := #[]
       let ep := chainEndpointFor cfg req.params chainIdParam
-      if !toParam.isEmpty then
-        match ← LeanKohaku.Daemon.TokenMeta.lookupOrFetch
-            state cfg.policy ep chainIdParam toParam with
-        | some m =>
-            tokenMetaPairs := tokenMetaPairs.push (toParam.toLower,
-              LeanKohaku.Daemon.TokenMeta.toJson m)
-        | none => pure ()
-      -- Walk calldata for embedded address-shaped words (12 zero bytes +
-      -- 20 nonzero bytes) and prefetch metadata for each. False positives
-      -- (small uint256 values that fit in 160 bits) are harmless: the
-      -- eth_call reverts and the cache absorbs the miss.
-      let embeddedAddrs := scanCalldataAddresses dataParam
-      for addr in embeddedAddrs do
-        let lower := addr.toLower
-        let alreadyHave := tokenMetaPairs.any (fun p => p.1 == lower)
-        if alreadyHave then
-          pure ()
-        else
-          match ← LeanKohaku.Daemon.TokenMeta.lookupOrFetch
-              state cfg.policy ep chainIdParam addr with
-          | some m =>
-              tokenMetaPairs := tokenMetaPairs.push (lower,
-                LeanKohaku.Daemon.TokenMeta.toJson m)
-          | none => pure ()
+      -- Prefetch ERC-20 metadata for `to` plus every address-shaped word
+      -- (12 zero bytes + 20 nonzero bytes) embedded in the calldata. False
+      -- positives (small uint256s that fit in 160 bits) are harmless — the
+      -- eth_call reverts and the miss is dropped. This was a serial 2·K
+      -- eth_call loop; `batchLookupJson` fetches the misses concurrently
+      -- (dedup + cache handled inside), collapsing it to ~one round-trip.
+      let metaAddrs : Array String :=
+        (if toParam.isEmpty then #[] else #[toParam]) ++ scanCalldataAddresses dataParam
+      let tokenMetaPairs ← LeanKohaku.Daemon.TokenMeta.batchLookupJson
+        state cfg.policy ep chainIdParam metaAddrs
       let tokenMeta : Json := .obj tokenMetaPairs
       -- ENS namehash → name session cache. Empty in the MVP — the
       -- shape is in place so the sidecar's `ensName` formatter has
