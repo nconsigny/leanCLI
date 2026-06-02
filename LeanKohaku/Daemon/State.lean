@@ -336,14 +336,19 @@ def heliosClient? (state : Shared) : IO (Option LeanKohaku.Helios.Persistent.Cli
     back). Symmetric with `heliosEnable`. The sidecar runs the full TDX
     verify flow before binding its sockets, so this call blocks for a
     few seconds on first spawn; subsequent enables are fast (the
-    sidecar caches its attested pin). -/
-def safeNodeEnable (state : Shared) (socketPath : String) :
+    sidecar caches its attested pin).
+
+    `extraEnv` is overlaid on the spawned child's environment — used by
+    the daemon to default `KOHAKU_SAFE_NODE_FALLBACK_RPC` to its own
+    configured Sepolia endpoint. -/
+def safeNodeEnable (state : Shared) (socketPath : String)
+    (extraEnv : Array (String × String) := #[]) :
     IO LeanKohaku.SafeNode.Persistent.Client := do
   let s ← state.get
   match s.safeNode with
   | some c => pure c
   | none =>
-      let c ← LeanKohaku.SafeNode.Persistent.start socketPath
+      let c ← LeanKohaku.SafeNode.Persistent.start socketPath extraEnv
       state.modify (fun s => { s with safeNode := some c, safeNodeSocket := some socketPath })
       -- Prime the cached proxy URL so the first `safeNodeProxyUrl?` read
       -- in the helios path doesn't pay a UDS round-trip.

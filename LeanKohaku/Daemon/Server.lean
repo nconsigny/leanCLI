@@ -342,7 +342,7 @@ def run (cfg : Config) : IO Unit := do
   -- operator opts in via `KOHAKU_SAFE_NODE_URL`; failure to attest is
   -- non-fatal — the daemon keeps serving with helios reading directly
   -- from the configured `rpcEndpoint`. When safenode IS attested, helios
-  -- transparently routes through it (see `Endpoints.heliosEndpointFor`).
+  -- transparently routes through it (see `Endpoints.applySafeNodeOverride`).
   match ← IO.getEnv "KOHAKU_SAFE_NODE_URL" with
   | none => pure ()
   | some _ =>
@@ -353,8 +353,28 @@ def run (cfg : Config) : IO Unit := do
             | some d => pure d
             | none => pure "/tmp"
       let safeNodeSocket := s!"{runtimeRoot}/leankohaku/safenode.sock"
+      -- Default the sidecar's non-private fallback to the daemon's
+      -- configured Sepolia endpoint, so non-getProof reads use the same
+      -- RPC the rest of the daemon uses (keyed Ankr, etc.). Operator can
+      -- still force a different fallback by setting
+      -- `KOHAKU_SAFE_NODE_FALLBACK_RPC` themselves before launching the
+      -- daemon — we only set it on the child when the env var is unset.
+      -- Falls back to `cfg.rpcEndpoint` when no per-chain entry is
+      -- configured. The override is passed through `safeNodeEnable` →
+      -- `Persistent.start` → `IO.Process.spawn.env`, so the daemon's own
+      -- env is untouched.
+      let safeNodeExtraEnv : Array (String × String) ←
+        match ← IO.getEnv "KOHAKU_SAFE_NODE_FALLBACK_RPC" with
+        | some _ => pure #[]  -- operator override wins
+        | none =>
+            let fallbackUrl :=
+              match endpointForChain cfg (some "sepolia") with
+              | .ok ep => ep.url
+              | .error _ => cfg.rpcEndpoint.url
+            IO.eprintln s!"leankohaku-daemon: safenode fallback RPC = {fallbackUrl} (configured sepolia endpoint)"
+            pure #[("KOHAKU_SAFE_NODE_FALLBACK_RPC", fallbackUrl)]
       try
-        let _ ← LeanKohaku.Daemon.State.safeNodeEnable state safeNodeSocket
+        let _ ← LeanKohaku.Daemon.State.safeNodeEnable state safeNodeSocket safeNodeExtraEnv
         IO.eprintln s!"leankohaku-daemon: safenode attested + enabled (socket={safeNodeSocket})"
       catch e =>
         IO.eprintln s!"leankohaku-daemon: safenode auto-enable failed ({e}); helios reads will use the configured RPC. Use daemon.safeNode.toggle to retry."

@@ -69,17 +69,23 @@ def resolveExecutable : IO String :=
     runs the TDX verify flow before binding either socket; if that
     fails, the spawned process exits non-zero and `connect` will fail
     here. The caller is responsible for keeping the returned `Client`
-    alive for the daemon's lifetime. -/
-def start (socketPath : String) : IO Client := do
+    alive for the daemon's lifetime.
+
+    `extraEnv` is overlaid on the spawned child's env. The daemon uses
+    this to default `KOHAKU_SAFE_NODE_FALLBACK_RPC` to its own
+    configured Sepolia endpoint without polluting its own env. -/
+def start (socketPath : String) (extraEnv : Array (String × String) := #[]) : IO Client := do
   let exe ← resolveExecutable
   -- Sidecar writes no on-disk state; CWD is incidental. Keep it under
   -- cache/safenode/ for parity with helios/colibri.
   let cacheDir : System.FilePath := (← IO.currentDir) / "cache" / "safenode"
   IO.FS.createDirAll cacheDir
+  let envArr : Array (String × Option String) := extraEnv.map (fun (k, v) => (k, some v))
   let _child ← IO.Process.spawn {
     cmd := exe,
     args := #["--listen", socketPath],
     cwd := some cacheDir.toString,
+    env := envArr,
     stdin := .null,
     stdout := .null,
     stderr := .inherit
