@@ -18,6 +18,43 @@ Merkle proof against the sync-committee-attested state root. Safe-node
 changes *where* proofs come from; it does not let the daemon trust
 the proofs without verifying them.
 
+## Split-routing (what travels safe-node vs. what doesn't)
+
+The upstream safe-node application implements **only `eth_getProof`** on
+its `/json_rpc` endpoint — every other method returns
+`-32601 Method not found`. So the proxy can't dumbly forward all of
+helios's traffic to it.
+
+Instead, the sidecar splits routes by JSON-RPC method:
+
+- **`eth_getProof` → safe-node** (TDX-pinned channel, ORAM upstream).
+  This is the only method that reveals which address/slot the caller
+  cares about, so it's the only one whose obliviousness matters.
+- **Everything else → a non-pinned Sepolia RPC** (configurable via
+  `KOHAKU_SAFE_NODE_FALLBACK_RPC`, defaults to
+  `https://ethereum-sepolia-rpc.publicnode.com`). These are
+  `eth_chainId`, `eth_getBlockByNumber`, `eth_getCode`, `eth_call`,
+  `eth_estimateGas`, etc. — block-header and chain-metadata calls that
+  reveal no address-level intent.
+
+Privacy posture: an observer of the fallback RPC sees block headers
+and chain metadata; they do **not** see which addresses or storage
+slots we accessed (those went via safe-node's ORAM channel). An
+observer of safe-node sees encrypted ORAM traffic with no useful
+selectors. The two observers cannot collude meaningfully because the
+queries are partitioned by sensitivity.
+
+## Backfill retry policy
+
+Safe-node's `eth_getProof` returns `-32001 "Failed due to data non
+availability"` on a cache miss and queues a backfill in the
+background. Per the upstream docs, retrying shortly afterward usually
+lands. The sidecar retries with exponential backoff: **800 ms, 1.6 s,
+3.2 s** (4 attempts total, ~5.6 s worst case). If the proof still
+isn't materialized, the `-32001` is returned to the caller verbatim —
+helios will surface it and the daemon can decide whether to fail the
+simulate or retry the whole flow.
+
 ## Prerequisite: the Rust TDX quote verifier
 
 The TDX quote-parsing logic lives in a companion Rust binary,

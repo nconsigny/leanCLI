@@ -227,35 +227,121 @@ function buildPinnedAgent(expectedPin, expectedDomain) {
   });
 }
 
-async function forwardJsonRpc({ upstreamUrl, agent, body }) {
-  // Backfill retry: when the cache misses, the server returns
-  // -32001 ("data non availability") and queues a fetch. Per upstream
-  // docs, retrying after a short delay typically succeeds. We do exactly
-  // one retry so we don't paper over genuine outages.
-  const doOnce = async () => {
-    const res = await undiciFetch(upstreamUrl, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body,
-      dispatcher: agent,
-    });
-    const text = await res.text();
-    if (!res.ok) {
-      throw new Error(`upstream HTTP ${res.status}: ${text}`);
-    }
-    try {
-      return { json: JSON.parse(text), text };
-    } catch (e) {
-      throw new Error(`upstream returned non-JSON: ${e?.message ?? e}`);
-    }
-  };
+// Methods safe-node actually serves on /json_rpc. Everything else returns
+// -32601 from the app (we proved this empirically with eth_chainId on
+// 2026-06-02). For non-listed methods we transparently forward to the
+// non-pinned Sepolia fallback — those calls reveal no address-level state
+// to an observer, so they don't need ORAM. The privacy property holds: only
+// the listed (address-revealing) reads travel the TDX-pinned channel.
+const SAFENODE_METHODS = new Set(['eth_getProof']);
 
-  let { json, text } = await doOnce();
-  if (json?.error?.code === -32001) {
-    await new Promise((r) => setTimeout(r, 1500));
-    ({ json, text } = await doOnce());
+// Retry schedule for safe-node's -32001 ("data non availability") backfill
+// path. The server queues a fetch on miss; first reach often misses, second
+// or third reach typically lands. We escalate the delay so a transient
+// outage doesn't spin us into a thundering retry.
+const BACKFILL_DELAYS_MS = [800, 1600, 3200];
+
+async function postOnce({ url, agent, body, headers = {} }) {
+  const res = await undiciFetch(url, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', ...headers },
+    body,
+    dispatcher: agent,
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new Error(`upstream HTTP ${res.status}: ${text}`);
+  }
+  let json;
+  try {
+    json = JSON.parse(text);
+  } catch (e) {
+    throw new Error(`upstream returned non-JSON: ${e?.message ?? e}`);
   }
   return { json, text };
+}
+
+/**
+ * Splice `address` into an eth_getProof response when safe-node omits it.
+ *
+ * The Ethereum JSON-RPC spec requires eth_getProof to return an
+ * `EIP1186AccountProof` object with `address`, `accountProof`, `balance`,
+ * `codeHash`, `nonce`, `storageHash`, `storageProof`. Safe-node's current
+ * deployment omits `address`, so strict Rust deserializers (Helios's REVM,
+ * ethers, viem) reject the response. We get the address back from the
+ * original request `params[0]` — safe to fill in losslessly, since the
+ * server's proof is *for* that address by request.
+ *
+ * This is a temporary workaround. Filed upstream as a spec-compliance bug.
+ */
+function patchGetProofResponse(reqBody, respJson) {
+  if (!respJson || typeof respJson !== 'object') return respJson;
+  if (!respJson.result || typeof respJson.result !== 'object') return respJson;
+  if (typeof respJson.result.address === 'string' && respJson.result.address.length > 0) {
+    return respJson;
+  }
+  let addr = null;
+  try {
+    const parsed = JSON.parse(reqBody);
+    if (parsed && Array.isArray(parsed.params) && typeof parsed.params[0] === 'string') {
+      addr = parsed.params[0];
+    }
+  } catch {
+    // bad incoming body, can't recover; let the original response flow
+    return respJson;
+  }
+  if (!addr) return respJson;
+  // Mutate in place — caller will re-stringify.
+  respJson.result.address = addr;
+  return respJson;
+}
+
+async function forwardSafeNode({ upstreamUrl, agent, body }) {
+  let { json, text } = await postOnce({ url: upstreamUrl, agent, body });
+  let i = 0;
+  while (json?.error?.code === -32001 && i < BACKFILL_DELAYS_MS.length) {
+    await new Promise((r) => setTimeout(r, BACKFILL_DELAYS_MS[i++]));
+    ({ json, text } = await postOnce({ url: upstreamUrl, agent, body }));
+  }
+  // Safe-node omits the spec-required `address` field on eth_getProof
+  // responses. Patch it back in so downstream consumers (Helios REVM,
+  // ethers, viem) don't reject the otherwise-valid proof.
+  json = patchGetProofResponse(body, json);
+  text = JSON.stringify(json);
+  return { json, text };
+}
+
+async function forwardFallback({ fallbackUrl, fallbackAgent, body }) {
+  // Non-private, non-pinned. Best-effort one-shot retry on transport
+  // failure (timeouts, transient 5xx) but not on JSON-RPC errors.
+  try {
+    return await postOnce({ url: fallbackUrl, agent: fallbackAgent, body });
+  } catch (e) {
+    await new Promise((r) => setTimeout(r, 500));
+    return await postOnce({ url: fallbackUrl, agent: fallbackAgent, body });
+  }
+}
+
+/**
+ * Route a single JSON-RPC request to the right backend.
+ * Privacy-sensitive (eth_getProof) → TDX-pinned safe-node.
+ * Everything else → non-pinned Sepolia fallback RPC.
+ */
+async function forwardJsonRpc({ upstreamUrl, agent, fallbackUrl, fallbackAgent, body }) {
+  let method = null;
+  try {
+    const parsed = JSON.parse(body);
+    if (parsed && typeof parsed.method === 'string') {
+      method = parsed.method;
+    }
+  } catch {
+    // Non-JSON or array-batch: don't try to be clever, send to fallback.
+    // The fallback's error response will surface to the caller.
+  }
+  if (method && SAFENODE_METHODS.has(method)) {
+    return await forwardSafeNode({ upstreamUrl, agent, body });
+  }
+  return await forwardFallback({ fallbackUrl, fallbackAgent, body });
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -269,6 +355,15 @@ async function listenMode(socketPath) {
   const expectedMrtd = readEnv('KOHAKU_SAFE_NODE_MRTD');
   const pccsUrl = readEnv('KOHAKU_SAFE_NODE_PCCS_URL');
   const verifierBin = readEnv('TDX_QUOTE_VERIFIER_BIN');
+  // Non-private fallback for every eth_* method safe-node doesn't implement
+  // (everything other than eth_getProof). Default = a16z's Sepolia public
+  // node, which is the same one safe-node itself feeds from for seed sync.
+  // The privacy property holds: an observer at this RPC sees block-header /
+  // chainId reads and helios's REVM internals — they do NOT see which
+  // address/slot we proved, because that travels safe-node's ORAM channel.
+  const fallbackUrl =
+    readEnv('KOHAKU_SAFE_NODE_FALLBACK_RPC') ||
+    'https://ethereum-sepolia-rpc.publicnode.com';
 
   // Boot-time TDX verify. Failure ⇒ refuse to start; daemon falls back.
   let attestation;
@@ -280,6 +375,10 @@ async function listenMode(socketPath) {
   }
 
   let agent = buildPinnedAgent(attestation.pin, domain);
+  // The fallback is a regular public RPC: no pinning, no key in the path.
+  // Use a fresh undici Agent so its connection pool doesn't share state
+  // with the pinned one.
+  const fallbackAgent = new Agent({ connect: { rejectUnauthorized: true } });
   const upstreamUrl = joinUrl(baseUrl, apiKey);
 
   // Bind HTTP proxy plane on 127.0.0.1, random port.
@@ -303,7 +402,13 @@ async function listenMode(socketPath) {
     }
     const body = Buffer.concat(chunks).toString('utf8');
     try {
-      const { text } = await forwardJsonRpc({ upstreamUrl, agent, body });
+      const { text } = await forwardJsonRpc({
+        upstreamUrl,
+        agent,
+        fallbackUrl,
+        fallbackAgent,
+        body,
+      });
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(text);
     } catch (e) {
@@ -330,6 +435,7 @@ async function listenMode(socketPath) {
   const proxyUrl = `http://127.0.0.1:${httpAddr.port}`;
   process.stderr.write(`[safenode] proxy on ${proxyUrl} → ${baseUrl} (domain=${domain})\n`);
   process.stderr.write(`[safenode] attested TLS pin = ${attestation.pin}\n`);
+  process.stderr.write(`[safenode] split-route: ${[...SAFENODE_METHODS].join(',')} → safe-node; everything else → ${fallbackUrl}\n`);
 
   // Bind UDS control plane.
   try {
@@ -343,6 +449,9 @@ async function listenMode(socketPath) {
     proxyUrl,
     upstreamUrl,
     upstreamDomain: domain,
+    fallbackUrl,
+    privateMethods: [...SAFENODE_METHODS],
+    backfillDelaysMs: BACKFILL_DELAYS_MS,
     attestedAtMs: attestation.attestedAtMs,
     pin: attestation.pin,
     mrtd: attestation.mrtd,
@@ -448,8 +557,13 @@ async function rpcMode(encoded) {
   const pccsUrl = readEnv('KOHAKU_SAFE_NODE_PCCS_URL');
   const verifierBin = readEnv('TDX_QUOTE_VERIFIER_BIN');
 
+  const fallbackUrl =
+    readEnv('KOHAKU_SAFE_NODE_FALLBACK_RPC') ||
+    'https://ethereum-sepolia-rpc.publicnode.com';
+
   const attestation = runTdxVerify({ baseUrl, domain, expectedMrtd, pccsUrl, verifierBin });
   const agent = buildPinnedAgent(attestation.pin, domain);
+  const fallbackAgent = new Agent({ connect: { rejectUnauthorized: true } });
   const upstreamUrl = joinUrl(baseUrl, apiKey);
 
   if (req.method === 'safenode.status') {
@@ -469,7 +583,13 @@ async function rpcMode(encoded) {
   if (req.method === 'safenode.proxy') {
     const innerBody = JSON.stringify(req.params?.inner ?? {});
     try {
-      const { text } = await forwardJsonRpc({ upstreamUrl, agent, body: innerBody });
+      const { text } = await forwardJsonRpc({
+        upstreamUrl,
+        agent,
+        fallbackUrl,
+        fallbackAgent,
+        body: innerBody,
+      });
       process.stdout.write(ok(req.id ?? null, JSON.parse(text)) + '\n');
     } catch (e) {
       process.stdout.write(err(req.id ?? null, -32099, `safenode proxy: ${e?.message ?? e}`) + '\n');
