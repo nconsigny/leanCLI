@@ -529,6 +529,16 @@ function ConfirmGate({
                 {decoded.contractName} · {decoded.function}
               </Text>
             )}
+            {decoded.tokenInfo && (
+              <Text>
+                <Text color={theme.dim}>{"Token".padEnd(14)}</Text>{" "}
+                <Text>
+                  {decoded.tokenInfo.symbol
+                    ? `${decoded.tokenInfo.symbol} (${decoded.tokenInfo.address})`
+                    : `${decoded.tokenInfo.address} (symbol unresolved)`}
+                </Text>
+              </Text>
+            )}
             {(decoded.fields ?? []).map((f: any, i: number) => (
               <Text key={i}>
                 <Text color={theme.dim}>{f.label.padEnd(14)}</Text>{" "}

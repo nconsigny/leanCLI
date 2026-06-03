@@ -240,6 +240,41 @@ function summariseAssistantTurn(t: Extract<Turn, { kind: "assistant" }>): string
   return null;
 }
 
+/** Map a canonical `intentActionTag` (e.g. `erc20Approve`,
+ *  `aaveV3Supply`) to a short, plain-English label for the
+ *  Review-and-sign button and chat hint. The tag space lives in
+ *  `LeanKohaku/Ethereum/IntentCanonical.lean#actionTag`; unknown tags
+ *  pass through as-is so a new action type still renders something
+ *  useful rather than a blank label. Kept deliberately terse — the
+ *  ConfirmGate screen is where full detail (token symbol, amount,
+ *  balance changes) is rendered. */
+function friendlyAction(tag: string | undefined): string {
+  switch (tag) {
+    case "nativeTransfer":       return "Send ETH";
+    case "erc20Transfer":        return "Send ERC-20 token";
+    case "erc20Approve":         return "Approve token spending";
+    case "uniswapV3SwapSingle":  return "Swap via Uniswap V3";
+    case "aaveV3Supply":         return "Supply to Aave V3";
+    case "aaveV3Withdraw":       return "Withdraw from Aave V3";
+    case "rawCall":              return "Contract call";
+    case "shielded.deposit":     return "Privacy Pools deposit";
+    case "shielded.withdraw":    return "Privacy Pools withdraw";
+    case "shielded.railgun.shield":   return "Shield to Railgun";
+    case "shielded.railgun.unshield": return "Unshield from Railgun";
+    case "shielded.tornado.deposit":  return "Deposit to Tornado Cash";
+    case "shielded.tornado.withdraw": return "Withdraw from Tornado Cash";
+    case "ens.register":         return "Register ENS name";
+    case "ens.renew":            return "Renew ENS name";
+    case "ens.setAddr":          return "Set ENS address record";
+    case "ens.setName":          return "Set primary ENS name";
+    case "stake":                return "Stake via Lido";
+    case "liquity.openTrove":    return "Open Liquity V2 trove";
+    case "liquity.closeTrove":   return "Close Liquity V2 trove";
+    case "protocol.claim":       return "Claim protocol reward";
+    default:                     return tag ?? "encoded draft";
+  }
+}
+
 /** Build the history array forwarded to chat.draft. Filters out
  *  ephemeral system rows and pending turns, summarises assistant
  *  turns, and slices to the most recent TUI_HISTORY_CAP entries. */
@@ -275,6 +310,18 @@ export type Phase =
        *  open cannot pollute the next open or the next `/clear` cycle.
        *  Never used as a secret — collision resistance is enough. */
       sessionKey: string;
+      /** Set by `App.tsx` after a successful send-raw broadcast that
+       *  originated from this chat. Triggers a single follow-up
+       *  `chat.draft` round so the agent can propose the next step of
+       *  a multi-leg flow (e.g. supply after an erc20Approve), or
+       *  acknowledge completion for a one-shot. Cleared as soon as the
+       *  effect picks it up. The agent decides what to do — the TUI
+       *  does not assume there IS a next step. */
+      pendingContinuation?: {
+        txHash: string;
+        status?: string;
+        blockNumber?: string | number;
+      };
     }
   | { kind: "fatal"; message: string };
 
@@ -439,6 +486,76 @@ export default function LlmChatFlow({
       cancelled = true;
     };
   }, [phase.kind, phase.kind === "chat" ? phase.chainName : null]);
+
+  // Auto-continuation after a successful send-raw broadcast that
+  // originated from this chat. App.tsx sets `pendingContinuation`
+  // on the chat phase; we fire one chat.draft round with a synthetic
+  // prompt that hands the agent the broadcast receipt and lets it
+  // decide whether the original goal has a next leg (e.g. supply
+  // after erc20Approve) or whether the request is fully satisfied.
+  // The agentd's sticky session memory keyed by (chainId, sessionKey)
+  // means the agent already has the original goal + tool-call history
+  // server-side; we just need to nudge it with the receipt.
+  useEffect(() => {
+    if (phase.kind !== "chat") return;
+    if (!phase.pendingContinuation) return;
+    if (phase.busy) return;
+    const cont = phase.pendingContinuation;
+    const receiptParts: string[] = [`tx ${cont.txHash}`];
+    if (cont.blockNumber !== undefined) receiptParts.push(`block ${cont.blockNumber}`);
+    if (cont.status !== undefined) receiptParts.push(`status ${cont.status}`);
+    const receipt = receiptParts.join(" · ");
+    // Phrased to give the agent permission to do nothing — if the
+    // original request was a one-shot, a single short confirmation
+    // is the right answer; we don't want to manufacture follow-ups.
+    const prompt =
+      `[continuation hook] The previous transaction was broadcast (${receipt}). ` +
+      `If the user's original request requires additional transactions ` +
+      `(for example, a supply after an approve, or a swap after an approve), ` +
+      `propose the next step now via propose_send. ` +
+      `If the original request is fully satisfied, reply with a single short confirmation — no propose_send needed.`;
+    const history = buildChatHistory(phase.turns);
+    // Show a tiny status row so the user knows the chat is doing
+    // something rather than appearing to hang. Replaced by the
+    // assistant turn when the agent answers.
+    const turnsAfter: Turn[] = [
+      ...phase.turns,
+      { kind: "system", tone: "info", text: "↻ continuing — looking for the next step…" },
+      { kind: "assistant", status: "pending" },
+    ];
+    setPhase({
+      ...phase,
+      turns: turnsAfter,
+      busy: true,
+      pendingContinuation: undefined,
+    });
+    let cancelled = false;
+    (async () => {
+      const r = await call<DraftResponse>(
+        "chat.draft",
+        {
+          prompt,
+          chainId: phase.chainId,
+          sessionKey: phase.sessionKey,
+          history,
+        },
+        { timeoutMs: 300_000 },
+      );
+      if (cancelled) return;
+      const finished: Turn = r.ok
+        ? { kind: "assistant", status: "done", result: r.result }
+        : { kind: "assistant", status: "done", error: r.error.message };
+      setPhase((p) => {
+        if (p.kind !== "chat") return p;
+        const updated = [...p.turns];
+        updated[updated.length - 1] = finished;
+        return { ...p, turns: updated, busy: false };
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [phase.kind === "chat" ? phase.pendingContinuation?.txHash : null]);
 
   // Global keys: esc leaves the chat from any phase.
   useInput((_input, key) => {
@@ -1024,17 +1141,21 @@ function ChatBody({
       {latestSignable && (
         <Box
           marginTop={1}
+          flexDirection="column"
           borderStyle={focus === "sign" ? "double" : "single"}
           borderColor={focus === "sign" ? theme.ok : theme.dim}
           paddingX={1}
         >
           <Text color={focus === "sign" ? theme.ok : theme.dim} bold>
-            {focus === "sign" ? "▶  ✓ Sign + broadcast (enter)" : "   ✓ Sign + broadcast (tab to focus)"}
+            {focus === "sign"
+              ? `▶  Review and sign — ${friendlyAction(latestSignable.result?.intentActionTag)} (enter)`
+              : `   Review and sign — ${friendlyAction(latestSignable.result?.intentActionTag)} (tab to focus)`}
           </Text>
           <Text color={theme.dim}>
-            {"   "}
-            ↳ {latestSignable.result?.intentActionTag ?? "encoded draft"} ·{" "}
-            simulate + ConfirmGate runs after this
+            {"   "}↳ opens the confirmation screen: decoded action, simulated outcome, token balance changes
+          </Text>
+          <Text color={theme.dim}>
+            {"   "}   nothing is signed yet — you can still cancel there (esc) before anything goes on-chain
           </Text>
         </Box>
       )}
@@ -1196,9 +1317,19 @@ function TurnRow({
       )}
       {r.canonical && <CanonicalLines canonical={r.canonical} />}
       {r.encoded && isLatestSignable && (
-        <Box marginTop={1} paddingLeft={5}>
-          <Text color={theme.primary} bold>↳ tab to the [Sign + broadcast] button below, then enter to confirm </Text>
-          <Text color={theme.dim}>(simulate + ConfirmGate)</Text>
+        <Box marginTop={1} paddingLeft={5} flexDirection="column">
+          <Text color={theme.primary} bold>
+            ↳ next step: press Tab to focus the [Review and sign] button below, then Enter.
+          </Text>
+          <Text color={theme.dim}>
+            {"  "}The full confirmation screen opens next — you'll see the decoded action,
+          </Text>
+          <Text color={theme.dim}>
+            {"  "}a simulated outcome, and any token balance changes. Nothing is signed until
+          </Text>
+          <Text color={theme.dim}>
+            {"  "}you confirm there; esc cancels before any signature is produced.
+          </Text>
         </Box>
       )}
       {(r.prepare || r.audit || r.create) && (

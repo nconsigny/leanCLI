@@ -182,6 +182,27 @@ function broadcastResultToTurn(
   };
 }
 
+/** Extract the structured broadcast receipt the chat's auto-continue
+ *  effect needs. Returns null when the result blob doesn't carry a
+ *  recognizable txHash (sphincs UserOps, malformed payloads, etc.) —
+ *  in which case the chat just leaves the receipt as a system turn
+ *  without trying to nudge the agent. */
+function extractBroadcastReceipt(
+  result: unknown,
+): { txHash: string; status?: string; blockNumber?: string | number } | null {
+  const r = result && typeof result === "object" ? (result as Record<string, unknown>) : {};
+  const txHash = typeof r.txHash === "string" ? r.txHash : undefined;
+  if (!txHash) return null;
+  const status = typeof r.status === "string" ? r.status : undefined;
+  const blockNumber =
+    typeof r.blockNumber === "number"
+      ? r.blockNumber
+      : typeof r.blockNumber === "string"
+        ? r.blockNumber
+        : undefined;
+  return { txHash, status, blockNumber };
+}
+
 /** Stack-based screen navigator. Push on navigate, pop on Esc/back; the
  *  bottom of the stack is the main menu so Quit always exits the app. */
 export default function App() {
@@ -666,14 +687,27 @@ export default function App() {
             // than just bouncing back to an unchanged conversation
             // — which would leave them wondering whether the tx
             // actually went out.
+            //
+            // On a successful broadcast we ALSO arm a one-shot
+            // `pendingContinuation` on the chat phase. LlmChatFlow's
+            // auto-continue effect picks it up and fires a single
+            // chat.draft round so the agent can propose the next leg
+            // of a multi-step flow (e.g. supply after erc20Approve)
+            // or acknowledge completion. The agent decides — we don't
+            // pre-judge whether there IS a next step.
             const fromChat = stack.some((s) => s.kind === "llm-chat");
             if (fromChat) {
               const turn = broadcastResultToTurn(success, result);
-              if (turn) {
-                setChatPhase((p) =>
-                  p.kind === "chat" ? { ...p, turns: [...p.turns, turn] } : p,
-                );
-              }
+              const cont = success ? extractBroadcastReceipt(result) : null;
+              setChatPhase((p) => {
+                if (p.kind !== "chat") return p;
+                const turns = turn ? [...p.turns, turn] : p.turns;
+                return {
+                  ...p,
+                  turns,
+                  pendingContinuation: cont ?? undefined,
+                };
+              });
             }
             finishAction();
           }}

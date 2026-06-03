@@ -161,6 +161,16 @@ export function decodeTxIntent(req, registry) {
     formatField(f, ctx),
   );
 
+  // Surface token identity for ERC-20-shaped descriptors. When a field
+  // declares `format: "tokenAmount"` with `tokenPath: "@.to"`, the
+  // contract being called IS the token, and the user otherwise has no
+  // way to see "this approve is for WETH" — descriptor field rows only
+  // expose function arguments (spender, value), not the to-address.
+  // Resolve symbol/decimals from the daemon-fetched tokenMetadata when
+  // available; fall back to address-only so the TUI always renders the
+  // token contract, even on a cold cache.
+  const tokenInfo = deriveTokenInfo(chosen.formatSpec, to, tokenMetadata);
+
   return {
     matched: true,
     partial: false,
@@ -174,6 +184,32 @@ export function decodeTxIntent(req, registry) {
     intent: chosen.formatSpec.intent ?? null,
     selector,
     fields,
+    tokenInfo,
+  };
+}
+
+// Return `{ address, symbol?, decimals? }` when the descriptor's fields
+// indicate the call-target IS the token contract (tokenAmount + tokenPath
+// "@.to"). Otherwise null. Symbol/decimals come from the daemon-injected
+// tokenMetadata map; address-only is still a useful render — the user
+// sees they're poking 0xfff9…6b14 instead of being shown only "Spender"
+// and "Amount" with no token context. The wallet does not trust this
+// for signing; ConfirmGate displays it for human review.
+function deriveTokenInfo(formatSpec, to, tokenMetadata) {
+  if (!to) return null;
+  const fields = formatSpec?.fields ?? [];
+  const usesSelfToken = fields.some(
+    (f) =>
+      f?.format === "tokenAmount" &&
+      typeof f?.params?.tokenPath === "string" &&
+      f.params.tokenPath === "@.to",
+  );
+  if (!usesSelfToken) return null;
+  const lookup = tokenMetadata?.[to.toLowerCase()] ?? null;
+  return {
+    address: to,
+    symbol: typeof lookup?.symbol === "string" ? lookup.symbol : null,
+    decimals: typeof lookup?.decimals === "number" ? lookup.decimals : null,
   };
 }
 
