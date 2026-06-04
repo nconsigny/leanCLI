@@ -22,9 +22,9 @@ as SLH-DSA-SHA2-128-24 with no on-chain account and no advantage over
 C13's keccak verifier, so it added surface without value.
 
 C13's Sepolia deployment (per `nconsigny/SPHINCS-` README) is the shared
-verifier at 0xce176df2680f6612a61486f74502db62d014d23d, account
-0xcef985d4db485e96ab9187ad462561bff241db0d via factory
-0xcaf5d2582eb405e3c4b65f3a52d147badfd96fed, against EntryPoint v0.9
+verifier at 0xc6f4009D4a8220527b849670431Cbde5FeD8A5F2, account
+0x01280171F336869e9c96F9e6eb674b1548D10dD4 via factory
+0x8830d36284829656F2A60CD028062686069FABA4, against EntryPoint v0.9
 (0x433709009B8330FDa32311DF1C2AFA402eD8D009). handleOps gas ≈ 293 K.
 These addresses ship as built-in defaults in `Daemon/Config.lean::resolve`;
 users override via `daemon.json`'s `sphincs_verifiers` /
@@ -37,10 +37,13 @@ relative to NIST SLH-DSA. Internal type names and the on-chain
 Trust model: identical to the Node sidecars in `bridge/`. The shim binary
 is **untrusted** (the GPU signer doubly so — it runs driver/shader code).
 Every output goes through length-validation against the parameter set's
-known sizes, and `signWithVerify` runs verify-after-sign locally — on the
-CPU reference even when signing on the GPU — before handing the signature
-back, so neither a malicious shim nor a faulty GPU can get the daemon to
-broadcast a signature the on-chain verifier would reject.
+known sizes, and `signWithVerify` runs verify-after-sign locally on the
+signing backend before handing the signature back, so neither a malicious
+shim nor a faulty GPU can get the daemon to broadcast a signature that
+backend's own verifier would reject. (Cross-backend verify is NOT used:
+the Vulkan SLH-DSA signer uses FIPS external mode while the CPU reference
+shim verifies internal mode — keygen is bit-exact between them, but the
+message-envelope convention differs; see `signWithVerify`.)
 
 `info`-reported sizes are checked against the parameter-set's expected
 constants on every call so a wrongly-spawned binary (or a tampered
@@ -76,9 +79,9 @@ inductive ParamSet
       **FIPS 205 §11.2.2 uncompressed 32-byte ADRS layout** (keccak256
       hash), so it ports cleanly from a FIPS reference implementation.
       C13 is the parameter set with a live on-chain hybrid 4337 account
-      on Sepolia: verifier `0xce176df2680f6612a61486f74502db62d014d23d`,
-      account `0xcef985d4db485e96ab9187ad462561bff241db0d` via factory
-      `0xcaf5d2582eb405e3c4b65f3a52d147badfd96fed` (EntryPoint v0.9).
+      on Sepolia: verifier `0xc6f4009D4a8220527b849670431Cbde5FeD8A5F2`,
+      account `0x01280171F336869e9c96F9e6eb674b1548D10dD4` via factory
+      `0x8830d36284829656F2A60CD028062686069FABA4` (EntryPoint v0.9).
       Signer: upstream `nconsigny/SPHINCS- signer-wasm` (`params.rs`
       SIG_SIZE = 3688). Supersedes C9, which is retired upstream. -/
   | c13
@@ -497,21 +500,26 @@ def verify (ps : ParamSet) (pkSeed pkRoot digest sig : String)
     to operate on the public values; either it accepts and the chain
     will accept (correctness), or it rejects and we abort here.
 
-    Cross-implementation guard for the GPU path: we sign on `backend`
-    (which may be the untrusted Vulkan signer) but always **re-verify on
-    the CPU reference**. The Vulkan signer is bit-exact with the CPU
-    SLH-DSA-SHA2 reference, so a correct GPU signature verifies under the
-    independent CPU implementation; a wrong one (tampered binary, driver
-    bug, parameter drift) fails closed here and is never broadcast. This
-    is strictly stronger than re-verifying in the same binary. For
-    `cpu`-backed param sets the two paths coincide. -/
+    Verify-after-sign runs on the SAME backend that produced the
+    signature. This was briefly cross-checked on the CPU reference, but
+    that is unsound here: the Vulkan SLH-DSA-SHA2 signer uses FIPS 205
+    *external* mode (M = 0x00‖0x00‖M, matching the on-chain verifier and
+    the pinned KAT), whereas the vendored CPU reference shim verifies in
+    *internal* mode (raw digest) — so the CPU shim rejects a perfectly
+    valid, on-chain-acceptable GPU signature. Keygen IS bit-exact across
+    the two (verified: identical pkRoot for a shared seed); only the
+    message-envelope convention differs. Verifying on the signing backend
+    keeps the guard self-consistent and on-chain-aligned for the GPU
+    path. (The CPU-shim internal-vs-on-chain-external mismatch is a
+    pre-existing SLH-DSA caveat — that param set has no on-chain account
+    yet, so it has never been cross-checked on-chain.) -/
 def signWithVerify (ps : ParamSet) (sk pkSeed pkRoot digest : String)
     (optrand? : Option String := none) (backend : SignerBackend := .cpu) :
     IO (Except Err String) := do
   match ← signRaw ps sk digest optrand? backend with
   | .error e => pure (.error e)
   | .ok sig =>
-      match ← verify ps pkSeed pkRoot digest sig .cpu with
+      match ← verify ps pkSeed pkRoot digest sig backend with
       | .error e => pure (.error e)
       | .ok true => pure (.ok sig)
       | .ok false => pure (.error .verifyAfterSignFailed)

@@ -1,0 +1,26 @@
+[package]
+name = "sphincs-c13-shim"
+version = "0.1.0"
+edition = "2021"
+description = "leanCLI C13 (WOTS+C / FORS+C, h=22 d=2 a=19 k=7 w=8, 3688-byte sig) signer shim — cryptographic core vendored verbatim from upstream nconsigny/SPHINCS- signer-wasm @ main (FIPS 205 uncompressed ADRS + keccak256), with the wasm-bindgen layer stripped and a stdio JSON-RPC dispatcher + verify-after-sign added."
+
+# Single native binary. Upstream also builds a wasm cdylib via
+# wasm-bindgen; we strip that — the daemon spawns a native stdio JSON-RPC
+# binary, so keeping wasm-bindgen out avoids pulling wasm32-unknown-unknown
+# into the toolchain requirement.
+[[bin]]
+name = "sphincs-c13"
+path = "src/main.rs"
+
+[lib]
+name = "sphincs_c13_signer"
+path = "src/lib.rs"
+crate-type = ["rlib"]
+
+[dependencies]
+tiny-keccak = { version = "2", features = ["keccak"] }
+hex = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = true

@@ -407,14 +407,17 @@ def resolve : IO LeanCli.Daemon.Server.Config := do
     if acc.any (fun e => e.chain = chain && e.paramSet = ps) then acc
     else acc.push { chain := chain, paramSet := ps, address := some addr }
   let sphincsVerifiers :=
-    -- C13 shared verifier — the canonical upstream `nconsigny/SPHINCS-`
-    -- Sepolia deployment (README "Deployed Contracts" table). C13
-    -- (WOTS+C / FORS+C, h=22 d=2 a=19 k=7 w=8, 3688-byte sig, FIPS 205
-    -- §11.2.2 uncompressed 32-byte ADRS + keccak256) supersedes the
-    -- retired C9 variant; C13 is the param set with a live on-chain
-    -- hybrid 4337 account. Standalone verify-tx gas ≈ 188 K.
+    -- C13 shared verifier — canonical upstream `nconsigny/SPHINCS-`
+    -- Sepolia deployment, 2026-06-04 redeploy (`script/.c13_addresses.json`).
+    -- This verifier is hardened over the original (commit 16732a7: N_MASK
+    -- canonical-key checks rejecting non-canonical pkSeed/pkRoot; codesize
+    -- 1091 → 1191 B). C13 (WOTS+C / FORS+C, h=22 d=2 a=19 k=7 w=8,
+    -- 3688-byte sig, FIPS 205 §11.2.2 uncompressed 32-byte ADRS +
+    -- keccak256) supersedes the retired C9 variant and is the param set
+    -- with a live on-chain hybrid 4337 account. Standalone verify-tx gas
+    -- ≈ 188 K. Superseded verifier: 0xce176df2…14d23d (pre-hardening).
     withVerifierDefault sphincsVerifiers
-      "sepolia" .c13 "0xce176df2680f6612a61486f74502db62d014d23d"
+      "sepolia" .c13 "0xc6f4009D4a8220527b849670431Cbde5FeD8A5F2"
   let sphincsVerifiers :=
     -- SLH-DSA-SHA2-128-24 verifier — upstream Sepolia deployment per
     -- `lib/sphincs-minus/README.md`. NOTE: only the verifier is
@@ -428,19 +431,19 @@ def resolve : IO LeanCli.Daemon.Server.Config := do
     withVerifierDefault sphincsVerifiers
       "sepolia" .slhDsaSha2_128_24 "0x9Fe41769395BC9fefb7e0d340064ed29F4a4Af91"
   let sphincsFactories :=
-    -- C13 Sepolia factory — canonical upstream deployment (README
-    -- "Deployed Contracts" table). Deploys `SphincsAccount` (inherits
-    -- the eth-infinitism `BaseAccount` from `lib/account-abstraction @
-    -- v0.9.0`, which pays prefund unconditionally in `validateUserOp`,
-    -- so bundler `eth_estimateUserOperationGas` with a dummy signature
-    -- clears the AA21 path naturally) bound to the canonical v0.9
-    -- EntryPoint 0x433709009B8330FDa32311DF1C2AFA402eD8D009. The sample
-    -- account at 0xcef985d4db485e96ab9187ad462561bff241db0d was minted
-    -- by this factory; full hybrid handleOps gas ≈ 293 K. Earlier C9
-    -- factories (0xE1494133…, 0xe1db33A8…, 0x9cdB9762…, 0x452B95a7…)
-    -- are retired with the C9 param set.
+    -- C13 Sepolia factory — 2026-06-04 redeploy bundled with the hardened
+    -- verifier above (`script/.c13_addresses.json`; a second fresh factory
+    -- 0x79FDD0aF…56Cd857 also points at the same verifier — either works,
+    -- accounts get distinct CREATE2 addresses). Deploys `SphincsAccount`
+    -- (inherits eth-infinitism `BaseAccount` @ v0.9.0, which pays prefund
+    -- unconditionally in `validateUserOp`, so bundler estimate with a dummy
+    -- signature clears the AA21 path) bound to the canonical v0.9 EntryPoint
+    -- 0x433709009B8330FDa32311DF1C2AFA402eD8D009. Sample account minted by
+    -- this factory: 0x01280171F336869e9c96F9e6eb674b1548D10dD4; full hybrid
+    -- handleOps gas ≈ 293 K. Superseded factory: 0xcaf5d2…d96fed (paired
+    -- with the pre-hardening verifier). Earlier C9 factories are retired.
     withVerifierDefault sphincsFactories
-      "sepolia" .c13 "0xcaf5d2582eb405e3c4b65f3a52d147badfd96fed"
+      "sepolia" .c13 "0x8830d36284829656F2A60CD028062686069FABA4"
   let sphincsFactories :=
     -- SLH-DSA-SHA2-128-24 factory — same `SphincsAccountFactory.sol` as
     -- C13, just wired to the SLH-DSA verifier

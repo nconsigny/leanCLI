@@ -1,0 +1,91 @@
+#version 430
+#extension GL_GOOGLE_include_directive : enable
+#include "keygen_common.comp"
+
+// FUSED variant for SLH-DSA-128-24 (n=16, h=22, d=1, w=4).
+//
+// Upstream slhvk computes WOTS chain tips into a giant intermediate buffer
+// (WOTS_CHAIN_BUFFER) sized N * WOTS_CHAIN_COUNT * XMSS_LEAVES * LAYERS.
+// At 128-24 this is 4.25 GB, exceeding Vulkan's per-descriptor 4 GB cap.
+//
+// This fused shader computes the WOTS_CHAIN_COUNT chain tips for one XMSS leaf
+// inline (in private storage) and immediately T_l-hashes them into the XMSS
+// leaf node. No intermediate buffer is required.
+//
+// One invocation = one XMSS leaf. Per-thread private storage: ~1.5 KB.
+// Total work per invocation: WOTS_CHAIN_COUNT * (1 PRF + (w-1) F) hash ops
+// followed by the T_l absorb. At 128-24 (w=4, l=68): 272 SHA-256 compressions
+// for chain work + ~19 for the leaf absorb.
+
+uint THREAD_COUNT = keys_count * XMSS_LEAVES;
+
+void main() {
+  uint thread_id = gl_GlobalInvocationID.x;
+  if (thread_id >= THREAD_COUNT) return;
+
+  uint key_index = thread_id / XMSS_LEAVES;
+  uint layer_address = HYPERTREE_LAYERS - 1; // always the root XMSS tree layer at d=1
+  uint keypair_address = thread_id % XMSS_LEAVES;
+
+  // Hoist the SHA-256 state after absorbing pk_seed+padding and the secret seed.
+  // Same for all 68 chains in this leaf.
+  uint sha256_state_init[8] = sha256_states[key_index];
+  uint sk_seed_local[HASH_WORDS] = sk_seeds[key_index];
+
+  // Private-memory buffer for the WOTS_CHAIN_COUNT chain tips of this one leaf.
+  uint tips[WOTS_TIPS_WORDS];
+
+  for (uint chain_address = 0; chain_address < WOTS_CHAIN_COUNT; chain_address++) {
+    uint schedule[64];
+
+    // ----- WOTS_PRF: derive chain start from sk_seed -----
+    schedule[0] = (layer_address << 24);
+    schedule[1] = 0; // tree_address = 0 at d=1 root layer
+    schedule[2] = (ADRS_TYPE_WOTS_PRF << 16) | (keypair_address >> 16);
+    schedule[3] = (keypair_address << 16) | (chain_address >> 16);
+    schedule[4] = (chain_address << 16); // hash_address = 0 in bytes 18-21
+    schedule[5] = (sk_seed_local[0] >> 16);
+    for (uint i = 1; i < HASH_WORDS; i++) {
+      schedule[5 + i] = (sk_seed_local[i - 1] << 16) | (sk_seed_local[i] >> 16);
+    }
+    schedule[5 + HASH_WORDS] = (sk_seed_local[HASH_WORDS - 1] << 16) | 0x8000;
+    for (uint i = 5 + HASH_WORDS + 1; i < 15; i++) {
+      schedule[i] = 0;
+    }
+    // SHA256 message-bit-length: 8 * (pkSeed_padded(64) + ADRSc(22) + sk_seed(N))
+    schedule[15] = 8 * (64 + 22 + 4 * HASH_WORDS);
+
+    uint s[8] = sha256_state_init;
+    uint old_state[8] = sha256_state_init;
+    sha256_rounds_all(s, schedule);
+
+    // ----- Chain iteration: hash forward WOTS_CHAIN_LEN-1 times -----
+    // Switch type byte from WOTS_PRF (5) to WOTS_HASH (0).
+    schedule[2] &= 0xFF00FFFF;
+
+    // Precompute 5 rounds for this chain's WOTS_HASH schedule[0..4].
+    uint fifth_round_state[8] = sha256_state_init;
+    sha256_rounds_0_thru_5(fifth_round_state, schedule);
+
+    for (uint hash_address = 0; hash_address < WOTS_CHAIN_LEN - 1; hash_address++) {
+      define_schedule_1hash_midwords(s, hash_address, schedule)
+      s = fifth_round_state;
+      sha256_rounds_5_thru_64(s, schedule, old_state);
+    }
+
+    // Store the chain tip in this thread's private tips array.
+    for (uint i = 0; i < HASH_WORDS; i++) {
+      tips[chain_address * HASH_WORDS + i] = s[i];
+    }
+  }
+
+  // ----- T_l: compress the 68 tips into the XMSS leaf -----
+  compute_xmss_leaf(
+    layer_address,
+    uint64(0, 0), // tree_address = 0
+    keypair_address,
+    sha256_state_init,
+    tips,
+    xmss_node_states[key_index][keypair_address]
+  );
+}

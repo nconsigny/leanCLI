@@ -1,0 +1,36 @@
+#version 430
+#extension GL_GOOGLE_include_directive : enable
+#include "signing_common.comp"
+
+#define THREAD_COUNT (HYPERTREE_LAYERS * XMSS_LEAVES)
+
+// The WOTS hash chain states. For all WOTS keypairs these will be filled with
+// hash chains iterated to their tips.
+layout(binding = 1) buffer chainstates {
+  uint hash_chain_states[THREAD_COUNT][WOTS_TIPS_WORDS];
+};
+
+// The compressed WOTS public keys hash output states.
+layout(binding = 2) buffer xmssnodes {
+  uint xmss_node_states[THREAD_COUNT][HASH_WORDS];
+};
+
+void main() {
+  uint thread_id = gl_GlobalInvocationID.x;
+  if (thread_id >= THREAD_COUNT) return;
+
+  uint layer_address = thread_id / XMSS_LEAVES;
+  if (layer_address >= HYPERTREE_LAYERS - cached_tree_layers) return;
+
+  uint keypair_address = thread_id % XMSS_LEAVES;
+  uint64 tree_address_shifted = shifted_tree_address(tree_address, XMSS_HEIGHT, layer_address);
+
+  compute_xmss_leaf(
+    layer_address,
+    tree_address_shifted,
+    keypair_address,
+    sha256_state,
+    hash_chain_states[thread_id],
+    xmss_node_states[thread_id]
+  );
+}

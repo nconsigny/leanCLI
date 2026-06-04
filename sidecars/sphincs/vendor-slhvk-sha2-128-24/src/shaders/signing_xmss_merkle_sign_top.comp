@@ -1,0 +1,113 @@
+#version 430
+#extension GL_GOOGLE_include_directive : enable
+#include "signing_common.comp"
+
+// XMSS merkle build — TOP PHASE (levels PARALLEL_TOP+1..XMSS_HEIGHT).
+//
+// 128-24 fork: this is the second of two compute dispatches for the XMSS merkle
+// build (see signing_xmss_merkle_sign.comp for the first). A Vulkan pipeline
+// barrier between dispatches gives queue-level sync of the level-PARALLEL_TOP
+// SSBO writes — necessary because intra-shader barrier() + memoryBarrier()
+// alone were not reliable on NVIDIA at h'=22.
+//
+// This dispatch:
+//   1. Cooperatively copies the 64 level-PARALLEL_TOP nodes from SSBO to
+//      workgroup-shared memory.
+//   2. Thread 0 builds levels PARALLEL_TOP+1..XMSS_HEIGHT in shared memory,
+//      writing the corresponding auth-path entries.
+//   3. Thread 0 writes the final XMSS root back to SSBO (for d > 1).
+
+#define PARALLEL_TOP 16
+#define TOP_NODE_COUNT 64  // = 1 << (XMSS_HEIGHT - PARALLEL_TOP) when XMSS_HEIGHT=22
+
+layout(binding = 2) coherent buffer xmssnodes {
+  uint xmss_node_states[HYPERTREE_LAYERS][XMSS_LEAVES][HASH_WORDS];
+};
+
+layout(binding = 3) buffer htsig {
+  XmssSignature hypertree_signature[HYPERTREE_LAYERS];
+};
+
+layout(binding = 4) buffer rootmsg {
+  uint xmss_root_messages[HYPERTREE_LAYERS][WOTS_CHAIN_COUNT];
+};
+
+shared uint top_nodes[TOP_NODE_COUNT][HASH_WORDS];
+
+void main() {
+  uint local_id = gl_LocalInvocationID.x;
+  uint layer_address = gl_WorkGroupID.x;
+  uint64 tree_address_shifted = shifted_tree_address(tree_address, XMSS_HEIGHT, layer_address);
+
+  uint our_layer_signing_keypair_address = layer_address == 0
+    ? signing_keypair_address
+    : (shifted_tree_address(tree_address, XMSS_HEIGHT, layer_address - 1).lo & (XMSS_LEAVES - 1));
+
+  // 128-24 fork: serialize the SSBO->shared copy on thread 0. We tried doing
+  // this cooperatively with 64 threads but the cross-warp sync (threads 32..63
+  // in warp 1, thread 0 in warp 0) was producing non-deterministic outputs.
+  // Single-threaded copy is intra-thread and eliminates the warp boundary.
+  if (local_id == 0) {
+    for (uint k = 0; k < TOP_NODE_COUNT; k++) {
+      uint global_offset = k * (1u << PARALLEL_TOP);
+      for (uint j = 0; j < HASH_WORDS; j++) {
+        top_nodes[k][j] = xmss_node_states[layer_address][global_offset][j];
+      }
+    }
+  }
+  memoryBarrierShared();
+  barrier();
+
+  if (local_id == 0) {
+    uint current_count = TOP_NODE_COUNT;
+    for (uint node_height = PARALLEL_TOP + 1; node_height <= XMSS_HEIGHT; node_height++) {
+      uint next_count = current_count / 2;
+      for (uint k = 0; k < next_count; k++) {
+        uint schedule[64];
+        define_schedule_2hash(
+          layer_address,
+          ADRS_TYPE_TREE,
+          0,
+          node_height,
+          k,
+          tree_address_shifted,
+          top_nodes[2 * k],
+          top_nodes[2 * k + 1],
+          schedule
+        );
+        uint s[8] = {
+          sha256_state[0], sha256_state[1], sha256_state[2], sha256_state[3],
+          sha256_state[4], sha256_state[5], sha256_state[6], sha256_state[7]
+        };
+        sha256_rounds_all(s, schedule);
+        for (uint i = 0; i < HASH_WORDS; i++) {
+          top_nodes[k][i] = s[i];
+        }
+      }
+      // Auth-path entry at this level (skip at the root level).
+      if (node_height < XMSS_HEIGHT) {
+        uint sibling_pos = ((our_layer_signing_keypair_address >> node_height) ^ 1);
+        for (uint i = 0; i < HASH_WORDS; i++) {
+          hypertree_signature[layer_address].xmss_merkle_path[node_height][i] = flip_endianness(top_nodes[sibling_pos][i]);
+        }
+      }
+      current_count = next_count;
+    }
+    // Write the root back to SSBO so downstream consumers (the wots_root_messages
+    // computation below, used at d > 1) see it.
+    for (uint i = 0; i < HASH_WORDS; i++) {
+      xmss_node_states[layer_address][0][i] = top_nodes[0][i];
+    }
+  }
+  memoryBarrierShared();
+  memoryBarrier();
+  barrier();
+
+  // For d > 1: convert the XMSS root into a base-W WOTS message for the next layer.
+  if (local_id == 0 && layer_address < HYPERTREE_LAYERS - 1) {
+    uint root_node[HASH_WORDS] = xmss_node_states[layer_address][0];
+    uint message[WOTS_CHAIN_COUNT];
+    convert_to_base_w(root_node, message);
+    xmss_root_messages[layer_address + 1] = message;
+  }
+}

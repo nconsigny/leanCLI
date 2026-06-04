@@ -38,6 +38,8 @@ SHIM    := shim/shim_main.c
 VENDOR_SLHDSA := vendor-slhdsa-sha2-128-24
 VENDOR_JARDIN := vendor-jardin-keccak-128-24
 VENDOR_C9     := vendor-c9
+VENDOR_C13    := vendor-c13
+VENDOR_SLHVK  := vendor-slhvk-sha2-128-24
 
 # C-side source files for the SLH-DSA-SHA2 variant. main.c is intentionally
 # excluded — it is replaced by shim_main.c.
@@ -69,17 +71,45 @@ C9_RUST_SRCS := $(VENDOR_C9)/Cargo.toml \
                 $(VENDOR_C9)/src/keygen.rs \
                 $(VENDOR_C9)/src/verifier.rs
 
+# C13 Rust sources — the active C-series param set (supersedes C9). Crypto
+# core is vendored verbatim from upstream signer-wasm @ main (FIPS ADRS +
+# keccak256); shim layer (main.rs/lib.rs/verifier.rs + keygen from_seed_bytes)
+# is leanCLI-local.
+C13_RUST_SRCS := $(VENDOR_C13)/Cargo.toml \
+                 $(VENDOR_C13)/src/main.rs \
+                 $(VENDOR_C13)/src/lib.rs \
+                 $(VENDOR_C13)/src/params.rs \
+                 $(VENDOR_C13)/src/hash.rs \
+                 $(VENDOR_C13)/src/wots.rs \
+                 $(VENDOR_C13)/src/fors.rs \
+                 $(VENDOR_C13)/src/merkle.rs \
+                 $(VENDOR_C13)/src/sphincs.rs \
+                 $(VENDOR_C13)/src/keygen.rs \
+                 $(VENDOR_C13)/src/verifier.rs
+
 SLHDSA_BIN := $(OUT_DIR)/sphincs-slhdsa-128-24
 JARDIN_BIN := $(OUT_DIR)/sphincs-jardin-keccak-128-24
 C9_BIN     := $(OUT_DIR)/sphincs-c9
 C9_CARGO_OUT := $(VENDOR_C9)/target/release/sphincs-c9
+C13_BIN    := $(OUT_DIR)/sphincs-c13
+C13_CARGO_OUT := $(VENDOR_C13)/target/release/sphincs-c13
 
-.PHONY: all slhdsa jardin c9 clean
-all: slhdsa jardin c9
+# Vulkan GPU signer for SLH-DSA-SHA2-128-24 (bit-exact with the CPU
+# reference). Optional: requires libvulkan + glslangValidator and a Vulkan
+# device, so it is NOT part of `all`. Built via `make slhvk`.
+SLHVK_BIN  := $(OUT_DIR)/sphincs-slhdsa-128-24-vk
+
+# Default build is the two live param sets: SLH-DSA-SHA2 (CPU) and C13.
+# C9 / JARDIN are retired (no longer wired in the Lean ParamSet) but their
+# targets remain for reproducing the legacy on-chain cross-checks.
+.PHONY: all slhdsa jardin c9 c13 slhvk clean
+all: slhdsa c13
 
 slhdsa: $(SLHDSA_BIN)
 jardin: $(JARDIN_BIN)
 c9:     $(C9_BIN)
+c13:    $(C13_BIN)
+slhvk:  $(SLHVK_BIN)
 
 $(SLHDSA_BIN): $(SLHDSA_SRCS)
 	@mkdir -p $(OUT_DIR)
@@ -103,7 +133,28 @@ $(C9_BIN): $(C9_RUST_SRCS)
 	cd $(VENDOR_C9) && $(CARGO) build --release
 	cp $(C9_CARGO_OUT) $@
 
+# C13: cargo build --release in vendor-c13/, then copy the binary into bin/.
+$(C13_BIN): $(C13_RUST_SRCS)
+	@mkdir -p $(OUT_DIR)
+	cd $(VENDOR_C13) && $(CARGO) build --release
+	cp $(C13_CARGO_OUT) $@
+
+# Vulkan GPU signer. Builds the vendored slhvk static lib (compiles GLSL
+# compute shaders to SPIR-V via glslangValidator, needs Vulkan headers),
+# then links shim/shim_main.c against the slhvk adapter so the binary speaks
+# the same stdio JSON-RPC protocol as the CPU shim. Requires libvulkan at
+# runtime + a Vulkan device. See shim/shim_slhvk.c.
+$(SLHVK_BIN): shim/shim_slhvk.c shim/shim_main.c
+	@mkdir -p $(OUT_DIR)
+	$(MAKE) -C $(VENDOR_SLHVK) lib/libslhvk.a
+	$(CC) $(CFLAGS) -Ishim/slhvk-api -I$(VENDOR_SLHVK)/include \
+	  -DPARAM_SET_NAME='"SLH-DSA-SHA2-128-24"' -DPARAM_SET_STUB=0 \
+	  -o $@ shim/shim_main.c shim/shim_slhvk.c \
+	  $(VENDOR_SLHVK)/lib/libslhvk.a -lvulkan $(LDFLAGS)
+
 clean:
-	rm -f $(SLHDSA_BIN) $(JARDIN_BIN) $(C9_BIN)
+	rm -f $(SLHDSA_BIN) $(JARDIN_BIN) $(C9_BIN) $(C13_BIN) $(SLHVK_BIN)
 	rm -rf $(OUT_DIR)
 	-cd $(VENDOR_C9) && $(CARGO) clean --quiet 2>/dev/null || true
+	-cd $(VENDOR_C13) && $(CARGO) clean --quiet 2>/dev/null || true
+	-$(MAKE) -C $(VENDOR_SLHVK) clean 2>/dev/null || true

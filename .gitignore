@@ -32,3 +32,12 @@ code_*
 
 # Local scratch planning docs.
 /simplification.md
+
+# Sphincs C13 (Rust) + Vulkan slhvk build artifacts — source stays tracked.
+/sidecars/sphincs/vendor-c13/target/
+/sidecars/sphincs/vendor-slhvk-sha2-128-24/lib/
+/sidecars/sphincs/vendor-slhvk-sha2-128-24/src/*.o
+/sidecars/sphincs/vendor-slhvk-sha2-128-24/src/shaders/*.spv
+/sidecars/sphincs/vendor-slhvk-sha2-128-24/src/shaders/*.h
+/sidecars/sphincs/vendor-slhvk-sha2-128-24/slhdsa-sha2-128-24-gpu
+/sidecars/sphincs/vendor-slhvk-sha2-128-24/*.test
