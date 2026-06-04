@@ -42,7 +42,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "leankohaku-rustcrypto-helpers"
+name = "leancli-rustcrypto-helpers"
 version = "0.1.0"
 dependencies = [
  "ripemd",

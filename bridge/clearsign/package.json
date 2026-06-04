@@ -1,15 +1,15 @@
 {
-  "name": "leankohaku-clearsign-bridge",
+  "name": "leancli-clearsign-bridge",
   "version": "0.0.1",
   "private": true,
-  "description": "Untrusted Node sidecar that decodes calldata and EIP-712 messages against ERC-7730 descriptors. Exposes JSON-RPC to the leanKohaku daemon over one-shot stdio (mirrors bridge/). Output is plain JSON; the Lean side is solely responsible for signing decisions.",
+  "description": "Untrusted Node sidecar that decodes calldata and EIP-712 messages against ERC-7730 descriptors. Exposes JSON-RPC to the leanCLI daemon over one-shot stdio (mirrors bridge/). Output is plain JSON; the Lean side is solely responsible for signing decisions.",
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "main": "bridge.mjs",
   "bin": {
-    "leankohaku-clearsign-bridge": "bridge.mjs"
+    "leancli-clearsign-bridge": "bridge.mjs"
   },
   "dependencies": {
     "viem": "^2.21.0"

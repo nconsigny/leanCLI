@@ -17,7 +17,7 @@ Pin Verity locally:
 ./script/setup_verity.sh
 ```
 
-At the moment upstream Verity pins Lean 4.22.0 while leanKohaku pins Lean
+At the moment upstream Verity pins Lean 4.22.0 while leanCLI pins Lean
 4.29.1. The compatibility bridge is tracked by:
 
 ```bash
@@ -31,13 +31,13 @@ The helper passes `--broadcast` to Foundry so the deployment is actually
 sent to Sepolia.
 
 ```bash
-LEAN_KOHAKU_TPM_KEY=daily ./script/r1_sepolia.sh deploy
+LEANCLI_TPM_KEY=daily ./script/r1_sepolia.sh deploy
 ```
 
 The script saves the deployed account address to:
 
 ```text
-.leankohaku/keystore/tpm2/daily/r1-account-address.txt
+.leancli/keystore/tpm2/daily/r1-account-address.txt
 ```
 
 Then prepare, sign, and execute a transfer:
@@ -57,19 +57,19 @@ Or use the one-shot helper:
 The same flow is exposed through the main CLI:
 
 ```bash
-./.lake/build/bin/leankohaku wallet send sepolia daily <target-address> <value-wei>
+./.lake/build/bin/leancli wallet send sepolia daily <target-address> <value-wei>
 ```
 
 Preferred daemon-shaped command:
 
 ```bash
-./.lake/build/bin/leankohaku daemon daily send sepolia <target-address> <value-eth>
+./.lake/build/bin/leancli daemon daily send sepolia <target-address> <value-eth>
 ```
 
 Detailed help:
 
 ```bash
-./.lake/build/bin/leankohaku daemon help
+./.lake/build/bin/leancli daemon help
 ```
 
 The R1 account must hold enough Sepolia ETH before sending nonzero value.
@@ -77,7 +77,7 @@ The R1 account must hold enough Sepolia ETH before sending nonzero value.
 The `sign` step calls:
 
 ```bash
-./.lake/build/bin/leankohaku wallet sign sepolia daily <digest>
+./.lake/build/bin/leancli wallet sign sepolia daily <digest>
 ```
 
 That requires local `fprintd-verify` before invoking `tpm2_sign`. By default
@@ -85,8 +85,8 @@ the CLI asks for `right-index-finger` and retries up to 3 times. Override the
 finger with:
 
 ```bash
-LEAN_KOHAKU_BIOMETRIC_FINGER=right-thumb ./.lake/build/bin/leankohaku wallet send sepolia daily <target> <wei>
+LEANCLI_BIOMETRIC_FINGER=right-thumb ./.lake/build/bin/leancli wallet send sepolia daily <target> <wei>
 ```
 
-The TPM private blob stays under `.leankohaku/keystore/tpm2/<name>/` and is
+The TPM private blob stays under `.leancli/keystore/tpm2/<name>/` and is
 ignored by git.

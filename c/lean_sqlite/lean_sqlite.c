@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
 // Implementation of the SQLite wrapper declared in lean_sqlite.h, plus
-// the Lean FFI shims consumed by LeanKohaku/Agent/Session.lean via
+// the Lean FFI shims consumed by LeanCli/Agent/Session.lean via
 // `@[extern]`. Matches the pattern in c/lean_uds/lean_uds.c and
 // c/lean_http/lean_http.c.
 //

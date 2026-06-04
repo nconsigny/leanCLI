@@ -10,11 +10,11 @@ with `docs/PHASE0_PLAN.md` (forbidden-import list, trust model) and
 When the Phase 1b workstream began the codebase already had a working
 skills system at a different layer:
 
-* `LeanKohaku/Daemon/SkillsStore.lean` reads `skills/<verb>/SKILL.md`
+* `LeanCli/Daemon/SkillsStore.lean` reads `skills/<verb>/SKILL.md`
   from the repo (action-oriented, verb-named: `send-native`,
   `approve-erc20`, `swap-uniswap-v3`, etc.). It is exposed to outside
   callers via the daemon RPCs `skills.list` and `skills.get` in
-  `LeanKohaku/Daemon/Server.lean`.
+  `LeanCli/Daemon/Server.lean`.
 * Frontmatter fields in that system are `name / description /
   category / risk`, plus a `requires.daemonRpcs` body convention.
 * Loading is on-demand by RPC, not by trigger-keyword.
@@ -24,8 +24,8 @@ mutating the daemon's action-skill API. The two live side by side:
 
 | Layer       | Owner                              | Trigger      | Surface                  |
 |-------------|------------------------------------|--------------|--------------------------|
-| Action skill| `LeanKohaku/Daemon/SkillsStore`    | RPC call     | TUI / daemon callers     |
-| Protocol/meta skill | `LeanKohaku/Agent/Skills` | LLM context  | `kohaku-agentd` system prompt |
+| Action skill| `LeanCli/Daemon/SkillsStore`    | RPC call     | TUI / daemon callers     |
+| Protocol/meta skill | `LeanCli/Agent/Skills` | LLM context  | `leancli-agentd` system prompt |
 
 Concrete divergences from the original Phase 1b spec, all kept here so
 nothing is silently inherited:
@@ -39,12 +39,12 @@ nothing is silently inherited:
    `category` field is added to the new skills with the value
    `protocol` or `meta` so the daemon's category-keyed grouping stays
    useful.
-2. **Module path**. Spec said `LeanKohaku/Agent/Skills.lean`. Confirmed
+2. **Module path**. Spec said `LeanCli/Agent/Skills.lean`. Confirmed
    — we do *not* reuse `Daemon/SkillsStore.lean` from the agent layer
    because that would pull a Daemon import into the Agent tree and
    violate the import-graph gate.
 3. **JSON module**. Spec said "project uses `Lean.Json`". The
-   codebase uses `LeanKohaku.Encoding.Json`. Codebase wins.
+   codebase uses `LeanCli.Encoding.Json`. Codebase wins.
 4. **Skill renderer**. Spec asked for ~500–1500 tokens of compact
    rendering per skill. We approximate via character budget (≈ 4 chars
    per token) — the prompt is recomputed each turn anyway so token
@@ -71,7 +71,7 @@ Chain IDs in scope: **1 = mainnet**, **11155111 = Sepolia**. No L2.
 
 ### Meta skills (real content; `alwaysOn: true`)
 
-1. `kohaku-wallet` — wallet operating model: pre-sign pipeline,
+1. `leancli-wallet` — wallet operating model: pre-sign pipeline,
    signer/path separation, ConfirmGate, nonce monotonicity. No
    addresses. Cross-references `INVARIANTS.md`.
 2. `web3-security` — port. Source `/mnt/skills/user/web3-security/`
@@ -179,13 +179,13 @@ file is a curation-debt marker, not a build failure.
 ## Module layout
 
 ```
-LeanKohaku/Agent/Skills.lean          -- registry, frontmatter parse, triggers, renderer
-LeanKohaku/Agent/ToolDefs/Protocols.lean
+LeanCli/Agent/Skills.lean          -- registry, frontmatter parse, triggers, renderer
+LeanCli/Agent/ToolDefs/Protocols.lean
                                        -- protocol_lookup, protocol_function_lookup
-LeanKohaku/Agent/Registry.lean         -- (already exists) add the two new tools
-LeanKohaku/Agent/Prompt.lean           -- (modified) inject alwaysOn + trigger skills
-LeanKohaku/Agent/Loop.lean             -- (modified) recompute active skills per call
-LeanKohaku/App/AgentDaemonMain.lean    -- (modified) open registry at startup; add reload op
+LeanCli/Agent/Registry.lean         -- (already exists) add the two new tools
+LeanCli/Agent/Prompt.lean           -- (modified) inject alwaysOn + trigger skills
+LeanCli/Agent/Loop.lean             -- (modified) recompute active skills per call
+LeanCli/App/AgentDaemonMain.lean    -- (modified) open registry at startup; add reload op
 ```
 
 No new `lean_exe`. No new `extern_lib`. No new daemon RPCs (the
@@ -210,7 +210,7 @@ C. `protocol_lookup` over a temp socket — the existing daemon's
    tool reads from the in-process Agent Skills registry. We exercise
    the tool by piping a synthesized turn through `run_turn` with
    trace logging, then grepping the agentd log for
-   `[skills] active: kohaku-wallet,web3-security`.
+   `[skills] active: leancli-wallet,web3-security`.
 
 D. Reload op via socket: edit a skill, send `{"op":"reload"}` to
    the socket, run another turn, verify the change is picked up.

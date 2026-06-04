@@ -6,7 +6,7 @@
 
 int main(int argc, char **argv) {
   if (argc != 5) {
-    fprintf(stderr, "usage: leankohaku-secp256k1-verify <digest-hex> <r-hex> <s-hex> <pubkey-hex>\n");
+    fprintf(stderr, "usage: leancli-secp256k1-verify <digest-hex> <r-hex> <s-hex> <pubkey-hex>\n");
     return 2;
   }
 

@@ -45,7 +45,7 @@ export default function PrivateActionsMenu({ onPick }: Props) {
         paddingY={0}
       >
         <Text color={theme.koiCream} backgroundColor={theme.koiInk} bold>
-          {" leanKohaku · privacy plugins "}
+          {" leanCLI · privacy plugins "}
         </Text>
         <Box marginTop={1}>
           <Select

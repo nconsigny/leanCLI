@@ -83,7 +83,7 @@ export default function NetworkScreen({ onPick, onBack }: Props) {
   return (
     <Layout
       title="Network"
-      subtitle="daemon's currently-active routing — mirrors `kohaku network show`"
+      subtitle="daemon's currently-active routing — mirrors `leancli network show`"
       hint="↑/↓ move · → / enter select · ← / esc back · r refresh"
     >
       {error && <Banner kind="err" text={error} />}
@@ -169,7 +169,7 @@ function SnapshotView({ snap }: { snap: NetworkSnapshot }) {
           </>
         ) : (
           <Text color={theme.warn}>
-            &lt;unset&gt; — `kohaku network set-ens-rpc &lt;url&gt;` to enable
+            &lt;unset&gt; — `leancli network set-ens-rpc &lt;url&gt;` to enable
           </Text>
         )}
       </Section>

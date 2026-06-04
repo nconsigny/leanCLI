@@ -2,7 +2,7 @@
 # R1Account Verity contract
 
 This is the Lean/Verity source-of-truth for the Sepolia R1 account. It is
-kept separate from the `LeanKohaku` Lake target until Verity is added as a
+kept separate from the `LeanCli` Lake target until Verity is added as a
 toolchain dependency.
 
 The contract stores a P-256 public key and nonce. Execution requires a
@@ -30,7 +30,7 @@ def sepoliaChainId : Uint256 := 11155111
 External digest oracle for the account operation.
 
 The intended linked implementation is:
-`keccak256(abi.encode("leanKohaku.r1.sepolia.execute", address(this),
+`keccak256(abi.encode("leanCLI.r1.sepolia.execute", address(this),
 chainId, nonce, target, value, dataHash))`.
 -/
 def operationDigest
@@ -38,7 +38,7 @@ def operationDigest
     (chainId nonce value dataHash : Uint256) : Contract Uint256 := fun s =>
   ContractResult.success
     ((Verity.Env.ofWorld s).callOracle
-      "LeanKohaku_R1_operationDigest"
+      "LeanCli_R1_operationDigest"
       [chainId, nonce, value, dataHash])
     s
 
@@ -52,7 +52,7 @@ def p256Verify
     (h r sigS qx qy : Uint256) : Contract Bool := fun s =>
   ContractResult.success
     (((Verity.Env.ofWorld s).callOracle
-      "LeanKohaku_R1_p256Verify"
+      "LeanCli_R1_p256Verify"
       [h, r, sigS, qx, qy]) == 1)
     s
 

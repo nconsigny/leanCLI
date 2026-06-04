@@ -16,15 +16,15 @@ type Phase =
   | { kind: "error"; msg: string };
 
 /** Same resolution as RpcSetupGate.daemonConfigPath and the shell helper
- *  in kohakuspawn — `$LEANKOHAKU_CONFIG`, else
- *  `$XDG_CONFIG_HOME/leankohaku/daemon.json`. Writing this from Node
+ *  in leanclispawn — `$LEANCLI_CONFIG`, else
+ *  `$XDG_CONFIG_HOME/leancli/daemon.json`. Writing this from Node
  *  before the daemon ever reads it sidesteps the in-memory cfg staleness
  *  problem (cfg.policy is loaded once at startup; `network set-policy`
  *  on a running daemon doesn't actually take effect until restart). */
 function daemonConfigPath(): string {
-  if (process.env.LEANKOHAKU_CONFIG) return process.env.LEANKOHAKU_CONFIG;
+  if (process.env.LEANCLI_CONFIG) return process.env.LEANCLI_CONFIG;
   const xdg = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
-  return path.join(xdg, "leankohaku", "daemon.json");
+  return path.join(xdg, "leancli", "daemon.json");
 }
 
 function writeNetworkPolicy(policy: Policy): void {
@@ -161,7 +161,7 @@ export default function NetworkPolicyGate(
     <Layout title="Network policy saved" hint="enter / esc — continue">
       <Banner
         kind="ok"
-        text={`network_policy=${phase.policy} written to daemon.json. Change later with: kohaku network set-policy <strict|permissive|tor> (then restart the daemon).`}
+        text={`network_policy=${phase.policy} written to daemon.json. Change later with: leancli network set-policy <strict|permissive|tor> (then restart the daemon).`}
       />
       <ContinueOnInput onDone={onDone} />
     </Layout>

@@ -3,20 +3,20 @@
 `PKGBUILD` builds the Lean library, CLI, and daemon with the distro `lean4`
 package and installs:
 
-- `/usr/bin/leankohaku`
-- `/usr/bin/leankohaku-daemon`
-- `/usr/lib/systemd/user/leankohaku.socket`
-- `/usr/lib/systemd/user/leankohaku.service`
-- `/usr/share/doc/leankohaku-git/` project docs
+- `/usr/bin/leancli`
+- `/usr/bin/leancli-daemon`
+- `/usr/lib/systemd/user/leancli.socket`
+- `/usr/lib/systemd/user/leancli.service`
+- `/usr/share/doc/leancli-git/` project docs
 
 Enable socket activation with:
 
 ```bash
-systemctl --user enable --now leankohaku.socket
+systemctl --user enable --now leancli.socket
 ```
 
 Before publishing, replace `_repo_url` and `url` with the canonical
-leanKohaku repository URL. The `optdepends` entries are intentionally
+leanCLI repository URL. The `optdepends` entries are intentionally
 host-integration tools only:
 
 - `tpm2-tools` for TPM2 provisioning and inspection

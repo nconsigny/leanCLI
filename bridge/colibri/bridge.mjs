@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// leankohaku-colibri-bridge — JSON-RPC sidecar exposing the Colibri
+// leancli-colibri-bridge — JSON-RPC sidecar exposing the Colibri
 // stateless light client. Two modes:
 //
 //   --rpc '<json>'        one-shot: dispatch one request, write response,
@@ -258,8 +258,8 @@ if (listenIdx !== -1 && argv[listenIdx + 1]) {
   }
 } else {
   process.stderr.write(
-    "usage: leankohaku-colibri-bridge --listen <socket-path>\n" +
-    "       leankohaku-colibri-bridge --rpc '<json-rpc-request>'\n",
+    "usage: leancli-colibri-bridge --listen <socket-path>\n" +
+    "       leancli-colibri-bridge --rpc '<json-rpc-request>'\n",
   );
   process.exit(2);
 }

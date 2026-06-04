@@ -14,7 +14,7 @@
 
 int main(int argc, char **argv) {
   if (argc != 6) {
-    fprintf(stderr, "usage: leankohaku-hacl-hmac-drbg <entropy-hex> <nonce-hex> <personalization-hex> <additional-hex> <out-len>\n");
+    fprintf(stderr, "usage: leancli-hacl-hmac-drbg <entropy-hex> <nonce-hex> <personalization-hex> <additional-hex> <out-len>\n");
     return 2;
   }
 

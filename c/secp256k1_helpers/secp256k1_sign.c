@@ -7,7 +7,7 @@
 
 int main(int argc, char **argv) {
   if (argc != 3) {
-    fprintf(stderr, "usage: leankohaku-secp256k1-sign <privkey-hex> <digest-hex>\n");
+    fprintf(stderr, "usage: leancli-secp256k1-sign <privkey-hex> <digest-hex>\n");
     return 2;
   }
 

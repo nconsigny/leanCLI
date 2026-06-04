@@ -1,7 +1,7 @@
 # lean_http
 
 Loopback-only HTTP POST shim for the Lean-native agent
-(`LeanKohaku/Agent/`).
+(`LeanCli/Agent/`).
 
 Linked as `extern_lib liblean_http` in `lakefile.lean`. Built either by
 `lake build` or by `script/setup_http.sh` (the latter mirrors
@@ -29,7 +29,7 @@ void lk_http_free(char* p);
 ## Trust model
 
 This module is the C floor of the loopback check. The Lean wrapper
-(`LeanKohaku/Agent/Http.lean::assertLoopback`) re-checks the same
+(`LeanCli/Agent/Http.lean::assertLoopback`) re-checks the same
 string-prefix rule before calling in. Both checks are intentionally
 redundant — defence in depth against a Lean bug or a wrapper-bypass via
 FFI.

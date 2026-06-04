@@ -144,7 +144,7 @@ export default function MasterUnlockGate({ onDone }: { onDone: () => void }) {
       <Layout title="Wallet master not initialized" hint="esc back">
         <Text>
           Run{" "}
-          <Text color={theme.primary}>kohaku wallet master init</Text> to set up
+          <Text color={theme.primary}>leancli wallet master init</Text> to set up
           one passphrase that unlocks every enrolled EOA + the PP secret.
         </Text>
         <Box marginTop={1}>

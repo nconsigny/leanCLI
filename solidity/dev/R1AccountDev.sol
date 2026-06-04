@@ -28,7 +28,7 @@ contract R1AccountDev {
     ) public view returns (bytes32) {
         return keccak256(
             abi.encode(
-                "leanKohaku.r1.sepolia.execute",
+                "leanCLI.r1.sepolia.execute",
                 address(this),
                 block.chainid,
                 nonce_,

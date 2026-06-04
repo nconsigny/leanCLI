@@ -59,7 +59,7 @@ type Phase =
   // (per-slot wrap but no master wrap) AND the user has not opted into a
   // custom passphrase. Default policy is master-only unlock, so we don't
   // prompt for the per-slot passphrase here — the user is directed to run
-  // `kohaku wallet enroll <name>` once, after which lazy-rewrap under the
+  // `leancli wallet enroll <name>` once, after which lazy-rewrap under the
   // current master KEK lets future unlocks go through the master fast path.
   | { kind: "needs-enrolment"; status: MasterStatus }
   | { kind: "error"; message: string };
@@ -282,13 +282,13 @@ export default function UnlockEoaStep({
           </Box>
           <Box marginTop={1} marginLeft={2}>
             <Text color={theme.primary}>
-              kohaku wallet enroll {wallet.name}
+              leancli wallet enroll {wallet.name}
             </Text>
           </Box>
           <Box marginTop={1} marginLeft={2}>
             <Text color={theme.dim}>
               (or{" "}
-              <Text color={theme.primary}>kohaku wallet enroll --all</Text>
+              <Text color={theme.primary}>leancli wallet enroll --all</Text>
               {" "}to migrate every unenrolled slot at once)
             </Text>
           </Box>

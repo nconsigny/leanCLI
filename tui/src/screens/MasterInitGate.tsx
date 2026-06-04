@@ -41,8 +41,8 @@ type Phase =
 const MIN_PASSPHRASE = 8;
 const MIN_PIN = 6;
 
-/** First-run wallet-master setup. Mirrors `kohaku wallet master init`
- *  (LeanKohaku/Cli/Runtime.lean#walletMasterInit) — passphrase twice,
+/** First-run wallet-master setup. Mirrors `leancli wallet master init`
+ *  (LeanCli/Cli/Runtime.lean#walletMasterInit) — passphrase twice,
  *  optional TPM PIN twice, then `wallet.master.init` with whatever the
  *  user supplied. Skipping (esc) just exits to MainMenu unblocked; the
  *  per-slot passphrase fallback still works. */

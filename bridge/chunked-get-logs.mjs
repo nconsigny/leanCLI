@@ -7,18 +7,18 @@ const DEFAULT_MAX_BLOCK_SPAN = 499n;
 
 function logGetLogsChunkFailure(path, label, from, to, err) {
   const message = err instanceof Error ? err.message : String(err);
-  console.error("[kohaku:getlogs]", path, `chunk ${label} failed`, {
+  console.error("[leancli:getlogs]", path, `chunk ${label} failed`, {
     from: from.toString(),
     to: to.toString(),
     message,
   });
   if (err instanceof Error && err.cause !== undefined) {
-    console.error("[kohaku:getlogs]", "cause:", err.cause);
+    console.error("[leancli:getlogs]", "cause:", err.cause);
   }
 }
 
 function parseEnvMaxBlockSpan() {
-  const raw = process.env.KOHAKU_GETLOGS_MAX_BLOCK_SPAN?.trim();
+  const raw = process.env.LEANCLI_GETLOGS_MAX_BLOCK_SPAN?.trim();
   if (!raw) return null;
   try {
     const n = BigInt(raw);

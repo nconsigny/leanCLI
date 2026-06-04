@@ -478,7 +478,7 @@ function VersionsPanel({ versions }: { versions: Snapshot["versions"] }) {
     <Section title="Versions / build">
       <KV
         k="checkout"
-        v={versions.checkoutRoot ?? "<unknown — no $KOHAKU_HOME/checkout marker>"}
+        v={versions.checkoutRoot ?? "<unknown — no $LEANCLI_HOME/checkout marker>"}
         mono={!!versions.checkoutRoot}
         color={versions.checkoutRoot ? undefined : theme.warn}
       />
@@ -627,23 +627,23 @@ type ActionPhase =
   | { kind: "done"; id: ActionId; ok: boolean; lines: string[] };
 
 /** Where the daemon reads its environment file from. Mirrors the
- *  resolution in `script/kohakuspawn` so the TUI writes to the same
+ *  resolution in `script/leanclispawn` so the TUI writes to the same
  *  path the systemd unit's `EnvironmentFile=` line reads. */
 function daemonEnvPath(): string {
   const cfg =
     process.env.XDG_CONFIG_HOME ??
     join(homedir(), ".config");
-  return join(cfg, "leankohaku", "daemon.env");
+  return join(cfg, "leancli", "daemon.env");
 }
 
-/** Read the current `LEAN_KOHAKU_SANDBOX=` value, defaulting to "auto"
- *  when unset (matches `LeanKohaku.Util.Sandbox.parseMode`). */
+/** Read the current `LEANCLI_SANDBOX=` value, defaulting to "auto"
+ *  when unset (matches `LeanCli.Util.Sandbox.parseMode`). */
 function readSandboxMode(): SandboxMode {
   const path = daemonEnvPath();
   if (!existsSync(path)) return "auto";
   const raw = readFileSync(path, "utf8");
   for (const line of raw.split("\n")) {
-    const m = line.match(/^LEAN_KOHAKU_SANDBOX\s*=\s*(\S+)/);
+    const m = line.match(/^LEANCLI_SANDBOX\s*=\s*(\S+)/);
     if (m) {
       const v = m[1].toLowerCase();
       if (v === "off" || v === "require" || v === "auto") return v;
@@ -652,7 +652,7 @@ function readSandboxMode(): SandboxMode {
   return "auto";
 }
 
-/** Idempotent in-place write of `LEAN_KOHAKU_SANDBOX=<mode>`. Preserves
+/** Idempotent in-place write of `LEANCLI_SANDBOX=<mode>`. Preserves
  *  every other line; replaces the sandbox line if present, appends if
  *  not. Creates the parent dir + file with 0600 perms when missing. */
 function writeSandboxMode(mode: SandboxMode): void {
@@ -665,9 +665,9 @@ function writeSandboxMode(mode: SandboxMode): void {
   const lines = existing ? existing.split("\n") : [];
   let replaced = false;
   const out = lines.map((line) => {
-    if (/^LEAN_KOHAKU_SANDBOX\s*=/.test(line)) {
+    if (/^LEANCLI_SANDBOX\s*=/.test(line)) {
       replaced = true;
-      return `LEAN_KOHAKU_SANDBOX=${mode}`;
+      return `LEANCLI_SANDBOX=${mode}`;
     }
     return line;
   });
@@ -675,7 +675,7 @@ function writeSandboxMode(mode: SandboxMode): void {
     // Trim trailing empty line before appending so we don't grow blank
     // lines on every write.
     while (out.length > 0 && out[out.length - 1] === "") out.pop();
-    out.push(`LEAN_KOHAKU_SANDBOX=${mode}`);
+    out.push(`LEANCLI_SANDBOX=${mode}`);
     out.push("");
   }
   writeFileSync(path, out.join("\n"), { mode: 0o600 });
@@ -687,15 +687,15 @@ function writeSandboxMode(mode: SandboxMode): void {
 function previewFor(id: ActionId, snap: Snapshot): string {
   switch (id) {
     case "restart-daemon":
-      return "systemctl --user restart kohaku-daemon\n\nStops the running daemon (pid " +
+      return "systemctl --user restart leancli-daemon\n\nStops the running daemon (pid " +
         snap.daemon.pid +
         ") and re-spawns it via the systemd user unit. Any in-flight RPCs from other clients drop with a transport error. Takes 1–2 seconds.";
     case "toggle-sandbox": {
       const current = readSandboxMode();
       const next = SANDBOX_CYCLE[current];
       return (
-        `Write LEAN_KOHAKU_SANDBOX=${next} to ${daemonEnvPath()}\n` +
-        `then: systemctl --user restart kohaku-daemon\n\n` +
+        `Write LEANCLI_SANDBOX=${next} to ${daemonEnvPath()}\n` +
+        `then: systemctl --user restart leancli-daemon\n\n` +
         `Current mode: ${current}  →  Next mode: ${next}\n\n` +
         `auto: wrap sidecars with unshare(1) when usable, degrade gracefully if not.\n` +
         `off:  no wrapping. Use only when AppArmor blocks userns and you've accepted the trade-off.\n` +
@@ -705,8 +705,8 @@ function previewFor(id: ActionId, snap: Snapshot): string {
     case "pull-updates":
       return (
         `cd ${snap.versions.checkoutRoot ?? "<unknown>"} && git pull --ff-only origin master\n` +
-        `then: ./script/kohakuspawn --pull --no-init  (rebuild lake + TUI)\n` +
-        `then: systemctl --user restart kohaku-daemon\n\n` +
+        `then: ./script/leanclispawn --pull --no-init  (rebuild lake + TUI)\n` +
+        `then: systemctl --user restart leancli-daemon\n\n` +
         `Skips first-run wizard. Fails fast (non-ff) instead of merging — your local commits would block the pull and you'd want to handle them manually.`
       );
   }
@@ -779,10 +779,10 @@ async function runAction(
 ): Promise<number> {
   switch (id) {
     case "restart-daemon": {
-      onLine("$ systemctl --user restart kohaku-daemon");
+      onLine("$ systemctl --user restart leancli-daemon");
       return await streamSpawn(
         "systemctl",
-        ["--user", "restart", "kohaku-daemon"],
+        ["--user", "restart", "leancli-daemon"],
         undefined,
         onLine,
       );
@@ -790,7 +790,7 @@ async function runAction(
     case "toggle-sandbox": {
       const current = readSandboxMode();
       const next = SANDBOX_CYCLE[current];
-      onLine(`# writing LEAN_KOHAKU_SANDBOX=${next} to ${daemonEnvPath()}`);
+      onLine(`# writing LEANCLI_SANDBOX=${next} to ${daemonEnvPath()}`);
       try {
         writeSandboxMode(next);
         onLine(`# daemon.env updated (${current} → ${next})`);
@@ -798,10 +798,10 @@ async function runAction(
         onLine(`write failed: ${(e as Error).message}`);
         return -1;
       }
-      onLine("$ systemctl --user restart kohaku-daemon");
+      onLine("$ systemctl --user restart leancli-daemon");
       return await streamSpawn(
         "systemctl",
-        ["--user", "restart", "kohaku-daemon"],
+        ["--user", "restart", "leancli-daemon"],
         undefined,
         onLine,
       );
@@ -810,7 +810,7 @@ async function runAction(
       const root = snap.versions.checkoutRoot;
       if (!root) {
         onLine("checkoutRoot is unknown — cannot pull updates from here.");
-        onLine("Run kohakuspawn from inside your local clone manually.");
+        onLine("Run leanclispawn from inside your local clone manually.");
         return -1;
       }
       onLine(`$ git -C ${root} pull --ff-only origin master`);
@@ -824,7 +824,7 @@ async function runAction(
         onLine(`(git exited ${gitCode}; not rebuilding)`);
         return gitCode;
       }
-      const spawnScript = `${root}/script/kohakuspawn`;
+      const spawnScript = `${root}/script/leanclispawn`;
       onLine(`$ ${spawnScript} --pull --no-init`);
       const installCode = await streamSpawn(
         spawnScript,

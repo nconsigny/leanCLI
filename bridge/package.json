@@ -1,15 +1,15 @@
 {
-  "name": "leankohaku-kohaku-bridge",
+  "name": "leancli-bridge",
   "version": "0.0.1",
   "private": true,
-  "description": "Untrusted Node sidecar exposing @kohaku-eth/{plugins,railgun,privacy-pools} to the leanKohaku daemon over JSON-RPC. Inputs and outputs are re-validated in Lean.",
+  "description": "Untrusted Node sidecar exposing @kohaku-eth/{plugins,railgun,privacy-pools} to the leanCLI daemon over JSON-RPC. Inputs and outputs are re-validated in Lean.",
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "main": "bridge.mjs",
   "bin": {
-    "leankohaku-kohaku-bridge": "bridge.mjs"
+    "leancli-bridge": "bridge.mjs"
   },
   "dependencies": {
     "@kohaku-eth/plugins": "0.0.1-alpha.8",

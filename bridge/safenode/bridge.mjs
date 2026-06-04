@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /*
- * leankohaku-safenode-bridge — TDX-attested oblivious-RPC proxy
+ * leancli-safenode-bridge — TDX-attested oblivious-RPC proxy
  *
  * Slots in *upstream* of Helios in the verified-read pipeline:
  *
@@ -54,14 +54,14 @@
  *
  * Environment (read once at startup; --listen mode caches them):
  *
- *   KOHAKU_SAFE_NODE_URL          required. e.g. "https://rpc.safe-node.com"
- *   KOHAKU_SAFE_NODE_API_KEY      required. user-tier API key; inserted
+ *   LEANCLI_SAFE_NODE_URL          required. e.g. "https://rpc.safe-node.com"
+ *   LEANCLI_SAFE_NODE_API_KEY      required. user-tier API key; inserted
  *                                 into the URL path before /json_rpc.
- *   KOHAKU_SAFE_NODE_DOMAIN       optional. TLS domain to verify; defaults
- *                                 to the hostname of KOHAKU_SAFE_NODE_URL.
- *   KOHAKU_SAFE_NODE_PCCS_URL     optional. forwarded to verify_client_tdx
+ *   LEANCLI_SAFE_NODE_DOMAIN       optional. TLS domain to verify; defaults
+ *                                 to the hostname of LEANCLI_SAFE_NODE_URL.
+ *   LEANCLI_SAFE_NODE_PCCS_URL     optional. forwarded to verify_client_tdx
  *                                 as --pccs-url.
- *   KOHAKU_SAFE_NODE_MRTD         optional. expected MRTD hex; forwarded
+ *   LEANCLI_SAFE_NODE_MRTD         optional. expected MRTD hex; forwarded
  *                                 as the second positional argument to
  *                                 verify_client_tdx.
  *   TDX_QUOTE_VERIFIER_BIN        required (effectively): path to the
@@ -349,11 +349,11 @@ async function forwardJsonRpc({ upstreamUrl, agent, fallbackUrl, fallbackAgent, 
 // ────────────────────────────────────────────────────────────────────────
 
 async function listenMode(socketPath) {
-  const baseUrl = readEnv('KOHAKU_SAFE_NODE_URL', { required: true });
-  const apiKey = readEnv('KOHAKU_SAFE_NODE_API_KEY', { required: true });
-  const domain = readEnv('KOHAKU_SAFE_NODE_DOMAIN') || new URL(baseUrl).hostname;
-  const expectedMrtd = readEnv('KOHAKU_SAFE_NODE_MRTD');
-  const pccsUrl = readEnv('KOHAKU_SAFE_NODE_PCCS_URL');
+  const baseUrl = readEnv('LEANCLI_SAFE_NODE_URL', { required: true });
+  const apiKey = readEnv('LEANCLI_SAFE_NODE_API_KEY', { required: true });
+  const domain = readEnv('LEANCLI_SAFE_NODE_DOMAIN') || new URL(baseUrl).hostname;
+  const expectedMrtd = readEnv('LEANCLI_SAFE_NODE_MRTD');
+  const pccsUrl = readEnv('LEANCLI_SAFE_NODE_PCCS_URL');
   const verifierBin = readEnv('TDX_QUOTE_VERIFIER_BIN');
   // Non-private fallback for every eth_* method safe-node doesn't implement
   // (everything other than eth_getProof). Default = a16z's Sepolia public
@@ -362,7 +362,7 @@ async function listenMode(socketPath) {
   // chainId reads and helios's REVM internals — they do NOT see which
   // address/slot we proved, because that travels safe-node's ORAM channel.
   const fallbackUrl =
-    readEnv('KOHAKU_SAFE_NODE_FALLBACK_RPC') ||
+    readEnv('LEANCLI_SAFE_NODE_FALLBACK_RPC') ||
     'https://ethereum-sepolia-rpc.publicnode.com';
 
   // Boot-time TDX verify. Failure ⇒ refuse to start; daemon falls back.
@@ -550,15 +550,15 @@ async function rpcMode(encoded) {
     process.stdout.write(err(null, -32700, `parse error: ${e?.message ?? e}`) + '\n');
     process.exit(1);
   }
-  const baseUrl = readEnv('KOHAKU_SAFE_NODE_URL', { required: true });
-  const apiKey = readEnv('KOHAKU_SAFE_NODE_API_KEY', { required: true });
-  const domain = readEnv('KOHAKU_SAFE_NODE_DOMAIN') || new URL(baseUrl).hostname;
-  const expectedMrtd = readEnv('KOHAKU_SAFE_NODE_MRTD');
-  const pccsUrl = readEnv('KOHAKU_SAFE_NODE_PCCS_URL');
+  const baseUrl = readEnv('LEANCLI_SAFE_NODE_URL', { required: true });
+  const apiKey = readEnv('LEANCLI_SAFE_NODE_API_KEY', { required: true });
+  const domain = readEnv('LEANCLI_SAFE_NODE_DOMAIN') || new URL(baseUrl).hostname;
+  const expectedMrtd = readEnv('LEANCLI_SAFE_NODE_MRTD');
+  const pccsUrl = readEnv('LEANCLI_SAFE_NODE_PCCS_URL');
   const verifierBin = readEnv('TDX_QUOTE_VERIFIER_BIN');
 
   const fallbackUrl =
-    readEnv('KOHAKU_SAFE_NODE_FALLBACK_RPC') ||
+    readEnv('LEANCLI_SAFE_NODE_FALLBACK_RPC') ||
     'https://ethereum-sepolia-rpc.publicnode.com';
 
   const attestation = runTdxVerify({ baseUrl, domain, expectedMrtd, pccsUrl, verifierBin });
@@ -620,8 +620,8 @@ if (listenIdx !== -1 && argv[listenIdx + 1]) {
 } else {
   process.stderr.write(
     'usage: bridge.mjs (--listen <uds-socket> | --rpc <json>)\n' +
-      'env: KOHAKU_SAFE_NODE_URL, KOHAKU_SAFE_NODE_API_KEY (required)\n' +
-      '     KOHAKU_SAFE_NODE_DOMAIN, KOHAKU_SAFE_NODE_MRTD, KOHAKU_SAFE_NODE_PCCS_URL (optional)\n' +
+      'env: LEANCLI_SAFE_NODE_URL, LEANCLI_SAFE_NODE_API_KEY (required)\n' +
+      '     LEANCLI_SAFE_NODE_DOMAIN, LEANCLI_SAFE_NODE_MRTD, LEANCLI_SAFE_NODE_PCCS_URL (optional)\n' +
       '     TDX_QUOTE_VERIFIER_BIN (path to companion Rust verifier)\n'
   );
   process.exit(2);

@@ -1,4 +1,4 @@
-# leanKohaku — Architecture
+# leanCLI — Architecture
 
 A map of the repository as it actually exists, complementing `README.md`
 (goals & user-visible behavior), `INVARIANTS.md` (proof obligations & status),
@@ -9,12 +9,12 @@ are **no `sorry`s** in proofs and no `axiom`s outside the explicit FFI
 boundary (opaque `Hacl` / `Tpm2` primitives, plus the `@[extern]`
 declarations in `Daemon/Uds.lean`, `Agent/Http.lean`, and the Phase 1a
 `Agent/Session.lean` SQLite shim). Every theorem in
-`LeanKohaku/Invariants/` is closed.
+`LeanCli/Invariants/` is closed.
 
 ## Layered structure
 
 ```
-Entry points        LeanKohaku/App/{Main,DaemonMain,AgentMain,AgentDaemonMain}.lean
+Entry points        LeanCli/App/{Main,DaemonMain,AgentMain,AgentDaemonMain}.lean
                         │
 Surfaces            Cli/   RPC/   Daemon/   Agent/
                         │
@@ -26,29 +26,29 @@ FFI boundary        c/hacl_helpers   c/secp256k1_helpers   c/lean_uds   c/lean_h
                     c/lean_sqlite    c/rustcrypto_helpers
 ```
 
-`LeanKohaku.lean` is import-only and re-exports every module; downstream code
-writes `import LeanKohaku`. Dependencies flow strictly downward.
-`LeanKohaku/Invariants/` sits beside the layers and proves properties about
+`LeanCli.lean` is import-only and re-exports every module; downstream code
+writes `import LeanCli`. Dependencies flow strictly downward.
+`LeanCli/Invariants/` sits beside the layers and proves properties about
 the abstract models defined alongside it (not about runtime IO).
 
 ## Module reference
 
 ### Entry points
-- `LeanKohaku/App/Main.lean` — CLI executable root; thin wrapper over
-  `LeanKohaku.Lib.Client` that dispatches argv via `Cli.Commands`.
-- `LeanKohaku/App/DaemonMain.lean` — Daemon executable root; thin wrapper over
-  `LeanKohaku.Lib.Core` that loads `Daemon.Config` from env and runs
+- `LeanCli/App/Main.lean` — CLI executable root; thin wrapper over
+  `LeanCli.Lib.Client` that dispatches argv via `Cli.Commands`.
+- `LeanCli/App/DaemonMain.lean` — Daemon executable root; thin wrapper over
+  `LeanCli.Lib.Core` that loads `Daemon.Config` from env and runs
   `Daemon.Server.run`.
-- `LeanKohaku/App/AgentMain.lean` — `kohaku-agent` executable root.
+- `LeanCli/App/AgentMain.lean` — `leancli-agent` executable root.
   Phase-0 Lean-native replacement for the `bridge/llm-legacy/` Node
   sidecar. One-shot JSON-RPC over `--rpc '<json>'`; speaks to a local
   loopback LLM via `c/lean_http/` and to the daemon over UDS.
-- `LeanKohaku/App/AgentDaemonMain.lean` — `kohaku-agentd` executable
-  root. Phase-1a long-running sibling of `kohaku-agent`. Listens on
-  `$XDG_RUNTIME_DIR/leankohaku/agent.sock`; persists session history
-  in SQLite via `LeanKohaku/Agent/Session.lean`. Wire shape is
+- `LeanCli/App/AgentDaemonMain.lean` — `leancli-agentd` executable
+  root. Phase-1a long-running sibling of `leancli-agent`. Listens on
+  `$XDG_RUNTIME_DIR/leancli/agent.sock`; persists session history
+  in SQLite via `LeanCli/Agent/Session.lean`. Wire shape is
   newline-delimited JSON with the op set in `docs/PHASE1A_PLAN.md`.
-- `LeanKohaku/Lib/{Client,Core,Spec}.lean` — aggregate library roots
+- `LeanCli/Lib/{Client,Core,Spec}.lean` — aggregate library roots
   (CLI surface, daemon/runtime surface, proof/spec surface) consumed by the
   three `lean_lib` targets in `lakefile.lean`.
 
@@ -56,7 +56,7 @@ the abstract models defined alongside it (not about runtime IO).
 - `Hex.lean` — hex encode/decode.
 - `Secp256k1.lean` — pure curve spec (Point, Signature, modular arithmetic).
 - `Secp256k1Native.lean` — IO wrapper that shells out to
-  `leankohaku-secp256k1-{sign,pubkey,recover,verify}`.
+  `leancli-secp256k1-{sign,pubkey,recover,verify}`.
 - `Hacl.lean` — 8 `opaque` declarations for keccak256, sha256, hmac-sha256/512,
   ripemd160, pbkdf2, hmac-drbg, chacha20-poly1305 (HACL\*/libsecp256k1).
 - `Random.lean` — `/dev/urandom` reader.
@@ -124,13 +124,13 @@ the abstract models defined alongside it (not about runtime IO).
   policy (~480 lines).
 - `DaemonClient.lean` — UDS client.
 - `Passphrase.lean` — passphrase prompting.
-- `MemoryCmd.lean` — Phase-1c `kohaku memory show / edit /
+- `MemoryCmd.lean` — Phase-1c `leancli memory show / edit /
   refresh / forget` subcommands. All four route through the
-  `kohaku-agentd` UDS socket so the daemon stays the sole
+  `leancli-agentd` UDS socket so the daemon stays the sole
   writer of `MEMORY.md`; `show` falls back to a direct file
   read when the daemon is down. `forget` refuses patterns
   shorter than 4 chars (operator-error guard). Deliberately
-  does not import `LeanKohaku.Agent.*` to keep the CLI surface
+  does not import `LeanCli.Agent.*` to keep the CLI surface
   decoupled from the agent module tree.
 
 ### `Agent/` — Lean-native LLM agent (Phase 0)
@@ -166,7 +166,7 @@ the abstract models defined alongside it (not about runtime IO).
   with the two Phase-1b protocol-lookup tools.
 - `Session.lean` — Phase-1a SQLite-backed session/message store
   with FTS5 search. Schema bootstrap is idempotent and version-
-  gated. Used by `kohaku-agentd`; one-shot `kohaku-agent` does
+  gated. Used by `leancli-agentd`; one-shot `leancli-agent` does
   not touch it. No signing or key-material imports — the DB
   carries conversation history only.
 - `Skills.lean` — Phase-1b in-process skill registry. Walks
@@ -190,7 +190,7 @@ the abstract models defined alongside it (not about runtime IO).
 - `Memory.lean` + `MemoryPrompts.lean` — Phase-1c long-term
   memory store. The agent persists a small markdown file
   (`MEMORY.md`, 0600 mode, 0700 parent dir) under
-  `$XDG_DATA_HOME/leankohaku/`. The daemon is the sole writer:
+  `$XDG_DATA_HOME/leancli/`. The daemon is the sole writer:
   it loads at startup, renders into every system prompt
   (omitted entirely when empty), and updates either on demand
   (`update_memory` op) or via LLM-driven extraction at
@@ -206,7 +206,7 @@ the abstract models defined alongside it (not about runtime IO).
 - `Compression.lean` — Phase-1c token-budget transcript
   compression. Before every chat round in the persistent agent
   daemon, the loop estimates the transcript's token count
-  (word-count × 1.4; tunable via `KOHAKU_TOKEN_RATIO`) and, if
+  (word-count × 1.4; tunable via `LEANCLI_TOKEN_RATIO`) and, if
   it exceeds the trigger threshold (default 6000), asks the
   LLM to summarise the middle of the transcript into a single
   `[Earlier in session, summarised]` system message. The first
@@ -240,8 +240,8 @@ joins this gated set; the CI grep gate is extended accordingly.
 | `c/hacl_helpers/ripemd160_*` | HACL\* | RIPEMD-160 for BIP-32 HASH160 |
 | `c/secp256k1_helpers/` | libsecp256k1 | sign / pubkey / recover / verify (hex in/out CLI helpers) |
 | `c/lean_uds/lean_uds.c` | POSIX | `bind/accept/connect/read/write/close/shutdown`, peer-uid/current-uid |
-| `c/lean_http/lean_http.c` | libcurl | loopback-only HTTP POST for `kohaku-agent`. Refuses non-`http://127.0.0.1`/`http://[::1]`/`http://localhost` URLs at the C layer. 8 MiB response cap. No TLS, no redirects. |
-| `c/lean_sqlite/lean_sqlite.c` | libsqlite3 | Phase-1a SQLite shim consumed by `LeanKohaku/Agent/Session.lean`. Links against the system libsqlite3 (Arch + Debian 12+ ship FTS5 enabled). Column-text bytes are copied out before further DB calls. |
+| `c/lean_http/lean_http.c` | libcurl | loopback-only HTTP POST for `leancli-agent`. Refuses non-`http://127.0.0.1`/`http://[::1]`/`http://localhost` URLs at the C layer. 8 MiB response cap. No TLS, no redirects. |
+| `c/lean_sqlite/lean_sqlite.c` | libsqlite3 | Phase-1a SQLite shim consumed by `LeanCli/Agent/Session.lean`. Links against the system libsqlite3 (Arch + Debian 12+ ship FTS5 enabled). Column-text bytes are copied out before further DB calls. |
 | `c/rustcrypto_helpers/` | RustCrypto | optional Rust ripemd160 binary |
 
 Build automation: `script/setup_hacl.sh`, `script/setup_secp256k1.sh`,
@@ -273,44 +273,44 @@ The other helpers are external binaries invoked at runtime.
 
 ### Sidecar bridges (`bridge/`) and the Lean-native agent
 
-Phase 0 split the LLM backend into a Lean-native primary (`kohaku-agent`)
+Phase 0 split the LLM backend into a Lean-native primary (`leancli-agent`)
 and an opt-in legacy Node sidecar. Phase 1a adds a long-running sibling
-`kohaku-agentd` selected automatically by `LlmAgent.Bridge.resolveMode`.
+`leancli-agentd` selected automatically by `LlmAgent.Bridge.resolveMode`.
 The other two bridges remain Node.
 
 Modes:
 
-* **One-shot (Phase 0 default)** — Spawn `kohaku-agent`, pass the
+* **One-shot (Phase 0 default)** — Spawn `leancli-agent`, pass the
   request as `--rpc <json>` on argv, read one line of stdout, reap.
-* **Persistent (Phase 1a, opt-in)** — Talk to a running `kohaku-agentd`
-  over `$XDG_RUNTIME_DIR/leankohaku/agent.sock`. Session history is
-  persisted in `$XDG_DATA_HOME/leankohaku/sessions.db` with FTS5
+* **Persistent (Phase 1a, opt-in)** — Talk to a running `leancli-agentd`
+  over `$XDG_RUNTIME_DIR/leancli/agent.sock`. Session history is
+  persisted in `$XDG_DATA_HOME/leancli/sessions.db` with FTS5
   search. Auto-detected: the bridge pings the socket; if `ok`, uses
   persistent, else one-shot.
 * **Legacy Node sidecar** — `bridge/llm-legacy/bridge.mjs`, opt-in
-  via `LEAN_KOHAKU_LLM_BRIDGE_LEGACY=1`.
+  via `LEANCLI_LLM_BRIDGE_LEGACY=1`.
 
 Mode resolution order: env override → legacy → socket probe → one-shot.
 Persistent mode that explicitly fails to contact the agent does NOT
 silently fall back. See `docs/PHASE1A_PLAN.md` for the full wire
-shape; `LeanKohaku/LlmAgent/Bridge.lean` is the only path the wallet
-daemon takes into either kohaku backend.
+shape; `LeanCli/LlmAgent/Bridge.lean` is the only path the wallet
+daemon takes into either leancli backend.
 
 Each bridge is treated as untrusted; every output flows through the
 existing decode → simulate → ConfirmGate gate before any signing.
 
 | Backend | Lean wrapper | Executable env var | Purpose |
 |---|---|---|---|
-| `kohaku-agent` (in-tree Lean, one-shot) | `LeanKohaku/LlmAgent/Bridge.lean` | `LEAN_KOHAKU_LLM_BRIDGE` (override) | Phase 0 primary. Spawn-per-call. Loopback HTTP via `c/lean_http`; talks to wallet daemon over UDS. |
-| `kohaku-agentd` (in-tree Lean, persistent) | `LeanKohaku/LlmAgent/Bridge.lean` | `LEAN_KOHAKU_AGENT_MODE`, `KOHAKU_AGENT_SOCKET` | Phase 1a opt-in. Long-running UDS sidecar; persists session history in `$XDG_DATA_HOME/leankohaku/sessions.db` via FTS5. Auto-detected. |
-| `bridge/llm-legacy/` (Node fallback) | `LeanKohaku/LlmAgent/Bridge.lean` | `LEAN_KOHAKU_LLM_BRIDGE_LEGACY=1` | Opt-in fallback. Anthropic SDK + viem; `ANTHROPIC_API_KEY` enables the model fallback. Kept for parity tests. |
-| `bridge/` | `LeanKohaku/Privacy/Bridge.lean` | `LEAN_KOHAKU_BRIDGE` | Privacy Pools / Railgun (snarkjs, libp2p) |
-| `bridge/clearsign/` | `LeanKohaku/Clearsign/Bridge.lean` | `LEAN_KOHAKU_CLEARSIGN_BRIDGE` | ERC-7730 calldata + EIP-712 walker |
+| `leancli-agent` (in-tree Lean, one-shot) | `LeanCli/LlmAgent/Bridge.lean` | `LEANCLI_LLM_BRIDGE` (override) | Phase 0 primary. Spawn-per-call. Loopback HTTP via `c/lean_http`; talks to wallet daemon over UDS. |
+| `leancli-agentd` (in-tree Lean, persistent) | `LeanCli/LlmAgent/Bridge.lean` | `LEANCLI_AGENT_MODE`, `LEANCLI_AGENT_SOCKET` | Phase 1a opt-in. Long-running UDS sidecar; persists session history in `$XDG_DATA_HOME/leancli/sessions.db` via FTS5. Auto-detected. |
+| `bridge/llm-legacy/` (Node fallback) | `LeanCli/LlmAgent/Bridge.lean` | `LEANCLI_LLM_BRIDGE_LEGACY=1` | Opt-in fallback. Anthropic SDK + viem; `ANTHROPIC_API_KEY` enables the model fallback. Kept for parity tests. |
+| `bridge/` | `LeanCli/Privacy/Bridge.lean` | `LEANCLI_BRIDGE` | Privacy Pools / Railgun (snarkjs, libp2p) |
+| `bridge/clearsign/` | `LeanCli/Clearsign/Bridge.lean` | `LEANCLI_CLEARSIGN_BRIDGE` | ERC-7730 calldata + EIP-712 walker |
 
 The clearsign sidecar bundles ERC-7730 descriptors under
 `bridge/clearsign/registry/` (ERC-20, Uniswap V3 SwapRouter02, Permit2,
 CowSwap order EIP-712, plus a `4byte.json` fallback dict). The Lean
-agent's chain-context surface lives in `LeanKohaku/Agent/ToolDefs/Chain.lean`
+agent's chain-context surface lives in `LeanCli/Agent/ToolDefs/Chain.lean`
 and routes every read through the daemon's `chain.ethCall` /
 `chain.nonce` / `chain.gasPrice` RPCs under the standard
 `Privacy.NetworkPolicy` gate — same trust model as the legacy sidecar's
@@ -321,13 +321,13 @@ and routes every read through the daemon's `chain.ethCall` /
 Two parallel skills layers share the `skills/` root:
 
 * **Action skills** (verb-named: `send-native`, `approve-erc20`,
-  `swap-uniswap-v3`, etc.) belong to `LeanKohaku/Daemon/SkillsStore.lean`
+  `swap-uniswap-v3`, etc.) belong to `LeanCli/Daemon/SkillsStore.lean`
   and are exposed via the daemon RPCs `skills.list` and
   `skills.get`. They were the pre-Phase-1b layer.
 * **Protocol + meta skills** (`uniswap`, `aave`, `railgun`,
   `tornado-cash`, `cowswap`, `morpho`, `fxusd`, `bold-liquity`,
-  `privacy-pool`, plus `kohaku-wallet` and `web3-security`) belong
-  to `LeanKohaku/Agent/Skills.lean` and are consumed at LLM-prompt
+  `privacy-pool`, plus `leancli-wallet` and `web3-security`) belong
+  to `LeanCli/Agent/Skills.lean` and are consumed at LLM-prompt
   assembly time. The two meta-skills are always-on; protocol
   skills activate by trigger-keyword match against the latest user
   message + tool outputs.
@@ -340,9 +340,9 @@ record.
 
 The agent daemon resolves the skills directory in this order:
 
-1. `KOHAKU_AGENT_SKILLS_DIR` env override.
-2. `$XDG_DATA_HOME/leankohaku/skills` if present (user override).
-3. `/usr/share/leankohaku/skills` (PKGBUILD-installed location).
+1. `LEANCLI_AGENT_SKILLS_DIR` env override.
+2. `$XDG_DATA_HOME/leancli/skills` if present (user override).
+3. `/usr/share/leancli/skills` (PKGBUILD-installed location).
 4. `<cwd>/skills` (dev fallback — the in-tree path).
 
 `reload` over the daemon socket re-walks the resolved path and
@@ -350,14 +350,14 @@ swaps the in-memory registry atomically under all active readers.
 
 ### Incognito mode (Phase 1c)
 
-Setting `LEAN_KOHAKU_INCOGNITO=1` (e.g. via `kohaku tui
+Setting `LEANCLI_INCOGNITO=1` (e.g. via `leancli tui
 --incognito`, which sets the env for the TUI subprocess) flips
 the LLM bridge into incognito mode for the duration of that
 process. Behaviour:
 
 - The bridge propagates `{"incognito": true}` in the
   `create_session` metadata when it opens a new agent session.
-- `kohaku-agentd` registers the returned `session_id` in an
+- `leancli-agentd` registers the returned `session_id` in an
   in-memory incognito set. For the lifetime of that session,
   `appendMessage` is a no-op (zero rows in `sessions.db`).
 - On `close_session`, the daemon skips the memory-extraction
@@ -374,8 +374,8 @@ asked for incognito, an unreachable daemon is a failure.
 ### Terminal UI (`tui/`)
 
 `tui/` is an Ink-based TUI bundled with esbuild to a single
-`dist/index.mjs`. Reachable via `kohaku tui`; the launcher in
-`Cli/Runtime.lean` resolves the bundle from `<bin>/../share/leankohaku/tui/`
+`dist/index.mjs`. Reachable via `leancli tui`; the launcher in
+`Cli/Runtime.lean` resolves the bundle from `<bin>/../share/leancli/tui/`
 or the local dev path. Notable screens:
 
 - **MainMenu** — Wallets / Create / Import / Privacy Pools / Daemon / More.
@@ -408,12 +408,12 @@ Trusted (not proved in Lean):
   LLM returns as adversarial input that must traverse the standard
   decode → simulate → ConfirmGate pipeline before any signing.
 - The SQLite shim (`Agent/Session.lean` + `c/lean_sqlite/` — `@[extern]`)
-  used only by `kohaku-agentd`. Trusted as an *opaque local store* —
+  used only by `leancli-agentd`. Trusted as an *opaque local store* —
   it never sees key material (the agent import graph forbids signing
   modules) and DB content never authorises signing.
 - The MEMORY.md file (`Agent/Memory.lean`, Phase 1c). Same trust
   shape as the session DB: an opaque local store, written
-  exclusively by `kohaku-agentd` via atomic `tmpfile + rename`,
+  exclusively by `leancli-agentd` via atomic `tmpfile + rename`,
   mode 0600 under a 0700 parent dir. The post-extraction filter
   in `Memory.postFilter` is the second line of defence against
   the LLM proposing key-shaped or mnemonic-shaped content; the

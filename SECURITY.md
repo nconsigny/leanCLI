@@ -1,6 +1,6 @@
 # Security
 
-leanKohaku uses a daemon boundary: the CLI parses arguments and talks to a
+leanCLI uses a daemon boundary: the CLI parses arguments and talks to a
 local Unix-domain socket; the daemon owns key access, signing, and Ethereum RPC.
 
 ## Trust Boundary

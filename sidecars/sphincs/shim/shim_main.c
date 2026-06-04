@@ -1,5 +1,5 @@
 /*
- * leanKohaku SPHINCS- shim — JSON-RPC dispatcher around the vendored
+ * leanCLI SPHINCS- shim — JSON-RPC dispatcher around the vendored
  * sphincs/sphincsplus reference C signer.
  *
  * Methods (one-shot stdio JSON-RPC, mirrors bridge/ sidecars):

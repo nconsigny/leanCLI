@@ -1,8 +1,8 @@
 # `c/lean_sqlite/` — SQLite FFI shim
 
 Linked into the Lean library via `extern_lib liblean_sqlite` in
-`lakefile.lean`. Consumed by `LeanKohaku/Agent/Session.lean` to back
-the persistent session DB read/written by `kohaku-agentd`.
+`lakefile.lean`. Consumed by `LeanCli/Agent/Session.lean` to back
+the persistent session DB read/written by `leancli-agentd`.
 
 ## What's in here
 
@@ -39,7 +39,7 @@ further DB calls. This is the "safer than zero-copy" trade the Phase
 
 ## Threading
 
-The Phase 1a daemon (`kohaku-agentd`) opens exactly one DB handle and
+The Phase 1a daemon (`leancli-agentd`) opens exactly one DB handle and
 serialises all access through its accept loop. SQLite is in serialised
 threading mode by default; no extra Lean-side locking is needed.
 

@@ -11,8 +11,8 @@ if [[ -f .env ]]; then
   set +a
 fi
 
-KEY_NAME="${LEAN_KOHAKU_TPM_KEY:-daily}"
-KEY_DIR=".leankohaku/keystore/tpm2/${KEY_NAME}"
+KEY_NAME="${LEANCLI_TPM_KEY:-daily}"
+KEY_DIR=".leancli/keystore/tpm2/${KEY_NAME}"
 ACCOUNT_FILE="${KEY_DIR}/r1-account-address.txt"
 
 require() {
@@ -47,7 +47,7 @@ load_pubkey_xy() {
   local pem="${KEY_DIR}/public.pem"
   if [[ ! -f "$pem" ]]; then
     echo "missing TPM public key: $pem" >&2
-    echo "run: ./.lake/build/bin/leankohaku wallet create r1 ${KEY_NAME}" >&2
+    echo "run: ./.lake/build/bin/leancli wallet create r1 ${KEY_NAME}" >&2
     exit 1
   fi
 
@@ -235,7 +235,7 @@ EOF
 
   sign)
     digest="${2:?usage: r1_sepolia.sh sign <digest-hex>}"
-    ./.lake/build/bin/leankohaku wallet sign sepolia "$KEY_NAME" "$digest"
+    ./.lake/build/bin/leancli wallet sign sepolia "$KEY_NAME" "$digest"
     ;;
 
   execute)
@@ -255,7 +255,7 @@ EOF
     echo "Value wei: $value"
     digest="$(compute_digest "$target" "$value" "$data")"
     echo "Digest: $digest"
-    ./.lake/build/bin/leankohaku wallet sign sepolia "$KEY_NAME" "$digest"
+    ./.lake/build/bin/leancli wallet sign sepolia "$KEY_NAME" "$digest"
     echo "Signature complete; broadcasting transaction..."
     execute_signed "$target" "$value" "$data"
     ;;
@@ -314,7 +314,7 @@ EOF
   *)
     cat <<EOF
 Usage:
-  LEAN_KOHAKU_TPM_KEY=daily ./script/r1_sepolia.sh deploy  # temporary Solidity fallback
+  LEANCLI_TPM_KEY=daily ./script/r1_sepolia.sh deploy  # temporary Solidity fallback
   ./script/r1_sepolia.sh address
   ./script/r1_sepolia.sh digest <target> <value-wei> [data-hex]
   ./script/r1_sepolia.sh sign <digest-hex>
@@ -330,7 +330,7 @@ Required env:
   SEPOLIA_DEPLOYER_PRIVATE_KEY or PRIVATE_KEY
 
 Optional env:
-  LEAN_KOHAKU_TPM_KEY=daily
+  LEANCLI_TPM_KEY=daily
   R1_ACCOUNT_ADDRESS=<deployed-account>
 EOF
     ;;

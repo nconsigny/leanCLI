@@ -1,6 +1,6 @@
 # Daemon
 
-`leankohaku-daemon` is the only runtime process that performs wallet signing,
+`leancli-daemon` is the only runtime process that performs wallet signing,
 keystore access, and Ethereum node RPC. The CLI is a thin JSON-RPC client over a
 local Unix-domain socket.
 
@@ -9,13 +9,13 @@ local Unix-domain socket.
 Default path:
 
 ```text
-${XDG_RUNTIME_DIR:-/tmp}/leankohaku/leankohaku.sock
+${XDG_RUNTIME_DIR:-/tmp}/leancli/leancli.sock
 ```
 
 Override with:
 
 ```bash
-LEANKOHAKU_SOCKET=/path/to/leankohaku.sock
+LEANCLI_SOCKET=/path/to/leancli.sock
 ```
 
 The daemon creates the parent directory when it binds the socket. For systemd
@@ -27,31 +27,31 @@ systemd owns the socket file lifecycle.
 Preferred user service:
 
 ```bash
-systemctl --user enable --now leankohaku.socket
+systemctl --user enable --now leancli.socket
 ```
 
 Fallback behavior:
 
-- CLI daemon-backed commands auto-spawn `leankohaku-daemon` when the socket is
+- CLI daemon-backed commands auto-spawn `leancli-daemon` when the socket is
   missing.
-- Set `LEANKOHAKU_NO_AUTOSPAWN=1` to disable fallback spawning.
-- `leankohaku daemon` starts the daemon in the foreground.
+- Set `LEANCLI_NO_AUTOSPAWN=1` to disable fallback spawning.
+- `leancli daemon` starts the daemon in the foreground.
 
 ## Configuration
 
 The daemon reads JSON config from:
 
 ```text
-${XDG_CONFIG_HOME:-$HOME/.config}/leankohaku/daemon.json
+${XDG_CONFIG_HOME:-$HOME/.config}/leancli/daemon.json
 ```
 
-Override the config path with `LEANKOHAKU_CONFIG`.
+Override the config path with `LEANCLI_CONFIG`.
 
 Example:
 
 ```json
 {
-  "socket_path": "/run/user/1000/leankohaku/leankohaku.sock",
+  "socket_path": "/run/user/1000/leancli/leancli.sock",
   "chain_id": 1,
   "rpc_url": "http://127.0.0.1:8545",
   "rpc_transport": "loopback",
@@ -63,15 +63,15 @@ Example:
 Environment variables override file values:
 
 ```bash
-LEANKOHAKU_SOCKET=/run/user/1000/leankohaku/leankohaku.sock
-LEANKOHAKU_RPC_URL=http://127.0.0.1:8545
-LEANKOHAKU_RPC_TRANSPORT=loopback
-LEANKOHAKU_CHAIN_ID=1
-LEANKOHAKU_NETWORK_POLICY=strict
-LEANKOHAKU_ENS_RPC_URL=https://mainnet.example/eth
+LEANCLI_SOCKET=/run/user/1000/leancli/leancli.sock
+LEANCLI_RPC_URL=http://127.0.0.1:8545
+LEANCLI_RPC_TRANSPORT=loopback
+LEANCLI_CHAIN_ID=1
+LEANCLI_NETWORK_POLICY=strict
+LEANCLI_ENS_RPC_URL=https://mainnet.example/eth
 ```
 
-`ens_rpc_url` (env `LEANKOHAKU_ENS_RPC_URL`; aliases `ensRpcUrl`,
+`ens_rpc_url` (env `LEANCLI_ENS_RPC_URL`; aliases `ensRpcUrl`,
 `mainnet_rpc_url`, `mainnetRpcUrl`) must point at a mainnet RPC. ENS names are
 canonical on mainnet, so resolution always queries mainnet (chainId 1)
 regardless of the wallet's operating chain. If unset, `chain.resolveName`
@@ -111,7 +111,7 @@ Daemon:
 - `daemon.shutdown`
 - `daemon.preflight` — params `{method: "balance"|"send", address?, to?, amountWei?}` → `{ok, summary, plan}`. The CLI's `printPreflight` is a thin wrapper.
 
-Account-state (workstation-local, owned by daemon — file lives at `$XDG_CONFIG_HOME/leankohaku/default-account.txt`):
+Account-state (workstation-local, owned by daemon — file lives at `$XDG_CONFIG_HOME/leancli/default-account.txt`):
 
 - `account.getDefault` → `{name: string|null}`
 - `account.setDefault` (params `{name}`) → `{ok, name}`

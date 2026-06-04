@@ -10,7 +10,7 @@ type Props = { onDone: (s: boolean) => void };
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const PATH_RE = /^m(\/[0-9]+'?)+$/;
 
-/** Inline mnemonic import (`kohaku wallet import`). */
+/** Inline mnemonic import (`leancli wallet import`). */
 export default function ImportEoaFlow({ onDone }: Props) {
   const [params, setParams] = useState<Record<string, string> | null>(null);
 

@@ -1,4 +1,4 @@
-name: LeanKohaku CI
+name: LeanCli CI
 
 on:
   push:

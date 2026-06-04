@@ -56,13 +56,13 @@ Not wired into CI yet. The runner is intentionally trivial — bash +
 `tests/agent_phase0_smoke.sh`. Skeleton:
 
 ```bash
-# Prerequisites: leankohaku-daemon + kohaku-agentd both running.
+# Prerequisites: leancli-daemon + leancli-agentd both running.
 for case in tests/evals/chat_draft/{regex,llm}/*.json; do
   prompt=$(jq -r .prompt "$case")
   chainId=$(jq -r .chainId "$case")
   resp=$(printf '{"jsonrpc":"2.0","id":1,"method":"chat.draft","params":{"prompt":%s,"chainId":%d}}' \
            "$(jq -nc --arg p "$prompt" '$p')" "$chainId" \
-       | nc -U "$XDG_RUNTIME_DIR/leankohaku/leankohaku.sock")
+       | nc -U "$XDG_RUNTIME_DIR/leancli/leancli.sock")
   # Score against jq queries on $resp and "$case".expect — see runner.sh.
 done
 ```
@@ -86,6 +86,6 @@ coverage or RuleParser regressed. Both are interesting failures.
   permitted to take different tool routes as long as the wallet still
   reaches a correct `propose_send`.
 * Trace items added by the new `llmCall` and `skills` constructors
-  (`LeanKohaku/Agent/Trace.lean`) carry `durationMs` + token counts +
+  (`LeanCli/Agent/Trace.lean`) carry `durationMs` + token counts +
   skill activation per round — use them to compute cost-aware metrics
   (tokens per outcome, p95 turn latency, skill→outcome correlation).

@@ -32,7 +32,7 @@ fi
 git -C "$SECP_SRC" fetch --depth 1 origin "$SECP_REV"
 git -C "$SECP_SRC" checkout --detach "$SECP_REV"
 
-cmake -S "$SECP_SRC" -B "$SECP_SRC/build/leankohaku" \
+cmake -S "$SECP_SRC" -B "$SECP_SRC/build/leancli" \
   -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_INSTALL_PREFIX="$SECP_PREFIX" \
@@ -42,7 +42,7 @@ cmake -S "$SECP_SRC" -B "$SECP_SRC/build/leankohaku" \
   -DSECP256K1_BUILD_BENCHMARK=OFF \
   -DSECP256K1_BUILD_CTIME_TESTS=OFF
 
-cmake --build "$SECP_SRC/build/leankohaku" --target install
+cmake --build "$SECP_SRC/build/leancli" --target install
 
 build_helper() {
   local src="$1"
@@ -57,20 +57,20 @@ build_helper() {
     -o "$out"
 }
 
-build_helper "${ROOT}/c/secp256k1_helpers/secp256k1_sign.c" "$HELPER_DIR/leankohaku-secp256k1-sign"
-build_helper "${ROOT}/c/secp256k1_helpers/secp256k1_pubkey.c" "$HELPER_DIR/leankohaku-secp256k1-pubkey"
-build_helper "${ROOT}/c/secp256k1_helpers/secp256k1_recover.c" "$HELPER_DIR/leankohaku-secp256k1-recover"
-build_helper "${ROOT}/c/secp256k1_helpers/secp256k1_verify.c" "$HELPER_DIR/leankohaku-secp256k1-verify"
+build_helper "${ROOT}/c/secp256k1_helpers/secp256k1_sign.c" "$HELPER_DIR/leancli-secp256k1-sign"
+build_helper "${ROOT}/c/secp256k1_helpers/secp256k1_pubkey.c" "$HELPER_DIR/leancli-secp256k1-pubkey"
+build_helper "${ROOT}/c/secp256k1_helpers/secp256k1_recover.c" "$HELPER_DIR/leancli-secp256k1-recover"
+build_helper "${ROOT}/c/secp256k1_helpers/secp256k1_verify.c" "$HELPER_DIR/leancli-secp256k1-verify"
 
 cat <<EOF
 libsecp256k1 installed at:
   $SECP_PREFIX
 
 Helpers installed at:
-  $HELPER_DIR/leankohaku-secp256k1-sign
-  $HELPER_DIR/leankohaku-secp256k1-pubkey
-  $HELPER_DIR/leankohaku-secp256k1-recover
-  $HELPER_DIR/leankohaku-secp256k1-verify
+  $HELPER_DIR/leancli-secp256k1-sign
+  $HELPER_DIR/leancli-secp256k1-pubkey
+  $HELPER_DIR/leancli-secp256k1-recover
+  $HELPER_DIR/leancli-secp256k1-verify
 
 Add to PATH if needed:
   export PATH="$HELPER_DIR:\$PATH"

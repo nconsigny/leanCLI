@@ -29,7 +29,7 @@ The skill activates when the user mentions "tornado cash", "tornado",
 
 1. Agent answers from `overview.md`:
    * Older-generation fixed-denomination zk-SNARK mixer.
-   * Kohaku integration is coming soon; the `@kohaku-eth/tornado-cash`
+   * leanCLI integration is coming soon; the `@kohaku-eth/tornado-cash`
      SDK is not yet shipped.
    * For active shielding today, the user is steered to
      `skills/privacy-pool/` (`@kohaku-eth/privacy-pools`) or
@@ -38,7 +38,7 @@ The skill activates when the user mentions "tornado cash", "tornado",
 
 ## Recipe 3 — "Draft me a Tornado Cash deposit / withdrawal"
 
-1. Agent responds: **coming soon**. The Kohaku Tornado Cash SDK is
+1. Agent responds: **coming soon**. The leanCLI Tornado Cash SDK is
    not yet shipped; once it is, the chat path mirrors the existing
    Privacy Pool / Railgun flow (witness in sidecar → decode →
    simulate → ConfirmGate → broadcast).
@@ -51,7 +51,7 @@ The skill activates when the user mentions "tornado cash", "tornado",
 1. Agent uses the comparison frame from `overview.md` plus the peer
    skills' overviews:
    * Tornado Cash: fixed denominations, no association-set
-     affordances. Kohaku integration coming soon.
+     affordances. leanCLI integration coming soon.
    * Privacy Pools (`skills/privacy-pool/`): variable amounts, opt-in
      ASP for compliance affordances, `@kohaku-eth/privacy-pools` SDK,
      live in `bridge.mjs`.

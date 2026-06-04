@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 //
-// Tiny SQLite wrapper for the persistent Lean-native agent (`kohaku-
+// Tiny SQLite wrapper for the persistent Lean-native agent (`leancli-
 // agentd`). Backed by the system libsqlite3 — Arch (`sqlite`) and
 // Debian 12+ (`libsqlite3-0`) ship FTS5-enabled binaries, which is the
 // only optional feature we rely on. Vendoring the amalgamation would
@@ -17,8 +17,8 @@
 // single accept loop, so no internal locking is needed beyond what
 // SQLite gives us in its default (serialised) threading mode.
 
-#ifndef LEANKOHAKU_LEAN_SQLITE_H
-#define LEANKOHAKU_LEAN_SQLITE_H
+#ifndef LEANCLI_LEAN_SQLITE_H
+#define LEANCLI_LEAN_SQLITE_H
 
 #include <stddef.h>
 
@@ -96,4 +96,4 @@ void lk_sqlite_free_err(char* err);
 }
 #endif
 
-#endif // LEANKOHAKU_LEAN_SQLITE_H
+#endif // LEANCLI_LEAN_SQLITE_H

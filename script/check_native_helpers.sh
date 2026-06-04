@@ -13,12 +13,12 @@ expect() {
   fi
 }
 
-expect "$("$BIN/leankohaku-hacl-sha256" abcd)" \
+expect "$("$BIN/leancli-hacl-sha256" abcd)" \
   "0x123d4c7ef2d1600a1b3a0f6addc60a10f05a3495c9409f2ecbf4cc095d000a6b"
 
-"$BIN/leankohaku-hacl-ripemd160" 00 | grep -Eq '^0x[0-9a-f]{40}$'
+"$BIN/leancli-hacl-ripemd160" 00 | grep -Eq '^0x[0-9a-f]{40}$'
 
-expect "$("$BIN/leankohaku-secp256k1-pubkey" \
+expect "$("$BIN/leancli-secp256k1-pubkey" \
   0000000000000000000000000000000000000000000000000000000000000001 compressed)" \
   "0x0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
 

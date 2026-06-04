@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Why: re-exec under our ESM loader if it isn't active yet. The loader
 // patches one extension-less import in @kohaku-eth/privacy-pools' bundle.
-if (!process.env.__LEANKOHAKU_BRIDGE_LOADED) {
+if (!process.env.__LEANCLI_BRIDGE_LOADED) {
   const { spawnSync } = await import("node:child_process");
   const { fileURLToPath } = await import("node:url");
   const { dirname, join } = await import("node:path");
@@ -10,19 +10,19 @@ if (!process.env.__LEANKOHAKU_BRIDGE_LOADED) {
   const result = spawnSync(
     process.execPath,
     ["--no-warnings", "--experimental-loader", loader, fileURLToPath(import.meta.url), ...process.argv.slice(2)],
-    { stdio: "inherit", env: { ...process.env, __LEANKOHAKU_BRIDGE_LOADED: "1" } },
+    { stdio: "inherit", env: { ...process.env, __LEANCLI_BRIDGE_LOADED: "1" } },
   );
   process.exit(result.status ?? 1);
 }
 
-// leankohaku-kohaku-bridge — untrusted JSON-RPC sidecar for the leanKohaku
-// daemon (LeanKohaku/Privacy/Bridge.lean).
+// leancli-bridge — untrusted JSON-RPC sidecar for the leanCLI
+// daemon (LeanCli/Privacy/Bridge.lean).
 //
 // SECURITY: This process is trusted to perform Railgun / privacy-pools
 // circuit work but UNTRUSTED for transaction structure. The Lean side
 // must re-decode every prepared tx and only sign through the existing
 // TPM-rooted path. Network egress from this process must be bound to the
-// daemon's policy (LEANKOHAKU_RPC_URL passed by the daemon spawn site).
+// daemon's policy (LEANCLI_RPC_URL passed by the daemon spawn site).
 //
 // STDOUT IS RESERVED FOR JSON-RPC. The Railgun SDK (`@kohaku-eth/railgun`)
 // uses `console.log(...)` internally for progress diagnostics, which
@@ -47,7 +47,7 @@ import * as pathMod from "node:path";
 // bare specifiers that Node ESM cannot resolve without an explicit loader.
 // We dynamic-import it (and provider/viem) only inside shielded handlers so
 // `ping` / `version` / `listProtocols` keep working without the loader hack.
-async function loadKohaku() {
+async function loadLeancli() {
   const pp = await import("@kohaku-eth/privacy-pools");
   const provider = await import("@kohaku-eth/provider/viem");
   return { pp, provider };
@@ -98,7 +98,7 @@ function jsonifyResult(id, result) {
 // invocations. Without it, prepareUnshield fails with "Leaf not found in
 // the leaves array" because the plugin can't map our spending secrets back
 // to on-chain commitments. Mirrors upstream kohaku-cli's encrypted store
-// without the AES layer (the key material is in LEANKOHAKU_PP_MNEMONIC).
+// without the AES layer (the key material is in LEANCLI_PP_MNEMONIC).
 function fileStorage(storagePath) {
   let store = {};
   try {
@@ -149,7 +149,7 @@ function entrypointFor(chainId, presets) {
 
 // Why: PPv1Plugin uses the host keystore via deriveAt(path) to derive its own
 // nullifier/salt material. We back this with a dedicated mnemonic
-// (LEANKOHAKU_PP_MNEMONIC) so the privacy-pools spending secret is separate
+// (LEANCLI_PP_MNEMONIC) so the privacy-pools spending secret is separate
 // from the EOA mnemonic the daemon manages for signing.
 function keystoreFromMnemonic(mnemonic) {
   const seed = mnemonicToSeedSync(mnemonic);
@@ -167,7 +167,7 @@ function keystoreFromMnemonic(mnemonic) {
 function keystoreFromSeedHex(seedHex) {
   const clean = seedHex.startsWith("0x") ? seedHex.slice(2) : seedHex;
   if (!/^[0-9a-fA-F]+$/.test(clean) || clean.length % 2 !== 0) {
-    throw new Error("LEANKOHAKU_RG_SEED_HEX must be 0x-prefixed even-length hex");
+    throw new Error("LEANCLI_RG_SEED_HEX must be 0x-prefixed even-length hex");
   }
   const bytes = Buffer.from(clean, "hex");
   return keystoreFromSeedBytes(bytes);
@@ -185,9 +185,9 @@ function keystoreFromSeedBytes(seed) {
 }
 
 function buildHost({ rpcUrl, chainId, mnemonic, viemProvider, storagePath }) {
-  if (!rpcUrl) throw new Error("LEANKOHAKU_RPC_URL is required");
-  if (!chainId) throw new Error("LEANKOHAKU_CHAIN_ID is required");
-  if (!mnemonic) throw new Error("LEANKOHAKU_PP_MNEMONIC is required (privacy-pools spending secret, separate from EOA mnemonic)");
+  if (!rpcUrl) throw new Error("LEANCLI_RPC_URL is required");
+  if (!chainId) throw new Error("LEANCLI_CHAIN_ID is required");
+  if (!mnemonic) throw new Error("LEANCLI_PP_MNEMONIC is required (privacy-pools spending secret, separate from EOA mnemonic)");
   const chain = chainFromId(chainId);
   const client = createPublicClient({ chain, transport: http(rpcUrl) });
   return {
@@ -254,26 +254,26 @@ async function persistState(statePath, plugin) {
 }
 
 async function buildPlugin(env) {
-  const chainId = BigInt(env.LEANKOHAKU_CHAIN_ID);
-  console.error(`[bridge] loading kohaku SDK (chainId=${chainId}, rpc=${env.LEANKOHAKU_RPC_URL})`);
+  const chainId = BigInt(env.LEANCLI_CHAIN_ID);
+  console.error(`[bridge] loading kohaku SDK (chainId=${chainId}, rpc=${env.LEANCLI_RPC_URL})`);
   const t0 = Date.now();
-  const { pp, provider } = await loadKohaku();
+  const { pp, provider } = await loadLeancli();
   console.error(`[bridge] SDK loaded in ${Date.now() - t0}ms`);
   const host = buildHost({
-    rpcUrl: env.LEANKOHAKU_RPC_URL,
+    rpcUrl: env.LEANCLI_RPC_URL,
     chainId,
-    mnemonic: env.LEANKOHAKU_PP_MNEMONIC,
+    mnemonic: env.LEANCLI_PP_MNEMONIC,
     viemProvider: provider.viem,
-    storagePath: env.LEANKOHAKU_PP_STORAGE_PATH,
+    storagePath: env.LEANCLI_PP_STORAGE_PATH,
   });
   const ep = entrypointFor(chainId, pp.PrivacyPoolsV1_0xBow);
   const entrypoint = {
     address: BigInt(ep.entrypointAddress),
     deploymentBlock: BigInt(ep.deploymentBlock),
   };
-  const broadcasterUrl = env.LEANKOHAKU_PP_BROADCASTER_URL || "https://fastrelay.xyz/relayer";
+  const broadcasterUrl = env.LEANCLI_PP_BROADCASTER_URL || "https://fastrelay.xyz/relayer";
   console.error(`[bridge] entrypoint=0x${ep.entrypointAddress.toString(16)} broadcaster=${broadcasterUrl}`);
-  const cachedState = await loadInitialState(env.LEANKOHAKU_PP_STATE_PATH);
+  const cachedState = await loadInitialState(env.LEANCLI_PP_STATE_PATH);
   const bundledState = cachedState ? undefined : await loadBundledState(chainId);
   const initialState = cachedState ?? bundledState;
   const aspParams = Number(chainId) === 11155111
@@ -304,8 +304,8 @@ async function buildPlugin(env) {
 // `needBundler` controls whether the bundler + delegating signer must be
 // configured. Balance/prepareShield don't need them; unshield/transfer do
 // (the broadcast path is ERC-4337 + EIP-7702, not Waku). When
-// `needBundler=true`, both LEANKOHAKU_RG_BUNDLER_URL and
-// LEANKOHAKU_RG_DELEGATING_KEY must be set.
+// `needBundler=true`, both LEANCLI_RG_BUNDLER_URL and
+// LEANCLI_RG_DELEGATING_KEY must be set.
 //
 // EIP-7702 delegation model (per crates/userop-kit/src/railgun.rs in
 // upstream ethereum/kohaku):
@@ -332,30 +332,30 @@ async function buildPlugin(env) {
 // `ppoi.fdi.network/`. Subsequent calls reuse the persisted provider
 // state in host.storage.
 async function buildRailgunPlugin(env, { needBundler = false } = {}) {
-  const chainId = BigInt(env.LEANKOHAKU_CHAIN_ID);
-  console.error(`[bridge] loading railgun SDK (chainId=${chainId}, rpc=${env.LEANKOHAKU_RPC_URL})`);
+  const chainId = BigInt(env.LEANCLI_CHAIN_ID);
+  console.error(`[bridge] loading railgun SDK (chainId=${chainId}, rpc=${env.LEANCLI_RPC_URL})`);
   const t0 = Date.now();
   const { rg, provider } = await loadRailgun();
   console.error(`[bridge] railgun SDK loaded in ${Date.now() - t0}ms`);
   // Keystore source priority:
-  //   1. LEANKOHAKU_RG_SEED_HEX — raw BIP-39 master seed from the
+  //   1. LEANCLI_RG_SEED_HEX — raw BIP-39 master seed from the
   //      daemon's unlocked EOA slot. This is the default flow: one
   //      mnemonic on disk, shared with the EOA, Railgun derives at
   //      its own BIP-32 paths so the keys don't collide.
-  //   2. LEANKOHAKU_RG_MNEMONIC — explicit BIP-39 phrase. Legacy /
+  //   2. LEANCLI_RG_MNEMONIC — explicit BIP-39 phrase. Legacy /
   //      compromise-isolation path: user wants a Railgun-only
   //      mnemonic separate from any EOA. Still supported but no
   //      longer the default.
   let keystore;
-  if (env.LEANKOHAKU_RG_SEED_HEX) {
-    keystore = keystoreFromSeedHex(env.LEANKOHAKU_RG_SEED_HEX);
-  } else if (env.LEANKOHAKU_RG_MNEMONIC) {
-    keystore = keystoreFromMnemonic(env.LEANKOHAKU_RG_MNEMONIC);
+  if (env.LEANCLI_RG_SEED_HEX) {
+    keystore = keystoreFromSeedHex(env.LEANCLI_RG_SEED_HEX);
+  } else if (env.LEANCLI_RG_MNEMONIC) {
+    keystore = keystoreFromMnemonic(env.LEANCLI_RG_MNEMONIC);
   } else {
-    throw new Error("LEANKOHAKU_RG_SEED_HEX or LEANKOHAKU_RG_MNEMONIC is required (railgun keystore source)");
+    throw new Error("LEANCLI_RG_SEED_HEX or LEANCLI_RG_MNEMONIC is required (railgun keystore source)");
   }
-  if (!env.LEANKOHAKU_RG_STORAGE_PATH) {
-    throw new Error("LEANKOHAKU_RG_STORAGE_PATH is required (railgun plugin state file)");
+  if (!env.LEANCLI_RG_STORAGE_PATH) {
+    throw new Error("LEANCLI_RG_STORAGE_PATH is required (railgun plugin state file)");
   }
   // Cold-start seed: if the user's railgun storage file doesn't exist
   // yet AND a bundled snapshot ships alongside bridge.mjs, copy it in
@@ -365,11 +365,11 @@ async function buildRailgunPlugin(env, { needBundler = false } = {}) {
   // POI metadata) — no per-user keys, since alpha-21 derives signers
   // fresh from host.keystore each call. Skipping the cold-sync turns
   // first-balance latency from minutes into seconds.
-  // Set LEANKOHAKU_RG_SNAPSHOT_DISABLE=1 to opt out (e.g. when
-  // generating a new snapshot via the leankohaku-railgun-snapshot tool).
+  // Set LEANCLI_RG_SNAPSHOT_DISABLE=1 to opt out (e.g. when
+  // generating a new snapshot via the leancli-railgun-snapshot tool).
   if (
-    !fsSync.existsSync(env.LEANKOHAKU_RG_STORAGE_PATH) &&
-    env.LEANKOHAKU_RG_SNAPSHOT_DISABLE !== "1"
+    !fsSync.existsSync(env.LEANCLI_RG_STORAGE_PATH) &&
+    env.LEANCLI_RG_SNAPSHOT_DISABLE !== "1"
   ) {
     try {
       const here = pathMod.dirname(new URL(import.meta.url).pathname);
@@ -381,9 +381,9 @@ async function buildRailgunPlugin(env, { needBundler = false } = {}) {
             : null;
       const snapshotPath = snapshotName ? pathMod.join(here, snapshotName) : null;
       if (snapshotPath && fsSync.existsSync(snapshotPath)) {
-        fsSync.mkdirSync(pathMod.dirname(env.LEANKOHAKU_RG_STORAGE_PATH), { recursive: true });
-        fsSync.copyFileSync(snapshotPath, env.LEANKOHAKU_RG_STORAGE_PATH);
-        const sz = fsSync.statSync(env.LEANKOHAKU_RG_STORAGE_PATH).size;
+        fsSync.mkdirSync(pathMod.dirname(env.LEANCLI_RG_STORAGE_PATH), { recursive: true });
+        fsSync.copyFileSync(snapshotPath, env.LEANCLI_RG_STORAGE_PATH);
+        const sz = fsSync.statSync(env.LEANCLI_RG_STORAGE_PATH).size;
         console.error(`[bridge] railgun: seeded storage from bundled snapshot ${snapshotPath} (${sz} bytes)`);
       }
     } catch (e) {
@@ -391,10 +391,10 @@ async function buildRailgunPlugin(env, { needBundler = false } = {}) {
     }
   }
   const chain = chainFromId(chainId);
-  const client = createPublicClient({ chain, transport: http(env.LEANKOHAKU_RPC_URL) });
+  const client = createPublicClient({ chain, transport: http(env.LEANCLI_RPC_URL) });
   const host = {
     network: inMemoryNetwork(),
-    storage: fileStorage(env.LEANKOHAKU_RG_STORAGE_PATH),
+    storage: fileStorage(env.LEANCLI_RG_STORAGE_PATH),
     keystore,
     provider: withChunkedGetLogs(provider.viem(client)),
   };
@@ -402,16 +402,16 @@ async function buildRailgunPlugin(env, { needBundler = false } = {}) {
   let bundler;
   let delegating_account;
   if (needBundler) {
-    if (!env.LEANKOHAKU_RG_BUNDLER_URL) {
-      throw new Error("LEANKOHAKU_RG_BUNDLER_URL is required for railgun unshield/transfer (4337 bundler URL, e.g. Pimlico)");
+    if (!env.LEANCLI_RG_BUNDLER_URL) {
+      throw new Error("LEANCLI_RG_BUNDLER_URL is required for railgun unshield/transfer (4337 bundler URL, e.g. Pimlico)");
     }
-    if (!env.LEANKOHAKU_RG_DELEGATING_KEY) {
-      throw new Error("LEANKOHAKU_RG_DELEGATING_KEY is required for railgun unshield/transfer (hex private key of the EIP-7702 delegating EOA)");
+    if (!env.LEANCLI_RG_DELEGATING_KEY) {
+      throw new Error("LEANCLI_RG_DELEGATING_KEY is required for railgun unshield/transfer (hex private key of the EIP-7702 delegating EOA)");
     }
-    bundler = rg.Bundler.pimlico(env.LEANKOHAKU_RG_BUNDLER_URL);
-    const key = env.LEANKOHAKU_RG_DELEGATING_KEY.startsWith("0x")
-      ? env.LEANKOHAKU_RG_DELEGATING_KEY
-      : "0x" + env.LEANKOHAKU_RG_DELEGATING_KEY;
+    bundler = rg.Bundler.pimlico(env.LEANCLI_RG_BUNDLER_URL);
+    const key = env.LEANCLI_RG_DELEGATING_KEY.startsWith("0x")
+      ? env.LEANCLI_RG_DELEGATING_KEY
+      : "0x" + env.LEANCLI_RG_DELEGATING_KEY;
     delegating_account = rg.Signer.privateKey(key);
   }
 
@@ -435,7 +435,7 @@ async function shieldedRailgunBalance(env) {
   const balances = await plugin.balance(undefined);
   console.error(`[bridge] railgun: balance complete in ${Date.now() - ts}ms (${balances.length} asset entries)`);
   return {
-    chainId: env.LEANKOHAKU_CHAIN_ID,
+    chainId: env.LEANCLI_CHAIN_ID,
     balances,
   };
 }
@@ -488,7 +488,7 @@ async function shieldedRailgunPrepareShield(env, params) {
     throw new Error("railgun prepareShield returned no txns");
   }
   return {
-    chainId: env.LEANKOHAKU_CHAIN_ID,
+    chainId: env.LEANCLI_CHAIN_ID,
     asset,
     amountWei,
     txns,
@@ -511,7 +511,7 @@ async function shieldedRailgunUnshield(env, params) {
   console.error(`[bridge] railgun: broadcasting unshield via 4337 bundler`);
   await plugin.broadcast(op);
   return {
-    chainId: env.LEANKOHAKU_CHAIN_ID,
+    chainId: env.LEANCLI_CHAIN_ID,
     recipient,
     asset,
     amountWei,
@@ -535,7 +535,7 @@ async function shieldedRailgunTransfer(env, params) {
   console.error(`[bridge] railgun: broadcasting transfer via 4337 bundler`);
   await plugin.broadcast(op);
   return {
-    chainId: env.LEANKOHAKU_CHAIN_ID,
+    chainId: env.LEANCLI_CHAIN_ID,
     recipient,
     tokenAddress: asset.contract,
     amountWei,
@@ -566,9 +566,9 @@ async function shieldedBalance(env) {
   if (plugin.sync) await plugin.sync();
   console.error(`[bridge] sync complete in ${Date.now() - ts}ms`);
   const balances = await plugin.balance([ethAsset()]);
-  await persistState(env.LEANKOHAKU_PP_STATE_PATH, plugin);
+  await persistState(env.LEANCLI_PP_STATE_PATH, plugin);
   return {
-    chainId: env.LEANKOHAKU_CHAIN_ID,
+    chainId: env.LEANCLI_CHAIN_ID,
     asset: E_ADDRESS,
     balances,
   };
@@ -591,9 +591,9 @@ async function shieldedPrepareDeposit(env, params) {
     throw new Error("prepareShield returned no txns");
   }
   console.error(`[bridge] prepareShield returned ${txns.length} tx(s)`);
-  await persistState(env.LEANKOHAKU_PP_STATE_PATH, plugin);
+  await persistState(env.LEANCLI_PP_STATE_PATH, plugin);
   return {
-    chainId: env.LEANKOHAKU_CHAIN_ID,
+    chainId: env.LEANCLI_CHAIN_ID,
     asset: E_ADDRESS,
     amountWei,
     txns,
@@ -629,14 +629,14 @@ async function shieldedPrepareWithdraw(env, params) {
     }
     throw e;
   }
-  await persistState(env.LEANKOHAKU_PP_STATE_PATH, plugin);
+  await persistState(env.LEANCLI_PP_STATE_PATH, plugin);
   const broadcaster = plugin.__pp.createPPv1Broadcaster(plugin.__host, {
     broadcasterUrl: plugin.__broadcasterUrl,
   });
   console.error(`[bridge] broadcasting unshield via ${plugin.__broadcasterUrl}`);
   const relayResult = await broadcaster.broadcast(privateOp);
   return {
-    chainId: env.LEANKOHAKU_CHAIN_ID,
+    chainId: env.LEANCLI_CHAIN_ID,
     recipient,
     amountWei,
     relay: relayResult ?? { ok: true },
@@ -697,7 +697,7 @@ async function shieldedUnshieldDrain(env, params) {
       // letting the raw on-chain revert string bubble up. Persist whatever
       // we drained so far so the user knows where they stand and the
       // PP state file reflects any successful relays.
-      await persistState(env.LEANKOHAKU_PP_STATE_PATH, plugin);
+      await persistState(env.LEANCLI_PP_STATE_PATH, plugin);
       const raw = e?.message ?? String(e);
       const drainedSoFar = target - remaining;
       const partial = sent.length > 0 ? ` (drained ${drainedSoFar} of ${target} before failure)` : "";
@@ -705,7 +705,7 @@ async function shieldedUnshieldDrain(env, params) {
         throw new Error(
           `Privacy Pools relayer quoted a relay fee above the pool's on-chain cap (RelayFeeGreaterThanMax)${partial}. ` +
           `This is a relayer/pool config mismatch — nothing was deducted. Try again later, ` +
-          `or override the relayer with LEANKOHAKU_PP_BROADCASTER_URL=<url>. Underlying: ${raw}`,
+          `or override the relayer with LEANCLI_PP_BROADCASTER_URL=<url>. Underlying: ${raw}`,
         );
       }
       throw new Error(`relayer rejected unshield at iter ${iter}${partial}: ${raw}`);
@@ -714,9 +714,9 @@ async function shieldedUnshieldDrain(env, params) {
     sent.push({ amountWei: chunk, relay: relay ?? { ok: true } });
     remaining -= chunk;
   }
-  await persistState(env.LEANKOHAKU_PP_STATE_PATH, plugin);
+  await persistState(env.LEANCLI_PP_STATE_PATH, plugin);
   return {
-    chainId: env.LEANKOHAKU_CHAIN_ID,
+    chainId: env.LEANCLI_CHAIN_ID,
     recipient,
     targetWei: target,
     drainedWei: target - remaining,
@@ -806,7 +806,7 @@ async function dispatch(req) {
     case "ping":
       return jsonrpcResult(id, {
         ok: true,
-        bridge: "leankohaku-kohaku-bridge",
+        bridge: "leancli-bridge",
         protocol: PROTOCOL_VERSION,
         node: process.versions.node,
       });

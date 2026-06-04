@@ -1,4 +1,4 @@
-# leanKohaku SPHINCS- shim — builds the parameter-set binaries.
+# leanCLI SPHINCS- shim — builds the parameter-set binaries.
 #
 # Three parameter sets, three build paths:
 #   - SLH-DSA-SHA2-128-24: C, links shared shim/shim_main.c against the

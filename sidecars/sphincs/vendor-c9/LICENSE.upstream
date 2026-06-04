@@ -15,7 +15,7 @@ referenced upstream commit. C9 is deployed on Sepolia at
 Files added (not copied from upstream):
 - main.rs       — JSON-RPC stdio dispatcher matching `shim/shim_main.c`
                   (info / keygen / sign / verify), so the Lean bridge in
-                  `LeanKohaku/Sphincs/Bridge.lean` is unchanged across
+                  `LeanCli/Sphincs/Bridge.lean` is unchanged across
                   parameter sets.
 - verifier.rs   — Rust port of `SPHINCs-C9Asm.sol`, used for local
                   verify-after-sign in `signWithVerify`. The on-chain
@@ -36,6 +36,6 @@ the vendored cryptographic core as a research-prototype copy under the
 implicit "all rights reserved" default; obtain an explicit license from
 upstream before any production use.
 
-The leanKohaku-authored files (main.rs, verifier.rs, lib.rs, keygen.rs,
-this file, Cargo.toml) are released under the leanKohaku project's
+The leanCLI-authored files (main.rs, verifier.rs, lib.rs, keygen.rs,
+this file, Cargo.toml) are released under the leanCLI project's
 license terms.

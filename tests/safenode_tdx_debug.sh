@@ -48,7 +48,7 @@ if [ "$status" -ne 0 ]; then
   echo
   echo "Hints based on output:"
   if grep -qi "pccs\|provisioning" /tmp/safenode-verifier.out; then
-    echo "  - PCCS-related: try setting KOHAKU_SAFE_NODE_PCCS_URL"
+    echo "  - PCCS-related: try setting LEANCLI_SAFE_NODE_PCCS_URL"
   fi
   if grep -qi "no such file\|not found" /tmp/safenode-verifier.out; then
     echo "  - missing-file: verifier may want files relative to its CWD"

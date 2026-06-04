@@ -1,7 +1,7 @@
 //! C9 stdio JSON-RPC dispatcher.
 //!
 //! Wire-protocol-identical to `sidecars/sphincs/shim/shim_main.c` so the
-//! Lean bridge in `LeanKohaku/Sphincs/Bridge.lean` is unchanged across
+//! Lean bridge in `LeanCli/Sphincs/Bridge.lean` is unchanged across
 //! parameter sets. Methods:
 //!   info    {}                                  -> { paramSet, sigBytes,
 //!                                                    pkBytes, skBytes,

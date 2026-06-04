@@ -496,7 +496,7 @@ function ConfirmGate({
         <ProvenancePanel
           title="canonical intent"
           tier="local"
-          source="rendered by Lean (LeanKohaku/Intent/*) from the structural Intent ADT — no RPC involved"
+          source="rendered by Lean (LeanCli/Intent/*) from the structural Intent ADT — no RPC involved"
         >
           {canonical.split("\n").map((line, i) => (
             <Text key={i}>{line}</Text>

@@ -58,10 +58,10 @@ function extractToolNames(skillBody) {
 }
 
 /** Build the resolved tool list for a request. Honors a per-call
- *  override (env: KOHAKU_LLM_TOOLS=allowance,simulateTx) so it's easy
+ *  override (env: LEANCLI_LLM_TOOLS=allowance,simulateTx) so it's easy
  *  to A/B without editing skill markdown. */
 function resolveTools(params) {
-  const override = (process.env.KOHAKU_LLM_TOOLS ?? "").trim();
+  const override = (process.env.LEANCLI_LLM_TOOLS ?? "").trim();
   if (override) {
     return selectTools(override.split(",").map((s) => s.trim()).filter(Boolean));
   }

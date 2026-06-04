@@ -14,7 +14,7 @@ This is an older protocol generation than Privacy Pools (no
 association-set affordances) and Railgun (no shielded smart-wallet
 UTXO model). It is documented here for **decode context**.
 
-## Status in Kohaku
+## Status in leanCLI
 
 **Coming soon.** There is no `@kohaku-eth/tornado-cash` package
 alongside `@kohaku-eth/privacy-pools` and `@kohaku-eth/railgun`. When

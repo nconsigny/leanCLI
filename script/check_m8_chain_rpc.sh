@@ -2,18 +2,18 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SOCK="/tmp/leankohaku-m8-check-$$.sock"
-DATA="$(mktemp -d /tmp/leankohaku-m8-check.XXXXXX)"
-DAEMON_LOG="$(mktemp /tmp/leankohaku-m8-daemon-log.XXXXXX)"
-ANVIL_LOG="$(mktemp /tmp/leankohaku-m8-anvil-log.XXXXXX)"
-PORT="${LEANKOHAKU_TEST_ANVIL_PORT:-8546}"
+SOCK="/tmp/leancli-m8-check-$$.sock"
+DATA="$(mktemp -d /tmp/leancli-m8-check.XXXXXX)"
+DAEMON_LOG="$(mktemp /tmp/leancli-m8-daemon-log.XXXXXX)"
+ANVIL_LOG="$(mktemp /tmp/leancli-m8-anvil-log.XXXXXX)"
+PORT="${LEANCLI_TEST_ANVIL_PORT:-8546}"
 ANVIL_ACCOUNT="0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266"
 ANVIL_RECIPIENT="0x70997970C51812dc3A010C7d01b50e0d17dc79C8"
 ANVIL_MNEMONIC="test test test test test test test test test test test junk"
 
 cleanup() {
   set +e
-  LEANKOHAKU_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leankohaku" daemon stop >/dev/null 2>&1
+  LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" daemon stop >/dev/null 2>&1
   if [[ -n "${daemon_pid:-}" ]]; then
     wait "$daemon_pid" >/dev/null 2>&1
   fi
@@ -21,7 +21,7 @@ cleanup() {
     kill "$anvil_pid" >/dev/null 2>&1
     wait "$anvil_pid" >/dev/null 2>&1
   fi
-  rm -rf "$DATA" "$DAEMON_LOG" "$ANVIL_LOG" "$SOCK" /tmp/leankohaku-m8-check-out
+  rm -rf "$DATA" "$DAEMON_LOG" "$ANVIL_LOG" "$SOCK" /tmp/leancli-m8-check-out
 }
 trap cleanup EXIT
 
@@ -45,12 +45,12 @@ for _ in {1..50}; do
   sleep 0.1
 done
 
-LEANKOHAKU_SOCKET="$SOCK" \
+LEANCLI_SOCKET="$SOCK" \
 XDG_DATA_HOME="$DATA" \
-LEANKOHAKU_RPC_URL="http://127.0.0.1:$PORT" \
-LEANKOHAKU_CHAIN_ID=31337 \
+LEANCLI_RPC_URL="http://127.0.0.1:$PORT" \
+LEANCLI_CHAIN_ID=31337 \
 PATH="$ROOT/.lake/build/bin:$PATH" \
-"$ROOT/.lake/build/bin/leankohaku-daemon" >"$DAEMON_LOG" 2>&1 &
+"$ROOT/.lake/build/bin/leancli-daemon" >"$DAEMON_LOG" 2>&1 &
 daemon_pid="$!"
 
 for _ in {1..50}; do
@@ -64,51 +64,51 @@ if [[ ! -S "$SOCK" ]]; then
   exit 1
 fi
 
-LEANKOHAKU_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leankohaku" balance "$ANVIL_ACCOUNT" >/tmp/leankohaku-m8-check-out
-grep -q '"balance":"0x' /tmp/leankohaku-m8-check-out
+LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" balance "$ANVIL_ACCOUNT" >/tmp/leancli-m8-check-out
+grep -q '"balance":"0x' /tmp/leancli-m8-check-out
 
-LEANKOHAKU_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leankohaku" nonce "$ANVIL_ACCOUNT" >/tmp/leankohaku-m8-check-out
-grep -q '"nonce":"0x' /tmp/leankohaku-m8-check-out
+LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" nonce "$ANVIL_ACCOUNT" >/tmp/leancli-m8-check-out
+grep -q '"nonce":"0x' /tmp/leancli-m8-check-out
 
-LEANKOHAKU_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leankohaku" \
-  token-balance 0x0000000000000000000000000000000000000000 "$ANVIL_ACCOUNT" >/tmp/leankohaku-m8-check-out
-grep -q '"balance":"0x' /tmp/leankohaku-m8-check-out
+LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" \
+  token-balance 0x0000000000000000000000000000000000000000 "$ANVIL_ACCOUNT" >/tmp/leancli-m8-check-out
+grep -q '"balance":"0x' /tmp/leancli-m8-check-out
 
-LEANKOHAKU_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leankohaku" gas-price >/tmp/leankohaku-m8-check-out
-grep -q '"gasPrice":"0x' /tmp/leankohaku-m8-check-out
+LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" gas-price >/tmp/leancli-m8-check-out
+grep -q '"gasPrice":"0x' /tmp/leancli-m8-check-out
 
-LEANKOHAKU_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leankohaku" priority-fee >/tmp/leankohaku-m8-check-out
-grep -q '"maxPriorityFeePerGas":"0x' /tmp/leankohaku-m8-check-out
+LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" priority-fee >/tmp/leancli-m8-check-out
+grep -q '"maxPriorityFeePerGas":"0x' /tmp/leancli-m8-check-out
 
-LEANKOHAKU_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leankohaku" \
+LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" \
   estimate-gas '{"from":"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266","to":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8","value":"0x1"}' \
-  >/tmp/leankohaku-m8-check-out
-grep -q '"gas":"0x' /tmp/leankohaku-m8-check-out
+  >/tmp/leancli-m8-check-out
+grep -q '"gas":"0x' /tmp/leancli-m8-check-out
 
 set +e
-LEANKOHAKU_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leankohaku" broadcast 0x01 >/tmp/leankohaku-m8-check-out 2>&1
+LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" broadcast 0x01 >/tmp/leancli-m8-check-out 2>&1
 broadcast_code="$?"
 set -e
 if [[ "$broadcast_code" != 2 ]]; then
   printf 'M8 check failed: invalid broadcast should preserve daemon/node failure as exit 2\n' >&2
-  cat /tmp/leankohaku-m8-check-out >&2
+  cat /tmp/leancli-m8-check-out >&2
   exit 1
 fi
-grep -q 'chain RPC failed' /tmp/leankohaku-m8-check-out
+grep -q 'chain RPC failed' /tmp/leancli-m8-check-out
 
-LEANKOHAKU_SOCKET="$SOCK" XDG_DATA_HOME="$DATA" LEANKOHAKU_PASSPHRASE='m8-pass' \
-  "$ROOT/.lake/build/bin/leankohaku" eoa import anvil "$ANVIL_MNEMONIC" >/tmp/leankohaku-m8-check-out
-grep -q "$ANVIL_ACCOUNT" /tmp/leankohaku-m8-check-out
+LEANCLI_SOCKET="$SOCK" XDG_DATA_HOME="$DATA" LEANCLI_PASSPHRASE='m8-pass' \
+  "$ROOT/.lake/build/bin/leancli" eoa import anvil "$ANVIL_MNEMONIC" >/tmp/leancli-m8-check-out
+grep -q "$ANVIL_ACCOUNT" /tmp/leancli-m8-check-out
 
-LEANKOHAKU_SOCKET="$SOCK" XDG_DATA_HOME="$DATA" LEANKOHAKU_PASSPHRASE='m8-pass' \
-  "$ROOT/.lake/build/bin/leankohaku" eoa unlock anvil >/tmp/leankohaku-m8-check-out
-grep -q '"locked":false' /tmp/leankohaku-m8-check-out
+LEANCLI_SOCKET="$SOCK" XDG_DATA_HOME="$DATA" LEANCLI_PASSPHRASE='m8-pass' \
+  "$ROOT/.lake/build/bin/leancli" eoa unlock anvil >/tmp/leancli-m8-check-out
+grep -q '"locked":false' /tmp/leancli-m8-check-out
 
-LEANKOHAKU_SOCKET="$SOCK" XDG_DATA_HOME="$DATA" \
-  "$ROOT/.lake/build/bin/leankohaku" eoa send anvil "$ANVIL_RECIPIENT" 1 >/tmp/leankohaku-m8-check-out
-grep -q '"txHash":"0x' /tmp/leankohaku-m8-check-out
+LEANCLI_SOCKET="$SOCK" XDG_DATA_HOME="$DATA" \
+  "$ROOT/.lake/build/bin/leancli" eoa send anvil "$ANVIL_RECIPIENT" 1 >/tmp/leancli-m8-check-out
+grep -q '"txHash":"0x' /tmp/leancli-m8-check-out
 
-LEANKOHAKU_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leankohaku" daemon stop >/dev/null
+LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" daemon stop >/dev/null
 wait "$daemon_pid" >/dev/null 2>&1 || true
 unset daemon_pid
 

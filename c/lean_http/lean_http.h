@@ -9,8 +9,8 @@
 // prompts to a remote endpoint. The Lean wrapper enforces the same
 // rule again; both checks are intentionally redundant.
 
-#ifndef LEANKOHAKU_LEAN_HTTP_H
-#define LEANKOHAKU_LEAN_HTTP_H
+#ifndef LEANCLI_LEAN_HTTP_H
+#define LEANCLI_LEAN_HTTP_H
 
 #include <stddef.h>
 
@@ -46,4 +46,4 @@ void lk_http_free(char* p);
 }
 #endif
 
-#endif // LEANKOHAKU_LEAN_HTTP_H
+#endif // LEANCLI_LEAN_HTTP_H

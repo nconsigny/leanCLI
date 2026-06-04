@@ -294,7 +294,7 @@ export function MoreCommandsScreen({
   return (
     <Layout
       title="More commands"
-      subtitle="Less-frequent flows. Most CLI verbs still live in the shell — run `kohaku help`."
+      subtitle="Less-frequent flows. Most CLI verbs still live in the shell — run `leancli help`."
       hint="↑/↓ move · → / enter select · ← / esc back"
     >
       <Select

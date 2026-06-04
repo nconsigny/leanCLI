@@ -1,5 +1,5 @@
 {
-  "name": "leankohaku-colibri-bridge",
+  "name": "leancli-colibri-bridge",
   "version": "0.0.1",
   "main": "bridge.mjs",
   "scripts": {
@@ -12,7 +12,7 @@
   "type": "module",
   "private": "true",
   "bin": {
-    "leankohaku-colibri-bridge": "bridge.mjs"
+    "leancli-colibri-bridge": "bridge.mjs"
   },
   "engines": {
     "node": ">=22"

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// leankohaku-llm-bridge — untrusted JSON-RPC sidecar. Thin transport:
+// leancli-llm-bridge — untrusted JSON-RPC sidecar. Thin transport:
 // dispatches llm.parseIntent to the selected backend (local llama-server
 // or Anthropic SDK) and returns the raw model output unchanged. The
 // Lean daemon's IntentParser does the trust-boundary validation.
@@ -82,7 +82,7 @@ const argv = process.argv.slice(2);
 const rpcIdx = argv.indexOf("--rpc");
 if (rpcIdx === -1 || !argv[rpcIdx + 1]) {
   process.stderr.write(
-    "usage: leankohaku-llm-bridge --rpc '<json-rpc-request>'\n",
+    "usage: leancli-llm-bridge --rpc '<json-rpc-request>'\n",
   );
   process.exit(2);
 }

@@ -17,7 +17,7 @@ type Props = { onDone: (s: boolean) => void };
  *  unlocks the EOA (master KEK / TPM / per-slot passphrase) gates this
  *  flow — if the default wallet is currently unlocked, balance just
  *  works. If it's locked, the daemon returns -32012 (EOA slot locked)
- *  and the user lands on a generic error page; the fix is `kohaku
+ *  and the user lands on a generic error page; the fix is `leancli
  *  wallet unlock <name>` (or unlock the master).
  *
  *  Today this menu only exposes balance. Unshield + transfer are

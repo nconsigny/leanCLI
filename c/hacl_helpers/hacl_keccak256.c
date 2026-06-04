@@ -78,7 +78,7 @@ static void ethereum_keccak256(uint8_t out[32], const uint8_t *input, uint32_t i
 
 int main(int argc, char **argv) {
   if (argc != 2) {
-    fprintf(stderr, "usage: leankohaku-hacl-keccak256 <hex>\n");
+    fprintf(stderr, "usage: leancli-hacl-keccak256 <hex>\n");
     return 2;
   }
   uint32_t in_len = 0;

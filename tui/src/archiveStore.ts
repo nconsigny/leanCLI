@@ -7,16 +7,16 @@ import os from "node:os";
  * derived sub-accounts) from the WalletsHub list without deleting it
  * daemon-side — the slot is intact, the keystore is untouched, only the
  * UI filters it out by default. Archive state lives in
- * `$XDG_STATE_HOME/leankohaku/tui-archive.json` (falling back to
- * `~/.local/state/leankohaku/...`); it's plain JSON so users can edit
+ * `$XDG_STATE_HOME/leancli/tui-archive.json` (falling back to
+ * `~/.local/state/leancli/...`); it's plain JSON so users can edit
  * by hand if they need to. We never block the UX on read/write errors —
  * a corrupted file just silently empties the archive set.
  */
 
 const STATE_DIR = (() => {
   const xdg = process.env.XDG_STATE_HOME;
-  if (xdg && xdg.length > 0) return path.join(xdg, "leankohaku");
-  return path.join(os.homedir(), ".local", "state", "leankohaku");
+  if (xdg && xdg.length > 0) return path.join(xdg, "leancli");
+  return path.join(os.homedir(), ".local", "state", "leancli");
 })();
 
 const FILE = path.join(STATE_DIR, "tui-archive.json");

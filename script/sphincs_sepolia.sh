@@ -17,7 +17,7 @@
 #       contract that inherits BaseAccount from account-abstraction).
 #       with constructor args (entryPoint=v0.9 singleton, verifier=<env>).
 #     - Saves the resulting factory address to
-#       $XDG_DATA_HOME/leankohaku/sphincs-factories/sepolia-<paramSet>.txt
+#       $XDG_DATA_HOME/leancli/sphincs-factories/sepolia-<paramSet>.txt
 #       so subsequent daemon reads can pick it up without a daemon.json
 #       edit. The daemon RPC also echoes the address in its response.
 
@@ -67,7 +67,7 @@ deployer_private_key() {
 factory_state_path() {
   local paramSet="$1"
   local data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-  local dir="${data_home}/leankohaku/sphincs-factories"
+  local dir="${data_home}/leancli/sphincs-factories"
   mkdir -p "$dir"
   printf '%s/sepolia-%s.txt' "$dir" "$paramSet"
 }
@@ -106,7 +106,7 @@ case "$cmd" in
     addr="$(printf '%s\n' "$out" | awk '/Deployed to:/ {print $3}')"
     if [[ -n "$addr" ]]; then
       data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-      dir="${data_home}/leankohaku/sphincs-verifiers"
+      dir="${data_home}/leancli/sphincs-verifiers"
       mkdir -p "$dir"
       out_file="${dir}/sepolia-${paramSet}.txt"
       printf '%s\n' "$addr" > "$out_file"
@@ -153,7 +153,7 @@ EOF
     # after a `git submodule update` that pulls a new verifier patch.
     "$0" deploy-verifier "${2:-C9}" || exit $?
     data_home="${XDG_DATA_HOME:-$HOME/.local/share}"
-    new_verifier="$(cat "${data_home}/leankohaku/sphincs-verifiers/sepolia-${2:-C9}.txt" 2>/dev/null)"
+    new_verifier="$(cat "${data_home}/leancli/sphincs-verifiers/sepolia-${2:-C9}.txt" 2>/dev/null)"
     if [[ -z "$new_verifier" ]]; then
       echo "deploy-all: verifier address not captured; aborting before factory deploy" >&2
       exit 2
@@ -179,13 +179,13 @@ EOF
 sphincs_sepolia.sh deploy-verifier [paramSet=C9]
   # Forge-creates the upstream Yul verifier from
   #   lib/sphincs-minus/src/SPHINCs-C9Asm.sol  (submodule)
-  # Saves the address to \$XDG_DATA_HOME/leankohaku/sphincs-verifiers/sepolia-<paramSet>.txt
+  # Saves the address to \$XDG_DATA_HOME/leancli/sphincs-verifiers/sepolia-<paramSet>.txt
 
 sphincs_sepolia.sh deploy <paramSet>
   # Forge-creates the upstream SphincsAccountFactory from
   #   lib/sphincs-minus/src/SphincsAccountFactory.sol
   # wiring (EntryPoint v0.9 singleton, \$SPHINCS_VERIFIER_ADDR).
-  # Saves to \$XDG_DATA_HOME/leankohaku/sphincs-factories/sepolia-<paramSet>.txt
+  # Saves to \$XDG_DATA_HOME/leancli/sphincs-factories/sepolia-<paramSet>.txt
 
 sphincs_sepolia.sh deploy-all [paramSet=C9]
   # verifier → factory back-to-back. Use after a submodule bump.

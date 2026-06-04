@@ -116,7 +116,7 @@ export default function CreateR1Flow({ onDone }: Props) {
                 </Text>
                 <Text color={theme.dim}>
                   Delete the old slot and retry with a fresh name:
-                  rm -rf .leankohaku/keystore/tpm2/{name}
+                  rm -rf .leancli/keystore/tpm2/{name}
                 </Text>
               </Box>
             );
@@ -146,7 +146,7 @@ export default function CreateR1Flow({ onDone }: Props) {
           },
           {
             label:
-              "Skip — return to menu (deploy later with `kohaku wallet deploy`)",
+              "Skip — return to menu (deploy later with `leancli wallet deploy`)",
             onSelect: () => onDone(true),
           },
         ]}
@@ -215,7 +215,7 @@ export default function CreateR1Flow({ onDone }: Props) {
         <Layout title="No deployer EOA available" hint="esc — back">
           <Banner
             kind="err"
-            text="No EOA wallets configured. Create one with `kohaku wallet create eoa <name>` or use the .env deployer instead."
+            text="No EOA wallets configured. Create one with `leancli wallet create eoa <name>` or use the .env deployer instead."
           />
         </Layout>
       );

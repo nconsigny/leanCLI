@@ -45,16 +45,16 @@ function validateUrl(url: string): string | null {
   }
 }
 
-/** Resolve the daemon's config path the same way LeanKohaku/Cli/NetworkConfig
- *  does: `$LEANKOHAKU_CONFIG`, else `$XDG_CONFIG_HOME/leankohaku/daemon.json`,
- *  else `~/.config/leankohaku/daemon.json`. Writing this from Node mirrors the
+/** Resolve the daemon's config path the same way LeanCli/Cli/NetworkConfig
+ *  does: `$LEANCLI_CONFIG`, else `$XDG_CONFIG_HOME/leancli/daemon.json`,
+ *  else `~/.config/leancli/daemon.json`. Writing this from Node mirrors the
  *  `network.setRpcChain` write path; we keep the schema in lockstep with
- *  `LeanKohaku.Cli.NetworkConfig.setChainRpcUrl` (rpc_urls.<chain> as a bare
+ *  `LeanCli.Cli.NetworkConfig.setChainRpcUrl` (rpc_urls.<chain> as a bare
  *  string when no transport is supplied). */
 function daemonConfigPath(): string {
-  if (process.env.LEANKOHAKU_CONFIG) return process.env.LEANKOHAKU_CONFIG;
+  if (process.env.LEANCLI_CONFIG) return process.env.LEANCLI_CONFIG;
   const xdg = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
-  return path.join(xdg, "leankohaku", "daemon.json");
+  return path.join(xdg, "leancli", "daemon.json");
 }
 
 function writeChainRpc(chain: "mainnet" | "sepolia", url: string): void {
@@ -97,7 +97,7 @@ function setDefaultChain(chain: "mainnet" | "sepolia"): void {
 }
 
 /** First-run RPC setup. Writes daemon.json directly from Node because the
- *  daemon refuses to start without an RPC URL (LeanKohaku/Daemon/Config.lean),
+ *  daemon refuses to start without an RPC URL (LeanCli/Daemon/Config.lean),
  *  so we can't route the write through a daemon RPC. After save the user is
  *  told to retry — daemon needs to be (re)started to pick up the new file. */
 export default function RpcSetupGate({ onDone }: { onDone: () => void }) {
@@ -277,7 +277,7 @@ export default function RpcSetupGate({ onDone }: { onDone: () => void }) {
       {phase.saved.length === 0 ? (
         <Banner
           kind="warn"
-          text="No URLs entered. Set later: kohaku network set-rpc-chain <chain> <url>"
+          text="No URLs entered. Set later: leancli network set-rpc-chain <chain> <url>"
         />
       ) : (
         <Box flexDirection="column">

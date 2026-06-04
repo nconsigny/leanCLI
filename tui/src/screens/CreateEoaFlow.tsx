@@ -12,7 +12,7 @@ type Props = { onDone: (success: boolean) => void };
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
 const PATH_RE = /^m(\/[0-9]+'?)+$/;
 
-/** Inline wallet creation. Mirrors `kohaku wallet create eoa <name> [path]`.
+/** Inline wallet creation. Mirrors `leancli wallet create eoa <name> [path]`.
  *
  *  When the wallet master KEK is currently held in memory, the daemon
  *  accepts a missing per-slot passphrase, generates an ephemeral one for
@@ -154,7 +154,7 @@ export default function CreateEoaFlow({ onDone }: Props) {
           <Text color={theme.dim}>address: {r?.address ?? "(unknown)"}</Text>
           <Text color={theme.dim}>derivation: {r?.derivationPath ?? "(default)"}</Text>
           <Text color={theme.warn}>
-            ⚠ Reveal &amp; back up the mnemonic with: kohaku wallet show {params.name}
+            ⚠ Reveal &amp; back up the mnemonic with: leancli wallet show {params.name}
           </Text>
         </Box>
       )}

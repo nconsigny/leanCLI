@@ -14,7 +14,7 @@ triggers:
   - 0xa160cdab225685da1d56aa342ad8841c3b53f291
 ---
 Tornado Cash is an older fixed-denomination Ethereum mixer that uses zk-SNARKs
-to break the on-chain link between deposit and withdrawal. Kohaku does not yet
+to break the on-chain link between deposit and withdrawal. leanCLI does not yet
 ship a `@kohaku-eth/tornado-cash` SDK package, so drafting Tornado Cash
 transactions through the agent is **coming soon**. The skill is loaded today
 for decode context: the agent can explain what a Tornado Cash calldata blob

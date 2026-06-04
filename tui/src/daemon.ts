@@ -5,8 +5,8 @@ import fs from "node:fs";
 import { spawn } from "node:child_process";
 
 /**
- * Minimal JSON-RPC client over the leanKohaku daemon's UDS socket. Mirrors
- * the framing used by `LeanKohaku/Cli/DaemonClient.lean`: newline-delimited
+ * Minimal JSON-RPC client over the leanCLI daemon's UDS socket. Mirrors
+ * the framing used by `LeanCli/Cli/DaemonClient.lean`: newline-delimited
  * JSON, requests carry an integer `id`, the daemon may emit notification
  * frames (no `result`/`error` field) interleaved with the response.
  *
@@ -48,28 +48,28 @@ function stringifyWithBigInt(v: unknown): string {
 }
 
 export function socketPath(): string {
-  const env = process.env.LEANKOHAKU_SOCKET;
+  const env = process.env.LEANCLI_SOCKET;
   if (env && env.length > 0) return env;
   const runtimeDir = process.env.XDG_RUNTIME_DIR || "/tmp";
-  return path.join(runtimeDir, "leankohaku", "leankohaku.sock");
+  return path.join(runtimeDir, "leancli", "leancli.sock");
 }
 
 /** Resolve the daemon binary the TUI should spawn when the socket is
- *  missing. Mirrors `LeanKohaku.Cli.DaemonClient.daemonBin`: env override
- *  first, then the standard install path under $HOME/.kohaku/bin, then
+ *  missing. Mirrors `LeanCli.Cli.DaemonClient.daemonBin`: env override
+ *  first, then the standard install path under $HOME/.leancli/bin, then
  *  PATH lookup. The TUI runs as `node dist/index.mjs`, so unlike the
  *  Lean CLI we can't lean on IO.appDir — the install path is the
  *  closest equivalent. */
 function daemonBinPath(): string {
-  const env = process.env.LEANKOHAKU_DAEMON_BIN;
+  const env = process.env.LEANCLI_DAEMON_BIN;
   if (env && env.length > 0) return env;
   const installed = path.join(
-    process.env.KOHAKU_HOME || path.join(os.homedir(), ".kohaku"),
+    process.env.LEANCLI_HOME || path.join(os.homedir(), ".leancli"),
     "bin",
-    "kohaku-daemon",
+    "leancli-daemon",
   );
   if (fs.existsSync(installed)) return installed;
-  return "kohaku-daemon";
+  return "leancli-daemon";
 }
 
 /** Match `DaemonClient.lean.noAutoSpawnMethod` — never auto-spawn for
@@ -80,21 +80,21 @@ function noAutoSpawnMethod(method: string): boolean {
 }
 
 function autoSpawnDisabled(): boolean {
-  const v = process.env.LEANKOHAKU_NO_AUTOSPAWN;
+  const v = process.env.LEANCLI_NO_AUTOSPAWN;
   if (!v) return false;
   const lc = v.toLowerCase();
   return lc !== "" && lc !== "0" && lc !== "false";
 }
 
 /** Path of the "this machine is managed by systemd" marker dropped by
- *  `kohakuspawn`. Mirrors `DaemonClient.lean.systemdMarkerPath`: honors
+ *  `leanclispawn`. Mirrors `DaemonClient.lean.systemdMarkerPath`: honors
  *  $XDG_CONFIG_HOME, falls back to $HOME/.config. Returns the path
  *  regardless of whether the file exists — callers stat it themselves. */
 export function systemdMarkerPath(): string {
   const cfgRoot =
     process.env.XDG_CONFIG_HOME ||
     path.join(process.env.HOME || os.homedir(), ".config");
-  return path.join(cfgRoot, "leankohaku", "managed-by-systemd");
+  return path.join(cfgRoot, "leancli", "managed-by-systemd");
 }
 
 /** True iff the systemd-handoff marker exists. Stat'd on every spawn
@@ -133,7 +133,7 @@ async function waitForSocket(p: string, attempts = 20): Promise<boolean> {
   return false;
 }
 
-/** Spawn `kohaku-daemon`, wait up to ~2s for the socket to bind, and
+/** Spawn `leancli-daemon`, wait up to ~2s for the socket to bind, and
  *  return either ok or the daemon's stderr (the actionable failure
  *  reason — typically "no rpc_url configured" or a build/permissions
  *  issue). Mirrors `DaemonClient.lean.ensureDaemon`. */
@@ -151,7 +151,7 @@ async function ensureDaemon(
       // startup error message (e.g. "no rpc_url configured") if it dies
       // before binding the socket.
       stdio: ["ignore", "ignore", "pipe"],
-      env: { ...process.env, LEANKOHAKU_SOCKET: p },
+      env: { ...process.env, LEANCLI_SOCKET: p },
     });
   } catch (e: any) {
     spawnErr = e;
@@ -288,12 +288,12 @@ function isSocketMissingError(err: RpcError): boolean {
 
 /** Public RPC entrypoint. Tries the call once; if the failure looks like
  *  "daemon not running" (UDS connect ENOENT) and autospawn isn't disabled
- *  for this method, spawns `kohaku-daemon` in the background and retries
+ *  for this method, spawns `leancli-daemon` in the background and retries
  *  once. This makes first-run flows (RpcSetupGate writes daemon.json,
  *  then the TUI moves on) and crash-recovery flows work without forcing
- *  the user to drop out of the TUI to run `kohaku daemon ping`.
+ *  the user to drop out of the TUI to run `leancli daemon ping`.
  *
- *  Mirrors LeanKohaku.Cli.DaemonClient.call: on auto-spawn failure we
+ *  Mirrors LeanCli.Cli.DaemonClient.call: on auto-spawn failure we
  *  surface the daemon's own stderr (e.g. "no rpc_url configured") so the
  *  user sees what to fix instead of the bare ENOENT. */
 export async function call<T = unknown>(
@@ -311,7 +311,7 @@ export async function call<T = unknown>(
     return first;
   }
   if (isSystemdManaged()) {
-    // kohakuspawn dropped the marker — the daemon's lifecycle now lives
+    // leanclispawn dropped the marker — the daemon's lifecycle now lives
     // under the systemd user unit, and racing it with an autospawn would
     // recreate the multi-zombie state we just cleaned up. Surface a
     // structured error with the exact start command so the user sees
@@ -321,9 +321,9 @@ export async function call<T = unknown>(
       error: {
         code: -32000,
         message:
-          `kohaku-daemon is managed by systemd on this machine ` +
+          `leancli-daemon is managed by systemd on this machine ` +
           `(${systemdMarkerPath()} present). ` +
-          `Start it with: systemctl --user start kohaku-daemon`,
+          `Start it with: systemctl --user start leancli-daemon`,
       },
     };
   }
@@ -349,7 +349,7 @@ export async function call<T = unknown>(
  * daemon's handlers are pure proxies; the agentd applies the chainId /
  * sessionKey filters and the incognito mask.
  *
- * Persistent agent mode is required. On `kohaku-agent` one-shot or the
+ * Persistent agent mode is required. On `leancli-agent` one-shot or the
  * legacy Node bridge these calls return -32601 ("history available only in
  * persistent mode") — the TUI surfaces a clear message in that case.
  * -------------------------------------------------------------------------- */

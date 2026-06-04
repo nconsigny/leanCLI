@@ -230,7 +230,7 @@ That would let the agent (and any compromised LLM with code-loading
 abilities) reach key derivation primitives directly instead of going
 through the daemon's policy-gated UDS surface.
 
-**What they get.** Direct in-process access to `LeanKohaku.Wallet.HDKey`,
+**What they get.** Direct in-process access to `LeanCli.Wallet.HDKey`,
 which is the BIP-32 derivation primitive. The agent would no longer
 have to ask the daemon for an address — it could compute one if it
 could exfiltrate a seed. The current trust contract is that the agent
@@ -245,9 +245,9 @@ binary **cannot link the seed-handling code at all**.
 - The `tests/agent_phase1c_smoke.sh` grep gate is preserved as-is and
   augmented by the Phase 1d smoke (see `tests/agent_phase1d_smoke.sh`).
 - The acceptance criterion grep — `grep -rE
-  '^import LeanKohaku\.(Wallet\.HDKey|Wallet\.Bip44|Wallet\.EOA|Wallet\.Mnemonic|Wallet\.Entropy|Keystore\.|Daemon\.State|Crypto\.Secp256k1Native|Crypto\.Random)'`
-  over `LeanKohaku/Agent`, `LeanKohaku/App/AgentMain.lean`,
-  `LeanKohaku/App/AgentDaemonMain.lean` — must return zero hits after
+  '^import LeanCli\.(Wallet\.HDKey|Wallet\.Bip44|Wallet\.EOA|Wallet\.Mnemonic|Wallet\.Entropy|Keystore\.|Daemon\.State|Crypto\.Secp256k1Native|Crypto\.Random)'`
+  over `LeanCli/Agent`, `LeanCli/App/AgentMain.lean`,
+  `LeanCli/App/AgentDaemonMain.lean` — must return zero hits after
   Phase 1d lands.
 
 ---
@@ -336,13 +336,13 @@ are not.
 Phase 1d touches these files only:
 
 - `docs/PHASE1D_THREAT_MODEL.md` — this document.
-- `LeanKohaku/Daemon/Server.lean` — `Config.trustedRegistryMaxPerPath`
+- `LeanCli/Daemon/Server.lean` — `Config.trustedRegistryMaxPerPath`
   field; `wallet.lean_verified_addresses` handler.
-- `LeanKohaku/Agent/ToolDefs/TrustedRegistry.lean` — new module.
-- `LeanKohaku/Agent/Registry.lean` — register the new tool.
-- `LeanKohaku/Agent/Prompt.lean` — new Trusted Registry section in
+- `LeanCli/Agent/ToolDefs/TrustedRegistry.lean` — new module.
+- `LeanCli/Agent/Registry.lean` — register the new tool.
+- `LeanCli/Agent/Prompt.lean` — new Trusted Registry section in
   `buildSystemPromptFull`.
-- `LeanKohaku/App/AgentDaemonMain.lean` — fetch + cache snapshot at
+- `LeanCli/App/AgentDaemonMain.lean` — fetch + cache snapshot at
   `create_session`; refresh on `seedFingerprint` change; render in
   `mkRebuildSystem`.
 - `tests/agent_phase1d_smoke.sh` — staged smoke test exercising every

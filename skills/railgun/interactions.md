@@ -1,7 +1,7 @@
 # railgun — interactions
 
 Every recipe below assumes the agent has the `@kohaku-eth/railgun` SDK
-loaded via the kohaku-bridge sidecar. The bridge does not yet expose
+loaded via the leancli-bridge sidecar. The bridge does not yet expose
 `railgun.*` JSON-RPC methods (see `overview.md`); the recipes describe
 the intended flow so that when the bridge is wired the agent already
 knows the shape. SDK functions in brackets reference

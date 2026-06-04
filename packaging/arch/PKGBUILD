@@ -1,15 +1,15 @@
-# Maintainer: leanKohaku maintainers
-pkgname=leankohaku-git
+# Maintainer: leanCLI maintainers
+pkgname=leancli-git
 pkgver=0.1.0.r0.g0000000
 pkgrel=1
 pkgdesc="Formally modeled Ethereum wallet daemon written in Lean 4"
 arch=('x86_64' 'aarch64')
-url="https://github.com/OWNER/leanKohaku"
+url="https://github.com/OWNER/leanCLI"
 license=('custom:TBD')
-# `curl` is the runtime dep for the Lean-native LLM agent (kohaku-agent
+# `curl` is the runtime dep for the Lean-native LLM agent (leancli-agent
 # links against /usr/lib/libcurl.so for its loopback-only HTTP shim).
 # `sqlite` is the runtime dep for the Phase 1a persistent agent daemon
-# (kohaku-agentd uses /usr/lib/libsqlite3.so for FTS5-backed session
+# (leancli-agentd uses /usr/lib/libsqlite3.so for FTS5-backed session
 # history). Both linked-shared-libraries are absolute-path linked, so
 # pinning the soname here keeps `pacman -Syu` honest about ABI breaks.
 depends=('lean4' 'curl' 'sqlite')
@@ -19,9 +19,9 @@ optdepends=(
   'tpm2-tss: TPM2 software stack (pulled in transitively by tpm2-tools; listed for visibility)'
   'libfido2: optional FIDO2 security-key provisioning and inspection outside Lean'
   'fprintd: optional Linux biometric enrollment outside Lean'
-  'nodejs: required only for the interactive TUI (`kohaku tui`)'
+  'nodejs: required only for the interactive TUI (`leancli tui`)'
 )
-_repo_url="https://github.com/OWNER/leanKohaku.git"
+_repo_url="https://github.com/OWNER/leanCLI.git"
 source=("${pkgname}::git+${_repo_url}")
 sha256sums=('SKIP')
 
@@ -35,7 +35,7 @@ build() {
   export HOME="${srcdir}/home"
   lake build
   # TUI bundle (Ink/React, esbuild → single file). Failures here are
-  # non-fatal: the wallet works without `kohaku tui`.
+  # non-fatal: the wallet works without `leancli tui`.
   if [ -d tui ]; then
     pushd tui >/dev/null
     npm ci --no-audit --no-fund 2>/dev/null || npm install --no-audit --no-fund
@@ -46,56 +46,52 @@ build() {
 
 package() {
   cd "${srcdir}/${pkgname}"
-  install -Dm755 ".lake/build/bin/leankohaku" "${pkgdir}/usr/bin/leankohaku"
-  install -Dm755 ".lake/build/bin/leankohaku-daemon" "${pkgdir}/usr/bin/leankohaku-daemon"
-  # Lean-native LLM agent (Phase 0). Installed as `kohaku-agent`
+  install -Dm755 ".lake/build/bin/leancli" "${pkgdir}/usr/bin/leancli"
+  install -Dm755 ".lake/build/bin/leancli-daemon" "${pkgdir}/usr/bin/leancli-daemon"
+  # Lean-native LLM agent (Phase 0). Installed as `leancli-agent`
   # (dash form) because that is the name LlmAgent.Bridge resolves on
-  # PATH. The Lake target is `kohaku_agent` (underscore) so the
-  # artefact lives at .lake/build/bin/kohaku_agent.
-  install -Dm755 ".lake/build/bin/kohaku_agent" "${pkgdir}/usr/bin/kohaku-agent"
-  # Phase 1a persistent agent daemon. Installed as `kohaku-agentd`
+  # PATH. The Lake target is `leancli_agent` (underscore) so the
+  # artefact lives at .lake/build/bin/leancli_agent.
+  install -Dm755 ".lake/build/bin/leancli_agent" "${pkgdir}/usr/bin/leancli-agent"
+  # Phase 1a persistent agent daemon. Installed as `leancli-agentd`
   # (dash form) to match the systemd unit name; the Lake target is
-  # `kohaku_agentd` so the artefact lives at .lake/build/bin/kohaku_agentd.
-  install -Dm755 ".lake/build/bin/kohaku_agentd" "${pkgdir}/usr/bin/kohaku-agentd"
-  # Short alias users type interactively. Symlink keeps a single binary on disk.
-  ln -s leankohaku "${pkgdir}/usr/bin/kohaku"
+  # `leancli_agentd` so the artefact lives at .lake/build/bin/leancli_agentd.
+  install -Dm755 ".lake/build/bin/leancli_agentd" "${pkgdir}/usr/bin/leancli-agentd"
 
   # Shell completion. Generated from the binary so it stays in sync with
   # whatever commands the build actually exposes — no second source of truth.
   install -dm755 "${pkgdir}/usr/share/bash-completion/completions"
-  ".lake/build/bin/leankohaku" completion bash \
-      > "${pkgdir}/usr/share/bash-completion/completions/leankohaku"
-  ln -s leankohaku "${pkgdir}/usr/share/bash-completion/completions/kohaku"
+  ".lake/build/bin/leancli" completion bash \
+      > "${pkgdir}/usr/share/bash-completion/completions/leancli"
 
   install -dm755 "${pkgdir}/usr/share/zsh/site-functions"
-  ".lake/build/bin/leankohaku" completion zsh \
-      > "${pkgdir}/usr/share/zsh/site-functions/_leankohaku"
-  ln -s _leankohaku "${pkgdir}/usr/share/zsh/site-functions/_kohaku"
+  ".lake/build/bin/leancli" completion zsh \
+      > "${pkgdir}/usr/share/zsh/site-functions/_leancli"
 
-  install -Dm644 "packaging/systemd/leankohaku.socket" "${pkgdir}/usr/lib/systemd/user/leankohaku.socket"
-  install -Dm644 "packaging/systemd/leankohaku.service" "${pkgdir}/usr/lib/systemd/user/leankohaku.service"
+  install -Dm644 "packaging/systemd/leancli.socket" "${pkgdir}/usr/lib/systemd/user/leancli.socket"
+  install -Dm644 "packaging/systemd/leancli.service" "${pkgdir}/usr/lib/systemd/user/leancli.service"
   # Phase 1a persistent agent daemon. Optional, opt-in via
-  # `systemctl --user enable --now kohaku-agentd`.
-  install -Dm644 "packaging/systemd/kohaku-agentd.service" "${pkgdir}/usr/lib/systemd/user/kohaku-agentd.service"
+  # `systemctl --user enable --now leancli-agentd`.
+  install -Dm644 "packaging/systemd/leancli-agentd.service" "${pkgdir}/usr/lib/systemd/user/leancli-agentd.service"
 
   # TUI bundle. The launcher in Cli/Runtime.lean looks here first
-  # (<appDir>/../share/leankohaku/tui/index.mjs) — keep this path in sync
+  # (<appDir>/../share/leancli/tui/index.mjs) — keep this path in sync
   # if you move it.
   if [ -f tui/dist/index.mjs ]; then
-    install -Dm644 "tui/dist/index.mjs" "${pkgdir}/usr/share/leankohaku/tui/index.mjs"
+    install -Dm644 "tui/dist/index.mjs" "${pkgdir}/usr/share/leancli/tui/index.mjs"
   fi
 
   # Phase 1b skills pack. The agent daemon resolves the skills dir in
-  # this order (see resolveSkillsDir in LeanKohaku/App/AgentDaemonMain.lean):
-  #   KOHAKU_AGENT_SKILLS_DIR env override
-  #   → $XDG_DATA_HOME/leankohaku/skills (user override)
-  #   → /usr/share/leankohaku/skills (this path)
+  # this order (see resolveSkillsDir in LeanCli/App/AgentDaemonMain.lean):
+  #   LEANCLI_AGENT_SKILLS_DIR env override
+  #   → $XDG_DATA_HOME/leancli/skills (user override)
+  #   → /usr/share/leancli/skills (this path)
   #   → <cwd>/skills (dev fallback)
   # We install every file under skills/ verbatim so the curator's
   # follow-up edits propagate cleanly.
   if [ -d skills ]; then
     find skills -type f | while read -r f; do
-      install -Dm644 "$f" "${pkgdir}/usr/share/leankohaku/$f"
+      install -Dm644 "$f" "${pkgdir}/usr/share/leancli/$f"
     done
   fi
   install -Dm644 "README.md" "${pkgdir}/usr/share/doc/${pkgname}/README.md"

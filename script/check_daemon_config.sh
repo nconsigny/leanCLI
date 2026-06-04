@@ -2,16 +2,16 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CONFIG_HOME="$(mktemp -d /tmp/leankohaku-config-check.XXXXXX)"
-SOCK="/tmp/leankohaku-config-check-$$.sock"
-OVERRIDE_SOCK="/tmp/leankohaku-config-override-$$.sock"
-LOG="$(mktemp /tmp/leankohaku-config-log.XXXXXX)"
-OUT="$(mktemp /tmp/leankohaku-config-out.XXXXXX)"
+CONFIG_HOME="$(mktemp -d /tmp/leancli-config-check.XXXXXX)"
+SOCK="/tmp/leancli-config-check-$$.sock"
+OVERRIDE_SOCK="/tmp/leancli-config-override-$$.sock"
+LOG="$(mktemp /tmp/leancli-config-log.XXXXXX)"
+OUT="$(mktemp /tmp/leancli-config-out.XXXXXX)"
 
 cleanup() {
   set +e
-  LEANKOHAKU_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leankohaku" daemon stop >/dev/null 2>&1
-  LEANKOHAKU_SOCKET="$OVERRIDE_SOCK" "$ROOT/.lake/build/bin/leankohaku" daemon stop >/dev/null 2>&1
+  LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" daemon stop >/dev/null 2>&1
+  LEANCLI_SOCKET="$OVERRIDE_SOCK" "$ROOT/.lake/build/bin/leancli" daemon stop >/dev/null 2>&1
   if [[ -n "${daemon_pid:-}" ]]; then
     wait "$daemon_pid" >/dev/null 2>&1
   fi
@@ -22,8 +22,8 @@ trap cleanup EXIT
 cd "$ROOT"
 lake build >/dev/null
 
-mkdir -p "$CONFIG_HOME/leankohaku"
-cat >"$CONFIG_HOME/leankohaku/daemon.json" <<JSON
+mkdir -p "$CONFIG_HOME/leancli"
+cat >"$CONFIG_HOME/leancli/daemon.json" <<JSON
 {
   "socket_path": "$SOCK",
   "chain_id": 31337,
@@ -34,7 +34,7 @@ JSON
 
 XDG_CONFIG_HOME="$CONFIG_HOME" \
 PATH="$ROOT/.lake/build/bin:$PATH" \
-"$ROOT/.lake/build/bin/leankohaku-daemon" >"$LOG" 2>&1 &
+"$ROOT/.lake/build/bin/leancli-daemon" >"$LOG" 2>&1 &
 daemon_pid="$!"
 
 for _ in {1..50}; do
@@ -48,18 +48,18 @@ if [[ ! -S "$SOCK" ]]; then
   exit 1
 fi
 
-LEANKOHAKU_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leankohaku" daemon ping >"$OUT"
+LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" daemon ping >"$OUT"
 grep -q '"chainId":31337' "$OUT"
 
-LEANKOHAKU_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leankohaku" daemon stop >/dev/null
+LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" daemon stop >/dev/null
 wait "$daemon_pid" >/dev/null 2>&1 || true
 unset daemon_pid
 
 XDG_CONFIG_HOME="$CONFIG_HOME" \
-LEANKOHAKU_SOCKET="$OVERRIDE_SOCK" \
-LEANKOHAKU_CHAIN_ID=1 \
+LEANCLI_SOCKET="$OVERRIDE_SOCK" \
+LEANCLI_CHAIN_ID=1 \
 PATH="$ROOT/.lake/build/bin:$PATH" \
-"$ROOT/.lake/build/bin/leankohaku-daemon" >"$LOG" 2>&1 &
+"$ROOT/.lake/build/bin/leancli-daemon" >"$LOG" 2>&1 &
 daemon_pid="$!"
 
 for _ in {1..50}; do
@@ -73,10 +73,10 @@ if [[ ! -S "$OVERRIDE_SOCK" ]]; then
   exit 1
 fi
 
-LEANKOHAKU_SOCKET="$OVERRIDE_SOCK" "$ROOT/.lake/build/bin/leankohaku" daemon ping >"$OUT"
+LEANCLI_SOCKET="$OVERRIDE_SOCK" "$ROOT/.lake/build/bin/leancli" daemon ping >"$OUT"
 grep -q '"chainId":1' "$OUT"
 
-LEANKOHAKU_SOCKET="$OVERRIDE_SOCK" "$ROOT/.lake/build/bin/leankohaku" daemon stop >/dev/null
+LEANCLI_SOCKET="$OVERRIDE_SOCK" "$ROOT/.lake/build/bin/leancli" daemon stop >/dev/null
 wait "$daemon_pid" >/dev/null 2>&1 || true
 unset daemon_pid
 

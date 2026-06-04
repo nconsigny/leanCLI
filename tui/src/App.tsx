@@ -228,11 +228,11 @@ export default function App() {
   // for power users.
   const [colibriEnabled, setColibriEnabled] = useState(false);
   const [colibriPending, setColibriPending] = useState(false);
-  // Daemon-side default backend for tx.simulate (kohaku-provider style
+  // Daemon-side default backend for tx.simulate (leancli-provider style
   // toggle). The MainMenu entry cycles rpc → colibri → helios → rpc and
   // sends `daemon.readBackend.set` after each tick. Initial value pulled
   // from `daemon.readBackend.status` so a fresh-install daemon (booted
-  // with KOHAKU_READ_BACKEND=helios from kohakuspawn's daemon.env) lights
+  // with LEANCLI_READ_BACKEND=helios from leanclispawn's daemon.env) lights
   // the menu up at "helios" without a manual flip.
   const [readBackend, setReadBackend] = useState<"rpc" | "colibri" | "helios">("helios");
   const [readBackendPending, setReadBackendPending] = useState(false);
@@ -272,7 +272,7 @@ export default function App() {
       const r = await call<{ running?: boolean }>("daemon.colibri.status", {});
       if (cancelled) return;
       if (r.ok && r.result?.running) setColibriEnabled(true);
-      else if (process.env.KOHAKU_COLIBRI === "1") {
+      else if (process.env.LEANCLI_COLIBRI === "1") {
         // Power-user auto-enable: ask the daemon to spawn one.
         await call("daemon.colibri.toggle", { enable: true });
         if (!cancelled) setColibriEnabled(true);
@@ -917,13 +917,13 @@ function BootGate({ onDone }: { onDone: () => void }) {
   if (status.kind === "systemd-not-running") {
     // Static notice — we deliberately don't auto-poll the socket from
     // here. The user starts the unit in another terminal, then
-    // re-launches `kohaku tui`. Auto-polling would risk autospawn races
+    // re-launches `leancli tui`. Auto-polling would risk autospawn races
     // if they removed the marker concurrently, and would also chew CPU
     // for the typical "user wandered off to coffee" gap.
     return (
       <Box flexDirection="column" paddingX={1}>
         <Text bold color="yellow">
-          kohaku-daemon is not running.
+          leancli-daemon is not running.
         </Text>
         <Text>
           This machine is configured to manage the daemon via systemd
@@ -931,12 +931,12 @@ function BootGate({ onDone }: { onDone: () => void }) {
         </Text>
         <Text> </Text>
         <Text>Start the daemon in another terminal:</Text>
-        <Text color="cyan">  systemctl --user start kohaku-daemon</Text>
+        <Text color="cyan">  systemctl --user start leancli-daemon</Text>
         <Text>Tail its logs:</Text>
-        <Text color="cyan">  journalctl --user -u kohaku-daemon -f</Text>
+        <Text color="cyan">  journalctl --user -u leancli-daemon -f</Text>
         <Text> </Text>
         <Text dimColor>
-          Then re-run `kohaku tui`. To restore autospawn instead, delete
+          Then re-run `leancli tui`. To restore autospawn instead, delete
           the marker file above.
         </Text>
       </Box>
@@ -952,10 +952,10 @@ function BootGate({ onDone }: { onDone: () => void }) {
 function hasNetworkPolicy(): boolean {
   try {
     const cfg =
-      process.env.LEANKOHAKU_CONFIG ||
+      process.env.LEANCLI_CONFIG ||
       pathJoin(
         process.env.XDG_CONFIG_HOME || pathJoin(homeDir(), ".config"),
-        "leankohaku",
+        "leancli",
         "daemon.json",
       );
     if (!fileExists(cfg)) return false;
@@ -968,17 +968,17 @@ function hasNetworkPolicy(): boolean {
   }
 }
 
-/** Mirror of `kohakuspawn`'s `has_rpc_configured` shell helper, scoped
+/** Mirror of `leanclispawn`'s `has_rpc_configured` shell helper, scoped
  *  to the file format the TUI writes. Checks for a non-empty
  *  `rpc_urls.<chain>` entry or a non-empty top-level `rpc_url` in
- *  `$LEANKOHAKU_CONFIG` / `$XDG_CONFIG_HOME/leankohaku/daemon.json`. */
+ *  `$LEANCLI_CONFIG` / `$XDG_CONFIG_HOME/leancli/daemon.json`. */
 function hasRpcConfigured(): boolean {
   try {
     const cfg =
-      process.env.LEANKOHAKU_CONFIG ||
+      process.env.LEANCLI_CONFIG ||
       pathJoin(
         process.env.XDG_CONFIG_HOME || pathJoin(homeDir(), ".config"),
-        "leankohaku",
+        "leancli",
         "daemon.json",
       );
     if (!fileExists(cfg)) return false;

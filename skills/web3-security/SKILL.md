@@ -12,4 +12,4 @@ Operational security knowledge the agent must apply on every turn,
 written from first principles. The upstream Anthropic `web3-security`
 skill at `/mnt/skills/user/web3-security/` was not present in the
 sandbox at port time; this v1 mirrors its scope based on the
-leanKohaku threat model. Refresh on next port.
+leanCLI threat model. Refresh on next port.

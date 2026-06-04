@@ -14,11 +14,11 @@ The agent must never confuse a `0zk…` recipient with a 20-byte `0x…`
 address: shielding/unshielding crosses the boundary, private transfer
 does not.
 
-## How RAILGUN fits Kohaku
+## How RAILGUN fits leanCLI
 
 | Layer | Where it lives |
 |---|---|
-| Witness generation, plugin state, broadcaster | `@kohaku-eth/railgun` (npm `0.0.1-alpha.12`, installed alpha is `0.0.1-alpha.21`) inside the kohaku-bridge Node sidecar |
+| Witness generation, plugin state, broadcaster | `@kohaku-eth/railgun` (npm `0.0.1-alpha.12`, installed alpha is `0.0.1-alpha.21`) inside the leancli-bridge Node sidecar |
 | Calldata decode + simulation | Lean daemon (`tx.decodeIntent`, `tx.simulate`) |
 | User confirmation | TUI `ConfirmGate` |
 | Signing | TPM-rooted `eoa.send` / `r1.send*` after gate |

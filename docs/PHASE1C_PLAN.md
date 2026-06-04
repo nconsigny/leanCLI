@@ -10,12 +10,12 @@ existing forbidden-import gate, and incognito is a hard switch that
 
 In scope:
 
-1. `LeanKohaku/Agent/Memory.lean` — load/save MEMORY.md;
+1. `LeanCli/Agent/Memory.lean` — load/save MEMORY.md;
    LLM-driven extraction at session close with a conservative
    post-extraction filter.
-2. `LeanKohaku/Agent/MemoryPrompts.lean` — the extraction prompt with
+2. `LeanCli/Agent/MemoryPrompts.lean` — the extraction prompt with
    documented policy.
-3. `LeanKohaku/Agent/Compression.lean` — token-budget-driven
+3. `LeanCli/Agent/Compression.lean` — token-budget-driven
    middle-turn summarisation.
 4. Wiring in `Agent/Loop.lean` (compression) and
    `Agent/Prompt.lean` (memory rendering).
@@ -24,23 +24,23 @@ In scope:
    `extract_memory` on `close_session` for non-incognito sessions.
 6. Incognito propagation: CLI `--incognito` → bridge env →
    `create_session` metadata → daemon-side conditional writes.
-7. `kohaku memory show/edit/refresh/forget` CLI subcommands.
+7. `leancli memory show/edit/refresh/forget` CLI subcommands.
 8. `docs/ARCHITECTURE.md` reflects the new modules and policies.
 
 Out of scope (deferred):
 
-- No new daemon RPCs in `kohakud` (the wallet daemon). Phase 1d.
+- No new daemon RPCs in `leanclid` (the wallet daemon). Phase 1d.
 - No new agent tools. Memory + compression are loop infra, not
   tools.
 - No SQLCipher. Session DB stays plaintext on a 0600 file under a
   0700 directory; memory file gets the same posture.
 - No real tokenizer. We use a word-count × 1.4 estimator with an
-  override (`KOHAKU_TOKEN_RATIO`) for drift on specific models.
+  override (`LEANCLI_TOKEN_RATIO`) for drift on specific models.
 - No prompt caching / streaming. No L2.
-- No changes to `bridge/clearsign/`, `LeanKohaku/Invariants/`,
-  `LeanKohaku/Crypto/`, the wallet daemon, or the TUI source tree.
+- No changes to `bridge/clearsign/`, `LeanCli/Invariants/`,
+  `LeanCli/Crypto/`, the wallet daemon, or the TUI source tree.
 - No automated MEMORY.md import/export (manual user edits via
-  `kohaku memory edit`).
+  `leancli memory edit`).
 
 ## Trust model (unchanged)
 
@@ -65,18 +65,18 @@ Out of scope (deferred):
 
 ## §A — Memory module
 
-`LeanKohaku/Agent/Memory.lean`:
+`LeanCli/Agent/Memory.lean`:
 
 ```
-namespace LeanKohaku.Agent.Memory
+namespace LeanCli.Agent.Memory
 
 structure Memory where
   raw  : String
   path : System.FilePath
 
 def defaultPath : IO System.FilePath
-  -- $XDG_DATA_HOME/leankohaku/MEMORY.md
-  --   fallback: $HOME/.local/share/leankohaku/MEMORY.md → /tmp
+  -- $XDG_DATA_HOME/leancli/MEMORY.md
+  --   fallback: $HOME/.local/share/leancli/MEMORY.md → /tmp
 
 def load (path : System.FilePath) : IO Memory
   -- Returns Memory.raw = "" when the file is absent.
@@ -102,7 +102,7 @@ def extract
   -- Failure → Except.error; caller decides whether to keep the old
   -- file.
 
-end LeanKohaku.Agent.Memory
+end LeanCli.Agent.Memory
 ```
 
 ### Post-extraction filter (defense in depth)
@@ -124,7 +124,7 @@ lines, at info level).
 
 ## §B — Memory prompts module
 
-`LeanKohaku/Agent/MemoryPrompts.lean` defines a single
+`LeanCli/Agent/MemoryPrompts.lean` defines a single
 `extractionInstructions : String` literal. It is the meta-prompt the
 LLM sees when asked to update MEMORY.md.
 
@@ -151,14 +151,14 @@ Rationale per rule:
 
 ## §C — Compression module
 
-`LeanKohaku/Agent/Compression.lean`:
+`LeanCli/Agent/Compression.lean`:
 
 ```
-namespace LeanKohaku.Agent.Compression
+namespace LeanCli.Agent.Compression
 
 def estimateTokens (msgs : Array AgentMessage) : IO Nat
   -- Word count × ratio. Default ratio is 1.4. Read
-  -- KOHAKU_TOKEN_RATIO env var for an override; parse failure
+  -- LEANCLI_TOKEN_RATIO env var for an override; parse failure
   -- → fall back to 1.4.
 
 structure Policy where
@@ -171,7 +171,7 @@ def maybeCompress
     (msgs : Array AgentMessage)
     : IO (Except String (Array AgentMessage))
 
-end LeanKohaku.Agent.Compression
+end LeanCli.Agent.Compression
 ```
 
 ### Compression algorithm
@@ -224,7 +224,7 @@ end LeanKohaku.Agent.Compression
   `Except.error`, log to stderr and proceed with the un-compressed
   transcript (compression failure is a graceful no-op).
 - Log when compression actually fires (info level on stderr,
-  gated by `KOHAKU_LOG_PROMPT`).
+  gated by `LEANCLI_LOG_PROMPT`).
 
 `Agent/Prompt.lean`:
 
@@ -251,7 +251,7 @@ builders so the Phase-0 one-shot binary's call shape doesn't change.
   `{ok:false, error:...}` on failure (file unchanged).
 - New opcode `update_memory`:
   `{"op": "update_memory", "content": "..."}` — atomic write,
-  used by `kohaku memory edit`.
+  used by `leancli memory edit`.
 - Auto-trigger: on `close_session`, if the session is NOT
   incognito AND `≥6` messages have been appended, call
   `Memory.extract` synchronously before responding. Failure logs
@@ -264,17 +264,17 @@ builders so the Phase-0 one-shot binary's call shape doesn't change.
 
 CLI:
 
-- `kohaku tui --incognito` — sets `LEAN_KOHAKU_INCOGNITO=1` in the
+- `leancli tui --incognito` — sets `LEANCLI_INCOGNITO=1` in the
   environment of the TUI subprocess. (TUI menu toggle for entering
   incognito mid-session is out of scope as visual UI; only the env
   pass-through is wired.)
-- `kohaku send --incognito ...` — applies to one-off send flow
+- `leancli send --incognito ...` — applies to one-off send flow
   (already passes through the daemon's normal send path; only
   affects the agent-bridge call shape).
 
 Wire-up:
 
-- `LlmAgent/Bridge.lean` reads `LEAN_KOHAKU_INCOGNITO=1` and adds
+- `LlmAgent/Bridge.lean` reads `LEANCLI_INCOGNITO=1` and adds
   `("incognito", .bool true)` to the `create_session` metadata
   object.
 - `AgentDaemonMain.opCreateSession` inspects the metadata. If
@@ -295,22 +295,22 @@ and close paths check membership.
 
 ## §G — CLI subcommands
 
-`LeanKohaku/Cli/MemoryCmd.lean`:
+`LeanCli/Cli/MemoryCmd.lean`:
 
-- `kohaku memory show` — `socketCall` to the agent daemon's
+- `leancli memory show` — `socketCall` to the agent daemon's
   `update_memory`? No — show is a read-mostly op, but to keep the
   daemon as sole writer (and avoid an inconsistent file mode race
-  with `kohaku memory edit`), `show` reads the file directly. The
+  with `leancli memory edit`), `show` reads the file directly. The
   daemon writes, the CLI reads. (Documented in the module
   docstring.)
-- `kohaku memory edit` — read the file, write to a temp file under
-  `$XDG_RUNTIME_DIR/leankohaku/memory.edit.<pid>.md`, open
+- `leancli memory edit` — read the file, write to a temp file under
+  `$XDG_RUNTIME_DIR/leancli/memory.edit.<pid>.md`, open
   `$EDITOR` (fallback `vi`). After the editor exits with 0, slurp
   the file and POST it to the agent daemon as `update_memory`.
-- `kohaku memory refresh [--session N]` — POST `extract_memory`
+- `leancli memory refresh [--session N]` — POST `extract_memory`
   for the given session (or the latest closed one, if `--session`
   is omitted — daemon picks).
-- `kohaku memory forget <pattern>` — refuse if `pattern.length <
+- `leancli memory forget <pattern>` — refuse if `pattern.length <
   4`. Otherwise read the current memory, strip any **line**
   containing `pattern`, POST the result via `update_memory`.
 
@@ -324,9 +324,9 @@ sessions.db being daemon-owned).
   parse (first balanced JSON object found in the response; failure
   → `Except.error`, don't update).
 - **Token estimator drifts on specific model** →
-  `KOHAKU_TOKEN_RATIO` env override. Default unchanged.
+  `LEANCLI_TOKEN_RATIO` env override. Default unchanged.
 - **Curator wants to edit MEMORY.md while daemon holds it open** →
-  `kohaku memory edit` routes through the daemon's `update_memory`
+  `leancli memory edit` routes through the daemon's `update_memory`
   op, NOT a direct write. The daemon is the single writer; the
   CLI's role is to assemble the new content and POST it.
 - **What happens when the LLM returns malformed JSON?** Extraction
@@ -343,7 +343,7 @@ Upstream has no formal Lean counterpart for memory or compression;
 TypeScript implementations of similar features tend to live in the
 front-end. This phase establishes the Lean-side primitive so the
 TUI / CLI both delegate to the same audited code path. The
-extraction prompt and post-filter rules are leanKohaku-specific
+extraction prompt and post-filter rules are leanCLI-specific
 (more restrictive than what a TS implementation might do); when /
 if upstream introduces a memory feature, we'll cross-reference the
 exclusion list explicitly.
@@ -370,7 +370,7 @@ exclusion list explicitly.
    input is a no-op.
 9. Incognito: messages not in `sessions.db`, MEMORY.md unchanged
    after close, `create_session` metadata records the flag.
-10. `kohaku memory show/edit/refresh/forget` all work.
+10. `leancli memory show/edit/refresh/forget` all work.
     `forget` refuses patterns < 4 chars.
 11. Forbidden-import gate still empty.
 12. `docs/ARCHITECTURE.md` reflects the new modules.

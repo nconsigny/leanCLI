@@ -1,8 +1,8 @@
 # Phase 1a — Persistent agent sidecar + sessions
 
-Phase 0 landed a Lean-native agent (`kohaku-agent`) as a one-shot binary
+Phase 0 landed a Lean-native agent (`leancli-agent`) as a one-shot binary
 that `LlmAgent.Bridge` spawns per `chat.draft` / `llm.parseIntent` call.
-Phase 1a adds a **long-running** sibling daemon, `kohaku-agentd`, that
+Phase 1a adds a **long-running** sibling daemon, `leancli-agentd`, that
 persists session history in SQLite (with FTS5 full-text search). The
 one-shot path keeps working unchanged. `LlmAgent.Bridge` auto-detects
 which transport to use; the TUI is not modified and cannot tell which
@@ -17,8 +17,8 @@ file paths, XDG locations, UDS frame shape, divergences from the brief.
 
 The wallet daemon remains the signing trust root.
 
-* `kohaku-agentd` has the same import-graph constraints as
-  `kohaku-agent`: no `Crypto.Secp256k1Native`, `Crypto.Random`,
+* `leancli-agentd` has the same import-graph constraints as
+  `leancli-agent`: no `Crypto.Secp256k1Native`, `Crypto.Random`,
   `Wallet.{EOA,HDKey,Mnemonic,Entropy}`, `Keystore/**`,
   `Daemon.State`. The acceptance gate greps for those names; the
   Phase 1a build extends the gate to `App/AgentDaemonMain.lean`.
@@ -42,7 +42,7 @@ The session DB stores conversation history only:
   payloads** — those are not reachable from anything in `Agent/`.
 
 DB file mode is `0600`; parent directory mode is `0700`.
-`kohaku-agentd` runs as a user-scope systemd service; never root.
+`leancli-agentd` runs as a user-scope systemd service; never root.
 
 ---
 
@@ -52,13 +52,13 @@ Approved defaults from the Phase 1a prompt:
 
 | What                | Env override             | Default                                                    |
 |---------------------|--------------------------|------------------------------------------------------------|
-| Session DB          | `KOHAKU_AGENT_DB`        | `$XDG_DATA_HOME/leankohaku/sessions.db`                    |
-|                     |                          | (falls back to `$HOME/.local/share/leankohaku/sessions.db`)|
-| Agent UDS socket    | `KOHAKU_AGENT_SOCKET`    | `$XDG_RUNTIME_DIR/leankohaku/agent.sock`                   |
-|                     |                          | (falls back to `/run/user/$UID/leankohaku/agent.sock`)     |
-| Wallet daemon UDS   | `LEAN_KOHAKU_DAEMON_SOCKET` / `LEANKOHAKU_SOCKET` | `$XDG_RUNTIME_DIR/leankohaku/leankohaku.sock`         |
+| Session DB          | `LEANCLI_AGENT_DB`        | `$XDG_DATA_HOME/leancli/sessions.db`                    |
+|                     |                          | (falls back to `$HOME/.local/share/leancli/sessions.db`)|
+| Agent UDS socket    | `LEANCLI_AGENT_SOCKET`    | `$XDG_RUNTIME_DIR/leancli/agent.sock`                   |
+|                     |                          | (falls back to `/run/user/$UID/leancli/agent.sock`)     |
+| Wallet daemon UDS   | `LEANCLI_DAEMON_SOCKET` / `LEANCLI_SOCKET` | `$XDG_RUNTIME_DIR/leancli/leancli.sock`         |
 
-`leankohaku.sock` and `agent.sock` share the same parent dir so a
+`leancli.sock` and `agent.sock` share the same parent dir so a
 single `mkdir -m700` covers both.
 
 ---
@@ -71,19 +71,19 @@ single `mkdir -m700` covers both.
 | `c/lean_sqlite/lean_sqlite.c`                         | FFI shim — `lk_sqlite_*` entry points; links system libsqlite3|
 | `c/lean_sqlite/README.md`                             | System-libsqlite3 / FTS5 rationale                            |
 | `script/setup_sqlite.sh`                              | Header + FTS5 probe; idempotent                               |
-| `LeanKohaku/Agent/Session.lean`                       | Schema, opaque `Handle`, CRUD + `searchFts`                   |
-| `LeanKohaku/Agent/SessionTest.lean`                   | Round-trip + concurrent-handle test (lean_exe)                |
-| `LeanKohaku/App/AgentDaemonMain.lean`                 | `kohaku-agentd` entry point — accept loop, op dispatch        |
-| `packaging/systemd/kohaku-agentd.service`             | User-scope unit, hardened                                     |
+| `LeanCli/Agent/Session.lean`                       | Schema, opaque `Handle`, CRUD + `searchFts`                   |
+| `LeanCli/Agent/SessionTest.lean`                   | Round-trip + concurrent-handle test (lean_exe)                |
+| `LeanCli/App/AgentDaemonMain.lean`                 | `leancli-agentd` entry point — accept loop, op dispatch        |
+| `packaging/systemd/leancli-agentd.service`             | User-scope unit, hardened                                     |
 | `tests/agent_phase1a_smoke.sh`                        | End-to-end smoke (ping, run_turn x3, search, restart)         |
 
 Files modified:
 
 | Path                                  | Change                                                       |
 |---------------------------------------|--------------------------------------------------------------|
-| `lakefile.lean`                       | `extern_lib liblean_sqlite`, `lean_exe kohaku_agentd`, `lean_exe agent_session_test` |
-| `LeanKohaku/LlmAgent/Bridge.lean`     | Mode resolution (env -> probe -> one-shot)                   |
-| `packaging/arch/PKGBUILD`             | `sqlite` dep, install `kohaku-agentd` + systemd unit         |
+| `lakefile.lean`                       | `extern_lib liblean_sqlite`, `lean_exe leancli_agentd`, `lean_exe agent_session_test` |
+| `LeanCli/LlmAgent/Bridge.lean`     | Mode resolution (env -> probe -> one-shot)                   |
+| `packaging/arch/PKGBUILD`             | `sqlite` dep, install `leancli-agentd` + systemd unit         |
 | `docs/ARCHITECTURE.md`                | Module reference + native side updates                       |
 | `INVARIANTS.md`                       | (only if new properties added — Phase 1a does not add any)   |
 
@@ -108,7 +108,7 @@ const char* lk_sqlite_errmsg(void* handle);
 void lk_sqlite_free_err(char* err);
 ```
 
-Lean bindings live in `LeanKohaku/Agent/Session.lean` as
+Lean bindings live in `LeanCli/Agent/Session.lean` as
 `@[extern] opaque` declarations (no `axiom`, per the approved Phase 1a
 defaults). This matches the pattern in `Daemon/Uds.lean` and
 `Agent/Http.lean`.
@@ -187,7 +187,7 @@ session daemon never reorders; consumers read in `seq` ascending order.
 
 ---
 
-## `kohaku-agentd` UDS frame shape
+## `leancli-agentd` UDS frame shape
 
 Newline-delimited JSON. One in-flight `run_turn` per session.
 Same envelope shape as the JSON-RPC requests Phase 0 already speaks
@@ -248,7 +248,7 @@ Error `kind` strings are part of the contract — callers may key on them.
 4. Persist each new message produced during the loop (assistant +
    tool messages), each with the next monotonic `seq`.
 5. Return the **final assistant message** as `result.raw` — same
-   shape Phase 0's `kohaku-agent` already emits, so the wallet
+   shape Phase 0's `leancli-agent` already emits, so the wallet
    daemon's `chat.draft` code path needs no changes regardless of
    which backend served the request.
 
@@ -284,16 +284,16 @@ single-flight-per-chat behaviour.
 
 Order:
 
-1. `LEAN_KOHAKU_AGENT_MODE=oneshot` -> force one-shot
+1. `LEANCLI_AGENT_MODE=oneshot` -> force one-shot
    (spawn-and-wait, byte-identical to Phase 0).
-2. `LEAN_KOHAKU_AGENT_MODE=persistent` -> force persistent. If the
+2. `LEANCLI_AGENT_MODE=persistent` -> force persistent. If the
    socket is missing or `ping` fails, the bridge returns a structured
    `Response.crash` instead of falling back. This is intentional: an
    operator who asked for persistent mode would rather see a clear
    failure than silently degrade.
 3. Otherwise: auto-detect. If the agent socket exists and accepts
    `ping`, use persistent; else one-shot.
-4. `LEAN_KOHAKU_LLM_BRIDGE_LEGACY=1` continues to route to the legacy
+4. `LEANCLI_LLM_BRIDGE_LEGACY=1` continues to route to the legacy
    Node sidecar at `bridge/llm-legacy/`. Legacy mode is incompatible
    with persistent; selecting both falls back to legacy (one-shot
    spawn). This is documented in `Bridge.resolveExecutable`'s
@@ -345,7 +345,7 @@ through `chat.draft`.
   instruction.
 
 * **Wallet daemon does not yet thread session ids through
-  `chat.draft`** (see "Persistent path" above). Phase 1a's `kohaku-
+  `chat.draft`** (see "Persistent path" above). Phase 1a's `leancli-
   agentd` supports sessions, but the wallet daemon side keeps the
   Phase 0 single-turn shape until 1d.
 
@@ -371,5 +371,5 @@ tests/agent_phase1a_smoke.sh                    # end-to-end (best-effort)
 ```
 
 The CI grep gate (Phase 0 introduced) is extended to include
-`LeanKohaku/App/AgentDaemonMain.lean`. The exact list of forbidden
+`LeanCli/App/AgentDaemonMain.lean`. The exact list of forbidden
 imports is the same as Phase 0; the file simply joins the gated set.

@@ -21,7 +21,7 @@ static void store_be32(uint8_t out[4], uint32_t x) {
 
 int main(int argc, char **argv) {
   if (argc != 5) {
-    fprintf(stderr, "usage: leankohaku-hacl-pbkdf2 <password-hex> <salt-hex> <iters> <dk-len>\n");
+    fprintf(stderr, "usage: leancli-hacl-pbkdf2 <password-hex> <salt-hex> <iters> <dk-len>\n");
     return 2;
   }
 

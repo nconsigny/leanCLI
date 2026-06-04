@@ -12,7 +12,7 @@
 #       to confirm the binary still binds the socket after the
 #       skills wiring was added.
 #
-#   C — skills startup. Spawn kohaku-agentd with a temp skills root
+#   C — skills startup. Spawn leancli-agentd with a temp skills root
 #       and confirm the stderr line shows the expected count.
 #
 #   D — reload op. Edit a temp skill, send {"op":"reload"} over the
@@ -29,10 +29,10 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
-AGENTD="${KOHAKU_AGENTD_BIN:-${ROOT}/.lake/build/bin/kohaku_agentd}"
+AGENTD="${LEANCLI_AGENTD_BIN:-${ROOT}/.lake/build/bin/leancli_agentd}"
 
 if [[ ! -x "$AGENTD" ]]; then
-  echo "FAIL: $AGENTD not built. Run \`lake build kohaku_agentd\`." >&2
+  echo "FAIL: $AGENTD not built. Run \`lake build leancli_agentd\`." >&2
   exit 1
 fi
 
@@ -55,7 +55,7 @@ assert_contains() {
 section "A: static skill-pack sanity"
 
 REQUIRED=(
-  kohaku-wallet web3-security uniswap railgun privacy-pool
+  leancli-wallet web3-security uniswap railgun privacy-pool
   tornado-cash morpho fxusd bold-liquity cowswap aave
 )
 for s in "${REQUIRED[@]}"; do
@@ -80,7 +80,7 @@ ok "tornado-cash security.md mentions OFAC"
 
 # Real-content skills must have non-empty overview.md without TODOs at
 # the top-level (functions/ scaffolding is allowed to carry TODOs).
-for s in kohaku-wallet web3-security uniswap; do
+for s in leancli-wallet web3-security uniswap; do
   if grep -lE 'TODO\(curator\):' \
        "skills/$s/SKILL.md" "skills/$s/overview.md" \
        "skills/$s/security.md" "skills/$s/interactions.md" \
@@ -88,7 +88,7 @@ for s in kohaku-wallet web3-security uniswap; do
     fail "real-content skill $s has TODO(curator): in top-level docs"
   fi
 done
-ok "real-content skills (kohaku-wallet, web3-security, uniswap) free of top-level TODOs"
+ok "real-content skills (leancli-wallet, web3-security, uniswap) free of top-level TODOs"
 
 # Every scaffold skill must carry at least one TODO(curator): marker
 for s in railgun privacy-pool tornado-cash morpho fxusd bold-liquity cowswap aave; do
@@ -106,7 +106,7 @@ fi
 ok "no chainId fields in any contracts.json"
 
 # ---------------------------------------------------------------------------
-section "B: kohaku-agentd ping (post-skills wiring)"
+section "B: leancli-agentd ping (post-skills wiring)"
 
 PYCLIENT="$(mktemp -t udsclient.XXXXXX.py)"
 trap 'rm -f "$PYCLIENT"' EXIT
@@ -126,24 +126,24 @@ print(buf.decode().rstrip())
 EOF
 
 TMP="$(mktemp -d)"
-mkdir -p "$TMP/run/leankohaku" "$TMP/state/leankohaku"
-export KOHAKU_AGENT_SOCKET="$TMP/run/leankohaku/agent.sock"
-export KOHAKU_AGENT_DB="$TMP/state/leankohaku/sessions.db"
+mkdir -p "$TMP/run/leancli" "$TMP/state/leancli"
+export LEANCLI_AGENT_SOCKET="$TMP/run/leancli/agent.sock"
+export LEANCLI_AGENT_DB="$TMP/state/leancli/sessions.db"
 # Use the in-tree skills/ root explicitly so the env / data-home
 # fallback chain in resolveSkillsDir does not surprise this test.
-export KOHAKU_AGENT_SKILLS_DIR="$ROOT/skills"
+export LEANCLI_AGENT_SKILLS_DIR="$ROOT/skills"
 
 start_agentd() {
   "$AGENTD" >"$TMP/agentd.log" 2>&1 &
   AGENTD_PID=$!
   sleep 0.3
   local waited=0
-  while [[ ! -S "$KOHAKU_AGENT_SOCKET" && $waited -lt 30 ]]; do
+  while [[ ! -S "$LEANCLI_AGENT_SOCKET" && $waited -lt 30 ]]; do
     sleep 0.1; waited=$((waited + 1))
   done
-  if [[ ! -S "$KOHAKU_AGENT_SOCKET" ]]; then
+  if [[ ! -S "$LEANCLI_AGENT_SOCKET" ]]; then
     cat "$TMP/agentd.log" >&2
-    fail "kohaku-agentd did not bind socket within ~3s"
+    fail "leancli-agentd did not bind socket within ~3s"
   fi
 }
 stop_agentd() {
@@ -155,14 +155,14 @@ stop_agentd() {
 }
 
 start_agentd
-PING_OUT="$(python3 "$PYCLIENT" "$KOHAKU_AGENT_SOCKET" '{"op":"ping"}')"
+PING_OUT="$(python3 "$PYCLIENT" "$LEANCLI_AGENT_SOCKET" '{"op":"ping"}')"
 note "ping reply: $PING_OUT"
 assert_contains "$PING_OUT" '"ok":true' "ping reply"
 
 # ---------------------------------------------------------------------------
 section "C: skills startup log"
 
-if grep -q "kohaku-agentd: skills at" "$TMP/agentd.log"; then
+if grep -q "leancli-agentd: skills at" "$TMP/agentd.log"; then
   ok "agentd logged skills path"
 else
   cat "$TMP/agentd.log" >&2
@@ -203,7 +203,7 @@ sentinel
 EOF
 trap 'rm -rf "$SENTINEL"' EXIT
 
-RELOAD_OUT="$(python3 "$PYCLIENT" "$KOHAKU_AGENT_SOCKET" '{"op":"reload"}')"
+RELOAD_OUT="$(python3 "$PYCLIENT" "$LEANCLI_AGENT_SOCKET" '{"op":"reload"}')"
 note "reload reply: $RELOAD_OUT"
 assert_contains "$RELOAD_OUT" '"ok":true' "reload reply"
 # The skills count after reload must be larger than the initial load
@@ -221,11 +221,11 @@ rm -rf "$SENTINEL"
 section "E: run_turn end-to-end (LLM required)"
 
 stop_agentd
-if [[ -z "${KOHAKU_TEST_LLAMA_URL:-}" ]]; then
-  defer "run_turn requires a live llama-server. Set KOHAKU_TEST_LLAMA_URL"
-  defer "  e.g. KOHAKU_TEST_LLAMA_URL=http://127.0.0.1:8080/v1"
-  defer "  With KOHAKU_LOG_PROMPT=1 the agentd log will contain"
-  defer "  '[skills] active: kohaku-wallet,web3-security[,...]' lines"
+if [[ -z "${LEANCLI_TEST_LLAMA_URL:-}" ]]; then
+  defer "run_turn requires a live llama-server. Set LEANCLI_TEST_LLAMA_URL"
+  defer "  e.g. LEANCLI_TEST_LLAMA_URL=http://127.0.0.1:8080/v1"
+  defer "  With LEANCLI_LOG_PROMPT=1 the agentd log will contain"
+  defer "  '[skills] active: leancli-wallet,web3-security[,...]' lines"
   defer "  the operator can grep to confirm trigger matching."
 fi
 

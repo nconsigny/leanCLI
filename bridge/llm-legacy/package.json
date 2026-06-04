@@ -1,15 +1,15 @@
 {
-  "name": "leankohaku-llm-legacy",
+  "name": "leancli-llm-legacy",
   "version": "0.0.1",
   "private": true,
-  "description": "LEGACY: Node LLM sidecar. Superseded by the Lean-native kohaku-agent (LeanKohaku/App/AgentMain.lean). Kept reachable via LEAN_KOHAKU_LLM_BRIDGE_LEGACY=1 in LeanKohaku/LlmAgent/Bridge.lean. No new development should land here; the Lean agent is the primary backend.",
+  "description": "LEGACY: Node LLM sidecar. Superseded by the Lean-native leancli-agent (LeanCli/App/AgentMain.lean). Kept reachable via LEANCLI_LLM_BRIDGE_LEGACY=1 in LeanCli/LlmAgent/Bridge.lean. No new development should land here; the Lean agent is the primary backend.",
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "main": "bridge.mjs",
   "bin": {
-    "leankohaku-llm-legacy": "bridge.mjs"
+    "leancli-llm-legacy": "bridge.mjs"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.92.0",

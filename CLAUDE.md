@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project
 
-This repo (`leanCLI/`, GitHub `nconsigny/leanCLI` — historical name `leanKohaku`) is a research-grade Ethereum wallet split between a verified Lean 4 core and a set of untrusted sidecars / native helpers. The historical name is preserved inside the tree: the Lake package is still `leanKohaku`, the Lean namespace is `LeanKohaku.*`, and the wallet CLI/daemon binaries are `leankohaku` / `leankohaku-daemon`. Only the repo directory and remote moved.
+This repo (`leanCLI/`, GitHub `nconsigny/leanCLI`, formerly `leanKohaku`) is a research-grade Ethereum wallet split between a verified Lean 4 core and a set of untrusted sidecars / native helpers. The Lake package is `leanCLI`, the Lean namespace is `LeanCli.*`, and the wallet CLI/daemon binaries are `leancli` / `leancli-daemon`. The assistant persona ("Kohaku") and the koi mascot keep their original names; the upstream spec project `ethereum/kohaku` and its `@kohaku-eth/*` packages are unrelated to this rename and referenced as-is.
 
 Lean (pinned to `leanprover/lean4:v4.29.1` via `lean-toolchain`) owns network policy, account policy, transaction framing, JSON/RLP encoding, daemon dispatch, intent decoding, simulation orchestration, and the agent loop. Cryptographic primitives, ZK circuits, EVM simulation, ERC-7730 walking, and the natural-language agent's LLM I/O live in process-isolated sidecars or native helper exes. The CLI-first surface talks to a wallet daemon over a Unix domain socket; a separate agent daemon hosts long-running LLM sessions.
 
@@ -21,16 +21,16 @@ Artifacts land in `.lake/build/bin/`. The `lean_exe` targets in `lakefile.lean`:
 
 | Lake target | Binary | Role |
 |---|---|---|
-| `leankohaku` | `leankohaku` | CLI (root: `LeanKohaku/App/Main.lean`). Thin JSON-RPC forwarder. |
-| `leankohaku-daemon` | `leankohaku-daemon` | Wallet daemon (root: `LeanKohaku/App/DaemonMain.lean`). UDS at `$XDG_RUNTIME_DIR/leankohaku/leankohaku.sock`. |
-| `kohaku_agent` | `kohaku-agent` | One-shot LLM agent (root: `LeanKohaku/App/AgentMain.lean`). Native replacement for the legacy `bridge/llm/` sidecar. |
-| `kohaku_agentd` | `kohaku-agentd` | Persistent agent daemon (root: `LeanKohaku/App/AgentDaemonMain.lean`). UDS at `$XDG_RUNTIME_DIR/leankohaku/agent.sock`; SQLite session store via `c/lean_sqlite/`. |
-| `leankohaku-eip712-check` | — | EIP-712 walker smoke check. |
-| `leankohaku-ens-check` | — | ENS resolver smoke check. |
-| `leankohaku-sphincs-test` | — | SPHINCS+ shim roundtrip test. |
+| `leancli` | `leancli` | CLI (root: `LeanCli/App/Main.lean`). Thin JSON-RPC forwarder. |
+| `leancli-daemon` | `leancli-daemon` | Wallet daemon (root: `LeanCli/App/DaemonMain.lean`). UDS at `$XDG_RUNTIME_DIR/leancli/leancli.sock`. |
+| `leancli_agent` | `leancli-agent` | One-shot LLM agent (root: `LeanCli/App/AgentMain.lean`). Native replacement for the legacy `bridge/llm/` sidecar. |
+| `leancli_agentd` | `leancli-agentd` | Persistent agent daemon (root: `LeanCli/App/AgentDaemonMain.lean`). UDS at `$XDG_RUNTIME_DIR/leancli/agent.sock`; SQLite session store via `c/lean_sqlite/`. |
+| `leancli-eip712-check` | — | EIP-712 walker smoke check. |
+| `leancli-ens-check` | — | ENS resolver smoke check. |
+| `leancli-sphincs-test` | — | SPHINCS+ shim roundtrip test. |
 | `agent_session_test` | — | SQLite session-store smoke test (Phase 1a prereq). |
 
-Build a single module while iterating on proofs: `lake build LeanKohaku.Invariants.Wallet`.
+Build a single module while iterating on proofs: `lake build LeanCli.Invariants.Wallet`.
 
 CI: `.github/workflows/lean_action_ci.yml` runs `leanprover/lean-action@v1` — same as `lake build`. Proofs ARE the tests; `lake build` fails on any `sorry`. Phase smoke tests live under `tests/agent_phase{0,1a,1b,1c,1d}_smoke.sh`.
 
@@ -40,12 +40,12 @@ Mathlib is intentionally **not** a dependency; add only when starting ZMod / EC 
 
 Four layers; dependency flows downward. `Invariants/` is the spec root.
 
-1. **Primitives** — `LeanKohaku/Crypto/` (Hex, Secp256k1 scaffolding, Hacl FFI). Pure, no IO.
-2. **Domain** — `LeanKohaku/Ethereum/`, `LeanKohaku/Wallet/`, `LeanKohaku/Keystore/`, `LeanKohaku/Contract/`, `LeanKohaku/Sphincs/` (post-quantum hybrid 4337 userOp). Runtime TPM2 integration is isolated in `Keystore/Tpm2Runtime.lean`. Privacy / Clearsign / Colibri / LlmAgent sidecar wrappers live here too (one Lean module per sidecar boundary).
-3. **Surfaces** — `LeanKohaku/RPC/`, `LeanKohaku/Daemon/`, `LeanKohaku/Cli/`, executable roots under `LeanKohaku/App/`. Wallet daemon serves the CLI/TUI; the agent daemon (below) is a sibling surface.
-4. **Agent** — `LeanKohaku/Agent/` (Loop, Registry, Persona, Prompt, Tools, ToolDefs/, Llm OpenAI-compatible client, Http, Session, Skills, Memory, MemoryPrompts, Compression, DaemonClient). Hosts the LLM loop; talks to the wallet daemon over UDS for chain reads, never for signing decisions.
+1. **Primitives** — `LeanCli/Crypto/` (Hex, Secp256k1 scaffolding, Hacl FFI). Pure, no IO.
+2. **Domain** — `LeanCli/Ethereum/`, `LeanCli/Wallet/`, `LeanCli/Keystore/`, `LeanCli/Contract/`, `LeanCli/Sphincs/` (post-quantum hybrid 4337 userOp). Runtime TPM2 integration is isolated in `Keystore/Tpm2Runtime.lean`. Privacy / Clearsign / Colibri / LlmAgent sidecar wrappers live here too (one Lean module per sidecar boundary).
+3. **Surfaces** — `LeanCli/RPC/`, `LeanCli/Daemon/`, `LeanCli/Cli/`, executable roots under `LeanCli/App/`. Wallet daemon serves the CLI/TUI; the agent daemon (below) is a sibling surface.
+4. **Agent** — `LeanCli/Agent/` (Loop, Registry, Persona, Prompt, Tools, ToolDefs/, Llm OpenAI-compatible client, Http, Session, Skills, Memory, MemoryPrompts, Compression, DaemonClient). Hosts the LLM loop; talks to the wallet daemon over UDS for chain reads, never for signing decisions.
 
-`LeanKohaku.lean` re-exports the lib so downstream code writes `import LeanKohaku`.
+`LeanCli.lean` re-exports the lib so downstream code writes `import LeanCli`.
 
 ### Sidecars (`bridge/`)
 
@@ -53,31 +53,31 @@ Untrusted Node sidecars. Each Lean wrapper is the **only** place that spawns its
 
 | Sidecar | Lean wrapper | Purpose | Trusted for? |
 |---|---|---|---|
-| `bridge/` | `LeanKohaku/Privacy/Bridge.lean` | Privacy Pools / Railgun (snarkjs, libp2p) | Witness generation; **not** tx structure |
-| `bridge/clearsign/` | `LeanKohaku/Clearsign/Bridge.lean` | ERC-7730 calldata + EIP-712 walker | UI rendering only |
-| `bridge/colibri/` | `LeanKohaku/Colibri/{Bridge,Persistent}.lean` | Stateless light client (Helios-backed); verified reads + opt-in verified simulation | UI confirmation copy; **not** signing |
-| `bridge/helios/` | `LeanKohaku/Helios/{Bridge,Persistent}.lean` | `@a16z/helios` Rust light client + embedded REVM; opt-in local `eth_call` / `eth_estimateGas` simulation against sync-committee-verified state | UI confirmation copy; **not** signing |
-| `bridge/llm-legacy/` | `LeanKohaku/LlmAgent/Bridge.lean` | Legacy NL → tx-draft (Anthropic SDK + viem) | UI suggestion only |
+| `bridge/` | `LeanCli/Privacy/Bridge.lean` | Privacy Pools / Railgun (snarkjs, libp2p) | Witness generation; **not** tx structure |
+| `bridge/clearsign/` | `LeanCli/Clearsign/Bridge.lean` | ERC-7730 calldata + EIP-712 walker | UI rendering only |
+| `bridge/colibri/` | `LeanCli/Colibri/{Bridge,Persistent}.lean` | Stateless light client (Helios-backed); verified reads + opt-in verified simulation | UI confirmation copy; **not** signing |
+| `bridge/helios/` | `LeanCli/Helios/{Bridge,Persistent}.lean` | `@a16z/helios` Rust light client + embedded REVM; opt-in local `eth_call` / `eth_estimateGas` simulation against sync-committee-verified state | UI confirmation copy; **not** signing |
+| `bridge/llm-legacy/` | `LeanCli/LlmAgent/Bridge.lean` | Legacy NL → tx-draft (Anthropic SDK + viem) | UI suggestion only |
 
-The LLM default is now the native `kohaku-agent` exe. The legacy sidecar is reachable via `LEAN_KOHAKU_LLM_BRIDGE_LEGACY=1`.
+The LLM default is now the native `leancli-agent` exe. The legacy sidecar is reachable via `LEANCLI_LLM_BRIDGE_LEGACY=1`.
 
-`Colibri/Persistent.lean` keeps a long-lived UDS connection to `bridge/colibri/bridge.mjs --listen`, so the sync-committee bootstrap is paid once per chainId per daemon lifetime. Toggled at runtime via `daemon.colibri.toggle`; auto-started at daemon boot unless `KOHAKU_COLIBRI_DISABLED=1`.
+`Colibri/Persistent.lean` keeps a long-lived UDS connection to `bridge/colibri/bridge.mjs --listen`, so the sync-committee bootstrap is paid once per chainId per daemon lifetime. Toggled at runtime via `daemon.colibri.toggle`; auto-started at daemon boot unless `LEANCLI_COLIBRI_DISABLED=1`.
 
-`Helios/Persistent.lean` is the parallel boundary for `@a16z/helios`. Same UDS / newline-JSON wire protocol; same trust posture (output is rendered to ConfirmGate, never trusted for signing). Default-on (`KOHAKU_HELIOS=0` to disable; failure to spawn is non-fatal); the daemon-wide default `readBackend` is also `helios`, so every `tx.simulate` runs through the consensus-verified path unless the caller passes `backend: "rpc"` or flips the toggle via `daemon.readBackend.set`. Toggled at runtime via `daemon.helios.toggle`. RPCs: `tx.simulateHelios`, `eth.proxyHelios`, `daemon.helios.status`. The sidecar injects `executionRpc` and `chainId` from `cfg.rpcEndpoint` automatically. `consensusRpc` (beacon API) is caller-supplied with `operationsolarstorm.org` defaults for mainnet + Sepolia (a16z's canonical light-client backends). v0.11.1 supports through Fulu; verified end-to-end with a REVM-backed `eth_call` simulate of `USDT.name() → "Tether USD"`.
+`Helios/Persistent.lean` is the parallel boundary for `@a16z/helios`. Same UDS / newline-JSON wire protocol; same trust posture (output is rendered to ConfirmGate, never trusted for signing). Default-on (`LEANCLI_HELIOS=0` to disable; failure to spawn is non-fatal); the daemon-wide default `readBackend` is also `helios`, so every `tx.simulate` runs through the consensus-verified path unless the caller passes `backend: "rpc"` or flips the toggle via `daemon.readBackend.set`. Toggled at runtime via `daemon.helios.toggle`. RPCs: `tx.simulateHelios`, `eth.proxyHelios`, `daemon.helios.status`. The sidecar injects `executionRpc` and `chainId` from `cfg.rpcEndpoint` automatically. `consensusRpc` (beacon API) is caller-supplied with `operationsolarstorm.org` defaults for mainnet + Sepolia (a16z's canonical light-client backends). v0.11.1 supports through Fulu; verified end-to-end with a REVM-backed `eth_call` simulate of `USDT.name() → "Tether USD"`.
 
 Beacon-endpoint gotcha: not every consensus RPC supports the light-client API the way helios needs. Concretely, Ankr Premium's `eth_beacon` endpoint returns `light_client/updates` payloads that helios rejects with `sync failed: invalid sync committee period`, while `ethereum.operationsolarstorm.org` (and the matching `sepolia.operationsolarstorm.org`) sync fine. If you point helios at a custom beacon, expect to validate the light-client paths first.
 
 The trust model is uniform: **every sidecar is treated as malicious**. The daemon never signs based on sidecar output. Chain reads from sidecars (and from the agent) are policy-gated by `Privacy.NetworkPolicy` exactly like CLI/TUI requests.
 
-### Agent layer (`LeanKohaku/Agent/` + `kohaku-agentd`)
+### Agent layer (`LeanCli/Agent/` + `leancli-agentd`)
 
-The agent owns its own daemon (`kohaku-agentd`) because LLM sessions are long-running, stateful, and need an SQLite store. Wire protocol on the agent socket is newline-delimited JSON ops: `ping`, `reload`, `extract_memory`, `update_memory`, `show_memory`, plus chat-shaped session ops (see `LeanKohaku/App/AgentDaemonMain.lean`).
+The agent owns its own daemon (`leancli-agentd`) because LLM sessions are long-running, stateful, and need an SQLite store. Wire protocol on the agent socket is newline-delimited JSON ops: `ping`, `reload`, `extract_memory`, `update_memory`, `show_memory`, plus chat-shaped session ops (see `LeanCli/App/AgentDaemonMain.lean`).
 
 Key modules:
-- `Agent/Loop.lean` — one shot of the agent loop (used by both `kohaku-agent` and per-turn from `kohaku-agentd`).
+- `Agent/Loop.lean` — one shot of the agent loop (used by both `leancli-agent` and per-turn from `leancli-agentd`).
 - `Agent/Llm.lean` — OpenAI-compatible chat client (HTTP via `c/lean_http/`).
 - `Agent/Session.lean` — SQLite append-log of turns + tool calls, FTS5 search.
-- `Agent/Memory.lean` + `Agent/MemoryPrompts.lean` — LLM-driven extraction into a project `MEMORY.md`; post-filter to keep the index tight. Surfaced as `kohaku memory show/edit/refresh/forget` CLI subcommands.
+- `Agent/Memory.lean` + `Agent/MemoryPrompts.lean` — LLM-driven extraction into a project `MEMORY.md`; post-filter to keep the index tight. Surfaced as `leancli memory show/edit/refresh/forget` CLI subcommands.
 - `Agent/Compression.lean` — token-budget middle-turn summarization for long sessions.
 - `Agent/Skills.lean` + `Agent/ToolDefs/Protocols.lean` — trigger-keyed skills registry, loaded from the on-disk `skills/` tree (below).
 - `Agent/ToolDefs/TrustedRegistry.lean` (Phase 1d) — wraps the daemon RPC `wallet.lean_verified_addresses`. The daemon caps results per derivation path via `trustedRegistryMaxPerPath`.
@@ -88,7 +88,7 @@ Key modules:
 On-disk, per-skill directories (`SKILL.md` + supporting JSON/ABI/markdown). Loaded by `Agent/Skills.lean`; surfaced to the LLM as a single `protocols` tool whose payload is gated by trigger keywords in the user message.
 
 Current entries:
-- Meta: `kohaku-wallet`, `web3-security`.
+- Meta: `leancli-wallet`, `web3-security`.
 - DeFi: `aave`, `morpho`, `uniswap`, `cowswap`, `bold-liquity`, `fxusd`.
 - Privacy: `railgun`, `privacy-pool`, `tornado-cash` (last is decode-only today; SDK and drafting coming soon).
 - Worked ops: `approve-erc20`, `audit-approvals`, `fresh-address`, `revoke-approval`, `send-erc20`, `send-native`, `shield-eth`, `swap-uniswap-v3`, `unshield-eth`.
@@ -141,12 +141,12 @@ Loopback FFI for capabilities Lean can't do directly. Wallet logic stays FFI-fre
 `INVARIANTS.md` is the living source of truth. Every invariant: 📝 stated → 🚧 in-progress → ✅ proved (or 🔒 axiomatized for FFI). Workflow:
 
 1. State informally in `INVARIANTS.md`.
-2. Formalize under `LeanKohaku/Invariants/<Topic>.lean`.
+2. Formalize under `LeanCli/Invariants/<Topic>.lean`.
 3. Real proof before merge; no `sorry` lands.
 4. Flip to ✅ with the theorem name + module path.
 
 Currently proved: **1.1** (`subChecked_preserves_total` in `Invariants/Amount.lean`) and **1.2** (`apply_some_affordable`, `apply_sender_debited`, `apply_non_sender_balance` in `Invariants/Wallet.lean`). **2.1** and **2.3** are `wellFormed`-by-definition in `Invariants/TxWellFormed.lean`.
 
-The `Invariants/Wallet.lean` abstract wallet is deliberately thin (`AccountId : String`, balances `Nat`, no crypto). Operational types in `LeanKohaku/Wallet/` and `LeanKohaku/Ethereum/` will refine these later. Keep the separation: the abstract model exists to make proofs tractable.
+The `Invariants/Wallet.lean` abstract wallet is deliberately thin (`AccountId : String`, balances `Nat`, no crypto). Operational types in `LeanCli/Wallet/` and `LeanCli/Ethereum/` will refine these later. Keep the separation: the abstract model exists to make proofs tractable.
 
 Use `Amount.subChecked` rather than raw `Nat.sub` for any balance computation — silent zero-clamping would be a catastrophic accounting bug and invariant 1.1 exists to rule it out.

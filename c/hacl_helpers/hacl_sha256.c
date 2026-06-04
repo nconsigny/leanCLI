@@ -14,7 +14,7 @@
 
 int main(int argc, char **argv) {
   if (argc != 2) {
-    fprintf(stderr, "usage: leankohaku-hacl-sha256 <hex>\n");
+    fprintf(stderr, "usage: leancli-hacl-sha256 <hex>\n");
     return 2;
   }
   uint32_t in_len = 0;

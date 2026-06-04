@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// leankohaku-helios-bridge — JSON-RPC sidecar exposing @a16z/helios.
+// leancli-helios-bridge — JSON-RPC sidecar exposing @a16z/helios.
 //
 // Helios is a trustless Ethereum light client written in Rust, exposed
 // here via its NAPI binding. It validates execution payloads against
@@ -391,8 +391,8 @@ if (listenIdx !== -1 && argv[listenIdx + 1]) {
   }
 } else {
   process.stderr.write(
-    "usage: leankohaku-helios-bridge --listen <socket-path>\n" +
-    "       leankohaku-helios-bridge --rpc '<json-rpc-request>'\n",
+    "usage: leancli-helios-bridge --listen <socket-path>\n" +
+    "       leancli-helios-bridge --rpc '<json-rpc-request>'\n",
   );
   process.exit(2);
 }

@@ -1,5 +1,5 @@
 {
-  description = "leanKohaku Lean wallet daemon";
+  description = "leanCLI Lean wallet daemon";
 
   inputs.nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
@@ -16,17 +16,17 @@
         in
         {
           default = package;
-          leankohaku = package;
+          leancli = package;
         });
 
       apps = forAllSystems (system: {
         default = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/leankohaku";
+          program = "${self.packages.${system}.default}/bin/leancli";
         };
         daemon = {
           type = "app";
-          program = "${self.packages.${system}.default}/bin/leankohaku-daemon";
+          program = "${self.packages.${system}.default}/bin/leancli-daemon";
         };
       });
 

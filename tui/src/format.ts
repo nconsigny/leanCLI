@@ -60,7 +60,7 @@ export function shortAddr(addr: string): string {
 }
 
 /** Parse a decimal-ETH string ("0", "0.001") to wei (bigint). Returns
- *  null on bad input. Mirrors the daemon's `LeanKohaku.Util.Units.parseUnits`
+ *  null on bad input. Mirrors the daemon's `LeanCli.Util.Units.parseUnits`
  *  so the TUI can compute value-hex for `tx.simulate` before any signing
  *  RPC round-trips. */
 export function parseEthToWei(s: string): bigint | null {

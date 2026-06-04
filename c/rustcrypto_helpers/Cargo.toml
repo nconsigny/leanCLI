@@ -1,11 +1,11 @@
 [package]
-name = "leankohaku-rustcrypto-helpers"
+name = "leancli-rustcrypto-helpers"
 version = "0.1.0"
 edition = "2021"
 publish = false
 
 [[bin]]
-name = "leankohaku-hacl-ripemd160"
+name = "leancli-hacl-ripemd160"
 path = "src/bin/ripemd160.rs"
 
 [dependencies]

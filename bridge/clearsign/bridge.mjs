@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// leankohaku-clearsign-bridge — untrusted JSON-RPC sidecar that decodes
+// leancli-clearsign-bridge — untrusted JSON-RPC sidecar that decodes
 // calldata and EIP-712 messages against ERC-7730 descriptors. Mirrors the
-// stdio one-shot pattern from bridge/bridge.mjs (LeanKohaku/Privacy/Bridge.lean).
+// stdio one-shot pattern from bridge/bridge.mjs (LeanCli/Privacy/Bridge.lean).
 //
 // SECURITY: This process is trusted to render human-readable intents but
 // UNTRUSTED for signing decisions. The Lean side never signs based on the
@@ -101,7 +101,7 @@ const argv = process.argv.slice(2);
 const rpcIdx = argv.indexOf("--rpc");
 if (rpcIdx === -1 || !argv[rpcIdx + 1]) {
   process.stderr.write(
-    "usage: leankohaku-clearsign-bridge --rpc '<json-rpc-request>'\n",
+    "usage: leancli-clearsign-bridge --rpc '<json-rpc-request>'\n",
   );
   process.exit(2);
 }

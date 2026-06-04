@@ -23,9 +23,9 @@ type Props = {
   onPick: (a: MainAction) => void;
   colibriEnabled: boolean;
   colibriPending?: boolean;
-  /** Daemon-side default backend for `tx.simulate` (kohaku-provider-style
+  /** Daemon-side default backend for `tx.simulate` (leancli-provider-style
    *  toggle). Cycles rpc → colibri → helios on the menu entry; helios needs
-   *  `KOHAKU_HELIOS=1` to actually serve (otherwise it falls through to the
+   *  `LEANCLI_HELIOS=1` to actually serve (otherwise it falls through to the
    *  one-shot sidecar spawn per call). */
   readBackend: ReadBackend;
   readBackendPending?: boolean;
@@ -37,7 +37,7 @@ type Props = {
 
 /** Top-level entry. Labels are intentionally short — the verbose
  *  "(balance / mnemonic / unshield)"-type subtitles moved to the
- *  destination screens. The koi-red rectangle is the canonical leanKohaku
+ *  destination screens. The koi-red rectangle is the canonical leanCLI
  *  framing; every hub-style screen reuses it. */
 export default function MainMenu({
   onPick,
@@ -106,12 +106,12 @@ export default function MainMenu({
 
   return (
     <Layout
-      title="leanKohaku — interactive wallet"
-      subtitle="formally-verified Ethereum wallet · daemon: leankohaku-daemon"
+      title="leanCLI — interactive wallet"
+      subtitle="formally-verified Ethereum wallet · daemon: leancli-daemon"
       hint={hint}
     >
       <Text color={theme.koiCream} backgroundColor={theme.koiInk} bold>
-        {" leanKohaku · interactive wallet "}
+        {" leanCLI · interactive wallet "}
       </Text>
       {locked && (
         <Box marginTop={1}>

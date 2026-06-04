@@ -18,6 +18,6 @@ triggers:
 Privacy Pools enable shielded deposits and withdrawals constrained by an opt-in
 association set ("ASP"). The agent **must use the `@kohaku-eth/privacy-pools`
 SDK** to prepare every deposit, withdrawal, and ragequit — never draft pool
-calldata by hand. Witnesses and ASP proofs are produced inside the kohaku-bridge
+calldata by hand. Witnesses and ASP proofs are produced inside the leancli-bridge
 Node sidecar; the daemon re-decodes every returned transaction and gates through
 the standard `decode_calldata → simulate → ConfirmGate` path before signing.

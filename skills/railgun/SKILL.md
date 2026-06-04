@@ -16,6 +16,6 @@ triggers:
 RAILGUN is a SNARK-based shielding system for EVM tokens. The agent **must use
 the `@kohaku-eth/railgun` SDK** to prepare every shield, unshield, and shielded
 transfer — never draft RAILGUN calldata by hand. ZK witness generation runs
-inside the kohaku-bridge Node sidecar; the SDK returns prepared transactions
+inside the leancli-bridge Node sidecar; the SDK returns prepared transactions
 that the daemon re-decodes and gates through the standard `decode_calldata →
 simulate → ConfirmGate` path before any signature is produced.

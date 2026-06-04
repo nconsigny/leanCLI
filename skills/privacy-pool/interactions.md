@@ -1,7 +1,7 @@
 # privacy-pool — interactions
 
 Every recipe below uses the `@kohaku-eth/privacy-pools` SDK as the
-calldata source. The kohaku-bridge sidecar exposes the SDK over
+calldata source. The leancli-bridge sidecar exposes the SDK over
 JSON-RPC; the Lean daemon re-validates every returned transaction
 through `decode_calldata → simulate → ConfirmGate` before any
 signature. SDK functions in brackets reference
@@ -31,7 +31,7 @@ bridge methods in `monospace` reference `bridge/bridge.mjs`.
    destination Entrypoint, and the user's depositor address.
 6. **On confirmation** — `eoa.send` (TPM-rooted) for each tx.
 7. Bridge `[SDK] dumpState()` is persisted to
-   `LEANKOHAKU_PP_STATE_PATH` so the deposit's secret↔commitment
+   `LEANCLI_PP_STATE_PATH` so the deposit's secret↔commitment
    map survives.
 8. Agent surfaces: the deposit is now waiting for ASP approval
    (minutes to hours on Sepolia) before it can be withdrawn.
@@ -57,7 +57,7 @@ each is gated independently by `ConfirmGate`.
    the bridge today calls `broadcaster.broadcast(privateOp)`
    directly after `prepareUnshield`. The Lean daemon must decode
    `privateOp.txData` and run `ConfirmGate` BEFORE broadcast — that
-   ordering belongs in `LeanKohaku/Privacy/Bridge.lean` and the
+   ordering belongs in `LeanCli/Privacy/Bridge.lean` and the
    `shielded.prepareWithdraw` handler. Document it here so the
    agent flow does not assume the bridge is the gate.
 6. Bridge `[SDK] dumpState()` is persisted.

@@ -84,7 +84,7 @@ type OwnershipEntry = {
 };
 
 /** One entry in the agent's per-turn trace. Matches the JSON shape
- *  produced by `LeanKohaku.Agent.Trace.toJson`. Display-only — never
+ *  produced by `LeanCli.Agent.Trace.toJson`. Display-only — never
  *  gates signing. The TUI's foldable trace block under each assistant
  *  turn is the only consumer; the agent loop's own correctness is
  *  unaffected by what we render (or don't render) here. */
@@ -106,7 +106,7 @@ type DraftResponse = {
   intentActionTag?: string;
   canonical?: string;
   validateError?: string;
-  /** Per-turn observability payload from `kohaku-agentd`. Optional;
+  /** Per-turn observability payload from `leancli-agentd`. Optional;
    *  legacy / one-shot bridge replies omit it and the trace block
    *  simply doesn't render. */
   agentTrace?: TraceItem[];
@@ -243,7 +243,7 @@ function summariseAssistantTurn(t: Extract<Turn, { kind: "assistant" }>): string
 /** Map a canonical `intentActionTag` (e.g. `erc20Approve`,
  *  `aaveV3Supply`) to a short, plain-English label for the
  *  Review-and-sign button and chat hint. The tag space lives in
- *  `LeanKohaku/Ethereum/IntentCanonical.lean#actionTag`; unknown tags
+ *  `LeanCli/Ethereum/IntentCanonical.lean#actionTag`; unknown tags
  *  pass through as-is so a new action type still renders something
  *  useful rather than a blank label. Kept deliberately terse — the
  *  ConfirmGate screen is where full detail (token symbol, amount,
@@ -387,7 +387,7 @@ export default function LlmChatFlow({
         // We surface (a) what the daemon's default endpoint currently is and
         // (b) the exact commands to populate per-chain entries. The daemon
         // also auto-bootstraps `chain_endpoints[primary]` from `rpc_url` at
-        // startup (LeanKohaku/Daemon/Config.lean), so seeing this error means
+        // startup (LeanCli/Daemon/Config.lean), so seeing this error means
         // either chain_id resolved to something with no known name (e.g. an
         // L2 we don't know yet) or rpc_url itself is unset.
         const activeUrl = n.result.rpc?.url ?? "(unset)";
@@ -402,8 +402,8 @@ export default function LlmChatFlow({
             `  active default rpc_url:  ${activeUrl}\n` +
             `  daemon chainId:          ${cid} (${cidName})\n\n` +
             `Fix one of:\n` +
-            `  kohaku network set-rpc-chain mainnet <mainnet-rpc-url>\n` +
-            `  kohaku network set-rpc-chain sepolia <sepolia-rpc-url>\n\n` +
+            `  leancli network set-rpc-chain mainnet <mainnet-rpc-url>\n` +
+            `  leancli network set-rpc-chain sepolia <sepolia-rpc-url>\n\n` +
             `Or export MAINNET_RPC_URL / SEPOLIA_RPC_URL (e.g. in ./.env) and ` +
             `restart the daemon.`,
         });
@@ -1688,7 +1688,7 @@ function RegexLine({
 // Per-field address-ownership badge. Renders the safety claim that
 // `chat.draft` is willing to make for a regex-resolved address.
 // Backed by the proven invariant 14.1
-// (LeanKohaku/Invariants/AddressOwnership.lean): the daemon can only
+// (LeanCli/Invariants/AddressOwnership.lean): the daemon can only
 // emit `verified` after re-deriving the unlocked seed at the recorded
 // BIP-44 path and structurally comparing to the address shown here.
 function OwnershipBadge({ entry }: { entry: OwnershipEntry }) {

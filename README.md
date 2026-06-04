@@ -1,4 +1,4 @@
-# leanKohaku
+# leanCLI
 
 **Research wallet.** A Lean 4 Ethereum wallet daemon with a CLI-first surface
 and an Ink-based TUI. Lean owns the orchestration code (network policy,
@@ -21,14 +21,14 @@ trust surface.
 One-liner :
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nconsigny/leanCLI/master/script/kohakuspawn | bash
+curl -fsSL https://raw.githubusercontent.com/nconsigny/leanCLI/master/script/leanclispawn | bash
 exec $SHELL -l                                 # pick up PATH
-kohaku help
+leancli help
 ```
 
-This downloads `kohakuspawn` and runs it. With no checkout in scope, the
-script clones the repo into `~/.kohaku/checkouts/leanCLI/`, runs `lake
-build`, and self-installs into `~/.kohaku/bin/`. You'll need `elan`,
+This downloads `leanclispawn` and runs it. With no checkout in scope, the
+script clones the repo into `~/.leancli/checkouts/leanCLI/`, runs `lake
+build`, and self-installs into `~/.leancli/bin/`. You'll need `elan`,
 `git`, and (for the TUI) `node` ≥ 20 on your `PATH`.
 
 If you'd prefer to clone the repo yourself first:
@@ -36,56 +36,56 @@ If you'd prefer to clone the repo yourself first:
 ```bash
 git clone https://github.com/nconsigny/leanCLI.git && cd leanCLI
 elan toolchain install $(cat lean-toolchain)   # one-time: installs Lean 4.29.1
-./script/kohakuspawn                            # build + install in-tree
+./script/leanclispawn                            # build + install in-tree
 exec $SHELL -l
-kohaku help
+leancli help
 ```
 
-After install, the `kohaku` CLI itself owns install/update/uninstall —
-no need to remember a separate `kohakuspawn` command:
+After install, the `leancli` CLI itself owns install/update/uninstall —
+no need to remember a separate `leanclispawn` command:
 
 ```bash
-kohaku install        # rebuild + relink (e.g. after editing source)
-kohaku update         # git pull + rebuild + relink
-kohaku uninstall      # remove ~/.kohaku/bin symlinks
+leancli install        # rebuild + relink (e.g. after editing source)
+leancli update         # git pull + rebuild + relink
+leancli uninstall      # remove ~/.leancli/bin symlinks
 ```
 
-These three subcommands delegate to `script/kohakuspawn` under the hood,
-so any `kohakuspawn` flag still works if you call the script directly.
+These three subcommands delegate to `script/leanclispawn` under the hood,
+so any `leanclispawn` flag still works if you call the script directly.
 
 What the bootstrap does:
 
-1. `lake build` (Lean lib + `leankohaku` + `leankohaku-daemon`).
+1. `lake build` (Lean lib + `leancli` + `leancli-daemon`).
 2. `npm install && npm run build` under `tui/` for the Ink TUI bundle.
-3. Creates `~/.kohaku/bin/` with:
-   - `kohaku`         → symlink to `.lake/build/bin/leankohaku`
-   - `kohaku-daemon`  → symlink to `.lake/build/bin/leankohaku-daemon`
-   - `kohakuspawn`       → copy of the script (still callable directly)
-4. Records the checkout location in `~/.kohaku/checkout` so subsequent
-   `kohaku install` / `kohaku update` runs know where to rebuild from.
-5. Appends a guarded `export PATH="$HOME/.kohaku/bin:$PATH"` block to
+3. Creates `~/.leancli/bin/` with:
+   - `leancli`         → symlink to `.lake/build/bin/leancli`
+   - `leancli-daemon`  → symlink to `.lake/build/bin/leancli-daemon`
+   - `leanclispawn`       → copy of the script (still callable directly)
+4. Records the checkout location in `~/.leancli/checkout` so subsequent
+   `leancli install` / `leancli update` runs know where to rebuild from.
+5. Appends a guarded `export PATH="$HOME/.leancli/bin:$PATH"` block to
    your shell rc (`.zshrc`, `.bashrc`, or `config.fish`). Skip with
-   `./script/kohakuspawn --no-modify-path`.
+   `./script/leanclispawn --no-modify-path`.
 
 Direct script flags (when you want finer control than the subcommands):
 `--no-build`, `--no-tui`, `--rebuild-tui`, `--force` (overwrite a stale
-`kohaku` symlink), `--no-modify-path`, `--pull`, `--uninstall`.
+`leancli` symlink), `--no-modify-path`, `--pull`, `--uninstall`.
 
 Bootstrap-mode env overrides:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
-| `KOHAKU_HOME` | `~/.kohaku` | Install root (`bin/`, `checkouts/`, `checkout` marker live under it) |
-| `KOHAKU_REPO_URL` | `https://github.com/nconsigny/leanCLI.git` | Repo to clone when no checkout is found |
-| `KOHAKU_REPO_DIR` | `$KOHAKU_HOME/checkouts/leanCLI` | Where the auto-clone lands; point at an existing clone to skip cloning |
-| `LEANKOHAKU_KOHAKUSPAWN` | unset | Override the path the `kohaku` CLI exec's for `install` / `update` / `uninstall` |
+| `LEANCLI_HOME` | `~/.leancli` | Install root (`bin/`, `checkouts/`, `checkout` marker live under it) |
+| `LEANCLI_REPO_URL` | `https://github.com/nconsigny/leanCLI.git` | Repo to clone when no checkout is found |
+| `LEANCLI_REPO_DIR` | `$LEANCLI_HOME/checkouts/leanCLI` | Where the auto-clone lands; point at an existing clone to skip cloning |
+| `LEANCLI_LEANCLISPAWN` | unset | Override the path the `leancli` CLI exec's for `install` / `update` / `uninstall` |
 
 If you'd rather skip the installer entirely:
 
 ```bash
 lake build
 export PATH="$PWD/.lake/build/bin:$PATH"
-# binaries are named `leankohaku` / `leankohaku-daemon` in this mode
+# binaries are named `leancli` / `leancli-daemon` in this mode
 ```
 
 Nix scaffolding is available:
@@ -114,17 +114,17 @@ xcode-select --install
 brew install node
 ```
 
-Then the standard `kohakuspawn` / `lake build` flow works the same as
-on Linux. systemd-related steps no-op (kohakuspawn checks
+Then the standard `leanclispawn` / `lake build` flow works the same as
+on Linux. systemd-related steps no-op (leanclispawn checks
 `command -v systemctl`); the daemons run via autospawn instead.
 
 Runtime-dir behavior: macOS doesn't set `XDG_RUNTIME_DIR`, so the
 daemons fall back to `$TMPDIR` (launchd's per-user mode-0700 dir
 under `/var/folders/...`). UDS paths become e.g.
-`$TMPDIR/leankohaku/leankohaku.sock` — same posture as on Linux, just
+`$TMPDIR/leancli/leancli.sock` — same posture as on Linux, just
 under a longer prefix. macOS's `sun_path` limit is 104 bytes; if you
-ever hit "UDS path is too long", set `LEANKOHAKU_SOCKET` /
-`KOHAKU_AGENT_SOCKET` to a shorter absolute path.
+ever hit "UDS path is too long", set `LEANCLI_SOCKET` /
+`LEANCLI_AGENT_SOCKET` to a shorter absolute path.
 
 Native helpers: the HACL and secp256k1 setup scripts assume `cc`,
 `cmake`, `ninja`, and (HACL only) `cargo` on `PATH` — all available
@@ -137,53 +137,53 @@ Two commands cover everything — each one propagates to balance, send,
 swap, and (for mainnet) ENS resolution:
 
 ```bash
-kohaku network set-rpc-chain mainnet https://your-mainnet-rpc/
-kohaku network set-rpc-chain sepolia https://your-sepolia-rpc/
-kohaku network show       # resolved URLs + source (env vs daemon.json)
+leancli network set-rpc-chain mainnet https://your-mainnet-rpc/
+leancli network set-rpc-chain sepolia https://your-sepolia-rpc/
+leancli network show       # resolved URLs + source (env vs daemon.json)
 ```
 
 ENS always resolves against mainnet. Setting the mainnet RPC above is
-enough; only use `kohaku network set-ens-rpc <url>` if you want a
+enough; only use `leancli network set-ens-rpc <url>` if you want a
 different mainnet endpoint for ENS than for everything else.
 
 Equivalent `.env` entries — both CLI and daemon autoload `./.env` and
-`${XDG_CONFIG_HOME:-$HOME/.config}/leankohaku/.env`:
+`${XDG_CONFIG_HOME:-$HOME/.config}/leancli/.env`:
 
 ```bash
 MAINNET_RPC_URL=https://your-mainnet-rpc/
 SEPOLIA_RPC_URL=https://your-sepolia-rpc/
 ```
 
-Shell env beats `.env`. Disable autoload with `LEANKOHAKU_NO_DOTENV=1`.
+Shell env beats `.env`. Disable autoload with `LEANCLI_NO_DOTENV=1`.
 See `.env.example` for the rest (transport, policy, chain id, Tor mode).
 
 ## Quick start
 
 ```bash
-kohaku help
-kohaku version
-kohaku policy                  # overview of policy topics
-kohaku policy privacy          # network privacy summary
-kohaku policy security         # hard rules + checks
-kohaku policy keystore         # custody policy
-kohaku policy accounts         # account families
-kohaku policy lightclient      # provider-policy plan
-kohaku policy all              # everything in one print
-kohaku network                 # current network config (rpc urls + sources)
-kohaku doctor                  # privacy/security status
-kohaku wallet create r1 work-key
-kohaku wallet deploy work-key
-kohaku wallet list
-kohaku balance 0x0000000000000000000000000000000000000000
-kohaku send 0x0000000000000000000000000000000000000000 1
-kohaku from daily send 0x0000000000000000000000000000000000000000 1
-kohaku debug policy-check strict configured-node broadcast-tx direct
-kohaku debug rpc-check tor configured tor eth_sendRawTransaction
-kohaku debug endpoint-check strict local http loopback false
-kohaku debug decode erc20 0xa9059cbb...
-kohaku daemon ping
-kohaku daemon                  # starts the daemon in the foreground
-kohaku tui                     # opens the Ink TUI
+leancli help
+leancli version
+leancli policy                  # overview of policy topics
+leancli policy privacy          # network privacy summary
+leancli policy security         # hard rules + checks
+leancli policy keystore         # custody policy
+leancli policy accounts         # account families
+leancli policy lightclient      # provider-policy plan
+leancli policy all              # everything in one print
+leancli network                 # current network config (rpc urls + sources)
+leancli doctor                  # privacy/security status
+leancli wallet create r1 work-key
+leancli wallet deploy work-key
+leancli wallet list
+leancli balance 0x0000000000000000000000000000000000000000
+leancli send 0x0000000000000000000000000000000000000000 1
+leancli from daily send 0x0000000000000000000000000000000000000000 1
+leancli debug policy-check strict configured-node broadcast-tx direct
+leancli debug rpc-check tor configured tor eth_sendRawTransaction
+leancli debug endpoint-check strict local http loopback false
+leancli debug decode erc20 0xa9059cbb...
+leancli daemon ping
+leancli daemon                  # starts the daemon in the foreground
+leancli tui                     # opens the Ink TUI
 ```
 
 
@@ -328,12 +328,12 @@ key touches it.
 ## Layout
 
 ```
-leanKohaku/
+leanCLI/
 ├─ lakefile.lean                  # Lake build config
 ├─ lean-toolchain                 # pinned Lean version (4.29.1)
 ├─ flake.nix / default.nix        # Nix scaffold
-├─ LeanKohaku.lean                # Root module (re-exports)
-├─ LeanKohaku/
+├─ LeanCli.lean                # Root module (re-exports)
+├─ LeanCli/
 │  ├─ App/         CLI / daemon executable roots
 │  ├─ Crypto/      Hex, Hacl (opaque + IO helpers), Secp256k1Native
 │  ├─ Encoding/    Json, Rlp
@@ -395,7 +395,7 @@ Every signing flow goes through the same gate before reaching `eoa.send`,
 
 `SendFlow` and `SendRawFlow` (TUI) implement this pipeline. The LLM
 agent in `bridge/llm/` produces a structured `Intent` (validated by
-`LeanKohaku/LlmAgent/IntentParser.lean` with hard-rejects) that flows
+`LeanCli/LlmAgent/IntentParser.lean` with hard-rejects) that flows
 through the same gate via `LlmChatFlow → SendRawFlow`. Pasted calldata
 flows through `DecodeIntentFlow` (read-only) and the same `ConfirmGate`
 when the user chooses to sign.
@@ -423,7 +423,7 @@ final authority on a signing decision.
 Wraps `@kohaku-eth/{plugins,railgun,privacy-pools}`. Methods: `ping`,
 `version`, `listProtocols`, `shielded.balance`, `shielded.prepareDeposit`,
 `shielded.prepareWithdraw`, `shielded.unshieldDrain`. Spending secrets are
-derived from a separate mnemonic (`LEANKOHAKU_PP_MNEMONIC`), never the EOA
+derived from a separate mnemonic (`LEANCLI_PP_MNEMONIC`), never the EOA
 mnemonic. Persistent PP state is cached on disk so deposit/note bookkeeping
 survives across one-shot invocations.
 
@@ -530,19 +530,19 @@ SLH-DSA.
 
 The orchestration layer (`Crypto/Hacl.lean`,
 `Crypto/Secp256k1Native.lean`) spawns these as one-shot subprocesses on
-each call. Helpers are built from external sources — leanKohaku does not
+each call. Helpers are built from external sources — leanCLI does not
 reimplement crypto:
 
 | Helper basename | Implementation | Used for |
 |---|---|---|
-| `leankohaku-hacl-keccak256` | HACL Packages | Ethereum keccak (delimiter `0x01`) |
-| `leankohaku-hacl-sha256` | HACL Packages | BIP-39 checksum, BIP-32 fingerprint input |
-| `leankohaku-hacl-hmac-sha256` / `-sha512` | HACL Packages | BIP-32 child-key derivation, generic HMAC |
-| `leankohaku-hacl-pbkdf2` | HACL Packages | BIP-39 seed, keystore wrapping |
-| `leankohaku-hacl-hmac-drbg` | HACL Packages | DRBG for k1 nonce |
-| `leankohaku-hacl-chacha20poly1305` | HACL Packages | At-rest keystore encryption |
-| `leankohaku-hacl-ripemd160` | RustCrypto `ripemd` | BIP-32 HASH160 fingerprint only |
-| `leankohaku-secp256k1-{sign,pubkey,recover,verify}` | Bitcoin Core libsecp256k1 | EOA k1 signing/verify/recovery/pubkey |
+| `leancli-hacl-keccak256` | HACL Packages | Ethereum keccak (delimiter `0x01`) |
+| `leancli-hacl-sha256` | HACL Packages | BIP-39 checksum, BIP-32 fingerprint input |
+| `leancli-hacl-hmac-sha256` / `-sha512` | HACL Packages | BIP-32 child-key derivation, generic HMAC |
+| `leancli-hacl-pbkdf2` | HACL Packages | BIP-39 seed, keystore wrapping |
+| `leancli-hacl-hmac-drbg` | HACL Packages | DRBG for k1 nonce |
+| `leancli-hacl-chacha20poly1305` | HACL Packages | At-rest keystore encryption |
+| `leancli-hacl-ripemd160` | RustCrypto `ripemd` | BIP-32 HASH160 fingerprint only |
+| `leancli-secp256k1-{sign,pubkey,recover,verify}` | Bitcoin Core libsecp256k1 | EOA k1 signing/verify/recovery/pubkey |
 
 Set up the helpers with:
 
@@ -565,16 +565,16 @@ because they each require their own credential.
 
 | Sidecar | Default behavior with no env var | Explicit override |
 |---|---|---|
-| Clearsign | walks up for `bridge/clearsign/bridge.mjs`; fallback PATH basename | `LEAN_KOHAKU_CLEARSIGN_BRIDGE` |
-| Colibri | walks up for `bridge/colibri/bridge.mjs`; fallback PATH basename | `LEAN_KOHAKU_COLIBRI_BRIDGE` |
-| Sphincs (C9, SLHDSA) | walks up for `sidecars/sphincs/bin/sphincs-{c9,slhdsa-128-24}`; fallback PATH basename. Requires you to have run `make` under `sidecars/sphincs/` first. | `LEAN_KOHAKU_SPHINCS_C9` / `LEAN_KOHAKU_SPHINCS_SLHDSA` |
-| Privacy Pools / Railgun | basename `leankohaku-kohaku-bridge` on PATH (likely missing) | `LEAN_KOHAKU_BRIDGE` plus `LEAN_KOHAKU_PP_MNEMONIC` (separate spending secret) |
-| LLM | basename `leankohaku-llm-bridge` on PATH (likely missing) | `LEAN_KOHAKU_LLM_BRIDGE`; the model tool-use loop only fires when an LLM API key is also configured in the daemon's environment, otherwise the rule-based matcher is the only path |
+| Clearsign | walks up for `bridge/clearsign/bridge.mjs`; fallback PATH basename | `LEANCLI_CLEARSIGN_BRIDGE` |
+| Colibri | walks up for `bridge/colibri/bridge.mjs`; fallback PATH basename | `LEANCLI_COLIBRI_BRIDGE` |
+| Sphincs (C9, SLHDSA) | walks up for `sidecars/sphincs/bin/sphincs-{c9,slhdsa-128-24}`; fallback PATH basename. Requires you to have run `make` under `sidecars/sphincs/` first. | `LEANCLI_SPHINCS_C9` / `LEANCLI_SPHINCS_SLHDSA` |
+| Privacy Pools / Railgun | basename `leancli-bridge` on PATH (likely missing) | `LEANCLI_BRIDGE` plus `LEANCLI_PP_MNEMONIC` (separate spending secret) |
+| LLM | basename `leancli-llm-bridge` on PATH (likely missing) | `LEANCLI_LLM_BRIDGE`; the model tool-use loop only fires when an LLM API key is also configured in the daemon's environment, otherwise the rule-based matcher is the only path |
 
 So the minimal local-dev launch is just:
 
 ```bash
-kohaku-daemon
+leancli-daemon
 ```
 
 …provided you've run `(cd sidecars/sphincs && make)` once. Without that,
@@ -583,39 +583,39 @@ SPHINCS+ flows fail with a spawn error; the other surfaces work.
 To enable the credentialed sidecars:
 
 ```bash
-LEAN_KOHAKU_BRIDGE=$PWD/bridge/bridge.mjs                                  \
-LEAN_KOHAKU_PP_MNEMONIC="abandon abandon …"                                \
-LEAN_KOHAKU_LLM_BRIDGE=$PWD/bridge/llm/bridge.mjs                          \
-kohaku-daemon
+LEANCLI_BRIDGE=$PWD/bridge/bridge.mjs                                  \
+LEANCLI_PP_MNEMONIC="abandon abandon …"                                \
+LEANCLI_LLM_BRIDGE=$PWD/bridge/llm/bridge.mjs                          \
+leancli-daemon
 ```
 
 Any defaulted entry can still be force-overridden by setting the matching
-`LEAN_KOHAKU_*` env var explicitly — useful when iterating on a sidecar
+`LEANCLI_*` env var explicitly — useful when iterating on a sidecar
 under a non-standard path.
 
 The TUI bundle is built by `script/install.sh`. To rebuild it on its own:
 
 ```bash
 (cd tui && npm install && npm run build)
-kohaku tui
+leancli tui
 ```
 
 ## Keystore
 
-`LeanKohaku.Keystore.Enclave` models local-only enclave-backed key custody.
+`LeanCli.Keystore.Enclave` models local-only enclave-backed key custody.
 Secret import/export is denied by the accepted policy. Native macOS/iOS
 Secure Enclave support is modeled for P-256/R1. Linux TPM, FIDO2, Apple
 Secure Enclave, and external hardware signers are local-only P-256/R1
 custody options.
 
-`LeanKohaku.Keystore.Linux` prefers TPM2 for common HP business
+`LeanCli.Keystore.Linux` prefers TPM2 for common HP business
 notebook/workstation and Lenovo ThinkPad/ThinkCentre profiles, falls
 back to FIDO2 security keys when TPM2 is absent, and treats the Linux
 kernel keyring as a local handle store.
 
-`LeanKohaku.Keystore.Tpm2Runtime` is the local Linux runtime boundary.
+`LeanCli.Keystore.Tpm2Runtime` is the local Linux runtime boundary.
 It uses local `tpm2-tools` to create TPM-wrapped P-256 keys under
-`.leankohaku/keystore/tpm2/<name>/`, writes `public.pem` and
+`.leancli/keystore/tpm2/<name>/`, writes `public.pem` and
 `manifest.txt`, and refuses to overwrite an existing manifest. Key
 creation and signing are gated by local `fprintd-verify`, defaulting to
 `right-index-finger` with three verification attempts.
@@ -624,18 +624,18 @@ Nix and Arch packaging list `tpm2-tools`, `libfido2`, and `fprintd` only
 as optional host-integration tools. The Lean wallet does not link to
 those libraries or trust them as crypto implementations.
 
-`script/kohakuspawn` ends each install with a TPM2 readiness probe and
+`script/leanclispawn` ends each install with a TPM2 readiness probe and
 prints the exact distro-specific install line (`pacman` / `apt` /
 `dnf`) when `tpm2-tools` is missing, plus the `usermod -aG tss $USER`
 hint when device permissions block access — so users who want
 `wallet master init` → TPM-bound PIN don't have to assemble the
-prerequisites themselves. `kohaku wallet master status` is the
+prerequisites themselves. `leancli wallet master status` is the
 post-install verification: `tpmHardwareReady: true` means
 `wallet master bind-tpm` will succeed.
 
 ## Accounts
 
-`LeanKohaku.Wallet.Account` defines:
+`LeanCli.Wallet.Account` defines:
 
 - regular BIP-39/BIP-32 Ethereum EOAs (k1) — proven local-only;
 - local hardware-backed P-256/R1 smart accounts — proven local-only;
@@ -655,7 +655,7 @@ SPHINCS+ verifier keyed by stored `(pkSeed, pkRoot)`. Rotation goes
 through dedicated self-call paths.
 
 The Lean abstract model lives in
-`LeanKohaku/Contract/SphincsAccount.lean`; its proofs (Cat 12) cover
+`LeanCli/Contract/SphincsAccount.lean`; its proofs (Cat 12) cover
 nonce monotonicity, the hybrid signature gate, rotation isolation, and
 key supersession after rotation. The Solidity contract itself is
 trusted external code — the Lean abstract model is a *spec* the on-chain
@@ -671,7 +671,7 @@ SPHINCS+ shim section above.
 
 ## Provider policy
 
-`LeanKohaku.Network.Provider` models the small JSON-RPC surface the
+`LeanCli.Network.Provider` models the small JSON-RPC surface the
 daemon may eventually need. It classifies methods by peer, purpose, and
 transport before any runtime networking is implemented.
 
@@ -686,7 +686,7 @@ module is *not* used at runtime — runtime ECDSA goes through
 helpers*).
 
 Keccak-256 and HMAC-SHA512 are the narrow native helper boundary in
-`LeanKohaku.Crypto.Hacl`. Runtime EOA signing depends on those helpers
+`LeanCli.Crypto.Hacl`. Runtime EOA signing depends on those helpers
 being on `$PATH`.
 
 ## Invariants

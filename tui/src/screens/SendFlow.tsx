@@ -95,7 +95,7 @@ function toBaseUnits(amount: string, decimals: number): bigint {
  *  validated by Lean before any signing path runs. */
 export default function SendFlow({ wallet, chain, token, colibriEnabled, onDone }: Props) {
   // Default off; can be overridden via app-level toggle (MainMenu) or the
-  // KOHAKU_COLIBRI env seed at startup.
+  // LEANCLI_COLIBRI env seed at startup.
   const useColibri = colibriEnabled ?? false;
   const [phase, setPhase] = useState<Phase>({ kind: "form" });
   const assetLabel = token ? token.symbol : "ETH";
@@ -671,7 +671,7 @@ function ColibriBlock({ colibri }: { colibri: any }) {
       <ProvenancePanel
         title="colibri stateless verification"
         tier="verified"
-        source="LeanKohaku/Colibri/Bridge.lean — stateless light-client EVM (consensus-verified state)"
+        source="LeanCli/Colibri/Bridge.lean — stateless light-client EVM (consensus-verified state)"
       >
         <Text color={theme.dim}>
           <Text color={theme.warn}>unavailable</Text>{" "}
@@ -694,7 +694,7 @@ function ColibriBlock({ colibri }: { colibri: any }) {
       title="colibri stateless verification"
       tier="verified"
       source={[
-        "LeanKohaku/Colibri/Bridge.lean — stateless light-client EVM",
+        "LeanCli/Colibri/Bridge.lean — stateless light-client EVM",
         "execution re-run locally under WASM EVM against sync-committee-verified state — independent of the untrusted RPC",
         "logs pre-decoded with ABIs shipped by the colibri sidecar",
       ]}

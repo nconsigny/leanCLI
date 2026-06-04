@@ -30,7 +30,7 @@ import { theme } from "../theme.js";
  * Trust contract: every wire shape comes from the agentd's read-only
  * ops (`list_sessions`, `get_session`, `list_proposed_txs`). The TUI
  * NEVER re-signs from this screen. To re-execute a tx, the user has
- * to copy calldata into `kohaku tx send-raw` (or similar) — outside
+ * to copy calldata into `leancli tx send-raw` (or similar) — outside
  * the scope of this surface. Incognito sessions are filtered out at
  * the agentd level; they never reach this view.
  */
@@ -194,8 +194,8 @@ export default function HistoryFlow({ onDone }: Props) {
           setMode({
             kind: "fatal",
             message:
-              "Chat history is only available when the persistent agent daemon (kohaku-agentd) is running. " +
-              "Start it via your systemd user unit (or `kohaku-agentd &`) and reopen this screen.",
+              "Chat history is only available when the persistent agent daemon (leancli-agentd) is running. " +
+              "Start it via your systemd user unit (or `leancli-agentd &`) and reopen this screen.",
           });
           return;
         }

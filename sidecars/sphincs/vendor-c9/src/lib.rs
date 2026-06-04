@@ -1,10 +1,10 @@
-//! leanKohaku C9 (WOTS+C / FORS+C) signer crate.
+//! leanCLI C9 (WOTS+C / FORS+C) signer crate.
 //!
 //! Cryptographic core (hash, wots, fors, merkle, sphincs) is a copy of
 //! upstream `nconsigny/SPHINCS-/signer-wasm` @ 63617e1, with `params.rs`
 //! retuned to C9 (h=20 d=2 a=12 k=11 w=8) against the on-chain verifier
 //! `legacy/src/SPHINCs-C9Asm.sol` @ 5964b61. This `lib.rs` deliberately
-//! omits the upstream `wasm-bindgen` exports — leanKohaku spawns the
+//! omits the upstream `wasm-bindgen` exports — leanCLI spawns the
 //! binary via stdio JSON-RPC, not via WASM.
 
 pub mod hash;

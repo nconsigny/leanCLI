@@ -71,12 +71,12 @@ through a single `renew(name, duration)` tx — no commit phase.
 
 ## Open follow-ups (clearly bounded)
 
-1. `LeanKohaku/Ens/Prepare.lean` — analogous to `Swap/Prepare.lean`
+1. `LeanCli/Ens/Prepare.lean` — analogous to `Swap/Prepare.lean`
    and `Aave/Prepare.lean`. Pure IO orchestration; computes
    `commitment = keccak256(abi.encode(name, owner, duration, secret,
    resolver, data, reverseRecord, ownerControlledFuses))` via the
    existing `c/hacl_helpers/` Keccak path.
-2. `LeanKohaku/Daemon/EnsState.lean` — SQLite-backed persistence of
+2. `LeanCli/Daemon/EnsState.lean` — SQLite-backed persistence of
    pending commitments keyed by `(chainId, name, owner)`. Mirrors
    `Agent/Session.lean`'s shape.
 3. Daemon RPCs `ens.prepareCommit` + `ens.prepareRegister` — wire

@@ -2,7 +2,7 @@
 
 ## Trust model
 
-The `@kohaku-eth/privacy-pools` SDK runs inside the kohaku-bridge
+The `@kohaku-eth/privacy-pools` SDK runs inside the leancli-bridge
 Node sidecar. The sidecar is **untrusted** — it computes the
 zero-knowledge proof and selects the relayer, but every transaction
 it returns is re-decoded by the Lean daemon. Specifically:
@@ -23,8 +23,8 @@ non-negotiable: it ensures the EOA private key is never derivable
 from the privacy-pools commitment secrets, and vice versa.
 
 * EOA signing: TPM-rooted or local mnemonic, as configured.
-* Privacy-pools spending: `LEANKOHAKU_PP_MNEMONIC`, used only inside
-  the kohaku-bridge sidecar.
+* Privacy-pools spending: `LEANCLI_PP_MNEMONIC`, used only inside
+  the leancli-bridge sidecar.
 
 The bridge refuses to start (`buildHost` throws) if either is missing.
 
@@ -83,7 +83,7 @@ sanity-check.
 
 The plugin's redux store (deposits, withdrawals, ASP leaves, pool
 leaves, sync cursor) is serialized to
-`LEANKOHAKU_PP_STATE_PATH` after every state change. Loss of this
+`LEANCLI_PP_STATE_PATH` after every state change. Loss of this
 file forces a full chain resync (the bridge ships
 `ppv1-sepolia-state.json` / `ppv1-mainnet-state.json` as bundled
 warm-start state). The file is non-secret but expensive to rebuild.

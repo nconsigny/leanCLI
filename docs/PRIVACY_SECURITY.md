@@ -1,6 +1,6 @@
 # Privacy And Security
 
-leanKohaku is designed around a narrow network boundary:
+leanCLI is designed around a narrow network boundary:
 
 - The CLI talks only to the local daemon over loopback.
 - Strict daemon mode uses local/light-client provider access only.
@@ -65,7 +65,7 @@ bypasses user confirmation.
 
 ## Invariant Modules
 
-- `LeanKohaku.Invariants.Network`
+- `LeanCli.Invariants.Network`
 
 These modules prove the current policy boundaries used by the CLI and
 daemon models.

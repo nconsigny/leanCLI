@@ -1,6 +1,6 @@
-# leanKohaku TUI
+# leanCLI TUI
 
-Interactive terminal UI for the leanKohaku wallet daemon, built with
+Interactive terminal UI for the leanCLI wallet daemon, built with
 [Ink](https://github.com/vadimdemedes/ink) (React-for-the-terminal).
 
 ## Trust boundary
@@ -12,7 +12,7 @@ limited to:
 
 1. Listing wallets and balances by calling daemon RPCs.
 2. Letting the user navigate with arrow keys.
-3. Rendering the equivalent `kohaku` CLI command for the chosen action and
+3. Rendering the equivalent `leancli` CLI command for the chosen action and
    exiting — the user runs that command in their shell, and prompts (EOA
    passphrase, fingerprint) happen there exactly as they do today.
 
@@ -32,7 +32,7 @@ npm run build      # → dist/index.mjs (single bundled file, ~MB)
 ```bash
 node dist/index.mjs
 # or after install:
-kohaku tui
+leancli tui
 ```
 
 ## Develop

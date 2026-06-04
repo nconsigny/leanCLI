@@ -1,15 +1,15 @@
 ---
-name: kohaku-skills
-description: Entry point for the kohaku wallet's local-LLM skills pack — privacy-first and wallet-hygiene-first. Each sub-skill maps a class of user intent to concrete daemon RPCs (`tx.encodeIntent`, `shielded.*`, `chain.scanTransfers`, …) and the safety steps that must run before signing.
+name: leancli-skills
+description: Entry point for the leancli wallet's local-LLM skills pack — privacy-first and wallet-hygiene-first. Each sub-skill maps a class of user intent to concrete daemon RPCs (`tx.encodeIntent`, `shielded.*`, `chain.scanTransfers`, …) and the safety steps that must run before signing.
 user-invocable: false
 disable-model-invocation: false
 trust-model: model-is-untrusted
 ---
 
-# kohaku skills
+# leancli skills
 
 This pack is loaded by the local-LLM chat path
-(`LeanKohaku/Daemon/Server.lean#chat.draft`). Each skill scopes a class of
+(`LeanCli/Daemon/Server.lean#chat.draft`). Each skill scopes a class of
 intents the user is allowed to ask in natural language; the model's job is
 to **match the user's prompt to the right skill** and emit the structured
 `Intent` JSON each skill specifies. The skill body documents exactly which
@@ -89,9 +89,9 @@ Body convention (every skill follows):
 ## Privacy + hygiene philosophy
 
 The two priority categories are not arbitrary. They are the categories
-that distinguish kohaku from a generic wallet:
+that distinguish leancli from a generic wallet:
 
-* **Privacy** — kohaku integrates Privacy Pools so users can route value
+* **Privacy** — leancli integrates Privacy Pools so users can route value
   through a shielded address without leaking the link to the source.
   Skills here normalize the multi-step shape (deposit → wait → withdraw
   to fresh address) so the user never has to think about it.

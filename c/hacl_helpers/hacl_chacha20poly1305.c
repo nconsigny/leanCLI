@@ -14,7 +14,7 @@
 
 int main(int argc, char **argv) {
   if (argc != 6) {
-    fprintf(stderr, "usage: leankohaku-hacl-chacha20poly1305 <seal|open> <key-hex> <nonce-hex> <aad-hex> <payload-hex>\n");
+    fprintf(stderr, "usage: leancli-hacl-chacha20poly1305 <seal|open> <key-hex> <nonce-hex> <aad-hex> <payload-hex>\n");
     return 2;
   }
 

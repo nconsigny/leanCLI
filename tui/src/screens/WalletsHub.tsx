@@ -292,7 +292,7 @@ export default function WalletsHub({
         setError(
           failed && !failed.ok
             ? failed.error.message
-            : "no wallets configured — run `kohaku wallet create eoa <name>` or `wallet create r1 <name>`",
+            : "no wallets configured — run `leancli wallet create eoa <name>` or `wallet create r1 <name>`",
         );
       }
 
@@ -509,7 +509,7 @@ export default function WalletsHub({
       hint="←/→ action · ↑/↓ wallet · enter run · n chain · r refresh · a archive · esc back"
     >
       <Text color={theme.koiCream} backgroundColor={theme.koiInk} bold>
-        {" leanKohaku · wallets "}
+        {" leanCLI · wallets "}
       </Text>
       <Box marginTop={1}>
         <TabStrip tabs={TABS} activeIndex={tabIdx} onChange={setTabIdx} />

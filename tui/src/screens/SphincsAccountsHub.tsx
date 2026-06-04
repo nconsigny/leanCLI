@@ -28,7 +28,7 @@ type JournalEntry = {
   /** Wall-clock duration of the SPHINCS+ shim call ("the grind"). Only
    *  present on kind = "sphincs.userOp" entries. */
   signMs?: number;
-  /** SPHINCS+ parameter set ("C9", "JARDIN-Keccak-128-24", ...). Same
+  /** SPHINCS+ parameter set ("C13", "SLH-DSA-SHA2-128-24", ...). Same
    *  scope as `signMs`. */
   paramSet?: string;
   /** Bundler-returned userOpHash. Same scope; lets users `getUserOp`
@@ -68,7 +68,7 @@ type Account = {
 };
 
 /** Sub-account ("cousin") within an EOA wallet, as returned by
- *  `eoa.account.list`. Mirrors `LeanKohaku.Wallet.EoaStore.Account.toJson`. */
+ *  `eoa.account.list`. Mirrors `LeanCli.Wallet.EoaStore.Account.toJson`. */
 type EoaAccount = {
   index: number;
   path: string;
@@ -1194,7 +1194,7 @@ function HistoryPanel({ history }: { history: HistoryCell }) {
 
 /** Compact row for the SPHINCS detail panel. Adds a fourth "grind" line
  *  when the entry is a SPHINCS+ UserOp — surfaces sign duration + the
- *  parameter set so the user can see how heavy C9 / JARDIN signing was
+ *  parameter set so the user can see how heavy C13 / SLH-DSA signing was
  *  at submission time. */
 function CompactHistoryRow({ entry }: { entry: JournalEntry }) {
   const status = entry.status ?? "?";

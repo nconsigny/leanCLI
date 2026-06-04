@@ -20,7 +20,7 @@ Verity pinned at:
   $VERITY_DIR
   $VERITY_REV
 
-Note: upstream Verity currently pins Lean 4.22.0 while leanKohaku pins
+Note: upstream Verity currently pins Lean 4.22.0 while leanCLI pins
 Lean 4.29.1. Build/compile Verity artifacts in a matching Verity toolchain
 until the dependency is upgraded or vendored compatibly.
 EOF

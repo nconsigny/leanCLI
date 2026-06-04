@@ -202,7 +202,7 @@ export default function NetworkMonitor({ onDone }: Props) {
         logPath
           ? `tailing ${logPath}`
           : logPath === null && error === null
-            ? "log disabled (LEANKOHAKU_NETWORK_LOG=0)"
+            ? "log disabled (LEANCLI_NETWORK_LOG=0)"
             : "starting…"
       }
       hint="space/p pause · c clear · ← / esc back"
@@ -219,7 +219,7 @@ export default function NetworkMonitor({ onDone }: Props) {
       {logPath === null && !error && (
         <Banner
           kind="warn"
-          text="network log disabled — set LEANKOHAKU_NETWORK_LOG=1 (or unset) and restart the daemon"
+          text="network log disabled — set LEANCLI_NETWORK_LOG=1 (or unset) and restart the daemon"
         />
       )}
       {logPath && (

@@ -18,7 +18,7 @@ type VersionsSnap = {
 
 /** One trusted-registry wallet entry — mirrors the daemon's
  *  `wallet.lean_verified_addresses` response (see
- *  LeanKohaku/Agent/ToolDefs/TrustedRegistry.lean#TrustedAddress). */
+ *  LeanCli/Agent/ToolDefs/TrustedRegistry.lean#TrustedAddress). */
 type WalletEntry = {
   kind: string; // "eoa" | "sphincs" | "r1"
   slot?: string;

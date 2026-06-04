@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 //
 // Loopback-only HTTP POST shim for the Lean-native agent. See lean_http.h
-// for the C ABI. The Lean side (LeanKohaku/Agent/Http.lean) calls into
+// for the C ABI. The Lean side (LeanCli/Agent/Http.lean) calls into
 // this via @[extern] bindings, exactly mirroring the pattern in
 // c/lean_uds/lean_uds.c.
 //

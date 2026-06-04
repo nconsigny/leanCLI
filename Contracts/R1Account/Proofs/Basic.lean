@@ -5,7 +5,7 @@ import Contracts.R1Account.Invariants
 # R1Account basic proof obligations
 
 These theorems are intentionally small and mirror the already-built
-`LeanKohaku.Contract.R1Account` model. Once Verity is added as a dependency,
+`LeanCli.Contract.R1Account` model. Once Verity is added as a dependency,
 these should be strengthened against Verity's generated compilation model.
 -/
 

@@ -49,7 +49,7 @@ static void print_hex(const uint8_t *bytes, size_t len) {
 
 int main(int argc, char **argv) {
   if (argc != 3) {
-    fprintf(stderr, "usage: leankohaku-hacl-hmac-sha512 <key-hex> <msg-hex>\n");
+    fprintf(stderr, "usage: leancli-hacl-hmac-sha512 <key-hex> <msg-hex>\n");
     return 2;
   }
   uint32_t key_len = 0;

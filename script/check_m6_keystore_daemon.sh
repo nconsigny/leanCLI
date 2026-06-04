@@ -2,13 +2,13 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-SOCK="/tmp/leankohaku-m6-check-$$.sock"
-DATA="$(mktemp -d /tmp/leankohaku-m6-check.XXXXXX)"
-LOG="$(mktemp /tmp/leankohaku-m6-check-log.XXXXXX)"
+SOCK="/tmp/leancli-m6-check-$$.sock"
+DATA="$(mktemp -d /tmp/leancli-m6-check.XXXXXX)"
+LOG="$(mktemp /tmp/leancli-m6-check-log.XXXXXX)"
 
 cleanup() {
   set +e
-  LEANKOHAKU_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leankohaku" daemon stop >/dev/null 2>&1
+  LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" daemon stop >/dev/null 2>&1
   if [[ -n "${daemon_pid:-}" ]]; then
     wait "$daemon_pid" >/dev/null 2>&1
   fi
@@ -20,10 +20,10 @@ cd "$ROOT"
 lake build >/dev/null
 script/check_cli_isolation.sh >/dev/null
 
-LEANKOHAKU_SOCKET="$SOCK" \
+LEANCLI_SOCKET="$SOCK" \
 XDG_DATA_HOME="$DATA" \
 PATH="$ROOT/.lake/build/bin:$PATH" \
-"$ROOT/.lake/build/bin/leankohaku-daemon" >"$LOG" 2>&1 &
+"$ROOT/.lake/build/bin/leancli-daemon" >"$LOG" 2>&1 &
 daemon_pid="$!"
 
 for _ in {1..50}; do
@@ -42,12 +42,12 @@ run_expect_code() {
   shift
   local code
   set +e
-  LEANKOHAKU_SOCKET="$SOCK" XDG_DATA_HOME="$DATA" "$ROOT/.lake/build/bin/leankohaku" "$@" >/tmp/leankohaku-m6-check-out 2>&1
+  LEANCLI_SOCKET="$SOCK" XDG_DATA_HOME="$DATA" "$ROOT/.lake/build/bin/leancli" "$@" >/tmp/leancli-m6-check-out 2>&1
   code="$?"
   set -e
   if [[ "$code" != "$expected" ]]; then
     printf 'M6 check failed: expected exit %s for %s, got %s\n' "$expected" "$*" "$code" >&2
-    cat /tmp/leankohaku-m6-check-out >&2
+    cat /tmp/leancli-m6-check-out >&2
     exit 1
   fi
 }
@@ -57,7 +57,7 @@ run_expect_code 1 wallet create sepolia 'bad/key'
 run_expect_code 1 wallet sign sepolia 'bad/key' 0000000000000000000000000000000000000000000000000000000000000000
 run_expect_code 1 wallet send sepolia 'bad/key' 0x0000000000000000000000000000000000000000 1
 
-LEANKOHAKU_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leankohaku" daemon stop >/dev/null
+LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" daemon stop >/dev/null
 wait "$daemon_pid" >/dev/null 2>&1 || true
 unset daemon_pid
 

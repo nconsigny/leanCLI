@@ -57,7 +57,7 @@ function formatBalanceShort(amount: bigint, decimals: number): string {
 
 /** A registry token as exposed by the daemon's `swap.tokens.list` RPC.
  *  The TUI must NOT duplicate the registry — it's sourced from
- *  `LeanKohaku.Swap.Tokens.registry` via the daemon. */
+ *  `LeanCli.Swap.Tokens.registry` via the daemon. */
 type DaemonToken = {
   symbol: string;
   name: string;
@@ -302,8 +302,8 @@ export default function SwapFlow({ wallet, onDone }: Props) {
         return setPhase({
           kind: "load-error",
           message: isR1
-            ? "R1 wallets can only swap on sepolia — register an RPC with `kohaku network set-rpc-chain sepolia <url>`"
-            : "no swappable chain has an RPC configured — register one with `kohaku network set-rpc-chain mainnet <url>` or `… sepolia <url>`",
+            ? "R1 wallets can only swap on sepolia — register an RPC with `leancli network set-rpc-chain sepolia <url>`"
+            : "no swappable chain has an RPC configured — register one with `leancli network set-rpc-chain mainnet <url>` or `… sepolia <url>`",
         });
       }
       // Prefer the daemon's "current" chain *only* if its RPC is configured.
@@ -527,7 +527,7 @@ export default function SwapFlow({ wallet, onDone }: Props) {
               <Text color={theme.dim}>
                 hint: run{" "}
                 <Text color={theme.primary}>
-                  kohaku network set-policy permissive
+                  leancli network set-policy permissive
                 </Text>{" "}
                 to allow configured-RPC mainnet reads (privacy tradeoff: RPC
                 provider sees your address). For privacy, set{" "}
@@ -1152,7 +1152,7 @@ function chainHeader(
       .map((c) => c.name)
       .join(", ");
     return others.length > 0
-      ? `chain ${chain.name} (only ${chain.name} configured · add ${others} via \`kohaku network set-rpc-chain ${chains.find((c) => !c.hasRpc)?.name ?? "<chain>"} <url>\`)`
+      ? `chain ${chain.name} (only ${chain.name} configured · add ${others} via \`leancli network set-rpc-chain ${chains.find((c) => !c.hasRpc)?.name ?? "<chain>"} <url>\`)`
       : `chain ${chain.name}`;
   }
   return `chain ${chain.name} (n to cycle)`;

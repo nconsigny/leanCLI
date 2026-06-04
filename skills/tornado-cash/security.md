@@ -2,7 +2,7 @@
 
 ## Status
 
-Kohaku does not yet ship a `@kohaku-eth/tornado-cash` SDK. Drafting
+leanCLI does not yet ship a `@kohaku-eth/tornado-cash` SDK. Drafting
 Tornado Cash transactions through the agent is **coming soon**. Until
 then, this skill is loaded for **decode context only**: the agent
 recognizes Tornado Cash calldata and explains it through the standard

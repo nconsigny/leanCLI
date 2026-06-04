@@ -272,7 +272,7 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
       >
         <Banner
           kind="warn"
-          text="address book is empty — add entries via `kohaku book add <label> <addr>` first."
+          text="address book is empty — add entries via `leancli book add <label> <addr>` first."
         />
         <Box marginTop={1}>
           <Select

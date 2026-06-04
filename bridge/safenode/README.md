@@ -1,7 +1,7 @@
-# leankohaku-safenode-bridge
+# leancli-safenode-bridge
 
 TDX-attested oblivious-RPC proxy. Sits *upstream* of helios in the
-verified-read pipeline and gives Kohaku two properties that plain RPC
+verified-read pipeline and gives leanCLI two properties that plain RPC
 can't:
 
 - **Privacy** — the upstream is an ORAM server
@@ -31,7 +31,7 @@ Instead, the sidecar splits routes by JSON-RPC method:
   This is the only method that reveals which address/slot the caller
   cares about, so it's the only one whose obliviousness matters.
 - **Everything else → a non-pinned Sepolia RPC** (configurable via
-  `KOHAKU_SAFE_NODE_FALLBACK_RPC`, defaults to
+  `LEANCLI_SAFE_NODE_FALLBACK_RPC`, defaults to
   `https://ethereum-sepolia-rpc.publicnode.com`). These are
   `eth_chainId`, `eth_getBlockByNumber`, `eth_getCode`, `eth_call`,
   `eth_estimateGas`, etc. — block-header and chain-metadata calls that
@@ -81,10 +81,10 @@ unattested ORAM server proxy reads).
 ## Running standalone
 
 ```bash
-export KOHAKU_SAFE_NODE_URL="https://rpc.safe-node.com"
-export KOHAKU_SAFE_NODE_API_KEY="olabs-api-…"
-export KOHAKU_SAFE_NODE_DOMAIN="rpc.safe-node.com"          # optional; defaults to URL hostname
-export KOHAKU_SAFE_NODE_PCCS_URL="https://…"               # optional; PCCS for the Rust verifier
+export LEANCLI_SAFE_NODE_URL="https://rpc.safe-node.com"
+export LEANCLI_SAFE_NODE_API_KEY="olabs-api-…"
+export LEANCLI_SAFE_NODE_DOMAIN="rpc.safe-node.com"          # optional; defaults to URL hostname
+export LEANCLI_SAFE_NODE_PCCS_URL="https://…"               # optional; PCCS for the Rust verifier
 export TDX_QUOTE_VERIFIER_BIN=/path/to/tdx_quote_verifier
 
 node bridge.mjs --listen /tmp/safenode.sock
@@ -103,19 +103,19 @@ API key never leaves this process.
 ## Running from the daemon
 
 The wallet daemon spawns this sidecar automatically when
-`KOHAKU_SAFE_NODE_URL` is set in its environment. Operator commands:
+`LEANCLI_SAFE_NODE_URL` is set in its environment. Operator commands:
 
 ```bash
 # Status (proxy URL, attested pin, MRTD, RTMR3, ...)
-leankohaku rpc daemon.safeNode.status
+leancli rpc daemon.safeNode.status
 
 # Re-run the TDX verify flow (refreshes the pin if the enclave rotated
 # certs; refuses to update on a verification failure).
-leankohaku rpc daemon.safeNode.verify
+leancli rpc daemon.safeNode.verify
 
 # Disable/re-enable at runtime
-leankohaku rpc daemon.safeNode.toggle '{"enable": false}'
-leankohaku rpc daemon.safeNode.toggle '{"enable": true}'
+leancli rpc daemon.safeNode.toggle '{"enable": false}'
+leancli rpc daemon.safeNode.toggle '{"enable": true}'
 ```
 
 When safe-node is enabled, the daemon transparently substitutes the

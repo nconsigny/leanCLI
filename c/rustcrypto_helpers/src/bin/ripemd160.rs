@@ -43,7 +43,7 @@ fn print_hex(bytes: &[u8]) {
 
 fn main() {
     let mut args = std::env::args();
-    let program = args.next().unwrap_or_else(|| "leankohaku-hacl-ripemd160".to_string());
+    let program = args.next().unwrap_or_else(|| "leancli-hacl-ripemd160".to_string());
     let Some(input_hex) = args.next() else {
         eprintln!("usage: {program} <hex>");
         std::process::exit(2);

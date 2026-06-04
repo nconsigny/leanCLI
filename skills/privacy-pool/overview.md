@@ -17,17 +17,17 @@ There is no native-Ethereum "wrap"; ETH is handled via the sentinel
 asset address `0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee` (the
 `E_ADDRESS` constant the SDK re-exports).
 
-## How Privacy Pools fits Kohaku
+## How Privacy Pools fits leanCLI
 
 | Layer | Where it lives |
 |---|---|
-| Witness generation, ASP tree fetch, relayer client | `@kohaku-eth/privacy-pools` (`0.0.2-alpha.9`) inside the kohaku-bridge Node sidecar |
+| Witness generation, ASP tree fetch, relayer client | `@kohaku-eth/privacy-pools` (`0.0.2-alpha.9`) inside the leancli-bridge Node sidecar |
 | Calldata decode + simulation | Lean daemon (`tx.decodeIntent`, `tx.simulate`) |
 | User confirmation | TUI `ConfirmGate` |
 | Signing | TPM-rooted `eoa.send` after gate |
 | Network policy | `Privacy.NetworkPolicy` purpose `shieldedRead` / `shieldedBroadcast` |
-| Storage | File-backed `host.storage` under `LEANKOHAKU_PP_STORAGE_PATH` so the per-account secret↔commitment map survives across sidecar invocations |
-| Secret derivation | `LEANKOHAKU_PP_MNEMONIC` — a dedicated mnemonic separate from the EOA mnemonic |
+| Storage | File-backed `host.storage` under `LEANCLI_PP_STORAGE_PATH` so the per-account secret↔commitment map survives across sidecar invocations |
+| Secret derivation | `LEANCLI_PP_MNEMONIC` — a dedicated mnemonic separate from the EOA mnemonic |
 
 The bridge wires this skill **live** on chains `[11155111, 1]` per
 `bridge.mjs:listProtocols`. Concretely the bridge exposes:
@@ -73,7 +73,7 @@ Reads:
   contract; the bridge calls it explicitly for clarity).
 * `PrivacyPoolsV1Protocol#dumpState()` — serializes the redux store
   for persistence; the bridge atomically writes it to
-  `LEANKOHAKU_PP_STATE_PATH` after every state change.
+  `LEANCLI_PP_STATE_PATH` after every state change.
 
 Calldata prep (every artifact MUST be re-decoded by the Lean daemon
 before signing):
@@ -92,7 +92,7 @@ Broadcast:
 * `createPPv1Broadcaster(host, { broadcasterUrl })` returns a
   broadcaster instance; the bridge defaults
   `broadcasterUrl = "https://fastrelay.xyz/relayer"` (overridable
-  via `LEANKOHAKU_PP_BROADCASTER_URL`).
+  via `LEANCLI_PP_BROADCASTER_URL`).
 * `broadcaster.broadcast(privateOp)` relays through the fastrelay
   endpoint.
 

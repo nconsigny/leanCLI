@@ -195,7 +195,7 @@ lean_object *lk_uds_current_uid(void) {
 
 // setenv(name, value, overwrite=0): only sets if not already in the
 // environment. Real process env always wins over .env, so a `.env` line
-// can never silently override an explicit `LEANKOHAKU_*=...` already in the
+// can never silently override an explicit `LEANCLI_*=...` already in the
 // shell. Returns 0 on any non-fatal outcome (already set, success); only
 // signals an error when setenv itself fails (ENOMEM / EINVAL on bad name).
 lean_object *lk_setenv_if_absent(lean_object *name_obj, lean_object *value_obj) {

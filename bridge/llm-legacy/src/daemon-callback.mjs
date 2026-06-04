@@ -1,9 +1,9 @@
 // Daemon callback — UDS JSON-RPC client for the LLM sidecar.
 //
 // Resolves the daemon socket using the same convention as the Lean CLI
-// (`LeanKohaku.Cli.DaemonClient`):
-//   1. LEANKOHAKU_SOCKET env (explicit override)
-//   2. ${XDG_RUNTIME_DIR:-/tmp}/leankohaku/leankohaku.sock (default)
+// (`LeanCli.Cli.DaemonClient`):
+//   1. LEANCLI_SOCKET env (explicit override)
+//   2. ${XDG_RUNTIME_DIR:-/tmp}/leancli/leancli.sock (default)
 //
 // Trust model: the sidecar is treated as malicious. Every call this
 // module makes goes through the daemon's normal RPC surface — the same
@@ -19,9 +19,9 @@ const DEFAULT_TIMEOUT_MS = 5_000;
 const MAX_RESPONSE_BYTES = 32_768;
 
 function resolveSocketPath() {
-  if (process.env.LEANKOHAKU_SOCKET) return process.env.LEANKOHAKU_SOCKET;
+  if (process.env.LEANCLI_SOCKET) return process.env.LEANCLI_SOCKET;
   const runtimeDir = process.env.XDG_RUNTIME_DIR ?? "/tmp";
-  return path.join(runtimeDir, "leankohaku", "leankohaku.sock");
+  return path.join(runtimeDir, "leancli", "leancli.sock");
 }
 
 let nextId = 1;

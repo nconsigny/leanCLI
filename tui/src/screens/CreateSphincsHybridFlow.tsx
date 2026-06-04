@@ -11,8 +11,12 @@ import { EoaListEntry } from "../types.js";
 
 type Props = { onDone: (success: boolean) => void };
 
-type ParamSet = "SLH-DSA-SHA2-128-24" | "JARDIN-Keccak-128-24" | "C9";
+type ParamSet = "SLH-DSA-SHA2-128-24" | "C13";
 type EcdsaKind = "existing" | "derived";
+// Signer backend for the SLH-DSA-SHA2 set: CPU reference vs the
+// bit-exact Vulkan GPU signer. Meaningful only for SLH-DSA-SHA2 — C13 /
+// JARDIN have a single (CPU) signer, so the picker is skipped for them.
+type Backend = "cpu" | "vulkan";
 type Chain = { name: "sepolia"; chainId: 11155111 }
            | { name: "mainnet"; chainId: 1 };
 
@@ -22,7 +26,8 @@ type Stage =
   | { kind: "pick-chain"; paramSet: ParamSet }
   | { kind: "pick-wallet"; paramSet: ParamSet; chain: Chain }
   | { kind: "pick-ecdsa"; paramSet: ParamSet; chain: Chain; wallet: EoaListEntry }
-  | { kind: "form"; paramSet: ParamSet; chain: Chain; wallet: EoaListEntry; ecdsaKind: EcdsaKind }
+  | { kind: "pick-backend"; paramSet: ParamSet; chain: Chain; wallet: EoaListEntry; ecdsaKind: EcdsaKind }
+  | { kind: "form"; paramSet: ParamSet; chain: Chain; wallet: EoaListEntry; ecdsaKind: EcdsaKind; backend?: Backend }
   | { kind: "rpc"; params: Record<string, string | number> };
 
 const SLOT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/;
@@ -99,9 +104,8 @@ export default function CreateSphincsHybridFlow({ onDone }: Props) {
       );
     }
     const items: { label: string; value: ParamSet }[] = [
-      { label: "SLH-DSA-SHA2-128-24 — NIST FIPS 205 candidate, SHA-2",          value: "SLH-DSA-SHA2-128-24" },
-      { label: "JARDIN-Keccak-128-24 — keccak256 thash, JARDIN ADRS",           value: "JARDIN-Keccak-128-24" },
-      { label: "C9 — WOTS+C / FORS+C, 3816-byte sig (Sepolia-deployed verifier)", value: "C9" },
+      { label: "C13 — WOTS+C / FORS+C, 3688-byte sig · live Sepolia hybrid account (recommended)", value: "C13" },
+      { label: "SLH-DSA-SHA2-128-24 — NIST FIPS 205 candidate, SHA-2 · CPU or Vulkan GPU signer",  value: "SLH-DSA-SHA2-128-24" },
     ];
     return (
       <Layout
@@ -183,12 +187,52 @@ export default function CreateSphincsHybridFlow({ onDone }: Props) {
           arrowNav
           onBack={() => setStage({ kind: "pick-wallet", paramSet: stage.paramSet, chain: stage.chain })}
           onSelect={(it) =>
+            // Only SLH-DSA-SHA2 has a choice of signer backend (CPU vs the
+            // Vulkan GPU signer). C13 / JARDIN have a single signer, so we
+            // skip straight to the form for them.
+            stage.paramSet === "SLH-DSA-SHA2-128-24"
+              ? setStage({
+                  kind: "pick-backend",
+                  paramSet: stage.paramSet,
+                  chain: stage.chain,
+                  wallet: stage.wallet,
+                  ecdsaKind: it.value,
+                })
+              : setStage({
+                  kind: "form",
+                  paramSet: stage.paramSet,
+                  chain: stage.chain,
+                  wallet: stage.wallet,
+                  ecdsaKind: it.value,
+                })}
+        />
+      </Layout>
+    );
+  }
+
+  if (stage.kind === "pick-backend") {
+    const items: { label: string; value: Backend }[] = [
+      { label: "CPU reference signer (default — always available)",                 value: "cpu" },
+      { label: "Vulkan GPU signer ⚡ ~180× faster keygen/sign · needs a Vulkan GPU", value: "vulkan" },
+    ];
+    return (
+      <Layout
+        title="Create SPHINCS- hybrid account · backend"
+        subtitle="SLH-DSA-SHA2 signing is heavy on CPU; the Vulkan signer is bit-exact and re-verified on the CPU reference before any broadcast."
+        hint="↑/↓ move · → / enter select · esc back"
+      >
+        <Select
+          items={items}
+          arrowNav
+          onBack={() => setStage({ kind: "pick-ecdsa", paramSet: stage.paramSet, chain: stage.chain, wallet: stage.wallet })}
+          onSelect={(it) =>
             setStage({
               kind: "form",
               paramSet: stage.paramSet,
               chain: stage.chain,
               wallet: stage.wallet,
-              ecdsaKind: it.value,
+              ecdsaKind: stage.ecdsaKind,
+              backend: it.value,
             })}
         />
       </Layout>
@@ -252,7 +296,9 @@ export default function CreateSphincsHybridFlow({ onDone }: Props) {
         <Form
           fields={fields}
           onCancel={() =>
-            setStage({ kind: "pick-ecdsa", paramSet: stage.paramSet, chain: stage.chain, wallet: stage.wallet })}
+            stage.backend
+              ? setStage({ kind: "pick-backend", paramSet: stage.paramSet, chain: stage.chain, wallet: stage.wallet, ecdsaKind: stage.ecdsaKind })
+              : setStage({ kind: "pick-ecdsa", paramSet: stage.paramSet, chain: stage.chain, wallet: stage.wallet })}
           onSubmit={(v) => {
             const base: Record<string, string | number> = {
               name: v.name ?? "",
@@ -261,6 +307,9 @@ export default function CreateSphincsHybridFlow({ onDone }: Props) {
               ecdsaKind: stage.ecdsaKind,
               chainId: stage.chain.chainId,
             };
+            // Forward the chosen signer backend (SLH-DSA-SHA2 only); the
+            // daemon ignores it for C13 / JARDIN.
+            if (stage.backend) base.backend = stage.backend;
             const slotPass = v.slotPassphrase ?? "";
             if (slotPass.length > 0) base.passphrase = slotPass;
             // empty slotPass + master loaded → daemon mints ephemeral

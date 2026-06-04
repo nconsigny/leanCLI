@@ -1,9 +1,9 @@
-leanKohaku SPHINCS- shim — vendoring provenance and license notes
+leanCLI SPHINCS- shim — vendoring provenance and license notes
 ==================================================================
 
 This directory contains vendored copies (subtree, not submodule) of the
 SPHINCS-/sphincsplus reference C signers, plus a small JSON-RPC shim
-(`shim/shim_main.c`) written for leanKohaku. Three binaries are produced,
+(`shim/shim_main.c`) written for leanCLI. Three binaries are produced,
 one per parameter set, all sharing the same shim source:
 
   - SLH-DSA-SHA2-128-24  (C, SHA-2,   vendor-slhdsa-sha2-128-24/)
@@ -25,7 +25,7 @@ Source:  https://github.com/nconsigny/SPHINCS-
 Path:    signers/sphincsplus-128-24/
 Pin:     63617e166d2e3a576ec5a8c99bebef344c9ca645
 Pin msg: "sphincsplus-128-24: fork ref SHA-2 impl, adapt for SLH-DSA-128-24"
-Vendored: 2026-05 by leanKohaku Phase 2 work.
+Vendored: 2026-05 by leanCLI Phase 2 work.
 
 Files copied verbatim (no edits, no patches):
   address.[ch] api.h context.h fors.[ch] hash.h hash_sha2.c
@@ -51,7 +51,7 @@ Pin:     1acf942 (the commit that introduced the JARDIN-Keccak signer).
          signers/sphincsplus-128-24/ tree, so the pin gap between the
          two vendor dirs is benign (a `git diff 63617e1..1acf942 --
          signers/sphincsplus-128-24/` is empty).
-Vendored: 2026-05 by leanKohaku Phase 2 work.
+Vendored: 2026-05 by leanCLI Phase 2 work.
 
 Files copied verbatim (no edits, no patches):
   address.[ch] api.h context.h fors.[ch] hash.h hash_keccak.c
@@ -109,7 +109,7 @@ will be accepted on chain (and vice versa).
 
 shim/shim_main.c
 ----------------
-Original code, written for leanKohaku, MIT-licensed under the project's
+Original code, written for leanCLI, MIT-licensed under the project's
 top-level LICENSE. JSON-RPC dispatcher with a hand-rolled minimal JSON
 scanner — no external dependencies beyond libc — so it builds cleanly on
 any C99-capable host that can build the upstream signer.

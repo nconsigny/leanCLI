@@ -17,11 +17,11 @@
 #       This stage is deferred when stage B has nothing unlocked
 #       (the daemon will refuse with `locked` before the clamp is
 #       exercised) — same gate applies to E.
-#   E — agent prompt order. Run agentd with KOHAKU_LOG_PROMPT=1 and
+#   E — agent prompt order. Run agentd with LEANCLI_LOG_PROMPT=1 and
 #       confirm the trustedRegistry= flag is emitted by the
 #       skill-trace line.
 #   F — forbidden-import gate (final). The full grep over
-#       LeanKohaku/Agent + the two App/Agent*.lean files for any of
+#       LeanCli/Agent + the two App/Agent*.lean files for any of
 #       the gated symbols must return zero matches.
 #
 # Stages with no live seed unlocked (B, C) run unconditionally. D and
@@ -31,9 +31,9 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 ROOT="$(pwd)"
-LEANKOHAKU="${LEANKOHAKU_BIN:-${ROOT}/.lake/build/bin/leankohaku}"
-LEANKOHAKU_DAEMON="${LEANKOHAKU_DAEMON_BIN:-${ROOT}/.lake/build/bin/leankohaku-daemon}"
-AGENTD="${KOHAKU_AGENTD_BIN:-${ROOT}/.lake/build/bin/kohaku_agentd}"
+LEANCLI="${LEANCLI_BIN:-${ROOT}/.lake/build/bin/leancli}"
+LEANCLI_DAEMON="${LEANCLI_DAEMON_BIN:-${ROOT}/.lake/build/bin/leancli-daemon}"
+AGENTD="${LEANCLI_AGENTD_BIN:-${ROOT}/.lake/build/bin/leancli_agentd}"
 
 note()    { printf '  %s\n' "$*"; }
 ok()      { printf '  ok: %s\n' "$*"; }
@@ -79,7 +79,7 @@ done
 ok "all seven threats covered in threat-model doc"
 
 # Module presence + canonical surface.
-for f in LeanKohaku/Agent/ToolDefs/TrustedRegistry.lean; do
+for f in LeanCli/Agent/ToolDefs/TrustedRegistry.lean; do
   if [[ ! -f "$f" ]]; then
     fail "missing $f"
   fi
@@ -87,27 +87,27 @@ done
 ok "TrustedRegistry tool module present"
 
 # The Lean handler must reference the canonical RPC name.
-if ! grep -q '"wallet.lean_verified_addresses"' LeanKohaku/Daemon/Server.lean; then
+if ! grep -q '"wallet.lean_verified_addresses"' LeanCli/Daemon/Server.lean; then
   fail "Daemon/Server.lean missing handler for wallet.lean_verified_addresses"
 fi
 ok "daemon handler for wallet.lean_verified_addresses present"
 
 # Config knob must be present with the documented default.
-if ! grep -qE 'trustedRegistryMaxPerPath : Nat := 5' LeanKohaku/Daemon/Server.lean; then
+if ! grep -qE 'trustedRegistryMaxPerPath : Nat := 5' LeanCli/Daemon/Server.lean; then
   fail "Config.trustedRegistryMaxPerPath default drifted from 5"
 fi
 ok "Config.trustedRegistryMaxPerPath = 5 (documented default)"
 
 # Forbidden-import gate (agent slice + App/Agent*Main).
-LEAK=$(grep -rE "^import LeanKohaku\.(Wallet\.HDKey|Wallet\.Bip44|Wallet\.EOA|Wallet\.Mnemonic|Wallet\.Entropy|Keystore\.|Daemon\.State|Crypto\.Secp256k1Native|Crypto\.Random)" \
-         LeanKohaku/Agent LeanKohaku/App/AgentMain.lean LeanKohaku/App/AgentDaemonMain.lean 2>/dev/null || true)
+LEAK=$(grep -rE "^import LeanCli\.(Wallet\.HDKey|Wallet\.Bip44|Wallet\.EOA|Wallet\.Mnemonic|Wallet\.Entropy|Keystore\.|Daemon\.State|Crypto\.Secp256k1Native|Crypto\.Random)" \
+         LeanCli/Agent LeanCli/App/AgentMain.lean LeanCli/App/AgentDaemonMain.lean 2>/dev/null || true)
 if [[ -n "$LEAK" ]]; then
   fail "forbidden-import gate failed: $LEAK"
 fi
 ok "forbidden-import gate (agent + Agent*Main) still empty"
 
 # Path-allowlist must be hardcoded, not config-driven.
-if ! grep -q 'allowedPrefixes : List String' LeanKohaku/Daemon/Server.lean; then
+if ! grep -q 'allowedPrefixes : List String' LeanCli/Daemon/Server.lean; then
   fail "daemon handler missing hardcoded allowedPrefixes list"
 fi
 ok "path allowlist is hardcoded in the daemon handler"
@@ -115,8 +115,8 @@ ok "path allowlist is hardcoded in the daemon handler"
 # ---------------------------------------------------------------------------
 section "B/C/D: live RPC behaviour"
 
-if [[ ! -x "$LEANKOHAKU_DAEMON" ]]; then
-  defer "leankohaku-daemon binary not built; skipping live RPC stages"
+if [[ ! -x "$LEANCLI_DAEMON" ]]; then
+  defer "leancli-daemon binary not built; skipping live RPC stages"
 else
 
 PYCLIENT="$(mktemp -t udsclient.XXXXXX.py)"
@@ -137,18 +137,18 @@ print(buf.decode().rstrip())
 EOF
 
 TMP="$(mktemp -d)"
-mkdir -p "$TMP/run/leankohaku"
+mkdir -p "$TMP/run/leancli"
 export XDG_RUNTIME_DIR="$TMP/run"
 export XDG_CONFIG_HOME="$TMP/config"
-mkdir -p "$XDG_CONFIG_HOME/leankohaku"
-WALLET_SOCKET="$XDG_RUNTIME_DIR/leankohaku/leankohaku.sock"
+mkdir -p "$XDG_CONFIG_HOME/leancli"
+WALLET_SOCKET="$XDG_RUNTIME_DIR/leancli/leancli.sock"
 
 start_wallet_daemon() {
   # This smoke test only exercises the `locked` and `bad_path` replies of
   # `wallet.lean_verified_addresses`, which never invoke a crypto helper.
   # Skip the boot-time helper precheck so hosts that haven't run
   # `lake script run setup-helpers` can still run Phase 1d.
-  KOHAKU_SKIP_HELPER_CHECK=1 "$LEANKOHAKU_DAEMON" >"$TMP/daemon.log" 2>&1 &
+  LEANCLI_SKIP_HELPER_CHECK=1 "$LEANCLI_DAEMON" >"$TMP/daemon.log" 2>&1 &
   WALLET_PID=$!
   local waited=0
   while [[ ! -S "$WALLET_SOCKET" && $waited -lt 50 ]]; do
@@ -156,7 +156,7 @@ start_wallet_daemon() {
   done
   if [[ ! -S "$WALLET_SOCKET" ]]; then
     cat "$TMP/daemon.log" >&2
-    fail "leankohaku-daemon did not bind socket within ~5s"
+    fail "leancli-daemon did not bind socket within ~5s"
   fi
 }
 stop_wallet_daemon() {
@@ -193,42 +193,42 @@ stop_wallet_daemon
 fi
 
 # ---------------------------------------------------------------------------
-section "E: agentd prompt order with KOHAKU_LOG_PROMPT=1"
+section "E: agentd prompt order with LEANCLI_LOG_PROMPT=1"
 
 if [[ ! -x "$AGENTD" ]]; then
-  defer "kohaku-agentd binary not built; skipping prompt-order probe"
+  defer "leancli-agentd binary not built; skipping prompt-order probe"
 else
   # The trustedRegistry= flag is emitted by mkRebuildSystem only when
   # run_turn fires (it sits inside the skill-trace line). A full live
   # exercise needs an LLM; the static probe below confirms the
   # rendering code path exists in the binary by greping the Lean
   # source for the marker.
-  if ! grep -q 'trustedRegistry=' LeanKohaku/App/AgentDaemonMain.lean; then
-    fail "AgentDaemonMain missing trustedRegistry= marker in KOHAKU_LOG_PROMPT block"
+  if ! grep -q 'trustedRegistry=' LeanCli/App/AgentDaemonMain.lean; then
+    fail "AgentDaemonMain missing trustedRegistry= marker in LEANCLI_LOG_PROMPT block"
   fi
   ok "trustedRegistry= marker present in AgentDaemonMain log line"
 
   # Prompt-section order in the Lean source: persona → memory →
   # registry → alwaysOn → trigger → ops → tools. Verify by ordering
   # of the relevant blocks in `buildSystemPromptFull`.
-  if ! grep -q 'memoryBlock' LeanKohaku/Agent/Prompt.lean; then
+  if ! grep -q 'memoryBlock' LeanCli/Agent/Prompt.lean; then
     fail "Prompt.lean missing memoryBlock"
   fi
-  if ! grep -q 'registryBlock' LeanKohaku/Agent/Prompt.lean; then
+  if ! grep -q 'registryBlock' LeanCli/Agent/Prompt.lean; then
     fail "Prompt.lean missing Phase-1d registryBlock"
   fi
-  if ! grep -q 'lockedSeedAddendum' LeanKohaku/Agent/Prompt.lean; then
+  if ! grep -q 'lockedSeedAddendum' LeanCli/Agent/Prompt.lean; then
     fail "Prompt.lean missing lockedSeedAddendum"
   fi
   ok "Prompt.lean exposes memoryBlock, registryBlock, and lockedSeedAddendum"
-  defer "live-LLM agentd run requires KOHAKU_TEST_LLAMA_URL; deferred"
+  defer "live-LLM agentd run requires LEANCLI_TEST_LLAMA_URL; deferred"
 fi
 
 # ---------------------------------------------------------------------------
 section "F: forbidden-import gate (final)"
 
-LEAK=$(grep -rE "^import LeanKohaku\.(Wallet\.HDKey|Wallet\.Bip44|Wallet\.EOA|Wallet\.Mnemonic|Wallet\.Entropy|Keystore\.|Daemon\.State|Crypto\.Secp256k1Native|Crypto\.Random)" \
-         LeanKohaku/Agent LeanKohaku/App/AgentMain.lean LeanKohaku/App/AgentDaemonMain.lean 2>/dev/null || true)
+LEAK=$(grep -rE "^import LeanCli\.(Wallet\.HDKey|Wallet\.Bip44|Wallet\.EOA|Wallet\.Mnemonic|Wallet\.Entropy|Keystore\.|Daemon\.State|Crypto\.Secp256k1Native|Crypto\.Random)" \
+         LeanCli/Agent LeanCli/App/AgentMain.lean LeanCli/App/AgentDaemonMain.lean 2>/dev/null || true)
 if [[ -n "$LEAK" ]]; then
   fail "forbidden-import gate failed: $LEAK"
 fi

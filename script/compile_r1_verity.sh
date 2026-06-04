@@ -14,12 +14,12 @@ R1Account is authored in Lean at:
   Contracts/R1Account/R1Account.lean
 
 The upstream Verity compiler expects contracts inside its own Lake package
-and currently pins Lean 4.22.0. leanKohaku pins Lean 4.29.1.
+and currently pins Lean 4.22.0. leanCLI pins Lean 4.29.1.
 
 Next integration task:
   1. add a compatible Verity package/toolchain,
   2. register Contracts.R1Account.R1Account as a compiler module,
-  3. link LeanKohaku_R1_p256Verify to an EIP-7951/P256VERIFY Yul helper,
+  3. link LeanCli_R1_p256Verify to an EIP-7951/P256VERIFY Yul helper,
   4. emit deployable Yul/EVM bytecode to artifacts/r1-sepolia/.
 
 This script intentionally fails until that compatibility bridge is in place,

@@ -1,7 +1,7 @@
 import Lake
 open Lake DSL
 
-package "leanKohaku" where
+package "leanCLI" where
   version := v!"0.1.0"
   -- Mathlib is intentionally omitted for now so `lake build` stays fast
   -- while we iterate on architecture. It will be added when we start
@@ -52,19 +52,19 @@ package "leanKohaku" where
         "/usr/lib/libsqlite3.so",
         "-Wl,--allow-shlib-undefined"]
 
-lean_lib LeanKohaku where
+lean_lib LeanCli where
 
 @[default_target]
-lean_lib LeanKohakuClient where
-  roots := #[`LeanKohaku.Lib.Client]
+lean_lib LeanCliClient where
+  roots := #[`LeanCli.Lib.Client]
 
 @[default_target]
-lean_lib LeanKohakuCore where
-  roots := #[`LeanKohaku.Lib.Core]
+lean_lib LeanCliCore where
+  roots := #[`LeanCli.Lib.Core]
 
 @[default_target]
-lean_lib LeanKohakuSpec where
-  roots := #[`LeanKohaku.Lib.Spec]
+lean_lib LeanCliSpec where
+  roots := #[`LeanCli.Lib.Spec]
 
 extern_lib liblean_uds pkg := do
   let srcJob ← inputTextFile <| pkg.dir / "c" / "lean_uds" / "lean_uds.c"
@@ -73,7 +73,7 @@ extern_lib liblean_uds pkg := do
     #["-I", lean.includeDir.toString, "-fPIC"] #[]
   buildStaticLib (pkg.buildDir / "native" / "liblean_uds.a") #[oJob]
 
--- Loopback-only HTTP POST shim consumed by LeanKohaku/Agent/Http.lean.
+-- Loopback-only HTTP POST shim consumed by LeanCli/Agent/Http.lean.
 -- Compiled against the system libcurl headers; the actual `-lcurl`
 -- link arg is set in the package-level `weakLinkArgs` above.
 extern_lib liblean_http pkg := do
@@ -85,7 +85,7 @@ extern_lib liblean_http pkg := do
       "-fPIC"] #[]
   buildStaticLib (pkg.buildDir / "native" / "liblean_http.a") #[oJob]
 
--- SQLite FFI shim consumed by LeanKohaku/Agent/Session.lean (Phase 1a
+-- SQLite FFI shim consumed by LeanCli/Agent/Session.lean (Phase 1a
 -- persistent agent sessions). Linked against the system libsqlite3 —
 -- Arch (`sqlite`) and Debian 12+ (`libsqlite3-0`) ship FTS5 enabled.
 -- See `c/lean_sqlite/README.md` for the vendoring tradeoff.
@@ -99,13 +99,13 @@ extern_lib liblean_sqlite pkg := do
   buildStaticLib (pkg.buildDir / "native" / "liblean_sqlite.a") #[oJob]
 
 @[default_target]
-lean_exe leankohaku where
-  root := `LeanKohaku.App.Main
+lean_exe leancli where
+  root := `LeanCli.App.Main
   supportInterpreter := true
 
 @[default_target]
-lean_exe «leankohaku-daemon» where
-  root := `LeanKohaku.App.DaemonMain
+lean_exe «leancli-daemon» where
+  root := `LeanCli.App.DaemonMain
   supportInterpreter := true
 
 /--
@@ -114,10 +114,10 @@ Lean-native LLM agent (Phase 0). One-shot replacement for the legacy
 runs the Lean agent loop, emits one JSON-RPC envelope line on stdout.
 
 `LlmAgent.Bridge` switches to this binary by default; the legacy
-sidecar is reachable via `LEAN_KOHAKU_LLM_BRIDGE_LEGACY=1`.
+sidecar is reachable via `LEANCLI_LLM_BRIDGE_LEGACY=1`.
 -/
-lean_exe kohaku_agent where
-  root := `LeanKohaku.App.AgentMain
+lean_exe leancli_agent where
+  root := `LeanCli.App.AgentMain
   supportInterpreter := true
 
 /--
@@ -129,26 +129,26 @@ second-handle concurrent read. Build with
 regression — `tests/agent_phase1a_smoke.sh` runs it as a prereq.
 -/
 lean_exe agent_session_test where
-  root := `LeanKohaku.Agent.SessionTest
+  root := `LeanCli.Agent.SessionTest
   supportInterpreter := true
 
 /--
 Long-running persistent agent daemon (Phase 1a). Listens on
-`$XDG_RUNTIME_DIR/leankohaku/agent.sock` and serves session-scoped
-chat turns backed by `LeanKohaku/Agent/Session.lean`. Mode resolution
+`$XDG_RUNTIME_DIR/leancli/agent.sock` and serves session-scoped
+chat turns backed by `LeanCli/Agent/Session.lean`. Mode resolution
 in `LlmAgent.Bridge.lean` auto-detects this socket and falls back to
 the Phase 0 one-shot path when it is missing.
 -/
-lean_exe kohaku_agentd where
-  root := `LeanKohaku.App.AgentDaemonMain
+lean_exe leancli_agentd where
+  root := `LeanCli.App.AgentDaemonMain
   supportInterpreter := true
 
-lean_exe «leankohaku-eip712-check» where
-  root := `LeanKohaku.App.Eip712Check
+lean_exe «leancli-eip712-check» where
+  root := `LeanCli.App.Eip712Check
   supportInterpreter := true
 
-lean_exe «leankohaku-ens-check» where
-  root := `LeanKohaku.App.EnsCheck
+lean_exe «leancli-ens-check» where
+  root := `LeanCli.App.EnsCheck
   supportInterpreter := true
 
 /--
@@ -166,20 +166,20 @@ keys. alpha-21 derives signers from `host.keystore` on every plugin
 construction, so the snapshot is keystore-agnostic.
 
 Run as a one-shot dev tool when refreshing the snapshot for a release:
-  lake env .lake/build/bin/leankohaku-railgun-snapshot
+  lake env .lake/build/bin/leancli-railgun-snapshot
 -/
-lean_exe «leankohaku-railgun-snapshot» where
-  root := `LeanKohaku.App.RailgunSnapshotMain
+lean_exe «leancli-railgun-snapshot» where
+  root := `LeanCli.App.RailgunSnapshotMain
   supportInterpreter := true
 
 /--
-SPHINCS- shim smoke test. Build with `lake build leankohaku-sphincs-test`,
-run with `lake env .lake/build/bin/leankohaku-sphincs-test`. Exits 0 on
+SPHINCS- shim smoke test. Build with `lake build leancli-sphincs-test`,
+run with `lake env .lake/build/bin/leancli-sphincs-test`. Exits 0 on
 success or when the shim binaries are absent; non-zero on a real
-roundtrip failure. See `LeanKohaku/Sphincs/Test.lean`.
+roundtrip failure. See `LeanCli/Sphincs/Test.lean`.
 -/
-lean_exe «leankohaku-sphincs-test» where
-  root := `LeanKohaku.Sphincs.Test
+lean_exe «leancli-sphincs-test» where
+  root := `LeanCli.Sphincs.Test
   supportInterpreter := true
 
 /--
@@ -191,8 +191,8 @@ the `[sphincs-shims] built` confirmation. We deliberately do not hook
 this into `lean_exe`/`extern_lib` because the C signer does not
 participate in incremental Lean compilation.
 -/
--- Build the native crypto helpers (`leankohaku-hacl-*`,
--- `leankohaku-secp256k1-*`) that the wallet daemon shells out to for
+-- Build the native crypto helpers (`leancli-hacl-*`,
+-- `leancli-secp256k1-*`) that the wallet daemon shells out to for
 -- every PBKDF2, HMAC, Keccak, ChaCha20-Poly1305, and ECDSA op. They
 -- are NOT produced by `lake build` because the bootstrap clones
 -- hacl-packages + bitcoin-core/secp256k1 and runs CMake/Ninja + cargo
