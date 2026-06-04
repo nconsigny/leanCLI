@@ -1,5 +1,6 @@
 /.lake
 /.leancli
+/.leankohaku
 .env
 /out
 /cache
