@@ -57,16 +57,21 @@ package() {
   # (dash form) to match the systemd unit name; the Lake target is
   # `leancli_agentd` so the artefact lives at .lake/build/bin/leancli_agentd.
   install -Dm755 ".lake/build/bin/leancli_agentd" "${pkgdir}/usr/bin/leancli-agentd"
+  # Short alias users type interactively → the single leancli binary. The CLI
+  # reads argv[0] and renders help/usage as `kohaku` when invoked so.
+  ln -s leancli "${pkgdir}/usr/bin/kohaku"
 
   # Shell completion. Generated from the binary so it stays in sync with
   # whatever commands the build actually exposes — no second source of truth.
   install -dm755 "${pkgdir}/usr/share/bash-completion/completions"
   ".lake/build/bin/leancli" completion bash \
       > "${pkgdir}/usr/share/bash-completion/completions/leancli"
+  ln -s leancli "${pkgdir}/usr/share/bash-completion/completions/kohaku"
 
   install -dm755 "${pkgdir}/usr/share/zsh/site-functions"
   ".lake/build/bin/leancli" completion zsh \
       > "${pkgdir}/usr/share/zsh/site-functions/_leancli"
+  ln -s _leancli "${pkgdir}/usr/share/zsh/site-functions/_kohaku"
 
   install -Dm644 "packaging/systemd/leancli.socket" "${pkgdir}/usr/lib/systemd/user/leancli.socket"
   install -Dm644 "packaging/systemd/leancli.service" "${pkgdir}/usr/lib/systemd/user/leancli.service"

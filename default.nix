@@ -33,16 +33,23 @@ pkgs.stdenv.mkDerivation rec {
     runHook preInstall
     install -Dm755 .lake/build/bin/leancli "$out/bin/leancli"
     install -Dm755 .lake/build/bin/leancli-daemon "$out/bin/leancli-daemon"
+    # Short alias users type interactively → the single leancli binary. The
+    # CLI reads argv[0] and renders help/usage as `kohaku` when invoked so.
+    ln -s leancli "$out/bin/kohaku"
 
     # Shell completion, generated from the binary so it tracks whatever
     # commands the build actually exposes (no second source of truth).
     install -dm755 "$out/share/bash-completion/completions"
     "$out/bin/leancli" completion bash \
         > "$out/share/bash-completion/completions/leancli"
+    # The generated script registers both `leancli` and `kohaku`; symlink so
+    # bash autoloads it when the alias is first completed.
+    ln -s leancli "$out/share/bash-completion/completions/kohaku"
 
     install -dm755 "$out/share/zsh/site-functions"
     "$out/bin/leancli" completion zsh \
         > "$out/share/zsh/site-functions/_leancli"
+    ln -s _leancli "$out/share/zsh/site-functions/_kohaku"
 
     if [ -f tui/dist/index.mjs ]; then
       install -Dm644 tui/dist/index.mjs "$out/share/leancli/tui/index.mjs"

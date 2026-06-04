@@ -1497,12 +1497,28 @@ private def runBalances
                               padRight addrField 44 ++ formatBaseUnits balN dec)
                 return 0
 
+/-- Basename of `argv[0]` as the process was invoked — `kohaku` when run
+    through the alias symlink, `leancli` otherwise. `IO.getArgs` drops
+    argv[0] and `IO.appPath` resolves the symlink to the real binary, so we
+    read `/proc/self/cmdline` (NUL-delimited; argv[0] is its first field) and
+    take its basename. Used only to render help/usage in the name the user
+    typed — never a trust input; falls back to `"leancli"` on any non-Linux
+    or read error. -/
+def progName : IO String := do
+  try
+    let raw ← IO.FS.readBinFile "/proc/self/cmdline"
+    let argv0 := String.ofList (raw.toList.takeWhile (· != 0) |>.map (fun b => Char.ofNat b.toNat))
+    let base := (System.FilePath.mk argv0).fileName.getD "leancli"
+    pure (if base.isEmpty then "leancli" else base)
+  catch _ => pure "leancli"
+
 def run (args : List String) : IO UInt32 := do
+  let prog ← progName
   let (cmd, accountIdx?) := parseTop args
   -- Why: only commands listed in step 4 spec consume `--account`; others ignore it silently.
   match cmd with
-  | .help       => IO.println helpText; return 0
-  | .version    => IO.println s!"leancli {LeanCli.version}"; return 0
+  | .help       => IO.println (helpText.replace "leancli " s!"{prog} "); return 0
+  | .version    => IO.println s!"{prog} {LeanCli.version}"; return 0
   | .policy topic => IO.println (policyText topic); return 0
   | .walletCreate typ name extra =>
       match typ with
@@ -2111,17 +2127,17 @@ def run (args : List String) : IO UInt32 := do
           child.wait
   | .doctor     => IO.println doctorText; return 0
   | .policyCheck policy peer purpose transport =>
-      IO.println (policyCheckText policy peer purpose transport)
+      IO.println ((policyCheckText policy peer purpose transport).replace "leancli " s!"{prog} ")
       return 0
   | .rpcCheck policy backend transport method =>
-      IO.println (rpcCheckText policy backend transport method)
+      IO.println ((rpcCheckText policy backend transport method).replace "leancli " s!"{prog} ")
       return 0
   | .rpcMethods => IO.println rpcMethodsText; return 0
   | .decodeErc20 calldata =>
       IO.println (erc20DecodeText calldata)
       return 0
   | .endpointCheck mode kind scheme transport credentialed =>
-      IO.println (endpointCheckText mode kind scheme transport credentialed)
+      IO.println ((endpointCheckText mode kind scheme transport credentialed).replace "leancli " s!"{prog} ")
       return 0
   | .daemonHelp walletName? =>
       IO.println (daemonHelpText walletName?)
@@ -3266,7 +3282,7 @@ def run (args : List String) : IO UInt32 := do
           return 2
       | _ =>
           IO.eprintln s!"unknown or invalid command: {args}"
-          IO.println helpText
+          IO.println (helpText.replace "leancli " s!"{prog} ")
           return 2
 
 end LeanCli.Cli

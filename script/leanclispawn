@@ -154,7 +154,7 @@ Options:
                       is not a TTY (covers `curl ... | bash` and CI).
   --force             Overwrite existing leancli / leancli-daemon symlinks
                       that point somewhere else. Default refuses.
-  --uninstall         Remove ~/.leancli/bin/{leancli,leancli-daemon,leancli-agent,leancli-agentd,leanclispawn}
+  --uninstall         Remove ~/.leancli/bin/{leancli,kohaku,leancli-daemon,leancli-agent,leancli-agentd,leanclispawn}
                       and the XDG skills symlink under
                       $XDG_DATA_HOME/leancli/skills (only when those
                       symlinks point at the recorded checkout; pair with
@@ -340,6 +340,7 @@ if [[ "$MODE" == "uninstall" ]]; then
   }
 
   remove_link "leancli" "leancli"
+  remove_link "kohaku" "leancli"
   remove_link "leancli-daemon" "leancli-daemon"
   # Agent binaries (Phase 0 + Phase 1a). Same checkout-rooted symlink
   # model; remove_link no-ops if the symlink is missing or points
@@ -752,6 +753,9 @@ install_skills_link() {
 }
 
 link_one "$LEAN_BIN" "leancli"
+# Short alias users type interactively. Points at the same leancli binary;
+# the CLI reads argv[0] and renders help/usage as `kohaku` when invoked so.
+link_one "$LEAN_BIN" "kohaku"
 link_one "$LEAN_DAEMON" "leancli-daemon"
 # Agent binaries are best-effort: an older checkout that predates Phase 0
 # won't have built them. Skip-with-warning rather than fail the install.
