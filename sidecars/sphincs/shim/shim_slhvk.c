@@ -5,7 +5,10 @@
  * Implements the three sphincsplus reference entry points that
  * `shim_main.c` calls — `crypto_sign_seed_keypair`, `crypto_sign_signature`,
  * `crypto_sign_verify` — in terms of the vendored Vulkan signer
- * (`vendor-slhvk-sha2-128-24/`, API in `slhvk.h`). Linking this against the
+ * (`vendor-slhvk-sha2-128-24/`, API in `slhvk.h`), vendored from upstream
+ * `nconsigny/SPHINCS-` pinned at commit
+ * aedfada38cb0548fe2d5a2070c0c8924f7f261a8 (GitHub main, 2026-06-04).
+ * Linking this against the
  * SAME `shim_main.c` yields `sphincs-slhdsa-128-24-vk`, which speaks the
  * identical wire protocol as the CPU `sphincs-slhdsa-128-24` binary — so the
  * Lean bridge (`LeanCli/Sphincs/Bridge.lean`) drives the GPU signer with no

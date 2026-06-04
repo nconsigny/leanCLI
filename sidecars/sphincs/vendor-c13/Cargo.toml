@@ -2,7 +2,7 @@
 name = "sphincs-c13-shim"
 version = "0.1.0"
 edition = "2021"
-description = "leanCLI C13 (WOTS+C / FORS+C, h=22 d=2 a=19 k=7 w=8, 3688-byte sig) signer shim — cryptographic core vendored verbatim from upstream nconsigny/SPHINCS- signer-wasm @ main (FIPS 205 uncompressed ADRS + keccak256), with the wasm-bindgen layer stripped and a stdio JSON-RPC dispatcher + verify-after-sign added."
+description = "leanCLI C13 (WOTS+C / FORS+C, h=22 d=2 a=19 k=7 w=8, 3688-byte sig) signer shim — cryptographic core vendored verbatim from upstream nconsigny/SPHINCS- signer-wasm pinned at commit aedfada38cb0548fe2d5a2070c0c8924f7f261a8 (GitHub main, 2026-06-04; FIPS 205 uncompressed ADRS + keccak256), with the wasm-bindgen layer stripped and a stdio JSON-RPC dispatcher + verify-after-sign added."
 
 # Single native binary. Upstream also builds a wasm cdylib via
 # wasm-bindgen; we strip that — the daemon spawns a native stdio JSON-RPC

@@ -14,9 +14,17 @@
 #define SPX_NAMESPACE(s) SPX_##s
 
 #define SPX_N 16
+/* SPX_FULL_HEIGHT / SPX_FORS_HEIGHT are -D-overridable (#ifndef) so CI can build
+ * a reduced-parameter binary for a fast Python<->C crosscheck. The DEFAULT build
+ * is the full NIST SP 800-230 set; do NOT override these for any binary intended
+ * to verify on-chain. */
+#ifndef SPX_FULL_HEIGHT
 #define SPX_FULL_HEIGHT 22
+#endif
 #define SPX_D 1
+#ifndef SPX_FORS_HEIGHT
 #define SPX_FORS_HEIGHT 24
+#endif
 #define SPX_FORS_TREES 6
 
 /* Winternitz parameter — 4 for the 24-signature variant (security level 1). */

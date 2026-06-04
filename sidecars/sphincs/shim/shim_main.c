@@ -402,9 +402,26 @@ static void handle_sign(const char *params_start, const char *params_end,
     set_rng_buffer(optrand, sizeof(optrand));
     unsigned char sig[SPX_BYTES];
     size_t siglen = 0;
+#ifdef SPX_EXTERNAL_ENVELOPE
+    /* FIPS 205 external SLH-DSA, empty context: sign M' = 0x00 || 0x00 || M
+     * (domain byte 0 = pure, ctx-length byte 0). The vendored crypto_sign_*
+     * is slh_sign_internal, so the envelope is a 2-byte prepend here. This
+     * matches the on-chain SLH-DSA-SHA2 verifier, the NIST/ACVP external
+     * KATs, and the Vulkan signer (which applies the same envelope inside
+     * slhvkSignPure). Set ONLY for the CPU SLH-DSA-SHA2 build: the keccak
+     * C13 signer has its own h_msg, and the GPU build must NOT set it (its
+     * lib already envelopes — a prepend here would double it). */
+    unsigned char menv[2 + DIGEST_BYTES];
+    menv[0] = 0x00; menv[1] = 0x00;
+    memcpy(menv + 2, dg, sizeof(dg));
+    if (crypto_sign_signature(sig, &siglen, menv, sizeof(menv), sk) != 0 || siglen != SPX_BYTES) {
+        emit_error(id_val, has_id, -32603, "sign failed"); return;
+    }
+#else
     if (crypto_sign_signature(sig, &siglen, dg, sizeof(dg), sk) != 0 || siglen != SPX_BYTES) {
         emit_error(id_val, has_id, -32603, "sign failed"); return;
     }
+#endif
     char *sig_hex = (char *)malloc(2 * SPX_BYTES + 1);
     if (!sig_hex) { emit_error(id_val, has_id, -32603, "oom"); return; }
     hex_encode(sig, SPX_BYTES, sig_hex);
@@ -454,7 +471,15 @@ static void handle_verify(const char *params_start, const char *params_end,
         free(sig);
         emit_error(id_val, has_id, -32602, "sig length mismatch"); return;
     }
+#ifdef SPX_EXTERNAL_ENVELOPE
+    /* External-mode verify: reconstruct M' = 0x00 || 0x00 || M (see handle_sign). */
+    unsigned char menv[2 + DIGEST_BYTES];
+    menv[0] = 0x00; menv[1] = 0x00;
+    memcpy(menv + 2, dg, sizeof(dg));
+    int rc = crypto_sign_verify(sig, SPX_BYTES, menv, sizeof(menv), pk);
+#else
     int rc = crypto_sign_verify(sig, SPX_BYTES, dg, sizeof(dg), pk);
+#endif
     free(sig);
     emit_result_open(id_val, has_id);
     printf("\"ok\":%s", (rc == 0) ? "true" : "false");

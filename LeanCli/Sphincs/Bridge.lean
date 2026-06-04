@@ -37,13 +37,13 @@ relative to NIST SLH-DSA. Internal type names and the on-chain
 Trust model: identical to the Node sidecars in `bridge/`. The shim binary
 is **untrusted** (the GPU signer doubly so — it runs driver/shader code).
 Every output goes through length-validation against the parameter set's
-known sizes, and `signWithVerify` runs verify-after-sign locally on the
-signing backend before handing the signature back, so neither a malicious
-shim nor a faulty GPU can get the daemon to broadcast a signature that
-backend's own verifier would reject. (Cross-backend verify is NOT used:
-the Vulkan SLH-DSA signer uses FIPS external mode while the CPU reference
-shim verifies internal mode — keygen is bit-exact between them, but the
-message-envelope convention differs; see `signWithVerify`.)
+known sizes, and `signWithVerify` runs verify-after-sign on the signing
+backend before handing the signature back, so neither a malicious shim
+nor a faulty GPU can get the daemon to broadcast a signature that
+backend's own verifier would reject. Verify is intentionally NOT
+cross-backend: after the FIPS-205 fixes the CPU shim reproduces the
+on-chain KAT bit-exact, but CPU↔GPU SLH-DSA parity on arbitrary inputs is
+not yet proven (a fresh vector still diverges) — see `signWithVerify`.
 
 `info`-reported sizes are checked against the parameter-set's expected
 constants on every call so a wrongly-spawned binary (or a tampered
@@ -501,18 +501,21 @@ def verify (ps : ParamSet) (pkSeed pkRoot digest sig : String)
     will accept (correctness), or it rejects and we abort here.
 
     Verify-after-sign runs on the SAME backend that produced the
-    signature. This was briefly cross-checked on the CPU reference, but
-    that is unsound here: the Vulkan SLH-DSA-SHA2 signer uses FIPS 205
-    *external* mode (M = 0x00‖0x00‖M, matching the on-chain verifier and
-    the pinned KAT), whereas the vendored CPU reference shim verifies in
-    *internal* mode (raw digest) — so the CPU shim rejects a perfectly
-    valid, on-chain-acceptable GPU signature. Keygen IS bit-exact across
-    the two (verified: identical pkRoot for a shared seed); only the
-    message-envelope convention differs. Verifying on the signing backend
-    keeps the guard self-consistent and on-chain-aligned for the GPU
-    path. (The CPU-shim internal-vs-on-chain-external mismatch is a
-    pre-existing SLH-DSA caveat — that param set has no on-chain account
-    yet, so it has never been cross-checked on-chain.) -/
+    signature — NOT cross-backend (CPU-verify of a GPU sig), because
+    CPU↔GPU parity for SLH-DSA-SHA2 is not yet complete. After the
+    FIPS-205 fixes (external envelope + MSB-first FORS parse), the CPU
+    reference reproduces the on-chain KAT vector
+    `vendor-slhvk-sha2-128-24/kat-counter0.json` BIT-EXACT — but a fresh
+    input still diverges: keygen matches, yet CPU and GPU produce
+    different (each individually valid) signatures and CPU rejects the
+    GPU's. There is a residual, input-dependent divergence in the
+    message→indices path that the single KAT did not exercise. Until that
+    is localised (more KAT vectors / a cross-impl oracle), cross-backend
+    verify is unsound, so each backend re-verifies its own output. The
+    KAT independently establishes the GPU signer is on-chain-correct for
+    the canonical vector; same-backend verify-after-sign then guarantees
+    self-consistency before broadcast. (C13 uses its own keccak h_msg and
+    is unaffected.) -/
 def signWithVerify (ps : ParamSet) (sk pkSeed pkRoot digest : String)
     (optrand? : Option String := none) (backend : SignerBackend := .cpu) :
     IO (Except Err String) := do

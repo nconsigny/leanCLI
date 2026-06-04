@@ -3,7 +3,9 @@
 //!
 //! The cryptographic core (hash, params, keygen, wots, fors, merkle,
 //! sphincs) is vendored verbatim from upstream
-//! `nconsigny/SPHINCS-/signer-wasm` @ main — which already targets C13
+//! `nconsigny/SPHINCS- signer-wasm` pinned at commit
+//! aedfada38cb0548fe2d5a2070c0c8924f7f261a8 (GitHub main, 2026-06-04) —
+//! which already targets C13
 //! (FIPS 205 §11.2.2 uncompressed 32-byte ADRS + keccak256). This
 //! `lib.rs` deliberately omits the upstream `wasm-bindgen` exports
 //! (leanCLI spawns the binary via stdio JSON-RPC, not via WASM) and adds
