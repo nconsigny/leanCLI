@@ -191,7 +191,14 @@ export default function Dashboard({
   // Height budget. The TUI lives in the alternate screen buffer: anything
   // taller than the viewport is lost, so every pane gets a hard height
   // and renders at most (height - border(2) - title(1)) single lines.
-  const H = rows - 1; // one row reserved for the footer
+  // Pane-row height. Total frame = H (pane row) + 1 (footer). We reserve
+  // TWO rows, not one: a frame that exactly fills the viewport makes many
+  // terminals scroll when the last cell is written, pushing the top line
+  // above the viewport — and Ink can't erase a line that scrolled off, so
+  // on the way back to the menu it leaks through as a "ghost dashboard".
+  // Leaving one blank row at the bottom keeps the frame strictly inside
+  // the viewport so Ink's own eraseLines fully clears it on transition.
+  const H = rows - 2;
   const chatW = Math.max(50, Math.floor(columns * 0.58));
   const rightW = columns - chatW;
   const rpcH = 9;
