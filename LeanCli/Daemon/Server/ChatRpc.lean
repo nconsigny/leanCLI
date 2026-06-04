@@ -332,7 +332,11 @@ private def chatDraftIntentResponse
           .obj <| commonFields ++ #[
             ("encoded", .obj #[
               ("to",      .str enc.to),
-              ("value",   .num (Int.ofNat enc.valueWei)),
+              -- Wei as a 0x-quantity hex STRING, not a JSON number: a JS
+              -- client's JSON.parse would silently round any value above
+              -- 2^53 to a double before it could be widened to bigint.
+              -- Same encoder the tx-framing path uses (natQuantityHex).
+              ("value",   .str (natQuantityHex enc.valueWei)),
               ("data",    .str enc.data),
               ("chainId", .num (Int.ofNat chainId))
             ])
@@ -878,7 +882,10 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                           ("intentActionTag",.str actionTag),
                           ("encoded", .obj <| #[
                             ("to",      .str ps.to),
-                            ("value",   .num (Int.ofNat ps.value)),
+                            -- 0x-quantity hex STRING (see encodeIntentResult);
+                            -- a JSON number would lose wei precision >2^53 in
+                            -- the TUI's JSON.parse before BigInt() runs.
+                            ("value",   .str (natQuantityHex ps.value)),
                             ("data",    .str ps.data),
                             ("chainId", .num (Int.ofNat ps.chainId))
                           ] ++ senderEntry)
