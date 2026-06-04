@@ -380,6 +380,9 @@ if [[ "$MODE" == "uninstall" ]]; then
   # users who hand-symlinked a sphincs-* binary to their own build won't
   # have it clobbered.
   remove_link "sphincs-slhdsa-128-24" "sphincs-slhdsa-128-24"
+  remove_link "sphincs-slhdsa-128-24-vk" "sphincs-slhdsa-128-24-vk"
+  remove_link "sphincs-c13" "sphincs-c13"
+  # Legacy variants (pre-C13 / pre-rename installs): clean up stale symlinks.
   remove_link "sphincs-jardin-keccak-128-24" "sphincs-jardin-keccak-128-24"
   remove_link "sphincs-c9" "sphincs-c9"
 
@@ -396,6 +399,7 @@ if [[ "$MODE" == "uninstall" ]]; then
   # that happens to share the name.
   for bridge_exe in leancli-bridge leancli-clearsign-bridge \
                     leancli-colibri-bridge leancli-helios-bridge \
+                    leancli-safenode-bridge \
                     leancli-llm-bridge leancli-llm-legacy; do
     if [[ -e "$LEANCLI_BIN/$bridge_exe" ]]; then
       rm -f "$LEANCLI_BIN/$bridge_exe"
@@ -507,7 +511,14 @@ fi
 # (gcc / cargo) so an install on a host that doesn't compile the shims
 # still finishes — the daemon's `sphincs.*` RPCs just fail closed at use
 # time with a clear "shim binary not found" message.
-SPHINCS_SHIMS=(sphincs-slhdsa-128-24 sphincs-jardin-keccak-128-24 sphincs-c9)
+# Built by the Makefile's default `all` target (see sidecars/sphincs/Makefile:
+# `all: slhdsa c13`). These are presence-checked and required-wired below.
+SPHINCS_SHIMS=(sphincs-slhdsa-128-24 sphincs-c13)
+# Opt-in Vulkan GPU signer for SLH-DSA-SHA2-128-24 (`make slhvk`; needs a
+# Vulkan SDK + device). NOT part of `make all`, so it is wired only when the
+# user has built it and is silent when absent — no spurious warning on hosts
+# without a GPU. Matches Bridge.lean's `.slhDsaSha2_128_24 .vulkan` backend.
+SPHINCS_SHIMS_OPTIONAL=(sphincs-slhdsa-128-24-vk)
 build_sphincs_shims() {
   if [[ $BUILD_LEAN -ne 1 ]]; then
     return 0
@@ -849,14 +860,18 @@ fi
 sphincs_env_var_for() {
   case "$1" in
     sphincs-slhdsa-128-24)        echo "LEANCLI_SPHINCS_SLHDSA";;
-    sphincs-jardin-keccak-128-24) echo "LEANCLI_SPHINCS_JARDIN";;
-    sphincs-c9)                   echo "LEANCLI_SPHINCS_C9";;
+    sphincs-slhdsa-128-24-vk)     echo "LEANCLI_SPHINCS_SLHDSA_VK";;
+    sphincs-c13)                  echo "LEANCLI_SPHINCS_C13";;
   esac
 }
-for shim in "${SPHINCS_SHIMS[@]}"; do
+for shim in "${SPHINCS_SHIMS[@]}" "${SPHINCS_SHIMS_OPTIONAL[@]}"; do
   shim_path="$CHECKOUT/.lake/build/bin/$shim"
   if [[ ! -x "$shim_path" ]]; then
-    echo "leanclispawn: sphincs shim $shim missing at $shim_path — sphincs.* RPCs will fail closed" >&2
+    # Opt-in (Vulkan) shims are silent when absent; required shims warn.
+    case " ${SPHINCS_SHIMS_OPTIONAL[*]} " in
+      *" $shim "*) : ;;
+      *) echo "leanclispawn: sphincs shim $shim missing at $shim_path — sphincs.* RPCs will fail closed" >&2 ;;
+    esac
     continue
   fi
   link_one "$shim_path" "$shim"
@@ -931,6 +946,10 @@ install_bridge_wrappers() {
     "leancli-clearsign-bridge:bridge/clearsign/bridge.mjs:LEANCLI_CLEARSIGN_BRIDGE"
     "leancli-colibri-bridge:bridge/colibri/bridge.mjs:LEANCLI_COLIBRI_BRIDGE"
     "leancli-helios-bridge:bridge/helios/bridge.mjs:LEANCLI_HELIOS_BRIDGE"
+    # TDX-attested ORAM proxy (SafeNode/Bridge.lean). The wrapper only execs
+    # node + bridge.mjs; the upstream TDX_QUOTE_VERIFIER_BIN it needs at
+    # runtime is a separate, user-supplied dependency.
+    "leancli-safenode-bridge:bridge/safenode/bridge.mjs:LEANCLI_SAFENODE_BRIDGE"
     "leancli-llm-legacy:bridge/llm-legacy/bridge.mjs:LEANCLI_LLM_BRIDGE_LEGACY_PATH"
   )
 
