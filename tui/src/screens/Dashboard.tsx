@@ -459,6 +459,29 @@ function RpcBox({
       {onOff(cfg.colibri, pending === "colibri")} · oram-tee{" "}
       {onOff(cfg.safeNode, pending === "oram-tee")}
     </Line>,
+    // The headline answer to "am I verified?": the read backend only
+    // governs tx.simulate (the pre-sign check). It is consensus-verified
+    // ONLY when the matching sidecar is actually running — backend=helios
+    // with the sidecar down is NOT verified. Balance/token reads always
+    // go direct RPC (display-only), so we say so explicitly.
+    (() => {
+      const rb = cfg.readBackend;
+      const v =
+        rb === "helios" && cfg.helios?.running
+          ? { c: theme.ok, t: "✓ verified: tx simulate via helios · balances direct" }
+          : rb === "colibri" && cfg.colibri?.running
+            ? { c: theme.ok, t: "✓ verified: tx simulate via colibri · balances direct" }
+            : rb === "helios"
+              ? { c: theme.warn, t: "⚠ backend=helios but sidecar OFF — simulate NOT verified" }
+              : rb === "colibri"
+                ? { c: theme.warn, t: "⚠ backend=colibri but sidecar OFF — simulate NOT verified" }
+                : { c: theme.dim, t: "simulate uses raw RPC — not consensus-verified" };
+      return (
+        <Line key="verified" color={v.c}>
+          {v.t}
+        </Line>
+      );
+    })(),
     cfg.oramProxyUrl ? (
       <Line key="oram" color={theme.ok}>⛨ reads exec via ORAM proxy {cfg.oramProxyUrl}</Line>
     ) : cfg.safeNode?.running && cfg.safeNode.attestation ? (
