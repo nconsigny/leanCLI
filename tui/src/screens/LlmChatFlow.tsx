@@ -88,12 +88,12 @@ type OwnershipEntry = {
  *  gates signing. The TUI's foldable trace block under each assistant
  *  turn is the only consumer; the agent loop's own correctness is
  *  unaffected by what we render (or don't render) here. */
-type TraceItem =
+export type TraceItem =
   | { kind: "assistant"; content: string; reasoning?: string }
   | { kind: "tool_call"; idx: number; name: string; argsJson: string }
   | { kind: "tool_result"; idx: number; ok: boolean; summary: string };
 
-type DraftResponse = {
+export type DraftResponse = {
   regex?: {
     action: string;
     fields: { k: string; v: string }[];
@@ -113,7 +113,13 @@ type DraftResponse = {
   // Standard leaf-encodable response — model emits a tx-shaped Intent
   // and the daemon's encoder returns the {to, value, data} the TUI
   // routes through tx.simulate + ConfirmGate.
-  encoded?: { to: string; value: number; data: string; chainId: number; sender?: string };
+  //
+  // `value` is a 0x-quantity hex STRING (wei), produced by the daemon's
+  // canonical `natQuantityHex` (ChatRpc.lean). It is deliberately NOT a
+  // JSON number: a number would be rounded by JSON.parse for any wei
+  // amount above 2^53 before we could widen it to bigint. `BigInt(value)`
+  // parses the 0x-string exactly.
+  encoded?: { to: string; value: string; data: string; chainId: number; sender?: string };
   encodeError?: string;
   modelAsk?: { error: string; question: string };
   // New non-tx-encoded action directives. Returned by chat.draft for
@@ -150,13 +156,13 @@ type DraftResponse = {
 /** A row from `daemon.approvals.list`. The shape is the wire spec
  *  documented in the audit-approvals SKILL.md; today the daemon returns
  *  an empty list with implemented=false until the actual scan is wired. */
-type ApprovalRow = {
+export type ApprovalRow = {
   token: string;
   spender: string;
   amount: string;       // uint256 string-form
   lastSeenBlock: number;
 };
-type AuditResult = {
+export type AuditResult = {
   chainId: number;
   approvals: ApprovalRow[];
   implemented: boolean;
@@ -164,12 +170,12 @@ type AuditResult = {
   wallet?: string;
 };
 
-type PreparedTx = { to: string; value: string; data: string };
+export type PreparedTx = { to: string; value: string; data: string };
 
 /** Per-turn dispatch state for the chat.draft directive directives
  *  (prepare / audit / create). idle = button shown; running = RPC in
  *  flight; done = rendered inline; error = surfaced inline. */
-type DispatchState =
+export type DispatchState =
   | { kind: "idle" }
   | { kind: "running" }
   | { kind: "auditDone"; data: AuditResult }
@@ -222,7 +228,7 @@ const TUI_HISTORY_CAP = 8;
  *  would balloon context and the sidecar re-runs tool calls per turn
  *  anyway. The point of history is to remember *what the user already
  *  said* and *what was offered/asked back*, not to relitigate state. */
-function summariseAssistantTurn(t: Extract<Turn, { kind: "assistant" }>): string | null {
+export function summariseAssistantTurn(t: Extract<Turn, { kind: "assistant" }>): string | null {
   if (t.status === "pending") return null;
   if (t.error) return `[error] ${t.error}`;
   const r = t.result;
@@ -248,7 +254,7 @@ function summariseAssistantTurn(t: Extract<Turn, { kind: "assistant" }>): string
  *  useful rather than a blank label. Kept deliberately terse — the
  *  ConfirmGate screen is where full detail (token symbol, amount,
  *  balance changes) is rendered. */
-function friendlyAction(tag: string | undefined): string {
+export function friendlyAction(tag: string | undefined): string {
   switch (tag) {
     case "nativeTransfer":       return "Send ETH";
     case "erc20Transfer":        return "Send ERC-20 token";
@@ -278,7 +284,7 @@ function friendlyAction(tag: string | undefined): string {
 /** Build the history array forwarded to chat.draft. Filters out
  *  ephemeral system rows and pending turns, summarises assistant
  *  turns, and slices to the most recent TUI_HISTORY_CAP entries. */
-function buildChatHistory(turns: Turn[]): { role: "user" | "assistant"; content: string }[] {
+export function buildChatHistory(turns: Turn[]): { role: "user" | "assistant"; content: string }[] {
   const out: { role: "user" | "assistant"; content: string }[] = [];
   for (const t of turns) {
     if (t.kind === "user") {
@@ -329,7 +335,7 @@ export type Phase =
  *  `crypto.randomUUID()` (available since 14.17 — the TUI ships on
  *  modern Node) and falls back to a time+random concatenation when
  *  the runtime omits it. Not used as a secret. */
-function newSessionKey(): string {
+export function newSessionKey(): string {
   try {
     const c = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
     if (c && typeof c.randomUUID === "function") return c.randomUUID();

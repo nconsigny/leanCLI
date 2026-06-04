@@ -644,7 +644,7 @@ function readSandboxMode(): SandboxMode {
   const raw = readFileSync(path, "utf8");
   for (const line of raw.split("\n")) {
     const m = line.match(/^LEANCLI_SANDBOX\s*=\s*(\S+)/);
-    if (m) {
+    if (m && m[1]) {
       const v = m[1].toLowerCase();
       if (v === "off" || v === "require" || v === "auto") return v;
     }

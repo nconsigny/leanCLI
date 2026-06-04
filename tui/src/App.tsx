@@ -53,6 +53,7 @@ import RailgunMenu from "./screens/RailgunMenu.js";
 import NetworkScreen from "./screens/NetworkScreen.js";
 import NetworkMonitor from "./screens/NetworkMonitor.js";
 import StatusFlow from "./screens/StatusFlow.js";
+import Dashboard from "./screens/Dashboard.js";
 import TrustedRegistryFlow from "./screens/TrustedRegistryFlow.js";
 import { NavContext, type NavApi } from "./nav.js";
 import {
@@ -74,6 +75,10 @@ type Screen =
   // empty MainMenu.
   | { kind: "boot" }
   | { kind: "main" }
+  // Multiplexed home screen: chat pane + wallet / rpc / network /
+  // llama.cpp boxes over one viewport. Default landing after BootGate;
+  // Esc pops to MainMenu.
+  | { kind: "dashboard" }
   | { kind: "master-unlock" }
   | { kind: "wallets" }
   | { kind: "actions"; wallet: Wallet }
@@ -346,8 +351,8 @@ export default function App() {
   };
   const forward = () => {
     setForwardStack((fs) => {
-      if (fs.length === 0) return fs;
       const [next, ...rest] = fs;
+      if (!next) return fs;
       // Re-push without touching forwardStack again — we already drained
       // the head. (Using `push` here would clear the rest of the chain.)
       setStack((prev) => [...prev, next]);
@@ -356,11 +361,18 @@ export default function App() {
   };
   // Top-level keystroke: `]` advances through the forward chain.
   // Screens use `←` / `esc` for back (existing convention) and own that
-  // key; we don't shadow them here. `]` is unused anywhere else in the
-  // TUI today (grep: no other useInput handles it).
-  useInput((input) => {
-    if (input === "]") forward();
-  });
+  // key; we don't shadow them here. Gated OFF for screens that mount a
+  // persistent text input (dashboard chat pane, full le-chat): ink's
+  // useInput is broadcast and ink-text-input passes `]` straight through
+  // to the buffer, so an un-gated forward hook would both insert `]` into
+  // the message AND navigate the user away mid-compose.
+  const textInputScreen = top.kind === "dashboard" || top.kind === "llm-chat";
+  useInput(
+    (input) => {
+      if (input === "]") forward();
+    },
+    { isActive: !textInputScreen },
+  );
   const navApi: NavApi = {
     canBack: stack.length > 1,
     canForward: forwardStack.length > 0,
@@ -370,6 +382,7 @@ export default function App() {
 
   const handleMain = (a: MainAction) => {
     switch (a) {
+      case "dashboard":        return push({ kind: "dashboard" });
       case "wallets":          return push({ kind: "wallets" });
       case "le-chat":          return push({ kind: "llm-chat" });
       case "create-wallet":    return push({ kind: "create-wallet" });
@@ -478,6 +491,26 @@ export default function App() {
           readBackend={readBackend}
           readBackendPending={readBackendPending}
           masterStatusKey={masterStatusKey}
+        />
+      );
+    case "dashboard":
+      return (
+        <Dashboard
+          chatPhase={chatPhase}
+          setChatPhase={setChatPhase}
+          chatWallets={chatWallets}
+          setChatWallets={setChatWallets}
+          onApprove={(tx, chainId, wallet) =>
+            push({ kind: "send-raw", tx, chainId, wallet })
+          }
+          onCreateWallet={(kind, _label) => {
+            // Same contract as the full chat: the trusted creation flow
+            // owns labels/passphrases; the chat never pre-fills them.
+            push({ kind: kind === "eoa" ? "create-eoa" : "create-r1" });
+          }}
+          onOpenFullChat={() => push({ kind: "llm-chat" })}
+          onOpenChatHistory={() => push({ kind: "chat-history" })}
+          onBack={pop}
         />
       );
     case "master-unlock":
@@ -636,6 +669,14 @@ export default function App() {
           wallets={chatWallets}
           setWallets={setChatWallets}
           onDone={(_success) => {
+            // Opened from the dashboard (ctrl+o expand)? Esc means
+            // "collapse back into the pane" — preserve the conversation
+            // instead of resetting; the dashboard's ChatPane remounts
+            // with the same lifted phase.
+            if (stack.some((s) => s.kind === "dashboard")) {
+              pop();
+              return;
+            }
             // Full exit from the chat — drop conversation state so the
             // next `/le-chat` entry starts at boot with a fresh
             // sessionKey. The send-raw round-trip uses `pop()` too but
@@ -680,8 +721,9 @@ export default function App() {
           chainId={top.chainId}
           wallet={top.wallet}
           onDone={(success, result) => {
-            // If the user reached send-raw FROM the chat (llm-chat sits
-            // underneath us on the stack), surface the broadcast outcome
+            // If the user reached send-raw FROM the chat (llm-chat or
+            // the dashboard's chat pane sits underneath us on the
+            // stack), surface the broadcast outcome
             // back into the conversation as a single system turn. Lets
             // the user "see the confirmation inside the chat" rather
             // than just bouncing back to an unchanged conversation
@@ -695,7 +737,9 @@ export default function App() {
             // of a multi-step flow (e.g. supply after erc20Approve)
             // or acknowledge completion. The agent decides — we don't
             // pre-judge whether there IS a next step.
-            const fromChat = stack.some((s) => s.kind === "llm-chat");
+            const fromChat = stack.some(
+              (s) => s.kind === "llm-chat" || s.kind === "dashboard",
+            );
             if (fromChat) {
               const turn = broadcastResultToTurn(success, result);
               const cont = success ? extractBroadcastReceipt(result) : null;
@@ -725,7 +769,10 @@ export default function App() {
       return (
         <BootGate
           onDone={() => {
-            setStack([{ kind: "main" }]);
+            // Land on the dashboard with MainMenu underneath, so Esc
+            // from the dashboard goes to the menu and Quit stays one
+            // more Esc away. Forward stack cleared as before.
+            setStack([{ kind: "main" }, { kind: "dashboard" }]);
             setForwardStack([]);
           }}
         />

@@ -6,6 +6,7 @@ import { call } from "../daemon.js";
 import { theme } from "../theme.js";
 
 export type MainAction =
+  | "dashboard"
   | "wallets"
   | "le-chat"
   | "create-wallet"
@@ -79,6 +80,7 @@ export default function MainMenu({
   });
 
   const items: { label: string; value: MainAction }[] = [
+    { label: "Dashboard (chat · wallet · rpc · network · llm)",          value: "dashboard" },
     { label: "Wallets",                                                  value: "wallets" },
     { label: "le chat (local-LLM, experimental)",                        value: "le-chat" },
     { label: "Privacy Plugins",                                          value: "private" },

@@ -66,7 +66,7 @@ export function shortAddr(addr: string): string {
 export function parseEthToWei(s: string): bigint | null {
   const t = s.trim();
   if (!/^[0-9]+(\.[0-9]+)?$/.test(t)) return null;
-  const [whole, frac = ""] = t.split(".");
+  const [whole = "0", frac = ""] = t.split(".");
   if (frac.length > 18) return null;
   const padded = (frac + "0".repeat(18)).slice(0, 18);
   try { return BigInt(whole) * 10n ** 18n + BigInt(padded || "0"); }
