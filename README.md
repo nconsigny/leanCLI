@@ -183,7 +183,8 @@ leancli debug endpoint-check strict local http loopback false
 leancli debug decode erc20 0xa9059cbb...
 leancli daemon ping
 leancli daemon                  # starts the daemon in the foreground
-leancli tui                     # opens the Ink TUI
+leancli tui                     # opens the Ink TUI (menu → Dashboard for the
+                                # multiplexed chat + wallet/RPC/network/llama.cpp view)
 ```
 
 
