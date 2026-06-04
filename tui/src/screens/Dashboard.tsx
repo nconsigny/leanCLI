@@ -47,10 +47,10 @@ type PaneId = (typeof PANES)[number];
 
 const PANE_HINTS: Record<PaneId, string> = {
   chat: "enter send · empty-enter act on draft · ctrl+o full chat · /clear reset",
-  wallet: "r refresh · s sync shielded (slow, needs unlock)",
-  rpc: "b read-backend · h helios · c colibri · o oram-tee",
-  net: "c clear counters",
-  llm: "read-only probes of llama-server + /proc",
+  wallet: "enter → Wallets hub · r refresh · s sync shielded (slow, needs unlock)",
+  rpc: "enter → Status · b read-backend · h helios · c colibri · o oram-tee",
+  net: "enter → live monitor · c clear counters",
+  llm: "enter → Status · read-only probes of llama-server + /proc",
 };
 
 type Props = {
@@ -66,6 +66,10 @@ type Props = {
   onCreateWallet: (kind: "eoa" | "r1", label: string | undefined) => void;
   onOpenFullChat: () => void;
   onOpenChatHistory: () => void;
+  /** Expand the focused pane to its dedicated full screen. */
+  onOpenWallets: () => void;
+  onOpenStatus: () => void;
+  onOpenNetworkMonitor: () => void;
   onBack: () => void;
 };
 
@@ -78,6 +82,9 @@ export default function Dashboard({
   onCreateWallet,
   onOpenFullChat,
   onOpenChatHistory,
+  onOpenWallets,
+  onOpenStatus,
+  onOpenNetworkMonitor,
   onBack,
 }: Props) {
   const { columns, rows } = useTerminalSize();
@@ -140,10 +147,21 @@ export default function Dashboard({
     }
   });
 
-  // Pane-scoped bare-letter shortcuts. Never active while the chat pane
-  // holds focus (its TextInput owns printable keys there).
+  // Pane-scoped shortcuts + "expand to full screen". Never active while
+  // the chat pane holds focus (its TextInput owns printable keys there;
+  // chat uses Ctrl+O to expand, handled inside ChatPane).
   useInput(
-    (ch) => {
+    (ch, key) => {
+      // Enter expands the focused pane to its dedicated full screen — the
+      // dense dashboard box is a summary; the full screen is the rich
+      // view. Consistent across panes so "drill in" is one key.
+      if (key.return) {
+        if (activePane === "wallet") onOpenWallets();
+        else if (activePane === "rpc") onOpenStatus();
+        else if (activePane === "net") onOpenNetworkMonitor();
+        else if (activePane === "llm") onOpenStatus();
+        return;
+      }
       if (activePane === "wallet") {
         if (ch === "r") wallet.refresh();
         if (ch === "s") wallet.syncShielded();

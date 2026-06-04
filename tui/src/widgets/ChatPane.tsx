@@ -4,6 +4,7 @@ import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import { call } from "../daemon.js";
 import { theme } from "../theme.js";
+import AnimatedKoi from "./AnimatedKoi.js";
 import {
   type Phase,
   type Turn,
@@ -399,15 +400,49 @@ export default function ChatPane({
         )}
       </Text>
       {turns.length === 0 ? (
-        <Box flexDirection="column">
-          <Text color={theme.dim}>Examples:</Text>
-          <Text wrap="truncate-end" color={theme.dim}>
-            {"  "}<Text color={theme.primary}>send 0.001 ETH to niard.eth</Text>
-          </Text>
-          <Text wrap="truncate-end" color={theme.dim}>
-            {"  "}<Text color={theme.primary}>swap 0.1 ETH to USDC</Text>
-          </Text>
-        </Box>
+        // Welcome state: show the Kohaku koi beside the examples — same
+        // identity the full le-chat screen carries, so collapsing the
+        // full chat (ctrl+o) back into this pane is visually continuous.
+        // The koi is 24×12; only render it when the pane has the room,
+        // and it costs nothing once the conversation starts (this whole
+        // block is replaced by the transcript below).
+        contentHeight >= 14 ? (
+          <Box flexDirection="row">
+            <Box width={24} minWidth={24} height={12} flexShrink={0} marginRight={2}>
+              <AnimatedKoi size="tiny" />
+            </Box>
+            <Box flexDirection="column" flexGrow={1} minWidth={0}>
+              <Text wrap="truncate-end" color={theme.koiCream} bold>
+                le chat · local LLM
+              </Text>
+              <Text wrap="truncate-end" color={theme.dim}>
+                untrusted model · Lean validator · canonical text in confirm
+              </Text>
+              <Box marginTop={1} flexDirection="column">
+                <Text color={theme.dim}>Examples:</Text>
+                <Text wrap="truncate-end" color={theme.dim}>
+                  {"  "}<Text color={theme.primary}>send 0.001 ETH to niard.eth</Text>
+                </Text>
+                <Text wrap="truncate-end" color={theme.dim}>
+                  {"  "}<Text color={theme.primary}>swap 0.1 ETH to USDC</Text>
+                </Text>
+                <Text wrap="truncate-end" color={theme.dim}>
+                  {"  "}<Text color={theme.primary}>approve 100 USDC for vitalik.eth</Text>
+                </Text>
+              </Box>
+            </Box>
+          </Box>
+        ) : (
+          <Box flexDirection="column">
+            <Text color={theme.dim}>Examples:</Text>
+            <Text wrap="truncate-end" color={theme.dim}>
+              {"  "}<Text color={theme.primary}>send 0.001 ETH to niard.eth</Text>
+            </Text>
+            <Text wrap="truncate-end" color={theme.dim}>
+              {"  "}<Text color={theme.primary}>swap 0.1 ETH to USDC</Text>
+            </Text>
+          </Box>
+        )
       ) : (
         <Box flexDirection="column">
           {dropped > 0 && (

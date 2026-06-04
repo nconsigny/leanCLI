@@ -510,6 +510,9 @@ export default function App() {
           }}
           onOpenFullChat={() => push({ kind: "llm-chat" })}
           onOpenChatHistory={() => push({ kind: "chat-history" })}
+          onOpenWallets={() => push({ kind: "wallets" })}
+          onOpenStatus={() => push({ kind: "status" })}
+          onOpenNetworkMonitor={() => push({ kind: "network-monitor" })}
           onBack={pop}
         />
       );
@@ -769,10 +772,11 @@ export default function App() {
       return (
         <BootGate
           onDone={() => {
-            // Land on the dashboard with MainMenu underneath, so Esc
-            // from the dashboard goes to the menu and Quit stays one
-            // more Esc away. Forward stack cleared as before.
-            setStack([{ kind: "main" }, { kind: "dashboard" }]);
+            // Land on the main menu. The dashboard is a deliberate
+            // sub-entry of the menu, not the default landing — the menu
+            // is the stable, consistent home. Forward stack cleared as
+            // before.
+            setStack([{ kind: "main" }]);
             setForwardStack([]);
           }}
         />
