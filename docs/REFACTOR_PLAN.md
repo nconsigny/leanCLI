@@ -86,5 +86,6 @@ Lean, auditable, maintainable, clean root. **Not a strip-down** — keep every u
 - [x] Recon (7 explorers) + verification of load-bearing claims.
 - [x] Phase 1 — layout move (commit `94b9045a`).
 - [x] Phase 2 Stream A — crypto hygiene (pins, CRYPTO_POLICY.md, native/README.md, pruned 2 dead helpers).
-- [ ] Phase 2 Streams B, C, D, E.
+- [x] Phase 2 Stream C — drop R1 + Solidity (commits c4fa2b55, 7840c69a, 8f8e2e87; build 256, re-proven).
+- [ ] Phase 2 Streams D, B, E (order per user: D→B→E).
 - [ ] Phase 3 — Stream-F reconciliation + integration gate.

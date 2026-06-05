@@ -2,7 +2,7 @@ import LeanCli.Crypto.Hacl
 import LeanCli.Crypto.Hex
 import LeanCli.Ethereum.Address
 import LeanCli.Invariants.Ens
-import LeanCli.Privacy.NetworkPolicy
+import LeanCli.Network.Policy
 import LeanCli.RPC.Outbound
 
 /-!
@@ -18,7 +18,7 @@ ASCII-only: callers must reject non-ASCII names before calling. The
 namespace LeanCli.Ethereum.Ens
 
 open LeanCli.Encoding.Json
-open LeanCli.Privacy.NetworkPolicy
+open LeanCli.Network.Policy
 
 /-- 32 zero bytes — the namehash of the empty name. -/
 def emptyNode : ByteArray :=

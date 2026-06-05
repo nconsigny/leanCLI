@@ -14,7 +14,7 @@ or auto-spawn `leancli-daemon` as a local fallback.
 
 namespace LeanCli.Cli.Commands
 
-open LeanCli.Privacy.NetworkPolicy
+open LeanCli.Network.Policy
 open LeanCli.Network.Provider
 open LeanCli.Network.Endpoint
 
@@ -817,7 +817,7 @@ def privacyText : String :=
      - configured-node traffic is denied in strict mode\n\
      - Tor mode may read or broadcast through a configured node over Tor\n\
      - third-party APIs remain denied even when Tor is enabled\n\n\
-   Policy modules: LeanCli.Privacy.NetworkPolicy, LeanCli.Network.Provider.\n"
+   Policy modules: LeanCli.Network.Policy, LeanCli.Network.Provider.\n"
 
 def networkText : String :=
   "leanCLI network surface\n\n\

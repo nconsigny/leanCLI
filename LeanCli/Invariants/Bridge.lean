@@ -1,5 +1,5 @@
 import LeanCli.Privacy.Bridge
-import LeanCli.Privacy.NetworkPolicy
+import LeanCli.Network.Policy
 
 /-!
 # Bridge boundary invariants
@@ -33,7 +33,7 @@ a theorem here.
 namespace LeanCli.Invariants.Bridge
 
 open LeanCli.Privacy.Bridge
-open LeanCli.Privacy.NetworkPolicy
+open LeanCli.Network.Policy
 
 /-! ## Method purpose classification -/
 

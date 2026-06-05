@@ -17,7 +17,7 @@ namespace LeanCli.Invariants.Network
 open LeanCli.Cli.Commands
 open LeanCli.Network.Endpoint
 open LeanCli.Network.Provider
-open LeanCli.Privacy.NetworkPolicy
+open LeanCli.Network.Policy
 
 theorem daemonRequestAlwaysLocal (action : Action) :
     (daemonRequest action).peer = Peer.localDaemon ∧

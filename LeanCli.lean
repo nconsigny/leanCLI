@@ -31,7 +31,7 @@ import LeanCli.Ethereum.IntentJson
 import LeanCli.Ethereum.Ownership
 import LeanCli.Ethereum.Tx
 
-import LeanCli.Privacy.NetworkPolicy
+import LeanCli.Network.Policy
 import LeanCli.Privacy.Bridge
 import LeanCli.Clearsign.Bridge
 import LeanCli.LlmAgent.Bridge

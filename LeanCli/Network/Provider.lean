@@ -1,4 +1,4 @@
-import LeanCli.Privacy.NetworkPolicy
+import LeanCli.Network.Policy
 
 /-!
 # Provider/network operation model
@@ -10,7 +10,7 @@ small set of Ethereum JSON-RPC methods the wallet may eventually need.
 
 namespace LeanCli.Network.Provider
 
-open LeanCli.Privacy.NetworkPolicy
+open LeanCli.Network.Policy
 
 inductive Backend where
   | localNode

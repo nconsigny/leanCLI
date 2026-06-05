@@ -13,7 +13,7 @@ sign sidecar via the daemon's policy gate.
 
 Both are pure reads from the agent's perspective: no state change, no
 signature, no broadcast. The daemon validates each call against
-`Privacy.NetworkPolicy` before forwarding.
+`Network.Policy` before forwarding.
 -/
 
 namespace LeanCli.Agent.ToolDefs.Decode

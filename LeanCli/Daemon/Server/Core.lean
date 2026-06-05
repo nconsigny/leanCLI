@@ -1,4 +1,4 @@
-import LeanCli.Privacy.NetworkPolicy
+import LeanCli.Network.Policy
 import LeanCli.RPC.Outbound
 import LeanCli.Sphincs.Bridge
 
@@ -14,7 +14,7 @@ No IO, no helpers — only structures and their `Repr` instances live here.
 
 namespace LeanCli.Daemon.Server
 
-open LeanCli.Privacy.NetworkPolicy
+open LeanCli.Network.Policy
 
 /-- A single configured indexer entry. URL is persisted to disk; the API
     key is supplied via env (e.g. `LEANCLI_ETHERSCAN_KEY`) and never

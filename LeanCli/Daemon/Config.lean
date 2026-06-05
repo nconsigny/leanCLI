@@ -1,6 +1,6 @@
 import LeanCli.Daemon.Server
 import LeanCli.Encoding.Json
-import LeanCli.Privacy.NetworkPolicy
+import LeanCli.Network.Policy
 import LeanCli.RPC.Outbound
 import LeanCli.Sphincs.Bridge
 
@@ -15,7 +15,7 @@ deployment defaults without rewriting config.
 namespace LeanCli.Daemon.Config
 
 open LeanCli.Encoding.Json
-open LeanCli.Privacy.NetworkPolicy
+open LeanCli.Network.Policy
 open LeanCli.RPC.Outbound
 
 /-- Resolve the per-user runtime directory hosting the wallet UDS
@@ -183,7 +183,7 @@ def resolve : IO LeanCli.Daemon.Server.Config := do
   let policy :=
     match ← IO.getEnv "LEANCLI_NETWORK_POLICY" with
     | some s =>
-        match LeanCli.Privacy.NetworkPolicy.parsePolicy s with
+        match LeanCli.Network.Policy.parsePolicy s with
         | some p => p
         | none => defaultPolicy
     | none =>
@@ -192,7 +192,7 @@ def resolve : IO LeanCli.Daemon.Server.Config := do
           configString? fileCfg "networkPolicy"
         ] with
         | some s =>
-            match LeanCli.Privacy.NetworkPolicy.parsePolicy s with
+            match LeanCli.Network.Policy.parsePolicy s with
             | some p => p
             | none => defaultPolicy
         | none => defaultPolicy
@@ -521,7 +521,7 @@ def resolve : IO LeanCli.Daemon.Server.Config := do
     -- `mainnetSafeDaemonPolicy` denies configured-node mainnet reads),
     -- silently no-op'ing the mismatch check. Use a permissive policy
     -- for THIS call only — all runtime calls still go through cfg.policy.
-    let probePolicy : LeanCli.Privacy.NetworkPolicy.Policy := fun _ => true
+    let probePolicy : LeanCli.Network.Policy.Policy := fun _ => true
     match ← LeanCli.RPC.Outbound.call probePolicy rpcEndpoint .chainId (.arr #[]) none with
     | .ok j =>
         match asString j with

@@ -1,5 +1,5 @@
 import LeanCli.Encoding.Json
-import LeanCli.Privacy.NetworkPolicy
+import LeanCli.Network.Policy
 import LeanCli.RPC.Outbound
 
 /-!
@@ -13,7 +13,7 @@ set-lightclient` / `network unset` without depending on the daemon module.
 namespace LeanCli.Cli.NetworkConfig
 
 open LeanCli.Encoding.Json
-open LeanCli.Privacy.NetworkPolicy
+open LeanCli.Network.Policy
 open LeanCli.RPC.Outbound
 
 def configDir : IO String := do

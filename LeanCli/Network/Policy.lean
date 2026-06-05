@@ -6,7 +6,7 @@ code can send it. The policy is deny-by-default: only explicitly modeled
 local daemon, local node, and configured-node traffic can be accepted.
 -/
 
-namespace LeanCli.Privacy.NetworkPolicy
+namespace LeanCli.Network.Policy
 
 inductive Peer where
   | localDaemon
@@ -20,11 +20,7 @@ inductive Purpose where
   | nodeRead
   | broadcastTx
   | peerDiscovery
-  | analytics
   | priceQuote
-  | metadataLookup
-  | fiatOnramp
-  | crashReport
   | shieldedRead
   | shieldedBroadcast
   -- Why: third-party block-explorer / indexer history lookups (e.g.
@@ -187,11 +183,7 @@ def denyByDefault : Policy := fun _ => false
 
 def thirdPartyPurpose : Purpose → Bool
   | .peerDiscovery => true
-  | .analytics => true
   | .priceQuote => true
-  | .metadataLookup => true
-  | .fiatOnramp => true
-  | .crashReport => true
   | .indexerLookup => true
   | _ => false
 
@@ -206,11 +198,7 @@ def Purpose.asString : Purpose → String
   | .nodeRead => "node-read"
   | .broadcastTx => "broadcast-tx"
   | .peerDiscovery => "peer-discovery"
-  | .analytics => "analytics"
   | .priceQuote => "price-quote"
-  | .metadataLookup => "metadata-lookup"
-  | .fiatOnramp => "fiat-onramp"
-  | .crashReport => "crash-report"
   | .shieldedRead => "shielded-read"
   | .shieldedBroadcast => "shielded-broadcast"
   | .indexerLookup => "indexer-lookup"
@@ -232,11 +220,7 @@ def parsePurpose : String → Option Purpose
   | "node-read" => some .nodeRead
   | "broadcast-tx" => some .broadcastTx
   | "peer-discovery" => some .peerDiscovery
-  | "analytics" => some .analytics
   | "price-quote" => some .priceQuote
-  | "metadata-lookup" => some .metadataLookup
-  | "fiat-onramp" => some .fiatOnramp
-  | "crash-report" => some .crashReport
   | "shielded-read" => some .shieldedRead
   | "shielded-broadcast" => some .shieldedBroadcast
   | "indexer-lookup" => some .indexerLookup
@@ -266,9 +250,8 @@ def policyNames : List String :=
   ["cli", "strict", "loopback-strict", "tor", "dev", "permissive", "indexer", "deny"]
 def peerNames : List String := ["local-daemon", "local-node", "configured-node", "third-party-api"]
 def purposeNames : List String :=
-  ["daemon-control", "node-read", "broadcast-tx", "peer-discovery", "analytics",
-    "price-quote", "metadata-lookup", "fiat-onramp", "crash-report",
-    "shielded-read", "shielded-broadcast", "indexer-lookup"]
+  ["daemon-control", "node-read", "broadcast-tx", "peer-discovery",
+    "price-quote", "shielded-read", "shielded-broadcast", "indexer-lookup"]
 def transportNames : List String := ["loopback", "tor", "direct"]
 
-end LeanCli.Privacy.NetworkPolicy
+end LeanCli.Network.Policy

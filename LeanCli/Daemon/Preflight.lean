@@ -1,7 +1,7 @@
 import LeanCli.Daemon.State
 import LeanCli.Daemon.TokenMeta
 import LeanCli.RPC.Outbound
-import LeanCli.Privacy.NetworkPolicy
+import LeanCli.Network.Policy
 import LeanCli.Encoding.Json
 import LeanCli.Crypto.Hex
 import LeanCli.Swap.UniV3
@@ -183,7 +183,7 @@ private def approveDelta (curr new : Nat) : String :=
 
 /-- `eth_call(allowance(owner, spender))` on the token contract. -/
 private def readAllowance
-    (policy : LeanCli.Privacy.NetworkPolicy.Policy)
+    (policy : LeanCli.Network.Policy.Policy)
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
     (via? : Option LeanCli.RPC.Outbound.VerifyVia)
     (token owner spender : String) : IO (Option Nat) := do
@@ -197,7 +197,7 @@ private def readAllowance
 
 /-- `eth_call(balanceOf(owner))` on the token contract. -/
 private def readErc20Balance
-    (policy : LeanCli.Privacy.NetworkPolicy.Policy)
+    (policy : LeanCli.Network.Policy.Policy)
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
     (via? : Option LeanCli.RPC.Outbound.VerifyVia)
     (token owner : String) : IO (Option Nat) := do
@@ -211,7 +211,7 @@ private def readErc20Balance
 
 /-- `eth_getBalance(owner)`. -/
 private def readNativeBalance
-    (policy : LeanCli.Privacy.NetworkPolicy.Policy)
+    (policy : LeanCli.Network.Policy.Policy)
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
     (via? : Option LeanCli.RPC.Outbound.VerifyVia)
     (owner : String) : IO (Option Nat) := do
@@ -224,7 +224,7 @@ private def readNativeBalance
 
 /-- `eth_blockNumber`. -/
 private def readBlockNumber
-    (policy : LeanCli.Privacy.NetworkPolicy.Policy)
+    (policy : LeanCli.Network.Policy.Policy)
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
     (via? : Option LeanCli.RPC.Outbound.VerifyVia) : IO (Option Nat) := do
   match ← LeanCli.RPC.Outbound.blockNumber policy endpoint via? with
@@ -241,7 +241,7 @@ public RPCs cap eth_getLogs ranges; this is a best-effort signal
 ("first-ever interaction" warning), not a complete audit. Returns the
 event count and the inclusive block range scanned. -/
 private def countPriorEvents
-    (policy : LeanCli.Privacy.NetworkPolicy.Policy)
+    (policy : LeanCli.Network.Policy.Policy)
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
     (via? : Option LeanCli.RPC.Outbound.VerifyVia)
     (tokenAddr topic0 partyA partyB : String)
@@ -273,7 +273,7 @@ by `kind` so the UI can render slot-by-slot — every variant carries
 `{"kind": <tag>}` plus the action-specific fields. -/
 def run
     (state : LeanCli.Daemon.State.Shared)
-    (policy : LeanCli.Privacy.NetworkPolicy.Policy)
+    (policy : LeanCli.Network.Policy.Policy)
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
     (chainId : Nat) (fromAddr to valueHex data : String)
     (lookback : Nat) : IO Json := do

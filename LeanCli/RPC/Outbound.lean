@@ -1,6 +1,6 @@
 import LeanCli.Encoding.Json
 import LeanCli.Network.Provider
-import LeanCli.Privacy.NetworkPolicy
+import LeanCli.Network.Policy
 import LeanCli.RPC.JsonRpc
 import LeanCli.Colibri.Persistent
 
@@ -15,7 +15,7 @@ namespace LeanCli.RPC.Outbound
 
 open LeanCli.Encoding.Json
 open LeanCli.Network.Provider
-open LeanCli.Privacy.NetworkPolicy
+open LeanCli.Network.Policy
 
 structure Endpoint where
   url       : String

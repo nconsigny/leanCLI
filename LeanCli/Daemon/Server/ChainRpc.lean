@@ -7,7 +7,7 @@ import LeanCli.Daemon.PpDestinations
 import LeanCli.Daemon.State
 import LeanCli.Daemon.TokenMeta
 import LeanCli.Encoding.Json
-import LeanCli.Privacy.NetworkPolicy
+import LeanCli.Network.Policy
 import LeanCli.Ethereum.Address
 import LeanCli.Ethereum.Ens
 import LeanCli.Keystore.Tpm2Runtime
@@ -38,7 +38,7 @@ namespace LeanCli.Daemon.Server.ChainRpc
 
 open LeanCli.Encoding.Json
 open LeanCli.Keystore.Tpm2Runtime
-open LeanCli.Privacy.NetworkPolicy
+open LeanCli.Network.Policy
 open LeanCli.RPC.Server
 open LeanCli.Daemon.Server
 

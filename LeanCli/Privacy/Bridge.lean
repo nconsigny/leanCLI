@@ -1,5 +1,5 @@
 import LeanCli.Encoding.Json
-import LeanCli.Privacy.NetworkPolicy
+import LeanCli.Network.Policy
 import LeanCli.Util.Sandbox
 import LeanCli.Util.BridgeResolve
 
@@ -20,7 +20,7 @@ do not carry any spending-key bytes.
 
 Network egress from the sidecar is policy-classified under the new
 `shieldedRead` / `shieldedBroadcast` purposes in
-`LeanCli.Privacy.NetworkPolicy`. Under `strictDaemonPolicy` shielded
+`LeanCli.Network.Policy`. Under `strictDaemonPolicy` shielded
 purposes are denied; under `torDaemonPolicy` they are permitted only to
 configured nodes via Tor.
 
@@ -30,7 +30,7 @@ This module is the **only** place that spawns the bridge.
 namespace LeanCli.Privacy.Bridge
 
 open LeanCli.Encoding.Json
-open LeanCli.Privacy.NetworkPolicy
+open LeanCli.Network.Policy
 
 /-- Default executable name for the leancli-bridge sidecar. Used as the
     PATH-resolved fallback when nothing more specific is configured. -/

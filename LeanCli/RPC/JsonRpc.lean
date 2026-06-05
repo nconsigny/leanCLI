@@ -1,5 +1,5 @@
 import LeanCli.Encoding.Json
-import LeanCli.Privacy.NetworkPolicy
+import LeanCli.Network.Policy
 
 /-!
 # JSON-RPC 2.0 client
@@ -7,14 +7,14 @@ import LeanCli.Privacy.NetworkPolicy
 Minimal client for talking to Ethereum nodes. JSON parsing/serialization
 stays in Lean to keep the "everything in Lean" promise.
 
-Transport code must be mediated by `LeanCli.Privacy.NetworkPolicy`.
+Transport code must be mediated by `LeanCli.Network.Policy`.
 The CLI must never call this module directly. The daemon may use it only
 for local/light-client reads and strictly necessary transaction broadcast.
 -/
 
 namespace LeanCli.RPC.JsonRpc
 
-open LeanCli.Privacy.NetworkPolicy
+open LeanCli.Network.Policy
 open LeanCli.Encoding.Json
 
 structure Request where

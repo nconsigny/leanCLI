@@ -24,7 +24,7 @@ import LeanCli.Daemon.Status
 import LeanCli.Daemon.PpDestinations
 import LeanCli.Daemon.TxJournal
 import LeanCli.Daemon.Uds
-import LeanCli.Privacy.NetworkPolicy
+import LeanCli.Network.Policy
 import LeanCli.Privacy.Bridge
 import LeanCli.Clearsign.Bridge
 import LeanCli.Sphincs.Bridge
@@ -80,7 +80,7 @@ import LeanCli.Invariants.Swap
 
 Long-running process that exposes wallet operations over a local socket.
 The daemon is the only component allowed to perform Ethereum node I/O, and
-every attempted connection must pass `Privacy.NetworkPolicy`.
+every attempted connection must pass `Network.Policy`.
 -/
 
 namespace LeanCli.Daemon.Server
@@ -88,7 +88,7 @@ namespace LeanCli.Daemon.Server
 open LeanCli.Encoding.Json
 open LeanCli.Keystore.Tpm2Runtime
 open LeanCli.Wallet.Account
-open LeanCli.Privacy.NetworkPolicy
+open LeanCli.Network.Policy
 open LeanCli.RPC.Server
 
 -- Why: no `defaultConfig` with a URL substitute. The daemon must refuse to

@@ -25,7 +25,7 @@ import LeanCli.Ethereum.Tx
 
 import LeanCli.Registry.KnownProtocols
 
-import LeanCli.Privacy.NetworkPolicy
+import LeanCli.Network.Policy
 import LeanCli.Network.Provider
 import LeanCli.Network.Endpoint
 

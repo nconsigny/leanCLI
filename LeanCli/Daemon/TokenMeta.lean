@@ -1,6 +1,6 @@
 import LeanCli.Daemon.State
 import LeanCli.RPC.Outbound
-import LeanCli.Privacy.NetworkPolicy
+import LeanCli.Network.Policy
 import LeanCli.Crypto.Hex
 
 /-!
@@ -103,7 +103,7 @@ def setMeta (state : LeanCli.Daemon.State.Shared) (chainId : Nat) (address : Str
     silently — the caller falls back to address-only display. -/
 def fetchAndCache
     (state : LeanCli.Daemon.State.Shared)
-    (policy : LeanCli.Privacy.NetworkPolicy.Policy)
+    (policy : LeanCli.Network.Policy.Policy)
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
     (chainId : Nat) (address : String) : IO (Option TokenMeta) := do
   -- Route through Colibri when the persistent client is up so token
@@ -128,7 +128,7 @@ def fetchAndCache
     are filled via `fetchAndCache`. Idempotent. -/
 def lookupOrFetch
     (state : LeanCli.Daemon.State.Shared)
-    (policy : LeanCli.Privacy.NetworkPolicy.Policy)
+    (policy : LeanCli.Network.Policy.Policy)
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
     (chainId : Nat) (address : String) : IO (Option TokenMeta) := do
   match ← lookup state chainId address with

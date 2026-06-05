@@ -1778,9 +1778,9 @@ def run (args : List String) : IO UInt32 := do
       restartDaemonForConfigChange
       return 0
   | .networkSetPolicy policy =>
-      match LeanCli.Privacy.NetworkPolicy.parsePolicy policy with
+      match LeanCli.Network.Policy.parsePolicy policy with
       | none =>
-          let names := String.intercalate ", " LeanCli.Privacy.NetworkPolicy.policyNames
+          let names := String.intercalate ", " LeanCli.Network.Policy.policyNames
           IO.eprintln s!"invalid network policy {policy}; expected one of: {names}"
           return 2
       | some _ =>

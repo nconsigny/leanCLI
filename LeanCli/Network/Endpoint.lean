@@ -1,4 +1,4 @@
-import LeanCli.Privacy.NetworkPolicy
+import LeanCli.Network.Policy
 
 /-!
 # Endpoint hygiene
@@ -10,7 +10,7 @@ transport code exists.
 
 namespace LeanCli.Network.Endpoint
 
-open LeanCli.Privacy.NetworkPolicy
+open LeanCli.Network.Policy
 
 inductive EndpointKind where
   | local

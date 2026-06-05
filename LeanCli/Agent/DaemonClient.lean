@@ -11,7 +11,7 @@ single JSON object terminated by `\n` (see
 and parse the last line.
 
 Trust model: every tool that reads chain state goes through this
-client. The daemon enforces `Privacy.NetworkPolicy` on the resulting
+client. The daemon enforces `Network.Policy` on the resulting
 RPC; nothing the agent can ask for bypasses that gate. The agent
 never asks the daemon to sign — there is no path here for
 `eoa.send` / `r1.send*`.
