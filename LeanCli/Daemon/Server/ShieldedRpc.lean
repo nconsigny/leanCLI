@@ -74,14 +74,12 @@ private def shieldedBridgeCall (cfg : Config) (method : String) (params : Json)
   -- chain-aware policy's testnet branch fires regardless of what the
   -- daemon's default chain happens to be.
   let ppChainId : Nat := 11155111
-  let allowed := LeanCli.Privacy.Bridge.policyAllows cfg.policy
-    .configuredNode .direct bridgeReq (some ppChainId)
-  if !allowed then
-    pure <| .error
-      { code := -32030
-        message := "shielded surface denied by policy"
-        data := some (.str ("policy denies " ++ method)) }
-  else
+  -- The policy gate now lives inside `callGated` (invariant 5.7): a
+  -- denied request returns `policyDenial` before the sidecar is spawned,
+  -- so no shielded call can bypass the policy. The classification is
+  -- `peer := .localNode`, `transport := .loopback` (the sidecar is a
+  -- local Node child of the daemon), which `gateDecision` fixes.
+  do
     -- Pick the Sepolia endpoint, not cfg.rpcEndpoint. Without this the
     -- sidecar gets handed the mainnet URL when the daemon's default is
     -- mainnet, then the on-chain calls fail or hit the wrong contract.
@@ -125,7 +123,10 @@ private def shieldedBridgeCall (cfg : Config) (method : String) (params : Json)
       ++ (match rgSeedHex? with
           | some s => #[("LEANCLI_RG_SEED_HEX", some s)]
           | none   => #[])
-    let resp ← LeanCli.Privacy.Bridge.callWithEnv bridgeReq env
+    -- Route through the policy gate (invariant 5.7): denied requests
+    -- return `policyDenial` before the sidecar is spawned.
+    let resp ← LeanCli.Privacy.Bridge.callGated cfg.policy bridgeReq env
+      (some ppChainId)
     -- Propagate bridge errors as JSON-RPC errors instead of burying them
     -- inside a successful `{ok:false, error:…}` payload. Without this the
     -- TUI/CLI render the wrapper as a successful result and the user only

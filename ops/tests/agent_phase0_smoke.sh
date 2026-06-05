@@ -76,9 +76,9 @@ if [[ ! -S "$SOCKET" ]]; then
   note "  then re-run with LEANCLI_SOCKET=$SOCKET"
 else
   # We do not have a Lean-side one-shot JSON-RPC CLI in this tree.
-  # Use the existing leancli-llm-legacy daemon-callback wire shape:
-  # one JSON line in, one JSON line out, close. nc-style probes
-  # work on socat / nc-openbsd; we try whichever is present.
+  # Use the daemon's newline-JSON callback wire shape: one JSON line
+  # in, one JSON line out, close. nc-style probes work on socat /
+  # nc-openbsd; we try whichever is present.
   if command -v socat >/dev/null 2>&1; then
     PROBE_OUT=$(printf '%s\n' '{"jsonrpc":"2.0","method":"daemon.ping","id":1}' \
                  | socat - UNIX-CONNECT:"$SOCKET" 2>&1 || true)

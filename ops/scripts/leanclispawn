@@ -400,7 +400,7 @@ if [[ "$MODE" == "uninstall" ]]; then
   for bridge_exe in leancli-bridge leancli-clearsign-bridge \
                     leancli-colibri-bridge leancli-helios-bridge \
                     leancli-safenode-bridge \
-                    leancli-llm-bridge leancli-llm-legacy; do
+                    leancli-llm-bridge; do
     if [[ -e "$LEANCLI_BIN/$bridge_exe" ]]; then
       rm -f "$LEANCLI_BIN/$bridge_exe"
       echo "removed $LEANCLI_BIN/$bridge_exe"
@@ -951,7 +951,6 @@ install_bridge_wrappers() {
     # node + bridge.mjs; the upstream TDX_QUOTE_VERIFIER_BIN it needs at
     # runtime is a separate, user-supplied dependency.
     "leancli-safenode-bridge:sidecars/kohaku/safenode/bridge.mjs:LEANCLI_SAFENODE_BRIDGE"
-    "leancli-llm-legacy:sidecars/kohaku/llm-legacy/bridge.mjs:LEANCLI_LLM_BRIDGE_LEGACY_PATH"
   )
 
   # daemon.env may not exist yet — the wizard creates it only after the

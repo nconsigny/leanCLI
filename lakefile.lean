@@ -109,12 +109,10 @@ lean_exe «leancli-daemon» where
   supportInterpreter := true
 
 /--
-Lean-native LLM agent (Phase 0). One-shot replacement for the legacy
-`sidecars/kohaku/llm/bridge.mjs` Node sidecar. Accepts `--rpc '<json>'` on argv,
-runs the Lean agent loop, emits one JSON-RPC envelope line on stdout.
-
-`LlmAgent.Bridge` switches to this binary by default; the legacy
-sidecar is reachable via `LEANCLI_LLM_BRIDGE_LEGACY=1`.
+Lean-native LLM agent (Phase 0). Replaced the former Node LLM sidecar.
+Accepts `--rpc '<json>'` on argv, runs the Lean agent loop, emits one
+JSON-RPC envelope line on stdout. `LlmAgent.Bridge` uses this binary as
+its sole backend (one-shot or, via `leancli-agentd`, persistent).
 -/
 lean_exe leancli_agent where
   root := `LeanCli.App.AgentMain

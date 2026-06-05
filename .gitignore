@@ -12,8 +12,6 @@
 /sidecars/kohaku/colibri/node_modules/
 /sidecars/kohaku/helios/node_modules/
 /sidecars/kohaku/safenode/node_modules/
-/sidecars/kohaku/llm/node_modules/
-/sidecars/kohaku/llm-legacy/node_modules/
 /tui/node_modules/
 /tui/dist/
 

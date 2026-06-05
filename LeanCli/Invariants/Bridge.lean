@@ -121,4 +121,53 @@ theorem ok_field_of_err
 theorem ok_field_of_crash (stderr : String) (exitCode : UInt32) :
     okField (responseToJson (Response.crash stderr exitCode)) = some false := rfl
 
+/-! ## Invariant 5.7 — every bridge call factors through the policy gate
+
+`callGated` evaluates the pure `gateDecision` before any process is
+spawned. The two lemmas below pin down both arms of that decision:
+
+* a policy-denied request yields `gateDecision = .error (policyDenial
+  req)`, and
+* `callGated` on a `.error` decision is `pure denial` — i.e. it never
+  reaches the `callWithEnv` spawn branch.
+
+Because `callGated` is the only path `shieldedBridgeCall` takes into the
+sidecar, a denied shielded request can never spawn the bridge. The
+allow-path symmetry (`gateDecision = .ok ()` ⇒ proceed) is the other arm
+of the same `if`, so the dispatcher respects the gate in both
+directions. -/
+
+/-- When the policy denies the (peer, transport, purpose, chain) request,
+the pure gate returns the fixed denial — independent of the rest of IO. -/
+theorem gateDecision_denied_when_policy_denies
+    (policy : Policy) (req : Request) (chainId : Option Nat)
+    (h : policyAllows policy .configuredNode .direct req chainId = false) :
+    gateDecision policy req chainId = .error (policyDenial req) := by
+  unfold gateDecision
+  simp [h]
+
+/-- A denied gate decision makes `callGated` return the denial with no
+spawn: the IO action reduces definitionally to `pure (policyDenial req)`,
+so the `callWithEnv` branch is unreachable. This is the runtime
+no-egress guarantee behind invariant 5.7. -/
+theorem callGated_denied_when_policy_denies
+    (policy : Policy) (req : Request)
+    (env : Array (String × Option String)) (chainId : Option Nat)
+    (h : policyAllows policy .configuredNode .direct req chainId = false) :
+    callGated policy req env chainId = pure (policyDenial req) := by
+  unfold callGated
+  rw [gateDecision_denied_when_policy_denies policy req chainId h]
+
+/-- Conversely, when the policy permits the request the gate clears and
+`callGated` proceeds to the (un-gated) transport primitive. Together with
+the denial lemma this shows `callGated` respects `gateDecision` in both
+arms — there is no third path. -/
+theorem callGated_allowed_proceeds
+    (policy : Policy) (req : Request)
+    (env : Array (String × Option String)) (chainId : Option Nat)
+    (h : policyAllows policy .configuredNode .direct req chainId = true) :
+    callGated policy req env chainId = callWithEnv req env := by
+  unfold callGated gateDecision
+  simp [h]
+
 end LeanCli.Invariants.Bridge

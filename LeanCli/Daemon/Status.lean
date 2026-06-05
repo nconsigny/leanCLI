@@ -45,8 +45,11 @@ private structure SidecarDescriptor where
   relPath     : System.FilePath
   defaultExe  : String
 
-/-- The four sidecars the daemon owns. Order matters only for the TUI
-    rendering — keep alphabetical so the Status page is deterministic. -/
+/-- The Node sidecars the daemon owns. Order matters only for the TUI
+    rendering — keep alphabetical so the Status page is deterministic.
+    The LLM backend is the Lean-native `leancli-agent` binary (not a
+    `bridge.mjs` Node sidecar), so it is not probed by this
+    `node_modules` + `--rpc ping` loop. -/
 private def sidecars : Array SidecarDescriptor := #[
   { name := "clearsign",
     envVar := "LEANCLI_CLEARSIGN_BRIDGE",
@@ -56,13 +59,6 @@ private def sidecars : Array SidecarDescriptor := #[
     envVar := "LEANCLI_COLIBRI_BRIDGE",
     relPath := "sidecars" / "kohaku" / "colibri" / "bridge.mjs",
     defaultExe := "leancli-colibri-bridge" },
-  { name := "llm",
-    envVar := "LEANCLI_LLM_BRIDGE",
-    -- Phase 0: the Lean-native leancli-agent is the default backend.
-    -- This status row points at the legacy Node sidecar that is now
-    -- opt-in via LEANCLI_LLM_BRIDGE_LEGACY=1.
-    relPath := "sidecars" / "kohaku" / "llm-legacy" / "bridge.mjs",
-    defaultExe := "leancli-agent" },
   { name := "privacy",
     envVar := "LEANCLI_BRIDGE",
     relPath := "sidecars" / "kohaku" / "bridge.mjs",

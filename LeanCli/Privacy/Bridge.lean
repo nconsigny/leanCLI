@@ -150,6 +150,19 @@ def callWithEnv (req : Request) (env : Array (String × Option String)) : IO Res
   let encoded := encodeRequest req
   let v := ((← IO.getEnv "LEANCLI_VERBOSE").getD "0").toNat?.getD 0
   let t0 ← IO.monoMsNow
+  -- Forward the daemon's `LEANCLI_PRIVACY` allow-list explicitly into the
+  -- sidecar env (TASK 3). The host (`bridge.mjs`) reads it to gate
+  -- `shielded.*` per plugin: a disabled plugin's method returns
+  -- `{ ok:false, error:"plugin not enabled: <name>" }` without lazy-loading
+  -- its code. Passing it through the explicit env array (rather than relying
+  -- on inheritance) keeps the value present across the sandbox wrap. Caller-
+  -- supplied entries win, so a test can still override.
+  let env ←
+    if env.any (fun (k, _) => k == "LEANCLI_PRIVACY") then pure env
+    else
+      match ← IO.getEnv "LEANCLI_PRIVACY" with
+      | some p => pure (env.push ("LEANCLI_PRIVACY", some p))
+      | none   => pure env
   if v ≥ 1 then IO.eprintln s!"[bridge→] {req.method} exe={exe}"
   try
     -- Sandbox the privacy sidecar. Conservatively keep host network
@@ -202,6 +215,58 @@ def callWithEnv (req : Request) (env : Array (String × Option String)) : IO Res
     pure (Response.crash (toString e) 0)
 
 def call (req : Request) : IO Response := callWithEnv req #[]
+
+/-- Fixed denial response for a policy-rejected bridge request. The
+    `-32030` code matches the daemon's pre-existing "shielded surface
+    denied by policy" error so callers see the same envelope whether the
+    gate fires at the call site or inside the dispatcher. -/
+def policyDenial (req : Request) : Response :=
+  Response.err (-32030) "shielded surface denied by policy"
+    (some (.str ("policy denies " ++ req.method)))
+
+/-- Pure gate decision for invariant 5.7. The classification models the
+    sidecar's *outbound* network reach, not the fact that it is a local
+    child process: a shielded operation talks to Railgun / Privacy-Pools
+    relayers and configured nodes, so the egress peer is
+    `.configuredNode` and the transport `.direct`. The policy then rules
+    on the request's `methodPurpose` and `chainId`.
+
+    Divergence note (vs. the Stream B task's suggested
+    `peer := .localNode, transport := .loopback`): in
+    `LeanCli.Network.Policy`, shielded purposes are *only ever* permitted
+    for `peer := .configuredNode` (mainnet-strict denies them; testnet,
+    tor, dev, and permissive allow `.configuredNode` shielded). Using
+    `.localNode` would deny every shielded operation under every policy —
+    a trust-posture-changing regression. The existing call-site gate in
+    `shieldedBridgeCall` already used `.configuredNode .direct`; this
+    keeps the exact same allow/deny outcome while moving the gate inside
+    the dispatcher so no call site can bypass it.
+
+    `.error (policyDenial req)` ⇒ deny (do NOT spawn).
+    `.ok ()`                   ⇒ allow (proceed to spawn). -/
+def gateDecision (policy : Policy) (req : Request) (chainId : Option Nat) :
+    Except Response Unit :=
+  if policyAllows policy .configuredNode .direct req chainId then
+    .ok ()
+  else
+    .error (policyDenial req)
+
+/-- Policy-gated bridge call (runtime hook for invariant 5.7). Every
+    `shielded.*` dispatch must route through here rather than calling
+    `callWithEnv` directly: the gate is evaluated and a denied request
+    returns `policyDenial` BEFORE any process is spawned, so a
+    policy-denied shielded operation can never reach the sidecar.
+
+    `callWithEnv` remains the un-gated transport primitive, used here
+    after the gate clears and by out-of-band dev tools (e.g. the
+    `leancli-railgun-snapshot` generator) that run outside the daemon's
+    policy context entirely. -/
+def callGated (policy : Policy) (req : Request)
+    (env : Array (String × Option String)) (chainId : Option Nat := none) :
+    IO Response := do
+  match gateDecision policy req chainId with
+  | .error denial => pure denial
+  | .ok () => callWithEnv req env
 
 /-- Convenience: invoke the `ping` method and return the parsed response.
     Used by the `shielded.ping` daemon RPC for liveness checks. -/

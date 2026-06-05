@@ -310,18 +310,38 @@ def run (cfg : Config) : IO Unit := do
     match ← IO.getEnv "LEANCLI_HELIOS" with
     | some "0" | some "off" | some "false" | some "no" => false
     | _ => true
-  -- Honor `LEANCLI_READ_BACKEND` for the initial default backend. Same
-  -- naming as the `daemon.readBackend.set { backend }` RPC. Unrecognized
-  -- values fall through to the structure default (.helios) with a warning.
-  match ← IO.getEnv "LEANCLI_READ_BACKEND" with
-  | some raw =>
-      match LeanCli.Daemon.State.ReadBackend.parse? raw with
-      | some b =>
-          LeanCli.Daemon.State.setReadBackend state b
-          IO.eprintln s!"leancli-daemon: read backend default = {b.asString} (from LEANCLI_READ_BACKEND)"
-      | none =>
-          IO.eprintln s!"leancli-daemon: LEANCLI_READ_BACKEND={raw} unrecognized; using default helios"
-  | none => pure ()
+  -- Provider selection (single-select read backend). `LEANCLI_PROVIDER`
+  -- is the documented flag (helios|colibri|rpc|safenode); it maps onto the
+  -- existing `ReadBackend` mechanism so `daemon.readBackend.set` and the
+  -- per-call `backend:` param keep working unchanged.
+  --   * helios|colibri|rpc → that ReadBackend directly.
+  --   * safenode → helios fronted by the TDX-attested SafeNode proxy; we
+  --     select `.helios` and require `LEANCLI_SAFE_NODE_URL` (warned if
+  --     absent — the SafeNode spawn below only fires when the URL is set).
+  -- `LEANCLI_READ_BACKEND` remains an accepted alias for back-compat;
+  -- `LEANCLI_PROVIDER` wins when both are set. Default stays helios when
+  -- neither is set. Unrecognized values fall through with a warning.
+  let applyBackend (envName raw : String) : IO Unit := do
+    match LeanCli.Daemon.State.ReadBackend.parse? raw with
+    | some b =>
+        LeanCli.Daemon.State.setReadBackend state b
+        IO.eprintln s!"leancli-daemon: read backend default = {b.asString} (from {envName})"
+    | none =>
+        if raw.toLower == "safenode" then
+          LeanCli.Daemon.State.setReadBackend state .helios
+          match ← IO.getEnv "LEANCLI_SAFE_NODE_URL" with
+          | some _ =>
+              IO.eprintln s!"leancli-daemon: provider=safenode → helios via SafeNode proxy (from {envName})"
+          | none =>
+              IO.eprintln s!"leancli-daemon: provider=safenode but LEANCLI_SAFE_NODE_URL unset; helios will read directly until it is configured (from {envName})"
+        else
+          IO.eprintln s!"leancli-daemon: {envName}={raw} unrecognized; using default helios"
+  match ← IO.getEnv "LEANCLI_PROVIDER" with
+  | some raw => applyBackend "LEANCLI_PROVIDER" raw
+  | none =>
+      match ← IO.getEnv "LEANCLI_READ_BACKEND" with
+      | some raw => applyBackend "LEANCLI_READ_BACKEND" raw
+      | none => pure ()
   if heliosEnabled then
     let runtimeRoot ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
       | some d => pure d

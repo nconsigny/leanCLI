@@ -77,12 +77,11 @@ private def looksLikeFilesystemPath (s : String) : Bool :=
     the PATH-resolved fallback name (e.g. `leancli-clearsign-bridge`).
 
     Stale-override behavior: when the env override is a filesystem path
-    that no longer exists on disk (e.g. a `daemon.env` carrying a
-    pre-rename `sidecars/kohaku/llm/bridge.mjs` after the package renamed it to
-    `sidecars/kohaku/llm-legacy/`), we emit a one-shot warning to stderr and
-    fall through to the normal lookup chain rather than handing the
-    spawn a path that will ENOENT. PATH-resolved bare names pass
-    through unchanged. -/
+    that no longer exists on disk (e.g. a `daemon.env` carrying a path
+    to a sidecar that has since been moved or removed), we emit a
+    one-shot warning to stderr and fall through to the normal lookup
+    chain rather than handing the spawn a path that will ENOENT.
+    PATH-resolved bare names pass through unchanged. -/
 def resolveExecutable
     (envVar : String) (relPath : System.FilePath) (defaultExe : String) :
     IO String := do

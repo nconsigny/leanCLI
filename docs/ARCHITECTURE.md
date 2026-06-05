@@ -40,8 +40,8 @@ the abstract models defined alongside it (not about runtime IO).
   `LeanCli.Lib.Core` that loads `Daemon.Config` from env and runs
   `Daemon.Server.run`.
 - `LeanCli/App/AgentMain.lean` — `leancli-agent` executable root.
-  Phase-0 Lean-native replacement for the `bridge/llm-legacy/` Node
-  sidecar. One-shot JSON-RPC over `--rpc '<json>'`; speaks to a local
+  Lean-native replacement for the former Node LLM sidecar (now removed).
+  One-shot JSON-RPC over `--rpc '<json>'`; speaks to a local
   loopback LLM via `c/lean_http/` and to the daemon over UDS.
 - `LeanCli/App/AgentDaemonMain.lean` — `leancli-agentd` executable
   root. Phase-1a long-running sibling of `leancli-agent`. Listens on
@@ -287,10 +287,11 @@ Modes:
   persisted in `$XDG_DATA_HOME/leancli/sessions.db` with FTS5
   search. Auto-detected: the bridge pings the socket; if `ok`, uses
   persistent, else one-shot.
-* **Legacy Node sidecar** — `bridge/llm-legacy/bridge.mjs`, opt-in
-  via `LEANCLI_LLM_BRIDGE_LEGACY=1`.
 
-Mode resolution order: env override → legacy → socket probe → one-shot.
+The former Node LLM sidecar has been removed; the native `leancli-agent`
+is the sole, independent backend.
+
+Mode resolution order: env override → socket probe → one-shot.
 Persistent mode that explicitly fails to contact the agent does NOT
 silently fall back. See `docs/PHASE1A_PLAN.md` for the full wire
 shape; `LeanCli/LlmAgent/Bridge.lean` is the only path the wallet
@@ -303,7 +304,6 @@ existing decode → simulate → ConfirmGate gate before any signing.
 |---|---|---|---|
 | `leancli-agent` (in-tree Lean, one-shot) | `LeanCli/LlmAgent/Bridge.lean` | `LEANCLI_LLM_BRIDGE` (override) | Phase 0 primary. Spawn-per-call. Loopback HTTP via `c/lean_http`; talks to wallet daemon over UDS. |
 | `leancli-agentd` (in-tree Lean, persistent) | `LeanCli/LlmAgent/Bridge.lean` | `LEANCLI_AGENT_MODE`, `LEANCLI_AGENT_SOCKET` | Phase 1a opt-in. Long-running UDS sidecar; persists session history in `$XDG_DATA_HOME/leancli/sessions.db` via FTS5. Auto-detected. |
-| `bridge/llm-legacy/` (Node fallback) | `LeanCli/LlmAgent/Bridge.lean` | `LEANCLI_LLM_BRIDGE_LEGACY=1` | Opt-in fallback. Anthropic SDK + viem; `ANTHROPIC_API_KEY` enables the model fallback. Kept for parity tests. |
 | `bridge/` | `LeanCli/Privacy/Bridge.lean` | `LEANCLI_BRIDGE` | Privacy Pools / Railgun (snarkjs, libp2p) |
 | `bridge/clearsign/` | `LeanCli/Clearsign/Bridge.lean` | `LEANCLI_CLEARSIGN_BRIDGE` | ERC-7730 calldata + EIP-712 walker |
 

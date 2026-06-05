@@ -1,0 +1,43 @@
+{
+  "_comment": "Supply-chain pin for the @kohaku-eth privacy plugins and their transitive @kohaku-eth/provider transport wrapper. Versions and sha512 integrity hashes are mirrored verbatim from package-lock.json (the authoritative npm pin). This file is a human-auditable, single-screen summary so a reviewer can diff plugin versions across releases without parsing the full lockfile. npm enforces the hashes at `npm ci`; the bridge dynamic-imports each plugin lazily and only when its plugin is enabled via LEANCLI_PRIVACY. See docs/PLUGIN_ARCHITECTURE.md.",
+  "lockfileVersion": 3,
+  "generatedFrom": "sidecars/kohaku/package-lock.json",
+  "plugins": {
+    "@kohaku-eth/plugins": {
+      "version": "0.0.1-alpha.8",
+      "integrity": "sha512-f8p9hracM3tqNE8SWpwzbqytpBIGBv1Z0G4n8SF3werZ0tmYTnVGelsxUvL3IC1p6AOjLOpuwpICPcCR9Ceu8w==",
+      "note": "top-level direct dependency"
+    },
+    "@kohaku-eth/railgun": {
+      "version": "0.0.1-alpha.21",
+      "integrity": "sha512-GXdMUw3ogg8PnmGTkhCDmVXduf9rTd1NNrCl9UZi4MrCgPVeTFki4XsajyAK/W67Sg+e3OttmX37+xOXsRNOkA==",
+      "note": "Railgun shielded flow; dynamic-imported only on shielded.railgun.*"
+    },
+    "@kohaku-eth/privacy-pools": {
+      "version": "0.0.2-alpha.9",
+      "integrity": "sha512-wey5qyVqslZdAYdiRfpwX8HXoREGH0IJNys2J6izIFeSR/NRDY/ar4rBNAfhcg7yri1nEL0pA6NiF7iKpemBug==",
+      "note": "Privacy Pools shielded flow; dynamic-imported only on shielded.* (non-railgun)"
+    }
+  },
+  "transitive": {
+    "@kohaku-eth/provider": [
+      {
+        "version": "0.1.0-alpha.7",
+        "integrity": "sha512-dtHnkTqHN3PhQme3Ej5AUhlkUOkKcw+Rj3iW1xSDWcw+s6m2dRiaPsdz7gZO6t8v6lhO1g/6PC1y+87TVxjeIQ==",
+        "note": "transport wrapper (call/estimateGas proxy to client.request); top-level + nested under privacy-pools"
+      },
+      {
+        "version": "0.1.0-alpha.8",
+        "integrity": "sha512-XYzI5J4nwiKLH4jWbDQTSW9inB7pqDtt53vgWyBaBnwKIcRhCyIJZo5iWuxlO2AQlB0mfOreeeYriGuRh03fTQ==",
+        "note": "transport wrapper; nested under @kohaku-eth/plugins and @kohaku-eth/railgun"
+      }
+    ],
+    "@kohaku-eth/plugins": [
+      {
+        "version": "0.0.1-alpha.7",
+        "integrity": "sha512-zVpnqOr8g8Otx+gUQvHsjQRlYCve+NtHUqKZLyqg6Fp2YIIRJtqvQqqhfoxyz/zBEnYzGlxcqeSF+Zk5TrbATg==",
+        "note": "older plugins build pinned transitively under @kohaku-eth/privacy-pools"
+      }
+    ]
+  }
+}

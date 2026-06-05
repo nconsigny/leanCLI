@@ -64,6 +64,40 @@ async function loadRailgun() {
 
 const PROTOCOL_VERSION = "0.0.1";
 
+// --- Privacy-plugin enablement (LEANCLI_PRIVACY flag surface) ---------------
+//
+// `LEANCLI_PRIVACY` is a comma-separated allow-list of privacy plugins the
+// daemon has enabled for this run (e.g. "railgun,privacy-pools"). Empty /
+// unset means no privacy plugin is enabled. The wallet daemon
+// (`LeanCli/Privacy/Bridge.lean`) passes this through the spawn env.
+//
+// Pinned-and-lazy model: every plugin is version-pinned in package-lock.json
+// (and mirrored in plugins.lock.json) and is `import()`-ed only inside its
+// handler. The gate below short-circuits a disabled plugin's method BEFORE
+// the lazy import fires, so a disabled plugin's code is never loaded into the
+// process. See docs/PLUGIN_ARCHITECTURE.md.
+const PRIVACY_PLUGINS = ["railgun", "privacy-pools", "tornado"];
+
+function enabledPrivacyPlugins(env) {
+  const raw = (env.LEANCLI_PRIVACY ?? "").trim();
+  if (raw === "") return [];
+  return raw
+    .split(",")
+    .map((s) => s.trim().toLowerCase())
+    .filter((s) => PRIVACY_PLUGINS.includes(s));
+}
+
+// Map a shielded method name to the privacy plugin it requires. Methods that
+// are not plugin-specific (ping/version/listProtocols/listEnabled) return
+// null and are never gated.
+function pluginForMethod(method) {
+  if (method.startsWith("shielded.railgun.")) return "railgun";
+  if (method.startsWith("shielded.tornado.")) return "tornado";
+  if (method.startsWith("shielded.")) return "privacy-pools";
+  return null;
+}
+
+
 function jsonrpcResult(id, result) {
   return JSON.stringify({ jsonrpc: "2.0", id: id ?? null, result });
 }
@@ -799,9 +833,37 @@ async function shieldedTornadoPrepareWithdraw(_env, params) {
   return tornadoNotImplemented("prepareWithdraw");
 }
 
+// Static protocol catalogue (independent of which plugins are enabled).
+const PROTOCOL_CATALOGUE = [
+  { name: "privacy-pools", plugin: "privacy-pools", status: "live", chains: [11155111, 1] },
+  { name: "railgun", plugin: "railgun", status: "live", chains: [11155111, 1] },
+  // Tornado Cash chat-drafting is wired through the daemon and agent
+  // layers in PR 2, but the sidecar implementation (snarkjs + Baby
+  // Jubjub Pedersen for deposit, ZK proof gen for withdraw) is pending.
+  // Status flips to "live" once tornado-deposit.mjs + tornado-withdraw.mjs
+  // land.
+  { name: "tornado-cash", plugin: "tornado", status: "scaffolded", chains: [1] },
+];
+
 async function dispatch(req) {
   const { method, params, id } = req;
   const env = process.env;
+
+  // Gate plugin-specific shielded methods on LEANCLI_PRIVACY enablement.
+  // This runs BEFORE the switch so a disabled plugin's lazy import() never
+  // fires. Non-plugin methods (ping/version/listProtocols/listEnabled)
+  // return null from pluginForMethod and pass through ungated.
+  const requiredPlugin = pluginForMethod(method);
+  if (requiredPlugin !== null) {
+    const enabled = enabledPrivacyPlugins(env);
+    if (!enabled.includes(requiredPlugin)) {
+      return jsonrpcResult(id, {
+        ok: false,
+        error: `plugin not enabled: ${requiredPlugin}`,
+      });
+    }
+  }
+
   switch (method) {
     case "ping":
       return jsonrpcResult(id, {
@@ -816,18 +878,32 @@ async function dispatch(req) {
         node: process.versions.node,
       });
     case "listProtocols":
+      // Back-compat alias for listEnabled's `protocols` view: the full
+      // static catalogue, regardless of enablement.
       return jsonrpcResult(id, {
-        protocols: [
-          { name: "privacy-pools", status: "live", chains: [11155111, 1] },
-          { name: "railgun", status: "live", chains: [11155111, 1] },
-          // Tornado Cash chat-drafting is wired through the daemon and
-          // agent layers in PR 2, but the sidecar implementation
-          // (snarkjs + Baby Jubjub Pedersen for deposit, ZK proof gen
-          // for withdraw) is pending. Status flips to "live" once
-          // tornado-deposit.mjs + tornado-withdraw.mjs land.
-          { name: "tornado-cash", status: "scaffolded", chains: [1] },
-        ],
+        protocols: PROTOCOL_CATALOGUE.map(({ name, status, chains }) => ({
+          name,
+          status,
+          chains,
+        })),
       });
+    case "listEnabled": {
+      // Report the active provider (read backend, single-select) and the
+      // enabled privacy plugins (multi-select). The provider is informational
+      // here — the daemon owns ReadBackend selection — but surfacing it keeps
+      // the host's view of the world legible to the TUI / agent.
+      const enabled = enabledPrivacyPlugins(env);
+      return jsonrpcResult(id, {
+        provider: (env.LEANCLI_PROVIDER ?? "helios").trim().toLowerCase() || "helios",
+        enabledPrivacy: enabled,
+        protocols: PROTOCOL_CATALOGUE.map(({ name, plugin, status, chains }) => ({
+          name,
+          status,
+          chains,
+          enabled: enabled.includes(plugin),
+        })),
+      });
+    }
     case "shielded.balance":
       return jsonifyResult(id, await shieldedBalance(env));
     case "shielded.prepareDeposit":

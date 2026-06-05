@@ -87,5 +87,13 @@ Lean, auditable, maintainable, clean root. **Not a strip-down** — keep every u
 - [x] Phase 1 — layout move (commit `94b9045a`).
 - [x] Phase 2 Stream A — crypto hygiene (pins, CRYPTO_POLICY.md, native/README.md, pruned 2 dead helpers).
 - [x] Phase 2 Stream C — drop R1 + Solidity (commits c4fa2b55, 7840c69a, 8f8e2e87; build 256, re-proven).
-- [ ] Phase 2 Streams D, B, E (order per user: D→B→E).
+- [x] Phase 2 Stream D — network policy re-home + trim (commit d2b6312a; Cat 6/7 re-proven).
+- [~] Phase 2 Stream B — Kohaku plugin host (in progress). **Fork resolved: B** — `@kohaku-eth/provider`
+      is a transport wrapper (its `call`/`estimateGas` proxy to the client's `request`); REVM/WASM-EVM
+      simulation lives in the existing `helios`/`colibri` sidecars. Keep those engines; build the
+      `LEANCLI_PROVIDER`/`LEANCLI_PRIVACY` flag surface on the EXISTING `ReadBackend` mechanism (default
+      `.helios`, `daemon.readBackend.set`, `backend:` param, `LEANCLI_SAFE_NODE_URL`). No new registry
+      rewrite, no `Colibri.Persistent` rename. Scope: delete llm-legacy, add pinned `plugins.lock.json`,
+      thin provider/privacy flags + `listEnabled`, complete inv 5.7 (policy gate on `Bridge.call`).
+- [ ] then E.
 - [ ] Phase 3 — Stream-F reconciliation + integration gate.

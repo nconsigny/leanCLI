@@ -7,9 +7,9 @@ import LeanCli.Registry.KnownProtocols
 # Rule-based English → `RegexDraft` parser
 
 Pure-Lean tokenizer + template matcher for natural-language transaction
-intents. Replaces the regex matcher in `sidecars/kohaku/llm-legacy/src/draft.mjs`.
-Lean is a strict win here: no regex ambiguity, total functions, the
-parser output IS an ADT, every match arm typechecks.
+intents. Replaces the regex matcher that lived in the now-removed Node
+LLM sidecar. Lean is a strict win here: no regex ambiguity, total
+functions, the parser output IS an ADT, every match arm typechecks.
 
 ## Role in the chat path
 

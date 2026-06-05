@@ -1,13 +1,12 @@
 import LeanCli.Encoding.Json
 import LeanCli.Util.Sandbox
-import LeanCli.Util.BridgeResolve
 import LeanCli.Transport.Uds
 
 /-!
 # LLM-agent bridge
 
 Bridges the wallet daemon's `chat.draft` / `llm.parseIntent` path to
-one of three LLM backends, selected at call time:
+one of two native LLM backends, selected at call time:
 
 * **Lean-native one-shot** (Phase 0 default) — spawn `leancli-agent`,
   pass `--rpc <json>`, read one stdout line. Same trust shape as the
@@ -15,16 +14,17 @@ one of three LLM backends, selected at call time:
 * **Lean-native persistent** (Phase 1a) — talk to a long-running
   `leancli-agentd` over its UDS socket; the agent persists session
   history under XDG_DATA_HOME via SQLite.
-* **Legacy Node sidecar** (opt-in) — `sidecars/kohaku/llm-legacy/bridge.mjs`,
-  selected by `LEANCLI_LLM_BRIDGE_LEGACY=1`.
+
+The Node `llm-legacy` sidecar was removed: the native `leancli-agent`
+is the sole, independent backend. There is no Node fallback to fall
+back to.
 
 Mode resolution (`resolveMode`):
 
   1. `LEANCLI_AGENT_MODE=oneshot` ⇒ force one-shot.
   2. `LEANCLI_AGENT_MODE=persistent` ⇒ force persistent;
      error if the socket is missing.
-  3. `LEANCLI_LLM_BRIDGE_LEGACY=1` ⇒ legacy Node bridge.
-  4. Otherwise: probe the agent socket. If it accepts `ping`, use
+  3. Otherwise: probe the agent socket. If it accepts `ping`, use
      persistent; else one-shot.
 
 The Lean daemon is the trusted policy enforcer; every backend is
@@ -44,15 +44,12 @@ def defaultExecutable : String := "leancli-agent"
 /-- Phase 0: the Lean-native `leancli-agent` executable is the default
     backend. `LEANCLI_LLM_BRIDGE` still overrides everything (used
     by integration tests and operators pinning a custom binary).
-    `LEANCLI_LLM_BRIDGE_LEGACY=1` opts back into the legacy Node
-    sidecar at `sidecars/kohaku/llm-legacy/bridge.mjs`.
 
     Stale-override safety: an explicit `LEANCLI_LLM_BRIDGE` that
     points at a missing filesystem path falls through to the default
     lookup. This catches stale `daemon.env` files carrying a
-    pre-rename `sidecars/kohaku/llm/bridge.mjs` after the package moved to
-    `sidecars/kohaku/llm-legacy/`. PATH-resolved bare names (e.g.
-    `leancli-agent`) pass through unchanged. -/
+    pre-rename `sidecars/kohaku/llm/bridge.mjs` path. PATH-resolved
+    bare names (e.g. `leancli-agent`) pass through unchanged. -/
 def resolveExecutable : IO String := do
   let overrideOk? : IO (Option String) := do
     match ← IO.getEnv "LEANCLI_LLM_BRIDGE" with
@@ -66,28 +63,16 @@ def resolveExecutable : IO String := do
   match ← overrideOk? with
   | some s => pure s
   | none =>
-      let useLegacy : Bool ← do
-        match ← IO.getEnv "LEANCLI_LLM_BRIDGE_LEGACY" with
-        | some v =>
-            let t := v.trimAscii.toString
-            pure (t ≠ "" && t ≠ "0")
-        | none => pure false
-      if useLegacy then
-        LeanCli.Util.BridgeResolve.resolveExecutable
-          "LEANCLI_LLM_BRIDGE_LEGACY_PATH"
-          ("sidecars" / "kohaku" / "llm-legacy" / "bridge.mjs")
-          "leancli-llm-bridge"
+      -- Lean-native default. The agent is built into the same Lake
+      -- project; .lake/build/bin/leancli_agent (lake's underscore
+      -- form) is the dev fallback, and the installed binary is
+      -- `leancli-agent` on PATH (the canonical install name).
+      let cwd ← IO.currentDir
+      let devCandidate := cwd / ".lake" / "build" / "bin" / "leancli_agent"
+      if (← devCandidate.pathExists) then
+        pure devCandidate.toString
       else
-        -- Lean-native default. The agent is built into the same Lake
-        -- project; .lake/build/bin/leancli_agent (lake's underscore
-        -- form) is the dev fallback, and the installed binary is
-        -- `leancli-agent` on PATH (the canonical install name).
-        let cwd ← IO.currentDir
-        let devCandidate := cwd / ".lake" / "build" / "bin" / "leancli_agent"
-        if (← devCandidate.pathExists) then
-          pure devCandidate.toString
-        else
-          pure defaultExecutable
+        pure defaultExecutable
 
 structure Request where
   method : String
@@ -138,11 +123,11 @@ private def callOneShot (req : Request) : IO Response := do
   let exe ← resolveExecutable
   let encoded := encodeRequest req
   try
-    -- Sandbox the LLM sidecar. needsTcpLoopback=true keeps the host
-    -- network namespace because this sidecar must reach the local
-    -- llama-server at 127.0.0.1:8080. The loopback-only URL guard in
-    -- sidecars/kohaku/llm/src/clients/ is the policy layer that prevents the
-    -- sidecar from reaching anything *but* loopback.
+    -- Sandbox the native agent. needsTcpLoopback=true keeps the host
+    -- network namespace because the agent must reach the local
+    -- llama-server at 127.0.0.1:8080. The agent's own loopback-only
+    -- URL guard (LeanCli/Agent/Http.lean) is the policy layer that
+    -- prevents it from reaching anything *but* loopback.
     let (cmd, args) ← LeanCli.Util.Sandbox.wrap
       { cmd := exe, args := #["--rpc", encoded], needsTcpLoopback := true }
     let child ← IO.Process.spawn {
@@ -235,19 +220,13 @@ private def pingAgentSocket (socketPath : String) : IO Bool := do
           | _ => pure false
       | _ => pure false
 
-/-- Effective bridge mode for a single call. -/
+/-- Effective bridge mode for a single call. Both arms are
+    Lean-native (`leancli-agent` one-shot vs. `leancli-agentd`
+    persistent); there is no Node fallback. -/
 inductive Mode where
   | oneshot
   | persistent
-  | legacy
   deriving Repr, DecidableEq
-
-private def legacySelected : IO Bool := do
-  match ← IO.getEnv "LEANCLI_LLM_BRIDGE_LEGACY" with
-  | none => pure false
-  | some v =>
-      let t := v.trimAscii.toString
-      pure (t ≠ "" && t ≠ "0")
 
 private def explicitMode : IO (Option Mode) := do
   match ← IO.getEnv "LEANCLI_AGENT_MODE" with
@@ -260,9 +239,8 @@ private def explicitMode : IO (Option Mode) := do
       | _           => pure none
 
 /-- Decide the mode for this call. Documented order of preference:
-    env override → legacy → socket probe → one-shot. -/
+    env override → socket probe → one-shot. -/
 def resolveMode : IO Mode := do
-  if ← legacySelected then return Mode.legacy
   match ← explicitMode with
   | some m => return m
   | none =>
@@ -432,9 +410,9 @@ private def callPersistent (req : Request) : IO Response := do
     `autoExtractMinMessages` messages will not extract, which is
     correct for an immediate-on-open `/clear`).
 
-    Mode-aware: only meaningful on `Mode.persistent`. On oneshot or
-    legacy bridges this returns a success no-op — there is no sticky
-    cache to roll over, and the caller (the wallet daemon's
+    Mode-aware: only meaningful on `Mode.persistent`. On the one-shot
+    bridge this returns a success no-op — there is no sticky cache to
+    roll over, and the caller (the wallet daemon's
     `chat.rolloverSession` RPC) should never have to special-case the
     mode.
 
@@ -464,8 +442,8 @@ def rolloverChatSession (chainId : Nat) (sessionKey : String) : IO Response := d
                   let errJ := (getField "error" j).getD .null
                   let msg := (getField "msg" errJ >>= asString).getD "agent error"
                   pure (Response.err (-32000) msg none)
-  | Mode.oneshot | Mode.legacy =>
-      -- No sticky cache to roll over in non-persistent modes; report
+  | Mode.oneshot =>
+      -- No sticky cache to roll over in one-shot mode; report
       -- success with `mode` so the wallet daemon can surface a hint.
       pure (Response.ok (.obj #[
         ("closed",     .bool false),
@@ -503,7 +481,7 @@ private def callHistoryOp (frame : String) : IO Response := do
                   -- message.
                   pure (Response.err (-32000) msg
                     (some <| .obj #[("kind", .str kind)]))
-  | Mode.oneshot | Mode.legacy =>
+  | Mode.oneshot =>
       pure (Response.err (-32601) "history available only in persistent mode" none)
 
 /-- Read-only session listing. Forwards `{limit, chainId, sessionKey}`
@@ -564,7 +542,6 @@ def listProposedTxs (limit? : Option Nat) (chainId? : Option Nat) :
     prompts route to a fresh process and lose history. -/
 def call (req : Request) : IO Response := do
   match ← resolveMode with
-  | Mode.legacy => callOneShot req
   | Mode.persistent =>
       -- Persistent mode was either auto-detected (socket already
       -- pinged ok) or explicitly requested. If we cannot complete
