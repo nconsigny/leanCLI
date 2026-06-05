@@ -95,5 +95,7 @@ Lean, auditable, maintainable, clean root. **Not a strip-down** — keep every u
       `.helios`, `daemon.readBackend.set`, `backend:` param, `LEANCLI_SAFE_NODE_URL`). No new registry
       rewrite, no `Colibri.Persistent` rename. Scope: delete llm-legacy, add pinned `plugins.lock.json`,
       thin provider/privacy flags + `listEnabled`, complete inv 5.7 (policy gate on `Bridge.call`).
-- [ ] then E.
+- [x] Phase 2 Stream B — Kohaku plugin host (commit a9f02b47; inv 5.7 ✅ proved; build 256).
+- [ ] Phase 2 Stream E — swap/DeFi (in progress; recon: Aave/Swap already consolidated, Cat 11 proved).
+- [ ] Phase 3 Stream F — reconcile INVARIANTS.md (apply C/D/B deltas + flip 5.7 ✅) + governance docs + final gate.
 - [ ] Phase 3 — Stream-F reconciliation + integration gate.
