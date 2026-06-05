@@ -1,7 +1,7 @@
 /-!
 # Loopback-only HTTP transport for the Lean-native agent
 
-Thin Lean wrapper over the libcurl FFI shim in `c/lean_http/`. The C
+Thin Lean wrapper over the libcurl FFI shim in `native/lean_http/`. The C
 layer is the floor for the loopback check; this layer adds the same
 string-prefix rule before calling FFI so a future C-side regression
 cannot widen the trust boundary silently.
@@ -9,13 +9,13 @@ cannot widen the trust boundary silently.
 Trust model: the agent talks to a local LLM server on the loopback
 interface. Any URL whose host is not `127.0.0.1`, `[::1]`, or
 `localhost` is refused. No HTTPS, no redirects, no auth headers — see
-`c/lean_http/lean_http.c` for the C-side rationale.
+`native/lean_http/lean_http.c` for the C-side rationale.
 -/
 
 namespace LeanCli.Agent.Http
 
 /-- Structured HTTP failure reasons. Mirrors the negative-coded error
-    space in `c/lean_http/lean_http.h`. `nonJsonResponse` is a Lean-side
+    space in `native/lean_http/lean_http.h`. `nonJsonResponse` is a Lean-side
     classification (decoded from a successful HTTP exchange whose body
     isn't valid JSON) and never originates from FFI. -/
 inductive Error where
@@ -50,7 +50,7 @@ private def acceptedLoopbackPrefixes : List String :=
 
 /-- Lean-side mirror of the C loopback check. Accepts a host prefix
     followed by either ':' (port), '/' (path), or end-of-string. Keep
-    in sync with `lk_is_loopback_url` in `c/lean_http/lean_http.c`.
+    in sync with `lk_is_loopback_url` in `native/lean_http/lean_http.c`.
     Returns the first matched prefix when accepted (for diagnostics);
     otherwise `none`. -/
 def isLoopbackUrl (url : String) : Bool :=

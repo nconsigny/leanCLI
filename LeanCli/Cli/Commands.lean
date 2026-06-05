@@ -334,7 +334,7 @@ inductive Command where
   | sphincsBundlerCheck (chainOverride? : Option String)
   /-- One-shot factory deploy. Sepolia-only — refuses other chains.
       Pulls the per-paramSet verifier address from daemon.json and
-      shells out to `script/sphincs_sepolia.sh deploy`. -/
+      shells out to `ops/scripts/sphincs_sepolia.sh deploy`. -/
   | sphincsFactoryDeploy (paramSet deployer : String)
       (accountIndex? : Option String) (chainOverride? : Option String)
   | completion (shell : String)
@@ -891,7 +891,7 @@ def doctorText : String :=
      - EOA signing: daemon-only; CLI forwards JSON-RPC requests\n\n\
    Run checks:\n\
      lake build\n\
-     ./script/check_privacy_cli.sh\n"
+     ./ops/scripts/check_privacy_cli.sh\n"
 
 def daemonHelpText (walletName? : Option String) : String :=
   let walletName := walletName?.getD "<wallet>"
@@ -925,10 +925,10 @@ def daemonHelpText (walletName? : Option String) : String :=
    Setup commands:\n\
      leancli wallet create r1 " ++ walletName ++ "\n\
      leancli wallet deploy " ++ walletName ++ "\n\
-     LEANCLI_TPM_KEY=" ++ walletName ++ " ./script/r1_sepolia.sh deploy\n\n\
+     LEANCLI_TPM_KEY=" ++ walletName ++ " ./ops/scripts/r1_sepolia.sh deploy\n\n\
    Inspect:\n\
      leancli wallet list\n\
-     ./script/r1_sepolia.sh address\n\n\
+     ./ops/scripts/r1_sepolia.sh address\n\n\
    Safety notes:\n\
      - The TPM private blob stays local under .leancli/ and is gitignored\n\
      - PIN is bound to the TPM key as a userwithauth value; wrong-PIN attempts are\n\
@@ -1048,7 +1048,7 @@ def helpText : String :=
      tui | ui                            Open the interactive Ink-based UI\n\
                                          (arrow-key navigation, requires Node ≥20).\n\
      install                             Rebuild + relink ~/.leancli/bin/{leancli,leancli-daemon}\n\
-                                         (delegates to script/leanclispawn).\n\
+                                         (delegates to ops/scripts/leanclispawn).\n\
      update                              git pull + rebuild + relink (leanclispawn --pull).\n\
      uninstall                           Remove ~/.leancli/bin symlinks (leanclispawn --uninstall).\n\n\
    SETUP / WALLET MANAGEMENT:\n\

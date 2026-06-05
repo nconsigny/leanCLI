@@ -50,22 +50,22 @@ private structure SidecarDescriptor where
 private def sidecars : Array SidecarDescriptor := #[
   { name := "clearsign",
     envVar := "LEANCLI_CLEARSIGN_BRIDGE",
-    relPath := "bridge" / "clearsign" / "bridge.mjs",
+    relPath := "sidecars" / "clearsign" / "bridge.mjs",
     defaultExe := "leancli-clearsign-bridge" },
   { name := "colibri",
     envVar := "LEANCLI_COLIBRI_BRIDGE",
-    relPath := "bridge" / "colibri" / "bridge.mjs",
+    relPath := "sidecars" / "kohaku" / "colibri" / "bridge.mjs",
     defaultExe := "leancli-colibri-bridge" },
   { name := "llm",
     envVar := "LEANCLI_LLM_BRIDGE",
     -- Phase 0: the Lean-native leancli-agent is the default backend.
     -- This status row points at the legacy Node sidecar that is now
     -- opt-in via LEANCLI_LLM_BRIDGE_LEGACY=1.
-    relPath := "bridge" / "llm-legacy" / "bridge.mjs",
+    relPath := "sidecars" / "kohaku" / "llm-legacy" / "bridge.mjs",
     defaultExe := "leancli-agent" },
   { name := "privacy",
     envVar := "LEANCLI_BRIDGE",
-    relPath := "bridge" / "bridge.mjs",
+    relPath := "sidecars" / "kohaku" / "bridge.mjs",
     defaultExe := "leancli-bridge" }
 ]
 

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Build the lean_http FFI shim into .lake/build/native. Idempotent;
-# safe to re-run. Mirrors script/setup_uds.sh exactly.
+# safe to re-run. Mirrors ops/scripts/setup_uds.sh exactly.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LEAN_PREFIX="$(lean --print-prefix)"
 OUT_DIR="${ROOT}/.lake/build/native"
 
@@ -22,7 +22,7 @@ CURL_LIBS="$(curl-config --libs)"
 cc -O2 -fPIC \
   -I"${LEAN_PREFIX}/include" \
   ${CURL_CFLAGS} \
-  -c "${ROOT}/c/lean_http/lean_http.c" \
+  -c "${ROOT}/native/lean_http/lean_http.c" \
   -o "${OUT_DIR}/lean_http.o"
 
 ar rcs "${OUT_DIR}/liblean_http.a" "${OUT_DIR}/lean_http.o"

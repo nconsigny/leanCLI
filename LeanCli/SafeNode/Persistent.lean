@@ -62,7 +62,7 @@ def defaultExecutable : String := "leancli-safenode-bridge"
 def resolveExecutable : IO String :=
   LeanCli.Util.BridgeResolve.resolveExecutable
     "LEANCLI_SAFENODE_BRIDGE"
-    ("bridge" / "safenode" / "bridge.mjs")
+    ("sidecars" / "kohaku" / "safenode" / "bridge.mjs")
     defaultExecutable
 
 /-- Spawn the sidecar in --listen mode and connect to it. The sidecar

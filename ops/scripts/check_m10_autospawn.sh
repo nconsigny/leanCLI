@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SOCK="/tmp/leancli-m10-autospawn-$$.sock"
 SYSTEMD_SOCK="/tmp/leancli-m10-systemd-$$.sock"
 RUNTIME="$(mktemp -d /tmp/leancli-m10-runtime.XXXXXX)"

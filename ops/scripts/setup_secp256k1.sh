@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SECP_URL="${SECP_URL:-https://github.com/bitcoin-core/secp256k1.git}"
 SECP_REV="${SECP_REV:-1a53f4961f337b4d166c25fce72ef0dc88806618}"
 SECP_SRC="${ROOT}/.lake/packages/secp256k1"
@@ -48,8 +48,8 @@ build_helper() {
   local src="$1"
   local out="$2"
   cc -O2 \
-    -I"${ROOT}/c/secp256k1_helpers" \
-    -I"${ROOT}/c/hacl_helpers" \
+    -I"${ROOT}/native/secp256k1_helpers" \
+    -I"${ROOT}/native/hacl_helpers" \
     -I"$SECP_PREFIX/include" \
     "$src" \
     -L"$SECP_PREFIX/lib" -lsecp256k1 \
@@ -57,10 +57,10 @@ build_helper() {
     -o "$out"
 }
 
-build_helper "${ROOT}/c/secp256k1_helpers/secp256k1_sign.c" "$HELPER_DIR/leancli-secp256k1-sign"
-build_helper "${ROOT}/c/secp256k1_helpers/secp256k1_pubkey.c" "$HELPER_DIR/leancli-secp256k1-pubkey"
-build_helper "${ROOT}/c/secp256k1_helpers/secp256k1_recover.c" "$HELPER_DIR/leancli-secp256k1-recover"
-build_helper "${ROOT}/c/secp256k1_helpers/secp256k1_verify.c" "$HELPER_DIR/leancli-secp256k1-verify"
+build_helper "${ROOT}/native/secp256k1_helpers/secp256k1_sign.c" "$HELPER_DIR/leancli-secp256k1-sign"
+build_helper "${ROOT}/native/secp256k1_helpers/secp256k1_pubkey.c" "$HELPER_DIR/leancli-secp256k1-pubkey"
+build_helper "${ROOT}/native/secp256k1_helpers/secp256k1_recover.c" "$HELPER_DIR/leancli-secp256k1-recover"
+build_helper "${ROOT}/native/secp256k1_helpers/secp256k1_verify.c" "$HELPER_DIR/leancli-secp256k1-verify"
 
 cat <<EOF
 libsecp256k1 installed at:

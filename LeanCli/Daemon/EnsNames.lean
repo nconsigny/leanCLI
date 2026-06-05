@@ -34,7 +34,7 @@ resolver via the existing chain-read path; result lands here.
 
 `forCalldata` returns a `Json.obj` of `{ "<0x-namehash>" : "<name>" }`
 keyed by lowercased hex, ready to merge into the `ensNames` field the
-sidecar (`bridge/clearsign/src/decoder.mjs`) consumes.
+sidecar (`sidecars/clearsign/src/decoder.mjs`) consumes.
 -/
 
 namespace LeanCli.Daemon.EnsNames

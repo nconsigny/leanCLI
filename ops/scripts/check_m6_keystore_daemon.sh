@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SOCK="/tmp/leancli-m6-check-$$.sock"
 DATA="$(mktemp -d /tmp/leancli-m6-check.XXXXXX)"
 LOG="$(mktemp /tmp/leancli-m6-check-log.XXXXXX)"
@@ -18,7 +18,7 @@ trap cleanup EXIT
 
 cd "$ROOT"
 lake build >/dev/null
-script/check_cli_isolation.sh >/dev/null
+ops/scripts/check_cli_isolation.sh >/dev/null
 
 LEANCLI_SOCKET="$SOCK" \
 XDG_DATA_HOME="$DATA" \

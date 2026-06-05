@@ -56,7 +56,7 @@ def defaultExecutable : String := "leancli-colibri-bridge"
 def resolveExecutable : IO String :=
   LeanCli.Util.BridgeResolve.resolveExecutable
     "LEANCLI_COLIBRI_BRIDGE"
-    ("bridge" / "colibri" / "bridge.mjs")
+    ("sidecars" / "kohaku" / "colibri" / "bridge.mjs")
     defaultExecutable
 
 /-- Spawn the sidecar in --listen mode and connect to it. The caller is

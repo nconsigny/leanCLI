@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 CONFIG_HOME="$(mktemp -d /tmp/leancli-config-check.XXXXXX)"
 SOCK="/tmp/leancli-config-check-$$.sock"
 OVERRIDE_SOCK="/tmp/leancli-config-override-$$.sock"

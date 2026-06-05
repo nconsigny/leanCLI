@@ -6,7 +6,7 @@ import LeanCli.Util.BridgeResolve
 # Clearsign-bridge sidecar boundary
 
 The ERC-7730 descriptor walker (calldata + EIP-712 → human intent) is
-implemented in `bridge/clearsign/` because viem already speaks the JSON-RPC
+implemented in `sidecars/clearsign/` because viem already speaks the JSON-RPC
 shapes we need (function-data decode, ABI parsing) and rewriting it in Lean
 adds friction without security upside.
 
@@ -34,7 +34,7 @@ def defaultExecutable : String := "leancli-clearsign-bridge"
 def resolveExecutable : IO String :=
   LeanCli.Util.BridgeResolve.resolveExecutable
     "LEANCLI_CLEARSIGN_BRIDGE"
-    ("bridge" / "clearsign" / "bridge.mjs")
+    ("sidecars" / "clearsign" / "bridge.mjs")
     defaultExecutable
 
 structure Request where

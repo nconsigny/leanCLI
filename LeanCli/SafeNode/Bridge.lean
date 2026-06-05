@@ -3,7 +3,7 @@ import LeanCli.Encoding.Json
 /-!
 # safenode-bridge sidecar boundary
 
-The safe-node sidecar (`bridge/safenode/bridge.mjs`) is a TDX-attested
+The safe-node sidecar (`sidecars/kohaku/safenode/bridge.mjs`) is a TDX-attested
 oblivious-RPC proxy. At startup it runs the vendored
 `verify_client_tdx.mjs` flow to fetch a TDX quote over
 `domain + sha256(cert PEM) + challenge`, verify it locally via the

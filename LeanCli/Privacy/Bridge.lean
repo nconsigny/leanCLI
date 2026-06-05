@@ -44,7 +44,7 @@ def defaultExecutable : String := "leancli-bridge"
 def resolveExecutable : IO String :=
   LeanCli.Util.BridgeResolve.resolveExecutable
     "LEANCLI_BRIDGE"
-    ("bridge" / "bridge.mjs")
+    ("sidecars" / "kohaku" / "bridge.mjs")
     defaultExecutable
 
 /-- A bridge JSON-RPC request. `params` is an arbitrary JSON object built by

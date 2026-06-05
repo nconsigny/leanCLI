@@ -55,8 +55,8 @@ pkgs.stdenv.mkDerivation rec {
       install -Dm644 tui/dist/index.mjs "$out/share/leancli/tui/index.mjs"
     fi
 
-    install -Dm644 packaging/systemd/leancli.socket "$out/lib/systemd/user/leancli.socket"
-    install -Dm644 packaging/systemd/leancli.service "$out/lib/systemd/user/leancli.service"
+    install -Dm644 ops/packaging/systemd/leancli.socket "$out/lib/systemd/user/leancli.socket"
+    install -Dm644 ops/packaging/systemd/leancli.service "$out/lib/systemd/user/leancli.service"
     install -Dm644 README.md "$out/share/doc/leancli/README.md"
     install -Dm644 INVARIANTS.md "$out/share/doc/leancli/INVARIANTS.md"
     install -Dm644 SECURITY.md "$out/share/doc/leancli/SECURITY.md"
@@ -85,7 +85,7 @@ pkgs.stdenv.mkDerivation rec {
       local policy boundary; system packages such as tpm2-tools, libfido2, and
       fprintd are optional operator tooling for host provisioning and testing.
       HACL Packages is the only accepted external crypto dependency and is
-      wired through script/setup_hacl.sh rather than linked into the default
+      wired through ops/scripts/setup_hacl.sh rather than linked into the default
       Lean build.
     '';
     mainProgram = "leancli";

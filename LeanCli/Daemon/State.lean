@@ -54,7 +54,7 @@ every subsequent `tx.simulate` honour it without restating the choice.
             why `tx.simulate` originally pinned to `rpc`).
 - `helios`  `@a16z/helios` + embedded REVM. Consensus-verified state via
             sync-committee proofs; opt-in here since helios depends on a
-            beacon RPC plumbed in `bridge/helios/`. -/
+            beacon RPC plumbed in `sidecars/kohaku/helios/`. -/
 inductive ReadBackend
   | rpc
   | colibri

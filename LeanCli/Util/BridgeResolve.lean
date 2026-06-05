@@ -3,7 +3,7 @@
 
 Every sidecar (`Privacy.Bridge`, `Clearsign.Bridge`, `LlmAgent.Bridge`,
 `Colibri.Persistent`) needs to answer the same question at spawn time:
-"where on disk is `bridge/<name>/bridge.mjs`?" Each used to ship its own
+"where on disk is `sidecars/kohaku/<name>/bridge.mjs`?" Each used to ship its own
 copy of the lookup logic, which diverged over time — `Colibri.Persistent`
 had the most complete fallback chain (env → cwd-walk → recorded
 checkout), while `Privacy.Bridge` and `LlmAgent.Bridge` only checked the
@@ -73,13 +73,13 @@ private def looksLikeFilesystemPath (s : String) : Bool :=
 /-- Resolve a sidecar executable. See module-level doc for the resolution
     order. `envVar` is the operator override env-var name (e.g.
     `LEANCLI_CLEARSIGN_BRIDGE`). `relPath` is the path under the
-    checkout root (e.g. `bridge/clearsign/bridge.mjs`). `defaultExe` is
+    checkout root (e.g. `sidecars/clearsign/bridge.mjs`). `defaultExe` is
     the PATH-resolved fallback name (e.g. `leancli-clearsign-bridge`).
 
     Stale-override behavior: when the env override is a filesystem path
     that no longer exists on disk (e.g. a `daemon.env` carrying a
-    pre-rename `bridge/llm/bridge.mjs` after the package renamed it to
-    `bridge/llm-legacy/`), we emit a one-shot warning to stderr and
+    pre-rename `sidecars/kohaku/llm/bridge.mjs` after the package renamed it to
+    `sidecars/kohaku/llm-legacy/`), we emit a one-shot warning to stderr and
     fall through to the normal lookup chain rather than handing the
     spawn a path that will ENOENT. PATH-resolved bare names pass
     through unchanged. -/

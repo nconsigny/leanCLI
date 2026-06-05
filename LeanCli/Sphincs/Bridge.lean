@@ -34,7 +34,7 @@ User-facing label is "SPHINCS-" because the variants are non-standard
 relative to NIST SLH-DSA. Internal type names and the on-chain
 `SphincsAccount` contract name stay as they are.
 
-Trust model: identical to the Node sidecars in `bridge/`. The shim binary
+Trust model: identical to the Node sidecars in `sidecars/`. The shim binary
 is **untrusted** (the GPU signer doubly so — it runs driver/shader code).
 Every output goes through length-validation against the parameter set's
 known sizes, and `signWithVerify` runs verify-after-sign on the signing

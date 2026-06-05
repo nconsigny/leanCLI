@@ -67,7 +67,7 @@ lean_lib LeanCliSpec where
   roots := #[`LeanCli.Lib.Spec]
 
 extern_lib liblean_uds pkg := do
-  let srcJob ← inputTextFile <| pkg.dir / "c" / "lean_uds" / "lean_uds.c"
+  let srcJob ← inputTextFile <| pkg.dir / "native" / "lean_uds" / "lean_uds.c"
   let lean ← getLeanInstall
   let oJob ← buildO (pkg.buildDir / "native" / "lean_uds.o") srcJob
     #["-I", lean.includeDir.toString, "-fPIC"] #[]
@@ -77,24 +77,24 @@ extern_lib liblean_uds pkg := do
 -- Compiled against the system libcurl headers; the actual `-lcurl`
 -- link arg is set in the package-level `weakLinkArgs` above.
 extern_lib liblean_http pkg := do
-  let srcJob ← inputTextFile <| pkg.dir / "c" / "lean_http" / "lean_http.c"
+  let srcJob ← inputTextFile <| pkg.dir / "native" / "lean_http" / "lean_http.c"
   let lean ← getLeanInstall
   let oJob ← buildO (pkg.buildDir / "native" / "lean_http.o") srcJob
     #["-I", lean.includeDir.toString,
-      "-I", (pkg.dir / "c" / "lean_http").toString,
+      "-I", (pkg.dir / "native" / "lean_http").toString,
       "-fPIC"] #[]
   buildStaticLib (pkg.buildDir / "native" / "liblean_http.a") #[oJob]
 
 -- SQLite FFI shim consumed by LeanCli/Agent/Session.lean (Phase 1a
 -- persistent agent sessions). Linked against the system libsqlite3 —
 -- Arch (`sqlite`) and Debian 12+ (`libsqlite3-0`) ship FTS5 enabled.
--- See `c/lean_sqlite/README.md` for the vendoring tradeoff.
+-- See `native/lean_sqlite/README.md` for the vendoring tradeoff.
 extern_lib liblean_sqlite pkg := do
-  let srcJob ← inputTextFile <| pkg.dir / "c" / "lean_sqlite" / "lean_sqlite.c"
+  let srcJob ← inputTextFile <| pkg.dir / "native" / "lean_sqlite" / "lean_sqlite.c"
   let lean ← getLeanInstall
   let oJob ← buildO (pkg.buildDir / "native" / "lean_sqlite.o") srcJob
     #["-I", lean.includeDir.toString,
-      "-I", (pkg.dir / "c" / "lean_sqlite").toString,
+      "-I", (pkg.dir / "native" / "lean_sqlite").toString,
       "-fPIC"] #[]
   buildStaticLib (pkg.buildDir / "native" / "liblean_sqlite.a") #[oJob]
 
@@ -110,7 +110,7 @@ lean_exe «leancli-daemon» where
 
 /--
 Lean-native LLM agent (Phase 0). One-shot replacement for the legacy
-`bridge/llm/bridge.mjs` Node sidecar. Accepts `--rpc '<json>'` on argv,
+`sidecars/kohaku/llm/bridge.mjs` Node sidecar. Accepts `--rpc '<json>'` on argv,
 runs the Lean agent loop, emits one JSON-RPC envelope line on stdout.
 
 `LlmAgent.Bridge` switches to this binary by default; the legacy
@@ -152,13 +152,13 @@ lean_exe «leancli-ens-check» where
   supportInterpreter := true
 
 /--
-Generate the bundled Railgun cold-start snapshot for `bridge/`.
+Generate the bundled Railgun cold-start snapshot for `sidecars/kohaku/`.
 
 Runs the railgun bridge sidecar with a deterministic dummy seed against
 Sepolia, lets `@kohaku-eth/railgun`'s indexer fully sync the on-chain
 UTXO tree + POI metadata into a temp storage file, then moves that
-file to `bridge/railgun-sepolia-snapshot.json`. The bridge cold-start
-hook in `bridge/bridge.mjs` copies this snapshot into a user's storage
+file to `sidecars/kohaku/railgun-sepolia-snapshot.json`. The bridge cold-start
+hook in `sidecars/kohaku/bridge.mjs` copies this snapshot into a user's storage
 path on first call so they skip the multi-minute initial sync.
 
 The snapshot contains chain-wide indexer state only — no per-user
@@ -209,7 +209,7 @@ script «setup-helpers» (args) do
   let _ := args
   let pkgDir ← IO.currentDir
   let runScript (name : String) : IO Bool := do
-    let path := pkgDir / "script" / name
+    let path := pkgDir / "ops" / "scripts" / name
     if !(← path.pathExists) then
       IO.eprintln s!"[setup-helpers] script not found: {path}"
       return false

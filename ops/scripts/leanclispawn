@@ -2,12 +2,12 @@
 # leanclispawn — installer/updater for the leancli CLI, modeled on `foundryup`.
 #
 # Bootstrap (foundryup-style, no clone needed):
-#   curl -fsSL https://raw.githubusercontent.com/nconsigny/leanCLI/master/script/leanclispawn | bash
+#   curl -fsSL https://raw.githubusercontent.com/nconsigny/leanCLI/master/ops/scripts/leanclispawn | bash
 #       → clones the repo to $LEANCLI_HOME/checkouts/leanCLI, builds, and
 #         self-installs into $LEANCLI_HOME/bin (default: ~/.leancli/bin).
 #
 # First run from an existing clone:
-#   ./script/leanclispawn
+#   ./ops/scripts/leanclispawn
 #       → uses the current checkout instead of cloning; everything else
 #         is the same.
 #
@@ -59,7 +59,7 @@ fi
 unset _self_src
 
 # Locate the checkout: prefer the script's own repo (works when running
-# `./script/leanclispawn`), otherwise consult $LEANCLI_HOME/checkout (works when
+# `./ops/scripts/leanclispawn`), otherwise consult $LEANCLI_HOME/checkout (works when
 # running `leanclispawn` from the user-bin symlink after first install).
 detect_checkout() {
   if [[ -n "$SELF_DIR" && -f "$SELF_DIR/../lakefile.lean" ]]; then
@@ -124,7 +124,7 @@ Options:
   --no-build          Skip `lake build`. Use when binaries are already current.
   --no-tui            Skip the Ink TUI bundle build. `leancli tui` will not work.
   --rebuild-tui       Force rebuilding the TUI bundle even if dist/ is present.
-  --no-bridges        Skip `npm install` for the bridge/ sidecars. Colibri,
+  --no-bridges        Skip `npm install` for the sidecars/kohaku/ sidecars. Colibri,
                       clearsign, privacy and LLM features will be degraded.
   --rebuild-bridges   Force reinstalling sidecar deps even when node_modules
                       already exists.
@@ -251,8 +251,8 @@ LEANCLI_SKILLS_LINK="$LEANCLI_DATA_DIR/skills"
 kill_stale_leancli_processes() {
   local found_daemon=0 found_bridge=0
   if pgrep -x leancli-daemon >/dev/null 2>&1; then found_daemon=1; fi
-  if pgrep -f 'bridge/colibri/bridge\.mjs' >/dev/null 2>&1; then found_bridge=1; fi
-  if pgrep -f 'bridge/helios/bridge\.mjs' >/dev/null 2>&1; then found_bridge=1; fi
+  if pgrep -f 'sidecars/kohaku/colibri/bridge\.mjs' >/dev/null 2>&1; then found_bridge=1; fi
+  if pgrep -f 'sidecars/kohaku/helios/bridge\.mjs' >/dev/null 2>&1; then found_bridge=1; fi
   if [[ $found_daemon -eq 0 && $found_bridge -eq 0 ]]; then
     return 0
   fi
@@ -271,14 +271,14 @@ kill_stale_leancli_processes() {
   # up any bridges that survived (e.g. orphaned by a previous crash, or
   # an autospawned daemon that's outside any cgroup we can reach).
   pkill -x leancli-daemon 2>/dev/null || true
-  pkill -f 'bridge/colibri/bridge\.mjs' 2>/dev/null || true
-  pkill -f 'bridge/helios/bridge\.mjs' 2>/dev/null || true
+  pkill -f 'sidecars/kohaku/colibri/bridge\.mjs' 2>/dev/null || true
+  pkill -f 'sidecars/kohaku/helios/bridge\.mjs' 2>/dev/null || true
   # Brief grace period for the processes to exit cleanly.
   local i
   for i in 1 2 3 4 5; do
     if ! pgrep -x leancli-daemon >/dev/null 2>&1 \
-       && ! pgrep -f 'bridge/colibri/bridge\.mjs' >/dev/null 2>&1 \
-       && ! pgrep -f 'bridge/helios/bridge\.mjs' >/dev/null 2>&1; then
+       && ! pgrep -f 'sidecars/kohaku/colibri/bridge\.mjs' >/dev/null 2>&1 \
+       && ! pgrep -f 'sidecars/kohaku/helios/bridge\.mjs' >/dev/null 2>&1; then
       break
     fi
     sleep 0.2
@@ -288,13 +288,13 @@ kill_stale_leancli_processes() {
     echo "    SIGKILL surviving leancli-daemon PIDs: $(pgrep -x leancli-daemon | tr '\n' ' ')"
     pkill -9 -x leancli-daemon 2>/dev/null || true
   fi
-  if pgrep -f 'bridge/colibri/bridge\.mjs' >/dev/null 2>&1; then
-    echo "    SIGKILL surviving colibri bridge.mjs PIDs: $(pgrep -f 'bridge/colibri/bridge\.mjs' | tr '\n' ' ')"
-    pkill -9 -f 'bridge/colibri/bridge\.mjs' 2>/dev/null || true
+  if pgrep -f 'sidecars/kohaku/colibri/bridge\.mjs' >/dev/null 2>&1; then
+    echo "    SIGKILL surviving colibri bridge.mjs PIDs: $(pgrep -f 'sidecars/kohaku/colibri/bridge\.mjs' | tr '\n' ' ')"
+    pkill -9 -f 'sidecars/kohaku/colibri/bridge\.mjs' 2>/dev/null || true
   fi
-  if pgrep -f 'bridge/helios/bridge\.mjs' >/dev/null 2>&1; then
-    echo "    SIGKILL surviving helios bridge.mjs PIDs: $(pgrep -f 'bridge/helios/bridge\.mjs' | tr '\n' ' ')"
-    pkill -9 -f 'bridge/helios/bridge\.mjs' 2>/dev/null || true
+  if pgrep -f 'sidecars/kohaku/helios/bridge\.mjs' >/dev/null 2>&1; then
+    echo "    SIGKILL surviving helios bridge.mjs PIDs: $(pgrep -f 'sidecars/kohaku/helios/bridge\.mjs' | tr '\n' ' ')"
+    pkill -9 -f 'sidecars/kohaku/helios/bridge\.mjs' 2>/dev/null || true
   fi
 }
 
@@ -461,7 +461,7 @@ Tried:
   3. Cloning $LEANCLI_REPO_URL into $LEANCLI_REPO_DIR
 
 To fix, either:
-  - git clone $LEANCLI_REPO_URL && cd leanCLI && ./script/leanclispawn
+  - git clone $LEANCLI_REPO_URL && cd leanCLI && ./ops/scripts/leanclispawn
   - Or set LEANCLI_REPO_DIR to point at an existing clone.
 EOF
   exit 1
@@ -632,13 +632,13 @@ build_native_helpers() {
     fi
     return 0
   fi
-  echo "==> native helpers: script/setup_hacl.sh (HACL Packages — keccak, sha256, hmac, pbkdf2, drbg, chacha20poly1305 + RustCrypto ripemd160)"
-  if ! (cd "$CHECKOUT" && bash script/setup_hacl.sh); then
+  echo "==> native helpers: ops/scripts/setup_hacl.sh (HACL Packages — keccak, sha256, hmac, pbkdf2, drbg, chacha20poly1305 + RustCrypto ripemd160)"
+  if ! (cd "$CHECKOUT" && bash ops/scripts/setup_hacl.sh); then
     echo "leanclispawn: setup_hacl.sh failed — wallet crypto will not work until re-run" >&2
     return 1
   fi
-  echo "==> native helpers: script/setup_secp256k1.sh (libsecp256k1 — sign, pubkey, recover, verify)"
-  if ! (cd "$CHECKOUT" && bash script/setup_secp256k1.sh); then
+  echo "==> native helpers: ops/scripts/setup_secp256k1.sh (libsecp256k1 — sign, pubkey, recover, verify)"
+  if ! (cd "$CHECKOUT" && bash ops/scripts/setup_secp256k1.sh); then
     echo "leanclispawn: setup_secp256k1.sh failed — EOA signing will not work until re-run" >&2
     return 1
   fi
@@ -656,14 +656,15 @@ build_bridges() {
     echo "==> bridges: skipped (--no-bridges)"
     return 0
   fi
-  if [[ ! -d "$CHECKOUT/bridge" ]]; then
+  if [[ ! -d "$CHECKOUT/sidecars/kohaku" ]]; then
     return 0
   fi
   require node
   require npm
   local any=0
-  # Top-level bridge/ (privacy) plus each bridge/<name>/ subpackage.
-  for pkg_json in "$CHECKOUT/bridge/package.json" "$CHECKOUT/bridge"/*/package.json; do
+  # Kohaku host (privacy) + each sidecars/kohaku/<name>/ subpackage, plus the
+  # sibling clearsign sidecar (clearsign is its own sidecar, not under kohaku).
+  for pkg_json in "$CHECKOUT/sidecars/kohaku/package.json" "$CHECKOUT/sidecars/kohaku"/*/package.json "$CHECKOUT/sidecars/clearsign/package.json"; do
     [[ -f "$pkg_json" ]] || continue
     local dir
     dir="$(dirname "$pkg_json")"
@@ -833,15 +834,15 @@ if [[ -x "$LEAN_AGENT" ]]; then
 fi
 
 # Helios light-client defaults. The sidecar itself is auto-installed by
-# `build_bridges` (any bridge/<name>/ with a package.json is npm-installed
-# in place), and the wrapper-shim resolver picks up `bridge/helios/`. The
+# `build_bridges` (any sidecars/kohaku/<name>/ with a package.json is npm-installed
+# in place), and the wrapper-shim resolver picks up `sidecars/kohaku/helios/`. The
 # remaining piece is opt-in at the daemon-boot level — the daemon checks
 # `LEANCLI_HELIOS=1` before auto-spawning the persistent helios client, and
 # `LEANCLI_READ_BACKEND=helios` to default `tx.simulate` to the helios
 # backend. We bake both in so a fresh install gets sync-committee-verified
 # simulation by default; users can flip them off via daemon.env edits or
 # `daemon.readBackend.set { backend: rpc }` at runtime.
-if [[ -f "$CHECKOUT/bridge/helios/package.json" ]]; then
+if [[ -f "$CHECKOUT/sidecars/kohaku/helios/package.json" ]]; then
   leancli_env_set "LEANCLI_HELIOS"        "1"
   leancli_env_set "LEANCLI_READ_BACKEND"  "helios"
 fi
@@ -933,7 +934,7 @@ install_bridge_wrappers() {
     echo "==> bridge wrappers: skipped (--no-bridges)"
     return 0
   fi
-  if [[ ! -d "$CHECKOUT/bridge" ]]; then
+  if [[ ! -d "$CHECKOUT/sidecars/kohaku" ]]; then
     return 0
   fi
   require node
@@ -942,15 +943,15 @@ install_bridge_wrappers() {
 
   # exe : relative-path-from-CHECKOUT : env-var-name
   local rows=(
-    "leancli-bridge:bridge/bridge.mjs:LEANCLI_BRIDGE"
-    "leancli-clearsign-bridge:bridge/clearsign/bridge.mjs:LEANCLI_CLEARSIGN_BRIDGE"
-    "leancli-colibri-bridge:bridge/colibri/bridge.mjs:LEANCLI_COLIBRI_BRIDGE"
-    "leancli-helios-bridge:bridge/helios/bridge.mjs:LEANCLI_HELIOS_BRIDGE"
+    "leancli-bridge:sidecars/kohaku/bridge.mjs:LEANCLI_BRIDGE"
+    "leancli-clearsign-bridge:sidecars/clearsign/bridge.mjs:LEANCLI_CLEARSIGN_BRIDGE"
+    "leancli-colibri-bridge:sidecars/kohaku/colibri/bridge.mjs:LEANCLI_COLIBRI_BRIDGE"
+    "leancli-helios-bridge:sidecars/kohaku/helios/bridge.mjs:LEANCLI_HELIOS_BRIDGE"
     # TDX-attested ORAM proxy (SafeNode/Bridge.lean). The wrapper only execs
     # node + bridge.mjs; the upstream TDX_QUOTE_VERIFIER_BIN it needs at
     # runtime is a separate, user-supplied dependency.
-    "leancli-safenode-bridge:bridge/safenode/bridge.mjs:LEANCLI_SAFENODE_BRIDGE"
-    "leancli-llm-legacy:bridge/llm-legacy/bridge.mjs:LEANCLI_LLM_BRIDGE_LEGACY_PATH"
+    "leancli-safenode-bridge:sidecars/kohaku/safenode/bridge.mjs:LEANCLI_SAFENODE_BRIDGE"
+    "leancli-llm-legacy:sidecars/kohaku/llm-legacy/bridge.mjs:LEANCLI_LLM_BRIDGE_LEGACY_PATH"
   )
 
   # daemon.env may not exist yet — the wizard creates it only after the
@@ -1018,7 +1019,7 @@ EOF
     installed=$((installed + 1))
   done
   if [[ $installed -eq 0 ]]; then
-    echo "==> bridge wrappers: none installed (no bridge.mjs targets found in $CHECKOUT/bridge/)"
+    echo "==> bridge wrappers: none installed (no bridge.mjs targets found in $CHECKOUT/sidecars/kohaku/)"
   fi
 }
 
@@ -1029,10 +1030,10 @@ install_bridge_wrappers
 # The privacy sidecars read pre-synced state files from disk on cold
 # start to skip the multi-minute initial chain walk:
 #
-#   bridge/ppv1-sepolia-state.json     — Privacy Pools v1, Sepolia
-#   bridge/ppv1-mainnet-state.json     — Privacy Pools v1, mainnet
-#   bridge/railgun-sepolia-snapshot.json — Railgun (alpha-21), Sepolia
-#   bridge/railgun-mainnet-snapshot.json — Railgun (alpha-21), mainnet
+#   sidecars/kohaku/ppv1-sepolia-state.json     — Privacy Pools v1, Sepolia
+#   sidecars/kohaku/ppv1-mainnet-state.json     — Privacy Pools v1, mainnet
+#   sidecars/kohaku/railgun-sepolia-snapshot.json — Railgun (alpha-21), Sepolia
+#   sidecars/kohaku/railgun-mainnet-snapshot.json — Railgun (alpha-21), mainnet
 #
 # These files live in the checkout next to bridge.mjs and are picked
 # up by the bridge via `__dirname`. The wrapper shims installed above
@@ -1048,7 +1049,7 @@ report_bridge_data_assets() {
       "Railgun (mainnet):railgun-mainnet-snapshot.json"; do
     local label="${data_pair%%:*}"
     local fname="${data_pair##*:}"
-    local path="$CHECKOUT/bridge/$fname"
+    local path="$CHECKOUT/sidecars/kohaku/$fname"
     if [[ -f "$path" ]]; then
       local bytes
       bytes=$(stat -c%s "$path" 2>/dev/null || echo "?")
@@ -1157,14 +1158,14 @@ EOF
 
 probe_userns_sandbox
 
-# Self-install: copy the canonical script from $CHECKOUT/script/leanclispawn
+# Self-install: copy the canonical script from $CHECKOUT/ops/scripts/leanclispawn
 # into $LEANCLI_BIN so the user can run `leanclispawn` from anywhere. We
 # always source from the checkout (never $BASH_SOURCE) because the latter
 # can be /dev/stdin under `curl ... | bash`, which has already been
 # consumed by the time we get here. Copy rather than symlink so deleting
 # or moving the checkout doesn't break the updater — the copy still finds
 # the checkout via $CHECKOUT_FILE.
-SCRIPT_SOURCE="$CHECKOUT/script/leanclispawn"
+SCRIPT_SOURCE="$CHECKOUT/ops/scripts/leanclispawn"
 INSTALLED_SELF="$LEANCLI_BIN/leanclispawn"
 if [[ ! -f "$SCRIPT_SOURCE" ]]; then
   echo "leanclispawn: $SCRIPT_SOURCE missing — cannot self-install. Is the checkout on a commit older than the script?" >&2
@@ -1175,7 +1176,7 @@ fi
 
 # ---- systemd user unit install ---------------------------------------------
 #
-# Ship the repo's `packaging/systemd/leancli-daemon.service` into the user's
+# Ship the repo's `ops/packaging/systemd/leancli-daemon.service` into the user's
 # systemd unit dir so they can manage the daemon with the standard
 # `systemctl --user {start,stop,status}` verbs. The unit has no [Install]
 # section on purpose — we never `enable` it and never call `loginctl
@@ -1188,7 +1189,7 @@ fi
 install_unit_file() {
   local unit_name="$1"
   local dest_path="$2"
-  local src="$CHECKOUT/packaging/systemd/$unit_name"
+  local src="$CHECKOUT/ops/packaging/systemd/$unit_name"
   if [[ ! -f "$src" ]]; then
     echo "leanclispawn: $src missing — skipping $unit_name install" >&2
     return 0

@@ -1342,7 +1342,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                                   let pkHex := LeanCli.Crypto.Hex.encode pk
                                   try
                                     let out ← IO.Process.output {
-                                      cmd := "./script/sphincs_sepolia.sh",
+                                      cmd := "./ops/scripts/sphincs_sepolia.sh",
                                       args := #["deploy", ps.toString],
                                       env := #[
                                         ("SPHINCS_VERIFIER_ADDR", some verifierAddr),

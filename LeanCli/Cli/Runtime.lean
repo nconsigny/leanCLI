@@ -55,7 +55,7 @@ private def restartDaemonForConfigChange : IO Unit := do
       1. `$LEANCLI_LEANCLISPAWN`        — explicit override (dev / packagers)
       2. `$LEANCLI_HOME/bin/leanclispawn`   — the self-installed copy
       3. `$HOME/.leancli/bin/leanclispawn`  — default install location
-      4. `<appDir>/../../script/leanclispawn` — repo-dev layout (Lean binary
+      4. `<appDir>/../../ops/scripts/leanclispawn` — repo-dev layout (Lean binary
                                             sits at <repo>/.lake/build/bin/)
       5. PATH lookup `leanclispawn`         — last resort
     Returns the script's exit code so `leancli install` surfaces install
@@ -65,7 +65,7 @@ def runLeanclispawn (extraArgs : Array String) : IO UInt32 := do
   let leancliHome? ← IO.getEnv "LEANCLI_HOME"
   let home? ← IO.getEnv "HOME"
   let appDir ← IO.appDir
-  let repoScript : System.FilePath := appDir / ".." / ".." / "script" / "leanclispawn"
+  let repoScript : System.FilePath := appDir / ".." / ".." / "ops" / "scripts" / "leanclispawn"
   let candidates : Array System.FilePath := #[]
   let candidates := match envOverride? with
     | some p => candidates.push (System.FilePath.mk p)
@@ -106,7 +106,7 @@ def runLeanclispawn (extraArgs : Array String) : IO UInt32 := do
     IO.eprintln s!"  {repoScript}"
     IO.eprintln "  leanclispawn (PATH)"
     IO.eprintln ""
-    IO.eprintln "First-time install? Run `./script/leanclispawn` from the repo root."
+    IO.eprintln "First-time install? Run `./ops/scripts/leanclispawn` from the repo root."
     pure 2
 
 /-- Thin wrapper around the daemon's `daemon.preflight` RPC. The policy
@@ -611,7 +611,7 @@ def daemonLogsHandler : IO UInt32 := do
     -- Direct the user toward the systemd install path rather than
     -- pretending we can tail a nonexistent journal.
     IO.eprintln "`daemon logs` requires the systemd-managed install."
-    IO.eprintln "Run `script/leanclispawn` from the repo to install the user unit,"
+    IO.eprintln "Run `ops/scripts/leanclispawn` from the repo to install the user unit,"
     IO.eprintln "or read $XDG_STATE_HOME/leancli/network.log directly."
     pure 2
 

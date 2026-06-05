@@ -5,9 +5,9 @@ import LeanCli.Util.DotEnv
 /-!
 # Railgun cold-start snapshot generator
 
-Builds `bridge/railgun-sepolia-snapshot.json` — a pre-synced
+Builds `sidecars/kohaku/railgun-sepolia-snapshot.json` — a pre-synced
 `@kohaku-eth/railgun` plugin storage file that the bridge cold-start
-hook in `bridge/bridge.mjs` copies into a user's storage path on
+hook in `sidecars/kohaku/bridge.mjs` copies into a user's storage path on
 first call. Lets users skip the multi-minute sync from the Railgun
 smart-wallet deployment block on Sepolia.
 
@@ -20,7 +20,7 @@ How it works:
   3. The SDK runs the indexer's full sync (Subsquid + RPC fallback)
      and the `fileStorage` adapter flushes the resulting chain-wide
      state to the temp file on every `set()`.
-  4. Move the temp file to `bridge/railgun-sepolia-snapshot.json`.
+  4. Move the temp file to `sidecars/kohaku/railgun-sepolia-snapshot.json`.
 
 The snapshot contains only chain-wide indexer state (UTXO commitments,
 merkle tree, POI metadata) — no per-user keys. alpha-21 derives
@@ -43,7 +43,7 @@ def deterministicSeedHex : String :=
 
 private def tmpStorageDir : System.FilePath := "/tmp/leancli-railgun-snapshot"
 
-private def snapshotOutPath : System.FilePath := "bridge" / "railgun-sepolia-snapshot.json"
+private def snapshotOutPath : System.FilePath := "sidecars" / "kohaku" / "railgun-sepolia-snapshot.json"
 
 private def die {α : Type} (msg : String) : IO α := do
   IO.eprintln msg

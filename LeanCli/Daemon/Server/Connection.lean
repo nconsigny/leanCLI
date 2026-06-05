@@ -109,8 +109,8 @@ def detectExistingDaemon (path : String) : IO (Option String) := do
 
 /-- Native helper binaries the daemon shells out to for every wallet op
     (PBKDF2 / HMAC / ChaCha20-Poly1305 / Keccak / secp256k1 sign+recover).
-    They are produced by `script/setup_hacl.sh` and
-    `script/setup_secp256k1.sh`, NOT by `lake build`, so a tree built
+    They are produced by `ops/scripts/setup_hacl.sh` and
+    `ops/scripts/setup_secp256k1.sh`, NOT by `lake build`, so a tree built
     with `lake build` alone is missing them and every unlock fails with
     a generic `could not execute external process` mid-flow. The boot
     precheck below stats each and refuses to listen if any are absent. -/
@@ -197,7 +197,7 @@ def verifyNativeHelpersOrExit : IO Unit := do
   IO.eprintln ""
   IO.eprintln "  These are NOT produced by `lake build`. Build them with one of:"
   IO.eprintln "    lake script run setup-helpers      # recommended"
-  IO.eprintln "    bash script/setup_hacl.sh && bash script/setup_secp256k1.sh"
+  IO.eprintln "    bash ops/scripts/setup_hacl.sh && bash ops/scripts/setup_secp256k1.sh"
   IO.eprintln "    leanclispawn --rebuild-helpers      # if installed via leanclispawn"
   IO.eprintln ""
   IO.eprintln "  Required system tools: git cmake ninja gcc cargo"

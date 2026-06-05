@@ -92,7 +92,7 @@ for _ in 1 2 3 4 5; do [ -S "$SOCK" ] || break; sleep 1; done
 if [ -S "$SOCK" ]; then
   echo "daemon did not stop via RPC; killing"
   pkill -f leancli-daemon || true
-  pkill -f 'bridge/(helios|colibri|safenode)/bridge.mjs' || true
+  pkill -f 'sidecars/kohaku/(helios|colibri|safenode)/bridge.mjs' || true
   sleep 1
   rm -f /run/user/"$(id -u)"/leancli/*.sock
 fi

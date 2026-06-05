@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SOCK="/tmp/leancli-m8-check-$$.sock"
 DATA="$(mktemp -d /tmp/leancli-m8-check.XXXXXX)"
 DAEMON_LOG="$(mktemp /tmp/leancli-m8-daemon-log.XXXXXX)"

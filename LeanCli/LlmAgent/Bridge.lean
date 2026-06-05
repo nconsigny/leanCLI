@@ -15,7 +15,7 @@ one of three LLM backends, selected at call time:
 * **Lean-native persistent** (Phase 1a) — talk to a long-running
   `leancli-agentd` over its UDS socket; the agent persists session
   history under XDG_DATA_HOME via SQLite.
-* **Legacy Node sidecar** (opt-in) — `bridge/llm-legacy/bridge.mjs`,
+* **Legacy Node sidecar** (opt-in) — `sidecars/kohaku/llm-legacy/bridge.mjs`,
   selected by `LEANCLI_LLM_BRIDGE_LEGACY=1`.
 
 Mode resolution (`resolveMode`):
@@ -45,13 +45,13 @@ def defaultExecutable : String := "leancli-agent"
     backend. `LEANCLI_LLM_BRIDGE` still overrides everything (used
     by integration tests and operators pinning a custom binary).
     `LEANCLI_LLM_BRIDGE_LEGACY=1` opts back into the legacy Node
-    sidecar at `bridge/llm-legacy/bridge.mjs`.
+    sidecar at `sidecars/kohaku/llm-legacy/bridge.mjs`.
 
     Stale-override safety: an explicit `LEANCLI_LLM_BRIDGE` that
     points at a missing filesystem path falls through to the default
     lookup. This catches stale `daemon.env` files carrying a
-    pre-rename `bridge/llm/bridge.mjs` after the package moved to
-    `bridge/llm-legacy/`. PATH-resolved bare names (e.g.
+    pre-rename `sidecars/kohaku/llm/bridge.mjs` after the package moved to
+    `sidecars/kohaku/llm-legacy/`. PATH-resolved bare names (e.g.
     `leancli-agent`) pass through unchanged. -/
 def resolveExecutable : IO String := do
   let overrideOk? : IO (Option String) := do
@@ -75,7 +75,7 @@ def resolveExecutable : IO String := do
       if useLegacy then
         LeanCli.Util.BridgeResolve.resolveExecutable
           "LEANCLI_LLM_BRIDGE_LEGACY_PATH"
-          ("bridge" / "llm-legacy" / "bridge.mjs")
+          ("sidecars" / "kohaku" / "llm-legacy" / "bridge.mjs")
           "leancli-llm-bridge"
       else
         -- Lean-native default. The agent is built into the same Lake
@@ -141,7 +141,7 @@ private def callOneShot (req : Request) : IO Response := do
     -- Sandbox the LLM sidecar. needsTcpLoopback=true keeps the host
     -- network namespace because this sidecar must reach the local
     -- llama-server at 127.0.0.1:8080. The loopback-only URL guard in
-    -- bridge/llm/src/clients/ is the policy layer that prevents the
+    -- sidecars/kohaku/llm/src/clients/ is the policy layer that prevents the
     -- sidecar from reaching anything *but* loopback.
     let (cmd, args) ← LeanCli.Util.Sandbox.wrap
       { cmd := exe, args := #["--rpc", encoded], needsTcpLoopback := true }

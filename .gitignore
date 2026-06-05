@@ -6,14 +6,14 @@
 /cache
 /broadcast
 /artifacts
-/c/rustcrypto_helpers/target
-/bridge/node_modules/
-/bridge/clearsign/node_modules/
-/bridge/colibri/node_modules/
-/bridge/helios/node_modules/
-/bridge/safenode/node_modules/
-/bridge/llm/node_modules/
-/bridge/llm-legacy/node_modules/
+/native/rustcrypto_helpers/target
+/sidecars/kohaku/node_modules/
+/sidecars/clearsign/node_modules/
+/sidecars/kohaku/colibri/node_modules/
+/sidecars/kohaku/helios/node_modules/
+/sidecars/kohaku/safenode/node_modules/
+/sidecars/kohaku/llm/node_modules/
+/sidecars/kohaku/llm-legacy/node_modules/
 /tui/node_modules/
 /tui/dist/
 

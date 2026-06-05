@@ -8,7 +8,7 @@ import LeanCli.Encoding.Json
 /-!
 # `leancli-agent` executable
 
-Drop-in replacement for the legacy `bridge/llm/bridge.mjs` Node
+Drop-in replacement for the legacy `sidecars/kohaku/llm/bridge.mjs` Node
 sidecar. Accepts a JSON-RPC 2.0 request on `--rpc '<json>'`, runs the
 one-shot agent loop for `llm.parseIntent`, emits exactly one
 JSON-RPC envelope line on stdout.

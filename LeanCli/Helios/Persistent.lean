@@ -54,7 +54,7 @@ def defaultExecutable : String := "leancli-helios-bridge"
 def resolveExecutable : IO String :=
   LeanCli.Util.BridgeResolve.resolveExecutable
     "LEANCLI_HELIOS_BRIDGE"
-    ("bridge" / "helios" / "bridge.mjs")
+    ("sidecars" / "kohaku" / "helios" / "bridge.mjs")
     defaultExecutable
 
 /-- Spawn the sidecar in --listen mode and connect to it. The caller is

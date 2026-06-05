@@ -22,7 +22,7 @@ Local TPM2-backed R1 wallet operations. Nine methods:
   r1.sendSepolia / r1.sendEthSepolia / r1.sendRawSepolia
                                         (end-to-end send via r1SendFlow)
 
-The `r1SendFlow` helper shells out to `script/r1_sepolia.sh` for
+The `r1SendFlow` helper shells out to `ops/scripts/r1_sepolia.sh` for
 calldata encoding + raw-tx assembly while keeping the PIN-bound TPM2
 signature step in-process so notifications stream live to the TUI.
 All chain reads pass through `RPC.Outbound.*` (policy-gated); the
@@ -144,7 +144,7 @@ private def runScript (cfg : Config) (args : Array String)
     (env : Array (String × Option String) := #[]) : IO (UInt32 × String) := do
   try
     let out ← IO.Process.output
-      { cmd := "./script/r1_sepolia.sh",
+      { cmd := "./ops/scripts/r1_sepolia.sh",
         args := args,
         env := chainScriptEnv cfg ++ env }
     pure (out.exitCode, out.stdout ++ out.stderr)
@@ -159,7 +159,7 @@ private def runScriptSplit (cfg : Config) (args : Array String)
     IO (UInt32 × String × String) := do
   try
     let out ← IO.Process.output
-      { cmd := "./script/r1_sepolia.sh",
+      { cmd := "./ops/scripts/r1_sepolia.sh",
         args := args,
         env := chainScriptEnv cfg ++ env }
     pure (out.exitCode, out.stdout, out.stderr)

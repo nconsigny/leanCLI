@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 HACL_URL="${HACL_URL:-https://github.com/cryspen/hacl-packages.git}"
 HACL_REV="${HACL_REV:-05c3d8fb321ed65e3db3a6a8b853019e86fb40a2}"
 HACL_SRC="${ROOT}/.lake/packages/hacl-packages"
@@ -51,7 +51,7 @@ build_helper() {
   local src="$1"
   local out="$2"
   cc -O2 \
-    -I"${ROOT}/c/hacl_helpers" \
+    -I"${ROOT}/native/hacl_helpers" \
     -I"$HACL_PREFIX/include" \
     -I"$HACL_PREFIX/include/hacl" \
     -I"$HACL_SRC/include" \
@@ -62,16 +62,16 @@ build_helper() {
     -o "$out"
 }
 
-build_helper "${ROOT}/c/hacl_helpers/hacl_keccak256.c" "$HELPER_DIR/leancli-hacl-keccak256"
-build_helper "${ROOT}/c/hacl_helpers/hacl_sha256.c" "$HELPER_DIR/leancli-hacl-sha256"
-build_helper "${ROOT}/c/hacl_helpers/hacl_hmac_sha512.c" "$HELPER_DIR/leancli-hacl-hmac-sha512"
-build_helper "${ROOT}/c/hacl_helpers/hacl_hmac_sha256.c" "$HELPER_DIR/leancli-hacl-hmac-sha256"
-build_helper "${ROOT}/c/hacl_helpers/hacl_pbkdf2_sha512.c" "$HELPER_DIR/leancli-hacl-pbkdf2"
-build_helper "${ROOT}/c/hacl_helpers/hacl_hmac_drbg_sha256.c" "$HELPER_DIR/leancli-hacl-hmac-drbg"
-build_helper "${ROOT}/c/hacl_helpers/hacl_chacha20poly1305.c" "$HELPER_DIR/leancli-hacl-chacha20poly1305"
+build_helper "${ROOT}/native/hacl_helpers/hacl_keccak256.c" "$HELPER_DIR/leancli-hacl-keccak256"
+build_helper "${ROOT}/native/hacl_helpers/hacl_sha256.c" "$HELPER_DIR/leancli-hacl-sha256"
+build_helper "${ROOT}/native/hacl_helpers/hacl_hmac_sha512.c" "$HELPER_DIR/leancli-hacl-hmac-sha512"
+build_helper "${ROOT}/native/hacl_helpers/hacl_hmac_sha256.c" "$HELPER_DIR/leancli-hacl-hmac-sha256"
+build_helper "${ROOT}/native/hacl_helpers/hacl_pbkdf2_sha512.c" "$HELPER_DIR/leancli-hacl-pbkdf2"
+build_helper "${ROOT}/native/hacl_helpers/hacl_hmac_drbg_sha256.c" "$HELPER_DIR/leancli-hacl-hmac-drbg"
+build_helper "${ROOT}/native/hacl_helpers/hacl_chacha20poly1305.c" "$HELPER_DIR/leancli-hacl-chacha20poly1305"
 
-cargo build --release --manifest-path "${ROOT}/c/rustcrypto_helpers/Cargo.toml"
-cp "${ROOT}/c/rustcrypto_helpers/target/release/leancli-hacl-ripemd160" "$HELPER_DIR/leancli-hacl-ripemd160"
+cargo build --release --manifest-path "${ROOT}/native/rustcrypto_helpers/Cargo.toml"
+cp "${ROOT}/native/rustcrypto_helpers/target/release/leancli-hacl-ripemd160" "$HELPER_DIR/leancli-hacl-ripemd160"
 
 cat <<EOF
 HACL installed at:

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 VERITY_DIR="${ROOT}/.lake/packages/verity"
 VERITY_REV="${VERITY_REV:-103311b0ebef7203c6ab14dc4fc7e10d32d5def0}"
 VERITY_URL="${VERITY_URL:-https://github.com/lfglabs-dev/verity.git}"

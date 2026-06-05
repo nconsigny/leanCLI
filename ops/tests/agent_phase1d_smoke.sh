@@ -29,7 +29,7 @@
 
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 ROOT="$(pwd)"
 LEANCLI="${LEANCLI_BIN:-${ROOT}/.lake/build/bin/leancli}"
 LEANCLI_DAEMON="${LEANCLI_DAEMON_BIN:-${ROOT}/.lake/build/bin/leancli-daemon}"

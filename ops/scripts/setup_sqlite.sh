@@ -7,7 +7,7 @@
 # c/lean_sqlite/README.md for the system-libsqlite3 rationale.
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 LEAN_PREFIX="$(lean --print-prefix)"
 OUT_DIR="${ROOT}/.lake/build/native"
 TMP="$(mktemp -d)"
@@ -61,8 +61,8 @@ fi
 # 3. Compile the shim.
 cc -O2 -fPIC \
   -I"${LEAN_PREFIX}/include" \
-  -I"${ROOT}/c/lean_sqlite" \
-  -c "${ROOT}/c/lean_sqlite/lean_sqlite.c" \
+  -I"${ROOT}/native/lean_sqlite" \
+  -c "${ROOT}/native/lean_sqlite/lean_sqlite.c" \
   -o "${OUT_DIR}/lean_sqlite.o"
 
 ar rcs "${OUT_DIR}/liblean_sqlite.a" "${OUT_DIR}/lean_sqlite.o"

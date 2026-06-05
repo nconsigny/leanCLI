@@ -25,7 +25,7 @@
 # stage either passed or was deferred.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "$0")/../.."
 ROOT="$(pwd)"
 AGENT="${LEANCLI_AGENT_BIN:-${ROOT}/.lake/build/bin/leancli_agent}"
 
