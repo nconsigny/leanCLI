@@ -1045,33 +1045,27 @@ def matchAuditApprovals (toks : List String) : Option RegexDraft := do
     confidence := .high
   }
 
-/-- `give me a fresh address [called <label>]`, `new EOA`, `new R1
-smart account [named <label>]`, `hardware wallet`, etc. The skill picks
-the wallet kind: `eoa` (BIP-39 default) vs `r1` (TPM hardware opt-in)
-based on keyword presence. Label is captured when the user named one. -/
+/-- `give me a fresh address [called <label>]`, `new EOA`,
+`new wallet [named <label>]`, etc. Always produces a BIP-39 EOA — the
+P-256/R1 hardware-key kind was removed from the core. Label is captured
+when the user named one. -/
 def matchFreshAddress (toks : List String) : Option RegexDraft := do
   let verb ← toks.head?
   let hasFreshHint :=
     (toks.any (fun t => t = "fresh"))
       ∨ (verb = "new" ∧ toks.any (fun t =>
-          t = "address" ∨ t = "wallet" ∨ t = "eoa" ∨ t = "r1"
-            ∨ t = "account"))
+          t = "address" ∨ t = "wallet" ∨ t = "eoa" ∨ t = "account"))
       ∨ (verb = "create" ∧ toks.any (fun t =>
-          t = "wallet" ∨ t = "address" ∨ t = "account" ∨ t = "eoa" ∨ t = "r1"))
+          t = "wallet" ∨ t = "address" ∨ t = "account" ∨ t = "eoa"))
       ∨ (verb = "give" ∧ toks.any (fun t => t = "fresh"))
       ∨ (verb = "make" ∧ toks.any (fun t => t = "fresh"))
   if ¬ hasFreshHint then none
-  -- R1 trigger words. EOA is the default; we flip to R1 only on
-  -- explicit hardware-key / smart-account / TPM phrasing.
-  let r1Triggers : List String :=
-    ["r1", "tpm", "hardware", "hardware-backed", "secure", "enclave", "smart"]
-  let isR1 := toks.any (fun t => r1Triggers.any (fun trig => t = trig))
   -- Label after `called <label>` or `named <label>`.
   let labelHint? : Option String :=
     ((indexOfKeyword toks "called").bind (fun i => at? toks (i + 1)))
       <|> ((indexOfKeyword toks "named").bind (fun i => at? toks (i + 1)))
   let fields : List (String × String) :=
-    [("verb", "fresh"), ("kind", if isR1 then "r1" else "eoa")] ++
+    [("verb", "fresh"), ("kind", "eoa")] ++
     (match labelHint? with
      | some l => [("label", l)]
      | none   => [])

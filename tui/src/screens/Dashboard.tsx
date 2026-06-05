@@ -63,7 +63,7 @@ type Props = {
     chainId: number,
     wallet?: { kind: "eoa" | "tpm"; name: string; address: string },
   ) => void;
-  onCreateWallet: (kind: "eoa" | "r1", label: string | undefined) => void;
+  onCreateWallet: (kind: "eoa", label: string | undefined) => void;
   onOpenFullChat: () => void;
   onOpenChatHistory: () => void;
   /** Expand the focused pane to its dedicated full screen. */

@@ -29,7 +29,6 @@ import LeanCli.Ethereum.IntentCanonical
 import LeanCli.Ethereum.IntentEncode
 import LeanCli.Ethereum.IntentJson
 import LeanCli.Ethereum.Ownership
-import LeanCli.Ethereum.P256Precompile
 import LeanCli.Ethereum.Tx
 
 import LeanCli.Privacy.NetworkPolicy
@@ -56,7 +55,6 @@ import LeanCli.Keystore.Tpm2Runtime
 import LeanCli.Keystore.MasterKey
 import LeanCli.Keystore.MasterPassphrase
 
-import LeanCli.Contract.R1Account
 import LeanCli.Contract.SphincsAccount
 
 import LeanCli.Wallet.Account
@@ -115,7 +113,6 @@ import LeanCli.Invariants.Keystore
 import LeanCli.Invariants.Mainnet
 import LeanCli.Invariants.Nonce
 import LeanCli.Invariants.Network
-import LeanCli.Invariants.R1Account
 import LeanCli.Invariants.SphincsAccount
 import LeanCli.Invariants.TxWellFormed
 import LeanCli.Invariants.Wallet

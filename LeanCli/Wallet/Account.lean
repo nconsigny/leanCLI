@@ -1,12 +1,11 @@
-import LeanCli.Ethereum.P256Precompile
+import LeanCli.Ethereum.Chain
 
 /-!
 # Wallet account model
 
-The CLI supports three Ethereum account families:
+The CLI supports two Ethereum account families:
 
 * `eoaK1`: regular BIP-39/BIP-32 Ethereum EOA account, signing with k1.
-* `r1Smart`: local hardware-backed P-256/R1 account verified by EIP-7951.
 * `sphincsHybrid`: ERC-4337 smart account whose `_validateSignature`
   gates every UserOp on BOTH a stored ECDSA owner AND a stateless
   SPHINCS- post-quantum verifier. The ECDSA half lives in one of the
@@ -15,18 +14,17 @@ The CLI supports three Ethereum account families:
   the shim sidecar at one of the supported parameter sets (see
   `LeanCli.Sphincs.ParamSet`).
 
-All three are local-only. Mainnet is the production default, and Sepolia
+Both are local-only. Mainnet is the production default, and Sepolia
 is an explicit dev/testnet target. No account kind implies remote
 custody or online keystore access.
 -/
 
 namespace LeanCli.Wallet.Account
 
-open LeanCli.Ethereum.P256Precompile
+open LeanCli.Ethereum.Chain
 
 inductive AccountKind where
   | eoaK1
-  | r1Smart
   /-- Hybrid ECDSA + SPHINCS- ERC-4337 smart account. The ECDSA half is
       one of the wallet's eoaK1 accounts (existing or derived for this
       hybrid); the SPHINCS- half is generated locally by the shim and
@@ -78,7 +76,6 @@ structure AccountPolicy where
 
 def compatible : AccountKind → KeySource → Bool
   | .eoaK1, .bip39Mnemonic => true
-  | .r1Smart, .localEnclave => true
   -- Why: hybrid accounts derive every secret (ECDSA + SPHINCS- seed) from
   -- the wallet's BIP-39 mnemonic at distinct paths so a single mnemonic
   -- backup recovers both halves.
@@ -91,7 +88,6 @@ def accepted (p : AccountPolicy) : Bool :=
     compatible p.kind p.source &&
     match p.kind, p.path with
     | .eoaK1, some path => path.coinType = 60
-    | .r1Smart, none => true
     -- Hybrid carries an optional derivation path: present when the ECDSA
     -- half is freshly derived for this hybrid; absent when it reuses an
     -- existing eoaK1 (the path then lives on the referenced account).
@@ -106,23 +102,8 @@ def defaultEoaK1 : AccountPolicy :=
     path := some defaultEthereumPath,
     localOnly := true }
 
-def defaultR1Smart : AccountPolicy :=
-  { kind := .r1Smart,
-    source := .localEnclave,
-    chainId := mainnetChainId,
-    path := none,
-    localOnly := true }
-
 def sepoliaEoaK1 : AccountPolicy :=
   { defaultEoaK1 with chainId := sepoliaChainId }
-
-def sepoliaR1Smart : AccountPolicy :=
-  { defaultR1Smart with chainId := sepoliaChainId }
-
--- Mainnet R1 smart-account policy. Identical to `defaultR1Smart` (mainnet
--- chainId), introduced for the `wallet deploy r1 --chain mainnet` gate.
-def mainnetR1Smart : AccountPolicy :=
-  { defaultR1Smart with chainId := mainnetChainId }
 
 /-- Default policy shape for a Sepolia SPHINCS- hybrid account whose
     ECDSA half reuses an existing eoaK1 account (so no derivation path

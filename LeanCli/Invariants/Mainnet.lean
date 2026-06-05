@@ -1,12 +1,17 @@
-import LeanCli.Ethereum.P256Precompile
+import LeanCli.Ethereum.Chain
 
 /-!
-# Ethereum chain and P256VERIFY invariants
+# Ethereum supported-chain invariants
+
+Chain-identity facts the verified core relies on. The theorem names retain
+their `p256`-prefixed identifiers to avoid downstream/ledger churn even
+though the P-256/R1 path they originally accompanied has been removed; they
+assert only chain-id facts (mainnet = 1, Sepolia = 11155111, both supported).
 -/
 
 namespace LeanCli.Invariants.Mainnet
 
-open LeanCli.Ethereum.P256Precompile
+open LeanCli.Ethereum.Chain
 
 theorem p256PrecompileIsMainnetScoped :
     mainnetChainId = 1 := by
@@ -22,34 +27,6 @@ theorem mainnetChainIdSupported :
 
 theorem sepoliaChainIdSupported :
     supportedChainId sepoliaChainId = true := by
-  rfl
-
-theorem p256PrecompileInputLength :
-    inputLength = 160 := by
-  rfl
-
-theorem p256PrecompileAddress :
-    address = 0x100 := by
-  rfl
-
-theorem p256PrecompileGasCost :
-    gasCost = 6900 := by
-  rfl
-
-theorem p256SuccessOutputLength :
-    successOutputLength = 32 := by
-  rfl
-
-theorem p256FailureOutputLength :
-    failureOutputLength = 0 := by
-  rfl
-
-theorem p256SuccessResultLength :
-    outputLength VerifyResult.success = 32 := by
-  rfl
-
-theorem p256FailureResultLength :
-    outputLength VerifyResult.failure = 0 := by
   rfl
 
 end LeanCli.Invariants.Mainnet

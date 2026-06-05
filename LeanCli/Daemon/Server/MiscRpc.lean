@@ -54,11 +54,11 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       -- calldata-producing surface.
       let chainIdParam :=
         ((getField "chainId" req.params) >>= asNat).getD cfg.chainId
-      -- Optional `accountKind` hint. When "r1Smart" / "sphincsHybrid"
+      -- Optional `accountKind` hint. When "sphincsHybrid"
       -- the daemon collapses a `needs_approval` two-leg result into a
       -- single `executeBatch` call against the sender (the smart wallet
       -- itself). If absent, fall back to `discoverAccountKind` which
-      -- scans the local R1 + sphincsHybrid stores by address — that
+      -- scans the local sphincsHybrid store by address — that
       -- way the LLM doesn't have to know its own account kind. Both
       -- explicit kind and the discovered kind quietly fall through to
       -- `.eoa` when nothing matches, so external callers and plain

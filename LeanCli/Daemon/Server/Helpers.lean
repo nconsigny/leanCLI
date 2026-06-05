@@ -222,7 +222,7 @@ def paramNat (params : Json) (key : String) : Except RpcError Nat :=
 /-- Read a `Nat` parameter from either a JSON integer (preferred — bigint
     serialised as a bare numeric literal by `tui/src/daemon.ts`) or a
     `String` containing a `0x`-prefixed hex quantity or a plain decimal.
-    Used by `r1.sendRawSepolia` where the TUI ships a hex `value`. -/
+    Generic helper for callers that ship a hex `value`. -/
 def paramNatOrHexStr (params : Json) (key : String) : Except RpcError Nat :=
   match getField key params with
   | none => .error invalidParams
@@ -367,8 +367,7 @@ def seedFingerprintFromSeed (seed : ByteArray) :
 
 /-- BIP-44 secp256k1 derivation: `seed → 32-byte private key at `path``.
     Validates the path under `LeanCli.Wallet.Bip44.validateEthereumPath`
-    before deriving. Used by deployer-EOA injection (`tpm.deploy` under
-    deployer="eoa") and by every EOA signing path. -/
+    before deriving. Used by every EOA signing path. -/
 def derivePrivateKeyFromSeed (seed : ByteArray) (path : String) :
     IO (Except String ByteArray) := do
   try
@@ -678,9 +677,8 @@ def unlockedSlot (state : LeanCli.Daemon.State.Shared) (name : String) :
     a multi-leg result into a single `executeBatch` call.
 
     Scan order — first hit wins:
-    1. TPM2 R1 deployments at `.leancli/keystore/tpm2/<name>/r1-account-address.txt`
-    2. SPHINCs- hybrid records' `smartAccountAddress`
-    3. (no EOA scan — `.eoa` is the default fall-through anyway)
+    1. SPHINCs- hybrid records' `smartAccountAddress`
+    2. (no EOA scan — `.eoa` is the default fall-through anyway)
 
     Address comparison is case-insensitive on the hex body. Empty / missing
     files are skipped without erroring; this is a best-effort hint, so any
@@ -693,17 +691,6 @@ def unlockedSlot (state : LeanCli.Daemon.State.Shared) (name : String) :
 def discoverAccountKind (addr : String) :
     IO LeanCli.Wallet.ExecuteBatch.AccountKindHint := do
   let target := addr.toLower
-  let tpmStateDir : System.FilePath := ".leancli/keystore/tpm2"
-  try
-    let tpmNames ← LeanCli.Keystore.Tpm2Runtime.listSepoliaKeys
-    for n in tpmNames do
-      let addrFile := tpmStateDir / n / "r1-account-address.txt"
-      if ← addrFile.pathExists then
-        let raw ← (try IO.FS.readFile addrFile catch _ => pure "")
-        let trimmed := raw.trimAscii.toString.toLower
-        if !trimmed.isEmpty && trimmed = target then
-          return LeanCli.Wallet.ExecuteBatch.AccountKindHint.r1Smart
-  catch _ => pure ()
   try
     let sphincsNames ← LeanCli.Wallet.SphincsHybridStore.listSlotNames
     for n in sphincsNames do

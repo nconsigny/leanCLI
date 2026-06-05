@@ -54,17 +54,6 @@ theorem acceptedSigningRequiresUserAuth (policy : KeyPolicy) :
       simp [policyAccepts, UserAuth.strongEnoughForSign,
         Backend.hardwareBacked, Backend.localOnly, Backend.supportsCurve, noSecretExport] at h ⊢
 
-theorem appleSecureEnclaveAcceptsEthereumR1Signing :
-    policyAccepts
-      { op := Operation.signDigest, policy := appleEthereumR1Policy } = true := by
-  simp [policyAccepts, appleEthereumR1Policy, hardwarePolicy, Backend.hardwareBacked,
-    Backend.localOnly, Backend.supportsCurve, UserAuth.strongEnoughForSign, noSecretExport]
-
-theorem ethereumR1HardwareSigningAccepted :
-    policyAccepts { op := Operation.signDigest, policy := ethereumR1HardwarePolicy } = true := by
-  simp [policyAccepts, ethereumR1HardwarePolicy, hardwarePolicy, Backend.hardwareBacked,
-    Backend.localOnly, Backend.supportsCurve, UserAuth.strongEnoughForSign, noSecretExport]
-
 theorem appleNativeP256SigningAccepted :
     policyAccepts { op := Operation.signDigest, policy := appleNativePolicy } = true := by
   simp [policyAccepts, appleNativePolicy, hardwarePolicy, Backend.hardwareBacked,

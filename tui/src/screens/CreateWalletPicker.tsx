@@ -6,7 +6,6 @@ import { theme } from "../theme.js";
 
 export type CreateKind =
   | "eoa"
-  | "r1"
   | "sphincs-hybrid"
   | "add-account"
   | "import-bip39"
@@ -21,7 +20,7 @@ type Props = {
  *  Import lived under its own main-menu item; folded in here so the
  *  user thinks "I want a new wallet" once, not "is this a create or an
  *  import." Routes through `onPick(...)`; the App stack handles the
- *  rest (CreateEoaFlow / CreateR1Flow / AddAccountFlow / ImportEoaFlow). */
+ *  rest (CreateEoaFlow / AddAccountFlow / ImportEoaFlow). */
 export default function CreateWalletPicker({ onPick }: Props) {
   useInput((input, key) => {
     if (key.escape || input === "q") onPick("back");
@@ -29,7 +28,6 @@ export default function CreateWalletPicker({ onPick }: Props) {
 
   const items: { label: string; value: CreateKind | "soon" }[] = [
     { label: "Create EOA — fresh BIP-39 mnemonic, passphrase-encrypted",  value: "eoa" },
-    { label: "Create TPM/R1 — hardware-backed P-256 key, PIN-protected",  value: "r1" },
     { label: "Create SPHINCS- hybrid — ECDSA + post-quantum ERC-4337",    value: "sphincs-hybrid" },
     { label: "Add account — new hardened branch on an existing EOA",      value: "add-account" },
     { label: "Import BIP-39 mnemonic (12 or 24 words)",                   value: "import-bip39" },

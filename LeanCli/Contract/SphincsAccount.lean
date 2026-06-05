@@ -1,4 +1,4 @@
-import LeanCli.Ethereum.P256Precompile
+import LeanCli.Ethereum.Chain
 
 /-!
 # Sphincs hybrid ECDSA + post-quantum account contract model
@@ -37,7 +37,7 @@ variant. This file is deliberately simpler than the previous JARDIN draft.
 
 namespace LeanCli.Contract.SphincsAccount
 
-open LeanCli.Ethereum.P256Precompile
+open LeanCli.Ethereum.Chain
 
 /-- Ethereum address as `Nat` for proof tractability.  Wallet/Ethereum
     types elsewhere refine this to a 20-byte representation. -/
@@ -46,9 +46,8 @@ abbrev Address := Nat
 /-- Address-zero, used by `rotateOwner` to reject the unowned account state. -/
 def addressZero : Address := 0
 
-/-- 32-byte field, modelled as `Nat`.  Matches the shape used for R1
-    public-key coordinates in `Contract/R1Account.lean`; refinement to a
-    fixed-width byte vector is a future concern. -/
+/-- 32-byte field, modelled as `Nat`.  Refinement to a fixed-width byte
+    vector is a future concern. -/
 abbrev Bytes32 := Nat
 
 /-- Public on-chain key material for the hybrid account. -/
@@ -88,7 +87,7 @@ structure UserOperation where
   payload    : Payload
 
 /-- Account state.  The supported-chain set is global (see
-    `P256Precompile.supportedChainId`); per-account chain pinning is a
+    `Chain.supportedChainId`); per-account chain pinning is a
     deployment concern outside this model. -/
 structure State where
   key   : PublicKey

@@ -265,12 +265,9 @@ def synth (draft : RegexDraft) (chainId : Nat) (senderAddr? : Option String := n
       let _ := chain
       pure (.approvalsAudit chainId wallet)
   | .freshAddress =>
-      -- Wallet kind defaults to .eoa per the design doc; the regex
-      -- writes the explicit choice into the `kind` field.
-      let kind : WalletKind :=
-        match draft.field? "kind" with
-        | some "r1" => .r1
-        | _         => .eoa
+      -- `.eoa` is the only wallet kind after the P-256/R1 path was
+      -- removed; any extracted `kind` field is ignored.
+      let kind : WalletKind := .eoa
       let label := draft.field? "label"
       let deployImmediately :=
         match draft.field? "deploy" with

@@ -396,7 +396,7 @@ def prepareSetCollateral
 
 /-! ## Smart-wallet batching
 
-When the caller's account is a smart wallet (`r1Smart`, `sphincsHybrid`)
+When the caller's account is a smart wallet (`sphincsHybrid`)
 and the prepare result is `needsApproval`, the two legs collapse into a
 single `executeBatch` call targeted at the sender (the smart wallet
 itself). The on-chain semantics are atomic: the approve and the action

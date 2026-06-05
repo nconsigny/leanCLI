@@ -254,8 +254,8 @@ def resolve : IO LeanCli.Daemon.Server.Config := do
   -- Without this the endpoint is `chainId = none`, which the
   -- `mainnetSafeDaemonPolicy` ("strict") treats as "unknown chain →
   -- apply mainnet-strict rule" and denies configured-node broadcasts.
-  -- That trips every non-EOA broadcast path (r1.sendSepolia,
-  -- shielded.*, anything that uses `cfg.rpcEndpoint` directly), while
+  -- That trips every non-EOA broadcast path (shielded.*, anything that
+  -- uses `cfg.rpcEndpoint` directly), while
   -- `eoa.send` works because it rebuilds the endpoint per call via
   -- `endpointForChain` (Server.lean#"eoa.send").
   let rpcEndpoint := endpointFromUrl rpcUrl transport? (some chainId)

@@ -54,7 +54,7 @@ type Props = {
     chainId: number,
     wallet?: { kind: "eoa" | "tpm"; name: string; address: string },
   ) => void;
-  onCreateWallet?: (kind: "eoa" | "r1", label: string | undefined) => void;
+  onCreateWallet?: (kind: "eoa", label: string | undefined) => void;
   onOpenFull?: () => void;
   onOpenHistory?: () => void;
 };

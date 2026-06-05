@@ -21,7 +21,6 @@ import LeanCli.Ethereum.Intent
 import LeanCli.Ethereum.IntentCanonical
 import LeanCli.Ethereum.IntentEncode
 import LeanCli.Ethereum.IntentJson
-import LeanCli.Ethereum.P256Precompile
 import LeanCli.Ethereum.Tx
 
 import LeanCli.Registry.KnownProtocols
@@ -33,8 +32,6 @@ import LeanCli.Network.Endpoint
 import LeanCli.Keystore.Enclave
 import LeanCli.Keystore.Linux
 import LeanCli.Keystore.Tpm2Runtime
-
-import LeanCli.Contract.R1Account
 
 import LeanCli.Wallet.Account
 import LeanCli.Wallet.Address

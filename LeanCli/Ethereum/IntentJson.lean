@@ -111,12 +111,13 @@ def parseActionTag (s : String) : Except String String :=
   | "address.fresh" => .ok s
   | _ => .error s!"unknown intent action tag: {s}"
 
-/-- Parse a `WalletKind` from a wire-tag string. -/
+/-- Parse a `WalletKind` from a wire-tag string. `"eoa"` is the only
+    accepted kind after the P-256/R1 path was removed; legacy `"r1"`
+    payloads are now rejected rather than silently routed to hardware. -/
 def parseWalletKind (s : String) : Except String WalletKind :=
   match s with
   | "eoa" => .ok .eoa
-  | "r1"  => .ok .r1
-  | _     => .error s!"walletKind: expected \"eoa\" or \"r1\", got {s}"
+  | _     => .error s!"walletKind: expected \"eoa\", got {s}"
 
 /-- Optional address field — `none` when key missing OR explicitly null. -/
 def optAddrField (obj : Json) (key : String) : Except String (Option Address) :=

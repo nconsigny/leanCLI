@@ -204,9 +204,9 @@ private def useAsCollateralProp : Json := .obj #[
 ]
 private def accountKindProp : Json := .obj #[
   ("type", .str "string"),
-  ("enum", .arr #[.str "eoa", .str "r1Smart", .str "sphincsHybrid"]),
+  ("enum", .arr #[.str "eoa", .str "sphincsHybrid"]),
   ("description",
-    .str ("Account kind hint. When 'r1Smart' or 'sphincsHybrid', a "
+    .str ("Account kind hint. When 'sphincsHybrid', a "
             ++ "needs_approval result is collapsed into a single executeBatch "
             ++ "call targeting the sender (one user confirmation, atomic on-chain). "
             ++ "Defaults to 'eoa' (two sequential propose_send legs)."))

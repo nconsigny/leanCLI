@@ -7,7 +7,7 @@ import LeanCli.Core
 namespace LeanCli.Invariants.Core
 
 open LeanCli.Core
-open LeanCli.Ethereum.P256Precompile
+open LeanCli.Ethereum.Chain
 
 theorem no_key_exfiltration (out : Output) :
     containsPrivateKeyMaterial out = false := by
@@ -44,30 +44,14 @@ theorem verified_signer_path_separation {s : State} {intent : Intent} :
   rcases h with ⟨_supported, _selected, _rpc, _approved, _raw, keyOk, _tpm, _delegation⟩
   exact keyOk
 
-theorem verified_r1_requires_tpm_policy {s : State} {intent : Intent} :
-    verifiedIntent s intent →
-      intent.signerKind = SignerKind.r1 →
-        ∃ policy, intent.tpmPolicy = some policy ∧ policy.satisfied = true := by
-  intro h signerEq
-  rcases h with ⟨_supported, _selected, _rpc, _approved, _raw, _key, tpmOk, _delegation⟩
-  unfold tpmPolicySatisfied at tpmOk
-  rw [signerEq] at tpmOk
-  cases hp : intent.tpmPolicy with
-  | none =>
-      simp [hp] at tpmOk
-  | some policy =>
-      simp [hp] at tpmOk ⊢
-      exact tpmOk
-
 theorem signIntent_verified
     {s s' : State} {intent : Intent} {kind : SignerKind} {scheme : SignatureScheme} :
     signIntent s intent kind = .ok (s', Output.signature scheme intent) →
       verifiedIntent s intent := by
   intro h
   unfold signIntent at h
-  by_cases ok : verifiedIntent s intent ∧ intent.signerKind = kind
-  · simp [ok] at h
-    exact ok.1
+  by_cases ok : verifiedIntent s intent
+  · exact ok
   · simp [ok] at h
 
 theorem signEOA_verified
@@ -77,34 +61,14 @@ theorem signEOA_verified
   intro h
   exact signIntent_verified h
 
-theorem signR1_verified
-    {s s' : State} {intent : Intent} {scheme : SignatureScheme} :
-    step s (Command.SignR1 intent) = .ok (s', Output.signature scheme intent) →
-      verifiedIntent s intent := by
-  intro h
-  exact signIntent_verified h
-
 theorem signEOA_uses_secp256k1
     {s s' : State} {intent : Intent} {scheme : SignatureScheme} :
     step s (Command.SignEOA intent) = .ok (s', Output.signature scheme intent) →
       scheme = SignatureScheme.secp256k1 := by
-  intro h
-  unfold step signIntent at h
-  by_cases ok : verifiedIntent s intent ∧ intent.signerKind = SignerKind.eoa
-  · simp [ok, schemeForKind] at h
-    exact h.2.symm
-  · simp [ok] at h
-
-theorem signR1_uses_p256
-    {s s' : State} {intent : Intent} {scheme : SignatureScheme} :
-    step s (Command.SignR1 intent) = .ok (s', Output.signature scheme intent) →
-      scheme = SignatureScheme.p256 := by
-  intro h
-  unfold step signIntent at h
-  by_cases ok : verifiedIntent s intent ∧ intent.signerKind = SignerKind.r1
-  · simp [ok, schemeForKind] at h
-    exact h.2.symm
-  · simp [ok] at h
+  intro _
+  -- `secp256k1` is now the sole signature scheme, so any `scheme` is it.
+  cases scheme
+  rfl
 
 theorem no_silent_7702_delegation {s : State} {intent : Intent} :
     verifiedIntent s intent →

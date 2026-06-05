@@ -144,33 +144,6 @@ def printPreflight (action : Action) : IO UInt32 := do
         IO.eprintln summary
         return 2
 
-def runR1WalletDeploy (keyName chain : String) : IO UInt32 := do
-  DaemonClient.printTextResult "tpm.deploy"
-    (.obj #[("name", .str keyName), ("chain", .str chain)])
-
-def runR1WalletCreate (keyName : String) : IO UInt32 := do
-  IO.eprintln s!"Choose a PIN for the new TPM2 key (min {LeanCli.Keystore.Tpm2Runtime.minPinLength} chars).\nThe PIN will be bound to the key as the TPM auth value and required for every signature."
-  match ← LeanCli.Cli.Pin.readConfirmed LeanCli.Keystore.Tpm2Runtime.minPinLength with
-  | .error err =>
-      IO.eprintln s!"error: {err}"
-      return 2
-  | .ok pin =>
-      let createCode ← DaemonClient.printTextResult "tpm.create"
-        (.obj #[("name", .str keyName), ("pin", .str pin)])
-      if createCode ≠ 0 then return createCode
-      IO.print s!"\nDeploy R1 account for '{keyName}' on Sepolia now? [Y/n] "
-      (← IO.getStdout).flush
-      let answer := (← (← IO.getStdin).getLine).trimAscii.toString.toLower
-      if answer = "" || answer = "y" || answer = "yes" then
-        IO.println "→ deploying…"
-        runR1WalletDeploy keyName "sepolia"
-      else
-        IO.println s!"Skipped. Deploy later with: leancli wallet deploy r1 {keyName}"
-        pure 0
-
-def runSepoliaWalletList : IO UInt32 := do
-  DaemonClient.printTextResult "tpm.listSepolia"
-
 /-! ## Default-account persistence
 
 The daemon owns the file (`account.getDefault` / `account.setDefault`); the
@@ -198,15 +171,14 @@ def writeDefaultAccount (wallet : String) : IO Unit := do
 
 inductive SlotType where
   | eoa
-  | tpm
   deriving Repr, DecidableEq
 
 /-! Thin wrappers around the daemon's unified `account.list` RPC.
 
-These three functions used to each call `eoa.list` + `tpm.listSepoliaAddresses`
-and concat the result. The daemon now ships a single `account.list` that
-returns `{ accounts: [{type, name, address, indices?}] }`; the CLI is just
-a pretty-printer per `CLAUDE.md`. -/
+These functions used to each merge multiple per-store lists. The daemon
+now ships a single `account.list` that returns
+`{ accounts: [{type, name, address, indices?}] }`; the CLI is just a
+pretty-printer per `CLAUDE.md`. -/
 
 private def fetchAccountList : IO (Array LeanCli.Encoding.Json.Json) := do
   match ← DaemonClient.call "account.list" with
@@ -215,7 +187,7 @@ private def fetchAccountList : IO (Array LeanCli.Encoding.Json.Json) := do
       pure <| (LeanCli.Encoding.Json.getField "accounts" r
         >>= LeanCli.Encoding.Json.asArray).getD #[]
 
-/-- Query daemon to figure out whether `name` is an EOA slot or a TPM/R1 slot. -/
+/-- Query daemon to figure out whether `name` is a known EOA slot. -/
 def resolveSlotType (name : String) : IO (Option SlotType) := do
   for e in (← fetchAccountList) do
     let entryName := (LeanCli.Encoding.Json.getField "name" e
@@ -225,11 +197,10 @@ def resolveSlotType (name : String) : IO (Option SlotType) := do
                   >>= LeanCli.Encoding.Json.asString).getD ""
       match typ with
       | "eoa" => return some .eoa
-      | "tpm" => return some .tpm
       | _ => return none
   pure none
 
-/-- Print one wallet name per line; EOA first, then TPM. Used by completion. -/
+/-- Print one wallet name per line. Used by completion. -/
 def printAccountListNames : IO UInt32 := do
   for e in (← fetchAccountList) do
     let n := (LeanCli.Encoding.Json.getField "name" e
@@ -237,9 +208,9 @@ def printAccountListNames : IO UInt32 := do
     if !n.isEmpty then IO.println n
   pure 0
 
-/-- Print `<type>\t<name>` per line — type is `eoa` or `tpm`. Used by
-    completion so it can render the `<wallet>/<index>` subaccount form
-    only for EOA wallets (TPM/R1 keys have no derivation indices). -/
+/-- Print `<type>\t<name>` per line — type is `eoa`. Used by completion
+    so it can render the `<wallet>/<index>` subaccount form for EOA
+    wallets. -/
 def printAccountListTypedNames : IO UInt32 := do
   for e in (← fetchAccountList) do
     let typ := (LeanCli.Encoding.Json.getField "type" e
@@ -950,28 +921,6 @@ private def renderEoaShow (record : LeanCli.Encoding.Json.Json) (name : String) 
                   >>= LeanCli.Encoding.Json.asString).getD ""
     IO.println s!"    └ #{idx}  {aAddr}  {aPath}"
 
-private def renderTpmShow (name addr : String) : IO Unit := do
-  let keyDir : System.FilePath := s!".leancli/keystore/tpm2/{name}"
-  let manifestPath := keyDir / "manifest.txt"
-  let publicPath := keyDir / "public.pem"
-  let addrLine := if addr.isEmpty then "(no address; deploy first)" else addr
-  IO.println s!"Wallet: {name}"
-  IO.println s!"  type:            r1 (TPM2 P-256)"
-  IO.println s!"  smart account:   {addrLine}"
-  -- Why: stat-verify each path so the user sees `(missing)` when the on-disk
-  -- blob is gone, instead of being misled by a hopeful string.
-  let dirExists ← keyDir.pathExists
-  if !dirExists then
-    IO.println s!"  key directory:   {keyDir} (MISSING — TPM record not on disk)"
-  else
-    let manExists ← manifestPath.pathExists
-    let pubExists ← publicPath.pathExists
-    let tag (b : Bool) : String := if b then "" else " (missing)"
-    IO.println s!"  key directory:   {keyDir}"
-    IO.println s!"  manifest:        {manifestPath}{tag manExists}"
-    IO.println s!"  public key:      {publicPath}{tag pubExists}"
-  IO.println "  signing requires the TPM-bound PIN (checked by the TPM)"
-
 private def prettyEoaShow (name : String) : IO UInt32 := do
   match ← DaemonClient.call "eoa.show" (.obj #[("name", .str name)]) with
   | .error err =>
@@ -980,25 +929,6 @@ private def prettyEoaShow (name : String) : IO UInt32 := do
   | .ok r =>
       renderEoaShow r name
       pure 0
-
-private def prettyTpmShow (name : String) : IO UInt32 := do
-  match ← DaemonClient.call "tpm.listSepoliaAddresses" with
-  | .error err =>
-      IO.eprintln s!"daemon error {err.code}: {err.message}"
-      pure 2
-  | .ok r =>
-      let entries := (LeanCli.Encoding.Json.asArray r).getD #[]
-      match entries.find? (fun e =>
-        ((LeanCli.Encoding.Json.getField "name" e
-          >>= LeanCli.Encoding.Json.asString).getD "") = name) with
-      | none =>
-          IO.eprintln s!"error: TPM record for '{name}' not found"
-          pure 2
-      | some e =>
-          let addr := (LeanCli.Encoding.Json.getField "address" e
-                        >>= LeanCli.Encoding.Json.asString).getD ""
-          renderTpmShow name addr
-          pure 0
 
 /-- Per-wallet history rendering used by `wallet history --all`. Layer 1
     journal + optional Layer 2 log scan; no account filter, no indexer leak. -/
@@ -1071,82 +1001,6 @@ private def runWalletHistoryFor (name : String) (scanLogs : Bool)
                               >>= LeanCli.Encoding.Json.asString).getD ""
               IO.println s!"    {txHash}  block={blockN}"
 
-/-- Per-wallet history rendering for R1 (TPM) wallets. Reads the same
-    `<name>.ndjson` journal as EOA wallets. For `--scan-logs`, the address to
-    scan is the deployed R1 account address; if undeployed, we skip cleanly. -/
-private def runR1WalletHistoryFor (name : String) (scanLogs : Bool)
-    (limit? : Option Nat) (chain? : Option String) : IO Unit := do
-  let limit := limit?.getD 50
-  let renderEntry (e : LeanCli.Encoding.Json.Json) : IO Unit := do
-    let getStr (k : String) : String :=
-      (LeanCli.Encoding.Json.getField k e >>= LeanCli.Encoding.Json.asString).getD ""
-    let getNat (k : String) : Nat :=
-      (LeanCli.Encoding.Json.getField k e >>= LeanCli.Encoding.Json.asNat).getD 0
-    let kind := getStr "kind"
-    let txHash := getStr "txHash"
-    let ts := getNat "timestamp"
-    let toAddr := getStr "to"
-    let fromA := getStr "from"
-    let valueStr := getStr "valueWei"
-    let valueWei := valueStr.toNat?.getD 0
-    let block := getStr "blockNumber"
-    let status := getStr "status"
-    let truncH := if txHash.length ≤ 14 then txHash
-                  else (txHash.toList.take 10 |> String.ofList) ++ "…"
-    IO.println s!"  {ts}  [{kind}]  {truncH}  {fromA} → {toAddr}  {formatEth valueWei}  block={block}  status={status}"
-  let allEntries ←
-    match ← DaemonClient.call "chain.history"
-        (.obj #[("name", .str name), ("limit", .num (Int.ofNat limit))]) with
-    | .ok r => pure ((LeanCli.Encoding.Json.asArray r).getD #[])
-    | .error err =>
-        IO.eprintln s!"  daemon error {err.code}: {err.message}"
-        pure #[]
-  IO.println s!"Local journal ({allEntries.size} entries):"
-  for e in allEntries do renderEntry e
-  if scanLogs then
-    IO.println ""
-    IO.println "Scanning chain logs (this may take a while)…"
-    -- Why: R1 has no `eoa.show`; pull the deployed address from
-    -- `tpm.listSepoliaAddresses`. If undeployed, we cannot scan.
-    let addr? ← match ← DaemonClient.call "tpm.listSepoliaAddresses" with
-      | .error err =>
-          IO.eprintln s!"  tpm.listSepoliaAddresses failed: {err.message}"
-          pure none
-      | .ok r =>
-          let entries := (LeanCli.Encoding.Json.asArray r).getD #[]
-          pure <| entries.findSome? fun e =>
-            let n := (LeanCli.Encoding.Json.getField "name" e
-                      >>= LeanCli.Encoding.Json.asString).getD ""
-            if n = name then
-              LeanCli.Encoding.Json.getField "address" e
-                >>= LeanCli.Encoding.Json.asString
-            else none
-    match addr? with
-    | none =>
-        IO.println "  (no deployed address; skipping log scan)"
-    | some addr =>
-        if addr.isEmpty then
-          IO.println "  (R1 account not yet deployed; skipping log scan)"
-        else
-          let baseFields : Array (String × LeanCli.Encoding.Json.Json) :=
-            #[("addresses", .arr #[.str addr]), ("slotName", .str name)]
-          let scanFields :=
-            match chain? with
-            | none => baseFields
-            | some c => baseFields.push ("chain", .str c)
-          match ← DaemonClient.call "chain.scanTransfers" (.obj scanFields) with
-          | .error err => IO.eprintln s!"  chain.scanTransfers failed: {err.message}"
-          | .ok r =>
-              let events := (LeanCli.Encoding.Json.getField "events" r
-                              >>= LeanCli.Encoding.Json.asArray).getD #[]
-              IO.println s!"  on-chain Transfer events: {events.size}"
-              for ev in events do
-                let txHash := (LeanCli.Encoding.Json.getField "transactionHash" ev
-                                >>= LeanCli.Encoding.Json.asString).getD ""
-                let blockN := (LeanCli.Encoding.Json.getField "blockNumber" ev
-                                >>= LeanCli.Encoding.Json.asString).getD ""
-                IO.println s!"    {txHash}  block={blockN}"
-
 /-- Enumerate every wallet name as `(name, slotType)`. Silent on daemon errors. -/
 private def listAllWallets : IO (Array (String × SlotType)) := do
   let mut out : Array (String × SlotType) := #[]
@@ -1156,13 +1010,6 @@ private def listAllWallets : IO (Array (String × SlotType)) := do
         let n := (LeanCli.Encoding.Json.getField "name" e
                   >>= LeanCli.Encoding.Json.asString).getD ""
         if !n.isEmpty then out := out.push (n, .eoa)
-  | .error _ => pure ()
-  match ← DaemonClient.call "tpm.listSepoliaAddresses" with
-  | .ok r =>
-      for e in (LeanCli.Encoding.Json.asArray r).getD #[] do
-        let n := (LeanCli.Encoding.Json.getField "name" e
-                  >>= LeanCli.Encoding.Json.asString).getD ""
-        if !n.isEmpty then out := out.push (n, .tpm)
   | .error _ => pure ()
   pure out
 
@@ -1523,32 +1370,14 @@ def run (args : List String) : IO UInt32 := do
   | .walletCreate typ name extra =>
       match typ with
       | "eoa" => eoaCreate name extra
-      | "r1" =>
-          match extra with
-          | none => runR1WalletCreate name
-          | some _ =>
-              IO.eprintln s!"error: 'wallet create r1 {name}' takes no extra argument"
-              return 2
       | _ =>
-          IO.eprintln s!"error: unknown wallet type '{typ}' (expected: eoa | r1)"
+          IO.eprintln s!"error: unknown wallet type '{typ}' (expected: eoa)"
           return 2
   | .walletImport name mnemonic path? =>
-      match ← resolveSlotType name with
-      | some .tpm =>
-          IO.eprintln s!"error: '{name}' is an R1 (TPM) wallet — import is only valid for EOA wallets"
-          return 2
-      | _ => eoaImport name mnemonic path?
+      eoaImport name mnemonic path?
   | .walletDeploy name =>
-      match ← resolveSlotType name with
-      | none =>
-          IO.eprintln s!"error: unknown wallet '{name}'"
-          return 2
-      | some .eoa =>
-          IO.eprintln s!"error: '{name}' is an EOA wallet — deploy is only valid for R1 wallets"
-          return 2
-      | some .tpm =>
-          let chain ← NetworkConfig.currentChainName
-          runR1WalletDeploy name chain
+      IO.eprintln s!"error: '{name}' — deploy is not a valid operation (EOA wallets need no deployment)"
+      return 2
   | .walletList =>
       let padName (name : String) : String :=
         let pad := if name.length < 16 then String.ofList (List.replicate (16 - name.length) ' ') else ""
@@ -1572,19 +1401,10 @@ def run (args : List String) : IO UInt32 := do
                   if idx = 0 then pure () else
                     let aAddr := (LeanCli.Encoding.Json.getField "address" acc >>= LeanCli.Encoding.Json.asString).getD ""
                     IO.println s!"eoa   {padName s!"{name}/#{idx}"} {aAddr}  -"
-      match ← DaemonClient.call "tpm.listSepoliaAddresses" with
-      | .error err => IO.eprintln s!"  tpm.listSepoliaAddresses failed: {err.message}"
-      | .ok tpmList =>
-          for entry in (LeanCli.Encoding.Json.asArray tpmList).getD #[] do
-            let name := (LeanCli.Encoding.Json.getField "name" entry >>= LeanCli.Encoding.Json.asString).getD "?"
-            let addr := (LeanCli.Encoding.Json.getField "address" entry >>= LeanCli.Encoding.Json.asString).getD ""
-            let addrTxt := if addr.isEmpty then "(no address; deploy first)" else addr
-            IO.println s!"r1    {padName name} {addrTxt}  -"
       pure 0
   | .walletShow name =>
       match ← resolveSlotType name with
       | some .eoa => prettyEoaShow name
-      | some .tpm => prettyTpmShow name
       | none =>
           IO.eprintln s!"error: unknown wallet '{name}'"
           return 2
@@ -1599,36 +1419,16 @@ def run (args : List String) : IO UInt32 := do
         first := false
         match t with
         | .eoa => let _ ← prettyEoaShow n
-        | .tpm => let _ ← prettyTpmShow n
       pure 0
   | .walletAddress name =>
       match ← resolveSlotType name with
       | some .eoa =>
           DaemonClient.printCall "eoa.address" (.obj #[("name", .str name)])
-      | some .tpm =>
-          match ← DaemonClient.call "tpm.listSepoliaAddresses" with
-          | .error err =>
-              IO.eprintln s!"daemon error {err.code}: {err.message}"
-              pure 2
-          | .ok r =>
-              let entries := (LeanCli.Encoding.Json.asArray r).getD #[]
-              let addr := entries.findSome? fun e =>
-                let n := (LeanCli.Encoding.Json.getField "name" e
-                          >>= LeanCli.Encoding.Json.asString).getD ""
-                if n = name then
-                  LeanCli.Encoding.Json.getField "address" e
-                    >>= LeanCli.Encoding.Json.asString
-                else none
-              match addr with
-              | some a => IO.println a; pure 0
-              | none =>
-                  IO.println "(no address; deploy first)"
-                  pure 0
       | none =>
           IO.eprintln s!"error: unknown wallet '{name}'"
           return 2
   | .walletAddressAll =>
-      -- Walk EOA wallets (with sub-accounts) then TPM wallets, one line each.
+      -- Walk EOA wallets (with sub-accounts), one line each.
       match ← DaemonClient.call "eoa.list" with
       | .error err => IO.eprintln s!"  eoa.list failed: {err.message}"
       | .ok eoaList =>
@@ -1650,39 +1450,22 @@ def run (args : List String) : IO UInt32 := do
                     let aAddr := (LeanCli.Encoding.Json.getField "address" acc
                                   >>= LeanCli.Encoding.Json.asString).getD ""
                     IO.println s!"eoa  {n}/#{idx}  {aAddr}"
-      match ← DaemonClient.call "tpm.listSepoliaAddresses" with
-      | .error err => IO.eprintln s!"  tpm.listSepoliaAddresses failed: {err.message}"
-      | .ok tpmList =>
-          for entry in (LeanCli.Encoding.Json.asArray tpmList).getD #[] do
-            let n := (LeanCli.Encoding.Json.getField "name" entry
-                      >>= LeanCli.Encoding.Json.asString).getD "?"
-            let addr := (LeanCli.Encoding.Json.getField "address" entry
-                          >>= LeanCli.Encoding.Json.asString).getD ""
-            let addrTxt := if addr.isEmpty then "(no address; deploy first)" else addr
-            IO.println s!"r1   {n}  {addrTxt}"
       pure 0
   | .walletUnlock name =>
       match ← resolveSlotType name with
       | some .eoa => eoaUnlock name
-      | some .tpm =>
-          IO.println "(r1 wallet — no unlock needed; signing prompts for the TPM PIN)"
-          pure 0
       | none =>
           IO.eprintln s!"error: unknown wallet '{name}'"
           return 2
   | .walletLock name =>
       match ← resolveSlotType name with
       | some .eoa => DaemonClient.printCall "eoa.lock" (.obj #[("name", .str name)])
-      | some .tpm =>
-          IO.println "(r1 wallet — already locked between operations)"
-          pure 0
       | none =>
           IO.eprintln s!"error: unknown wallet '{name}'"
           return 2
   | .walletUnlockAll =>
       let wallets ← listAllWallets
       let eoas := wallets.filter (fun (_, t) => t = .eoa)
-      let tpms := wallets.filter (fun (_, t) => t = .tpm)
       -- Why: collect locked EOAs first; if everyone is already unlocked, skip the prompt.
       let mut locked : Array String := #[]
       let mut unlockedAlready : Array String := #[]
@@ -1704,7 +1487,6 @@ def run (args : List String) : IO UInt32 := do
       IO.println s!"Unlocking {totalEoa} EOA wallets…"
       if locked.isEmpty then
         for n in unlockedAlready do IO.println s!"  ✓ {n}  (already unlocked)"
-        for (n, _) in tpms do IO.println s!"  -  {n}       (skipped: r1)"
         IO.println s!"Unlocked {unlockedAlready.size} of {totalEoa}. 0 wallets still locked."
         return 0
       let passphrase ← Passphrase.read "Master passphrase (will try against all locked EOA wallets): "
@@ -1720,7 +1502,6 @@ def run (args : List String) : IO UInt32 := do
         | .error _ =>
             IO.println s!"  ✗ {n}  (different passphrase; still locked)"
             failed := failed.push n
-      for (n, _) in tpms do IO.println s!"  -  {n}       (skipped: r1)"
       let stillLocked := failed.size
       IO.println s!"Unlocked {succeeded} of {totalEoa}. {stillLocked} wallet(s) still locked."
       pure 0
@@ -1733,7 +1514,6 @@ def run (args : List String) : IO UInt32 := do
             match ← DaemonClient.call "eoa.lock" (.obj #[("name", .str n)]) with
             | .ok _ => IO.println s!"  ✓ {n}"; locked := locked + 1
             | .error err => IO.println s!"  ✗ {n}  ({err.message})"
-        | .tpm => IO.println s!"  -  {n}  (skipped: r1)"
       IO.println s!"Locked {locked} EOA wallet(s)."
       pure 0
   | .walletMasterInit timeoutMins? =>
@@ -1918,38 +1698,16 @@ def run (args : List String) : IO UInt32 := do
             anyShown := true
             IO.println s!"── {n} ──"
             runWalletHistoryFor n scanLogs limit? chain?
-      -- Why: r1.send entries are written to <name>.ndjson by `r1SendFlow`
-      -- (Server.lean:981, :1008), so R1 wallets get the same Layer-1 history
-      -- as EOAs. Layer 2 scan uses the deployed R1 address.
-      match ← DaemonClient.call "tpm.listSepoliaAddresses" with
-      | .error err => IO.eprintln s!"  tpm.listSepoliaAddresses failed: {err.message}"
-      | .ok r =>
-          let tpms := (LeanCli.Encoding.Json.asArray r).getD #[]
-          for entry in tpms do
-            let n := (LeanCli.Encoding.Json.getField "name" entry
-                      >>= LeanCli.Encoding.Json.asString).getD ""
-            if n.isEmpty then continue
-            if !first then IO.println ""
-            first := false
-            anyShown := true
-            IO.println s!"── {n} (r1) ──"
-            runR1WalletHistoryFor n scanLogs limit? chain?
       if !anyShown then IO.println "(no wallets found)"
       pure 0
   | .walletDelete name =>
       match ← resolveSlotType name with
       | some .eoa => eoaDelete name
-      | some .tpm =>
-          IO.eprintln s!"error: deleting an R1 (TPM) wallet via the CLI is not yet wired; remove the TPM blob under .leancli/ manually"
-          return 2
       | none =>
           IO.eprintln s!"error: unknown wallet '{name}'"
           return 2
   | .walletReveal name =>
       match ← resolveSlotType name with
-      | some .tpm =>
-          IO.eprintln s!"error: '{name}' is a TPM/R1 wallet — there is no BIP-39 mnemonic to reveal."
-          return 2
       | none =>
           IO.eprintln s!"error: unknown wallet '{name}'"
           return 2
@@ -1982,37 +1740,15 @@ def run (args : List String) : IO UInt32 := do
               IO.eprintln "✓ revealed. Clear your scrollback now (Ctrl-L is not enough)."
               return 0
   | .walletDerive name path =>
-      match ← resolveSlotType name with
-      | some .tpm =>
-          IO.eprintln s!"error: '{name}' is an R1 (TPM) wallet — derive is only valid for EOA wallets"
-          return 2
-      | _ =>
-          DaemonClient.printCall "eoa.derive" (.obj #[("name", .str name), ("path", .str path)])
+      DaemonClient.printCall "eoa.derive" (.obj #[("name", .str name), ("path", .str path)])
   | .walletSignDigest name digest =>
-      match ← resolveSlotType name with
-      | some .tpm =>
-          let pin ← LeanCli.Cli.Pin.read s!"PIN for {name}: "
-          DaemonClient.printTextResult "tpm.signSepolia"
-            (.obj #[("name", .str name), ("digest", .str digest), ("pin", .str pin)])
-      | _ => eoaSignDigestCall name digest accountIdx?
+      eoaSignDigestCall name digest accountIdx?
   | .walletSignMessage name message path? =>
-      match ← resolveSlotType name with
-      | some .tpm =>
-          IO.eprintln s!"error: 'wallet sign-message' is not yet wired for R1 (TPM) wallets"
-          return 2
-      | _ => eoaSignMessage name message path? accountIdx?
+      eoaSignMessage name message path? accountIdx?
   | .walletSignTx name txJson path? =>
-      match ← resolveSlotType name with
-      | some .tpm =>
-          IO.eprintln s!"error: 'wallet sign-tx' is not yet wired for R1 (TPM) wallets — use `leancli send` instead"
-          return 2
-      | _ => eoaSignTx name txJson path? accountIdx?
+      eoaSignTx name txJson path? accountIdx?
   | .walletSignTypedData name json path? =>
-      match ← resolveSlotType name with
-      | some .tpm =>
-          IO.eprintln s!"error: '{name}' is an R1 (TPM) wallet — sign-typed-data is only valid for EOA wallets (TPM keys are P-256, not secp256k1)"
-          return 2
-      | _ => eoaSignTypedData name json path? accountIdx?
+      eoaSignTypedData name json path? accountIdx?
   | .networkShow =>
       IO.println (← NetworkConfig.humanReport)
       return 0
@@ -2347,17 +2083,8 @@ def run (args : List String) : IO UInt32 := do
       IO.println s!"removed indexer {indexerName}"
       pure 0
   | .walletAccountList name =>
-      match ← resolveSlotType name with
-      | some .tpm =>
-          IO.eprintln s!"error: '{name}' is an R1 (TPM) wallet — account list is only valid for EOA wallets"
-          return 2
-      | _ => DaemonClient.printCall "eoa.account.list" (.obj #[("name", .str name)])
+      DaemonClient.printCall "eoa.account.list" (.obj #[("name", .str name)])
   | .walletAccountAdd name path? =>
-      match ← resolveSlotType name with
-      | some .tpm =>
-          IO.eprintln s!"error: '{name}' is an R1 (TPM) wallet — account add is only valid for EOA wallets"
-          return 2
-      | _ =>
         let passphrase ← Passphrase.read
         let base : Array (String × LeanCli.Encoding.Json.Json) := #[
           ("name", .str name),
@@ -2369,11 +2096,6 @@ def run (args : List String) : IO UInt32 := do
           | some p => base.push ("path", .str p)
         DaemonClient.printCall "eoa.account.add" (.obj fields)
   | .walletAccountRm name index =>
-      match ← resolveSlotType name with
-      | some .tpm =>
-          IO.eprintln s!"error: '{name}' is an R1 (TPM) wallet — account rm is only valid for EOA wallets"
-          return 2
-      | _ =>
         match index.toNat? with
         | none =>
             IO.eprintln s!"invalid account index (expected non-negative integer): {index}"
@@ -2412,11 +2134,9 @@ def run (args : List String) : IO UInt32 := do
         let pad := if name.length < 16 then String.ofList (List.replicate (16 - name.length) ' ') else ""
         name ++ pad
       let eoaResult ← DaemonClient.call "eoa.list"
-      let tpmResult ← DaemonClient.call "tpm.listSepoliaAddresses"
       IO.println "Address balances (Sepolia):"
       IO.println ""
       let mut totalEoa : Nat := 0
-      let mut totalTpm : Nat := 0
       let mut anyShown := false
       match eoaResult with
       | .error err =>
@@ -2443,22 +2163,11 @@ def run (args : List String) : IO UInt32 := do
                     let subName := s!"{name}/{label}"
                     let subWei ← printRow "eoa" (padName subName) aAddr ""
                     totalEoa := totalEoa + subWei
-      match tpmResult with
-      | .error err =>
-          IO.eprintln s!"  tpm.listSepoliaAddresses failed: {err.message}"
-      | .ok tpmList =>
-          for entry in (LeanCli.Encoding.Json.asArray tpmList).getD #[] do
-            anyShown := true
-            let name := (LeanCli.Encoding.Json.getField "name" entry >>= LeanCli.Encoding.Json.asString).getD "?"
-            let addr := (LeanCli.Encoding.Json.getField "address" entry >>= LeanCli.Encoding.Json.asString).getD ""
-            let wei ← printRow "tpm" (padName name) addr ""
-            totalTpm := totalTpm + wei
       if !anyShown then
         IO.println "  (no wallets found)"
       IO.println ""
       IO.println s!"  EOA total: {formatEth totalEoa}"
-      IO.println s!"  TPM/R1 total: {formatEth totalTpm}"
-      let publicTotal := totalEoa + totalTpm
+      let publicTotal := totalEoa
       IO.println s!"  Public total:    {formatEth publicTotal}"
       IO.println ""
       -- Why: only prompt for the PP passphrase if a secret is on disk.
@@ -2528,15 +2237,6 @@ def run (args : List String) : IO UInt32 := do
                     let labelTxt := if label.isEmpty then "" else s!"  ({label})"
                     IO.println s!"        └ #{idx}{labelTxt}  {aAddr}  {path}"
       IO.println ""
-      match ← DaemonClient.call "tpm.listSepoliaAddresses" with
-      | .error err => IO.eprintln s!"  tpm.listSepoliaAddresses failed: {err.message}"
-      | .ok tpmList =>
-          for entry in (LeanCli.Encoding.Json.asArray tpmList).getD #[] do
-            let name := (LeanCli.Encoding.Json.getField "name" entry >>= LeanCli.Encoding.Json.asString).getD "?"
-            let addr := (LeanCli.Encoding.Json.getField "address" entry >>= LeanCli.Encoding.Json.asString).getD ""
-            let addrTxt := if addr.isEmpty then "(no address; deploy first)" else addr
-            IO.println s!"  [tpm] {padName name} {addrTxt}"
-      IO.println ""
       IO.println "Tip: `leancli balance -a` adds Sepolia balances."
       pure 0
   | .nonce a =>
@@ -2603,7 +2303,7 @@ def run (args : List String) : IO UInt32 := do
           | .ok valueNat =>
               match ← resolveSlotType slotName with
               | none =>
-                  IO.eprintln s!"unknown wallet: {slotName} (not in eoa.list or tpm.listSepoliaAddresses)"
+                  IO.eprintln s!"unknown wallet: {slotName} (not in eoa.list)"
                   return 2
               | some .eoa =>
                   match ← resolveAddressOrName to with
@@ -2621,51 +2321,10 @@ def run (args : List String) : IO UInt32 := do
                               return 2
                           | some _ =>
                               dispatchEoaSend slotName toResolved valueNat none (some s)
-              | some .tpm =>
-                  match subIdx? with
-                  | some _ =>
-                      IO.eprintln s!"sub-account form <slot>/<index> is not supported for TPM/R1 wallets ({slotName})"
-                      return 2
-                  | none =>
-                      match ← resolveAddressOrName to with
-                      | .error err =>
-                          IO.eprintln s!"invalid send recipient: {err}"
-                          return 2
-                      | .ok toResolved =>
-                          let pin ← LeanCli.Cli.Pin.read s!"PIN for {slotName}: "
-                          let rc ← DaemonClient.printTextResult "r1.sendEthSepolia"
-                            (.obj #[("name", .str slotName),
-                                    ("to", .str toResolved),
-                                    ("amountEth", .str amount),
-                                    ("pin", .str pin)])
-                          if rc = 0 then
-                            match ← DaemonClient.call "tpm.listSepoliaAddresses" with
-                            | .ok r =>
-                                let entries := (LeanCli.Encoding.Json.asArray r).getD #[]
-                                let addr := entries.foldl (init := "") fun acc e =>
-                                  if !acc.isEmpty then acc
-                                  else
-                                    let n := (LeanCli.Encoding.Json.getField "name" e
-                                              >>= LeanCli.Encoding.Json.asString).getD ""
-                                    if n = slotName then
-                                      (LeanCli.Encoding.Json.getField "address" e
-                                        >>= LeanCli.Encoding.Json.asString).getD ""
-                                    else acc
-                                if !addr.isEmpty then
-                                  match ← DaemonClient.call "chain.balance"
-                                      (.obj #[("address", .str addr)]) with
-                                  | .ok b =>
-                                      let hex := (LeanCli.Encoding.Json.getField "balance" b
-                                                  >>= LeanCli.Encoding.Json.asString).getD "0x0"
-                                      let wei := (hexWeiToNat hex).getD 0
-                                      IO.println s!"  remaining: {formatEth wei}  ({slotName})"
-                                  | .error _ => pure ()
-                            | .error _ => pure ()
-                          pure rc
   | .accountUse wallet =>
       match ← resolveSlotType wallet with
       | none =>
-          IO.eprintln s!"unknown wallet: {wallet} (not in eoa.list or tpm.listSepoliaAddresses)"
+          IO.eprintln s!"unknown wallet: {wallet} (not in eoa.list)"
           return 2
       | some _ =>
           writeDefaultAccount wallet
@@ -2683,9 +2342,7 @@ def run (args : List String) : IO UInt32 := do
               IO.println s!"default account: {w}  (WARNING: not currently registered)"
               return 0
           | some t =>
-              let kindStr := match t with | .eoa => "eoa" | .tpm => "tpm"
-              -- Print a resolved address best-effort.
-              let method := match t with | .eoa => "eoa.address" | .tpm => "tpm.listSepoliaAddresses"
+              let kindStr := match t with | .eoa => "eoa"
               let addr ← match t with
                 | .eoa =>
                     match ← DaemonClient.call "eoa.address" (.obj #[("name", .str slotName)]) with
@@ -2697,20 +2354,6 @@ def run (args : List String) : IO UInt32 := do
                             pure ((LeanCli.Encoding.Json.getField "address" r
                                    >>= LeanCli.Encoding.Json.asString).getD "")
                     | .error _ => pure ""
-                | .tpm =>
-                    match ← DaemonClient.call "tpm.listSepoliaAddresses" with
-                    | .ok r =>
-                        let entries := (LeanCli.Encoding.Json.asArray r).getD #[]
-                        let found := entries.findSome? fun e =>
-                          let n := (LeanCli.Encoding.Json.getField "name" e
-                                    >>= LeanCli.Encoding.Json.asString).getD ""
-                          if n = slotName then
-                            LeanCli.Encoding.Json.getField "address" e
-                              >>= LeanCli.Encoding.Json.asString
-                          else none
-                        pure (found.getD "")
-                    | .error _ => pure ""
-              let _ := method  -- silence unused
               IO.println s!"default account: {w}  type={kindStr}  address={addr}"
               return 0
   | .accountListNames =>
@@ -2752,20 +2395,10 @@ def run (args : List String) : IO UInt32 := do
           IO.eprintln s!"daemon error {err.code}: {err.message}"
           pure 2
   | .shieldedDeposit walletName amountEth =>
-      -- Privacy Pools v1 deposit requires a secp256k1 EOA signer. TPM/R1
-      -- wallets hold P-256 keys behind a smart-account wrapper, which the
-      -- current daemon `shielded.deposit` path can't drive. Reject early
-      -- with a clear message instead of prompting for a passphrase the
-      -- TPM wallet doesn't have.
+      -- Privacy Pools v1 deposit requires a secp256k1 EOA signer.
       match ← resolveSlotType walletName with
       | none =>
           IO.eprintln s!"unknown wallet: {walletName}"
-          return 2
-      | some .tpm =>
-          IO.eprintln s!"'{walletName}' is a TPM/R1 wallet; shield deposits are only supported from EOA wallets today."
-          IO.eprintln "  The Privacy Pools v1 deposit path in the daemon needs a secp256k1 EOA signer."
-          IO.eprintln "  Use an EOA wallet, e.g.:  leancli shield bbqTest 0.04"
-          IO.eprintln "  See `leancli list` for the [eoa] entries."
           return 2
       | some .eoa => pure ()
       -- Two distinct secrets are involved here:

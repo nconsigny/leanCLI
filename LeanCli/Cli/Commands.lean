@@ -312,7 +312,7 @@ inductive Command where
       Updates the slot's `smartAccountAddress` field in place. -/
   | sphincsComputeAddress (name : String) (chainOverride? : Option String)
   /-- Deploy the hybrid smart account by submitting a factory.createAccount
-      tx through a funded deployer EOA (mirrors the R1 deploy UX). -/
+      tx through a funded deployer EOA. -/
   | sphincsDeploy (name deployer : String) (accountIndex? : Option String)
       (chainOverride? : Option String)
   /-- Send a UserOperation from the hybrid account via the configured
@@ -911,30 +911,22 @@ def daemonHelpText (walletName? : Option String) : String :=
    Example:\n\
      leancli daemon " ++ walletName ++ " send sepolia 0xAa651C04bfE4F302eE243D6638d3B91389C4C02C 0.002\n\n\
    Arguments:\n\
-     <wallet>  Local TPM key slot name, for example daily or sepolia-r1\n\
-     <chain>   sepolia today; mainnet is intentionally disabled until production R1 deployment\n\
+     <wallet>  Local EOA wallet slot name, for example daily or sepolia\n\
+     <chain>   sepolia today; mainnet is dev-gated\n\
      <to>      20-byte Ethereum address, 0x-prefixed\n\
      <eth>     Human ETH amount, for example 0, 0.001, or 0.002\n\n\
-   What happens on Sepolia:\n\
-     1. Read the deployed R1 account address for the wallet key\n\
-     2. Convert ETH to wei locally with cast\n\
-     3. Ask the R1 account for the operation digest\n\
-     4. Prompt for the TPM PIN (auth value bound at key-creation time)\n\
-     5. Sign the digest with the local TPM P-256 key (TPM checks the PIN)\n\
-     6. Broadcast execute(...) through the deployed R1 account\n\n\
+   What happens on send:\n\
+     1. Decode the intent and simulate it (decode → simulate)\n\
+     2. Convert ETH to wei locally\n\
+     3. Show the intent + simulation outcome for confirmation (ConfirmGate)\n\
+     4. Sign with the in-process secp256k1 EOA key and broadcast\n\n\
    Setup commands:\n\
-     leancli wallet create r1 " ++ walletName ++ "\n\
-     leancli wallet deploy " ++ walletName ++ "\n\
-     LEANCLI_TPM_KEY=" ++ walletName ++ " ./ops/scripts/r1_sepolia.sh deploy\n\n\
+     leancli wallet create eoa " ++ walletName ++ "\n\n\
    Inspect:\n\
-     leancli wallet list\n\
-     ./ops/scripts/r1_sepolia.sh address\n\n\
+     leancli wallet list\n\n\
    Safety notes:\n\
-     - The TPM private blob stays local under .leancli/ and is gitignored\n\
-     - PIN is bound to the TPM key as a userwithauth value; wrong-PIN attempts are\n\
-       rate-limited by the TPM's hardware dictionary-attack protection\n\
-     - The current Sepolia contract is a temporary Solidity fallback\n\
-     - Contracts/R1Account/ remains the Lean/Verity source of truth\n"
+     - The encrypted seed stays local under .leancli/ and is gitignored\n\
+     - Every send flows through decode → simulate → ConfirmGate before signing\n"
 
 def lightclientText : String :=
   "leanCLI provider policy plan\n\n\
@@ -959,17 +951,15 @@ def keystoreText : String :=
      - signing requires hardware-backed key custody and user authorization\n\n\
    Platform notes:\n\
      - Ethereum mainnet is production; Sepolia is explicit dev/testnet support\n\
-     - macOS/iOS native Secure Enclave is modeled for P-256/R1\n\
+     - the generic P-256 hardware capability table models which local\n\
+       backends (TPM2 / FIDO2 / Secure Enclave) can hold and sign with a\n\
+       non-exportable key; no on-chain P-256/R1 account path consumes it today\n\
      - Linux profiles prefer TPM2 on common HP/Lenovo hardware, with FIDO2 fallback\n\
-     - the Linux kernel keyring is modeled as local handle storage, not signing\n\
-     - account logic verifies R1 signatures with the P256VERIFY precompile model\n\n\
+     - the Linux kernel keyring is modeled as local handle storage, not signing\n\n\
    Runtime:\n\
-     - wallet create r1 <name> creates a chain-agnostic TPM2-wrapped P-256 key\n\
-     - wallet deploy r1 <name> --chain sepolia deploys the R1 smart account on Sepolia\n\
-     - wallet sign sepolia <name> <digest> signs a 32-byte digest locally\n\
-     - new key creation prompts for a PIN that is set as the TPM auth value\n\
-     - signing requires that PIN, checked by the TPM in hardware\n\
-     - wrong-PIN attempts are rate-limited by the TPM's dictionary-attack lockout\n\
+     - the TPM-sealed master KEK (wallet master) seals the wallet's key-\n\
+       encryption key behind a TPM auth-value PIN\n\
+     - PIN attempts are rate-limited by the TPM's dictionary-attack lockout\n\
      - key material is stored under .leancli/ and is ignored by git\n\n\
    See LeanCli.Keystore.Enclave, LeanCli.Keystore.Linux, and\n\
    LeanCli.Keystore.Tpm2Runtime.\n"
@@ -978,10 +968,10 @@ def accountsText : String :=
   "leanCLI account policy\n\n\
    Supported account families:\n\
      - eoa-k1: regular BIP-39/BIP-32 Ethereum EOA with k1 signing\n\
-     - r1-smart: local hardware-backed P-256/R1 account using EIP-7951 verification\n\n\
+     - sphincs-hybrid: ERC-4337 smart account gated on a stored ECDSA owner\n\
+       AND a stateless SPHINCS+ post-quantum verifier\n\n\
    Defaults:\n\
      - eoa-k1 path: m/44'/60'/0'/0/0\n\
-     - r1-smart key source: local enclave / TPM / FIDO / Secure Enclave class backend\n\
      - chain: Ethereum mainnet by default; Sepolia is available for dev/testing\n\
      - custody: local only; no online keystore\n\n\
    See LeanCli.Wallet.Account and LeanCli.Invariants.Account.\n"
@@ -1029,7 +1019,7 @@ def helpText : String :=
      send <to> <amount> [--account <wallet>]\n\
                                          Send ETH from the default wallet (set via 'wallet use').\n\
                                          <to> is 0x... or ENS. <amount> is human ETH.\n\
-     from <wallet> send <to> <amount>    Send ETH from a specific wallet (eoa or r1),\n\
+     from <wallet> send <to> <amount>    Send ETH from a specific wallet,\n\
                                          bypassing the default. Tab-completes <wallet>.\n\
      balance | balance -a                Sum balances across all wallets (Sepolia).\n\
                                          With -a also adds shielded (Privacy-Pools) totals.\n\
@@ -1037,7 +1027,7 @@ def helpText : String :=
      balances [--chain <c>] [--address 0x..] [--json]\n\
                                          Per-token balances (registry + ETH) for one address.\n\
                                          Defaults: current chain, default account.\n\
-     list | list -a                      Tree view of EOA + TPM/R1 wallets.\n\
+     list | list -a                      Tree view of wallets.\n\
      wallet use <wallet>                 Set default wallet for `send`.\n\
      wallet current                      Print current default wallet.\n\
      resolve <name>                      Resolve an ENS name to an address.\n\
@@ -1053,13 +1043,11 @@ def helpText : String :=
      uninstall                           Remove ~/.leancli/bin symlinks (leanclispawn --uninstall).\n\n\
    SETUP / WALLET MANAGEMENT:\n\
      wallet create eoa <name> [path]     Create an encrypted EOA slot.\n\
-     wallet create r1 <name>             Create a TPM2-wrapped P-256 key.\n\
-     wallet import <name> [path] <words> Import a BIP-39 mnemonic as an EOA slot (EOA only).\n\
-     wallet deploy <name>                Deploy the R1 smart account on the configured chain (R1 only).\n\
-     wallet list                         Tabular list of every wallet (eoa + r1).\n\
-     wallet show <name>                  Type-aware metadata.\n\
+     wallet import <name> [path] <words> Import a BIP-39 mnemonic as an EOA slot.\n\
+     wallet list                         Tabular list of every wallet.\n\
+     wallet show <name>                  Wallet metadata.\n\
      wallet address <name>               Primary address.\n\
-     wallet unlock <name>                Per-slot EOA passphrase prompt; R1 is a no-op.\n\
+     wallet unlock <name>                Per-slot EOA passphrase prompt.\n\
      wallet unlock                       Master unlock — single prompt; TPM-PIN if hardware present,\n\
                                          master passphrase otherwise. Covers every enrolled EOA + PP secret.\n\
      wallet lock <name>                  Lock one wallet.\n\
@@ -1081,13 +1069,13 @@ def helpText : String :=
                                          Requires passphrase + name confirmation.\n\
                                          Only works for slots created with mnemonic retention.\n\
      wallet derive <name> <path>         Derive an extra path (EOA only).\n\
-     wallet sign-digest <name> <hash>    Sign a 32-byte digest. Both types.\n\
+     wallet sign-digest <name> <hash>    Sign a 32-byte digest.\n\
      wallet sign-message <name> [path] <msg>\n\
-                                         Personal-message sign. Both types.\n\
+                                         Personal-message sign.\n\
      wallet sign-tx <name> [path] <tx-json>\n\
-                                         Sign a transaction. Both types.\n\
+                                         Sign a transaction.\n\
      wallet sign-typed-data <name> [path] <json>\n\
-                                         EIP-712 sign (EOA only).\n\
+                                         EIP-712 sign.\n\
      wallet history <name> [--scan-logs] [--limit N]\n\
                                          Local journal + optional log scan.\n\
      wallet account list <name>          List sub-accounts on an EOA slot.\n\
@@ -1185,8 +1173,7 @@ def bashCompletion : String :=
     "      _is_index=1",
     "    fi",
     "    if [ \"$_is_index\" = \"1\" ]; then",
-    "      # Two-stage UX: EOA wallets get `<wallet>/<index>` (sub-account form);",
-    "      # TPM/R1 wallets are bare names (no derivation indices). Wallet type",
+    "      # EOA wallets get `<wallet>/<index>` (sub-account form). Wallet type",
     "      # is read from `wallet list-typed-names` which emits `<type>\\t<name>`.",
     "      case \"$_cur\" in",
     "        */*)",
@@ -1199,20 +1186,18 @@ def bashCompletion : String :=
     "          COMPREPLY=( $(compgen -W \"$entries\" -- \"${_w}/${_suffix}\") )",
     "          ;;",
     "        *)",
-    "          local _typed _t _n _eoa=\"\" _tpm=\"\"",
+    "          local _typed _t _n _eoa=\"\"",
     "          _typed=\"$(\"${COMP_WORDS[0]}\" wallet list-typed-names 2>/dev/null)\"",
     "          while IFS=$'\\t' read -r _t _n; do",
     "            [ -z \"$_n\" ] && continue",
     "            case \"$_t\" in",
     "              eoa) _eoa+=\"${_n}/ \" ;;",
-    "              tpm) _tpm+=\"${_n} \" ;;",
     "            esac",
     "          done <<< \"$_typed\"",
-    "          # EOA: trailing slash (more typing follows). TPM: bare name.",
-    "          # We can't mix nospace/space in a single COMPREPLY, so prefer",
-    "          # nospace (safe: an EOA insert ends in `/`, a TPM insert in a",
-    "          # bare name — the user adds their own space when they're done).",
-    "          COMPREPLY=( $(compgen -W \"${_eoa}${_tpm}\" -- \"$_cur\") )",
+    "          # EOA: trailing slash (more typing follows). We prefer",
+    "          # nospace (an EOA insert ends in `/`; the user adds their",
+    "          # own space when they're done).",
+    "          COMPREPLY=( $(compgen -W \"${_eoa}\" -- \"$_cur\") )",
     "          compopt -o nospace 2>/dev/null",
     "          ;;",
     "      esac",
@@ -1235,8 +1220,8 @@ def bashCompletion : String :=
     "  fi",
     "  case \"${COMP_WORDS[1]}\" in",
     "    wallet)",
-    "      if [ \"$COMP_CWORD\" -eq 2 ]; then COMPREPLY=( $(compgen -W \"create import deploy list show address unlock lock delete reveal derive sign-digest sign-message sign-tx sign-typed-data history account use current\" -- \"$cur\") );",
-    "      elif [ \"$COMP_CWORD\" -eq 3 ] && [ \"${COMP_WORDS[2]}\" = \"create\" ]; then COMPREPLY=( $(compgen -W \"eoa r1\" -- \"$cur\") );",
+    "      if [ \"$COMP_CWORD\" -eq 2 ]; then COMPREPLY=( $(compgen -W \"create import list show address unlock lock delete reveal derive sign-digest sign-message sign-tx sign-typed-data history account use current\" -- \"$cur\") );",
+    "      elif [ \"$COMP_CWORD\" -eq 3 ] && [ \"${COMP_WORDS[2]}\" = \"create\" ]; then COMPREPLY=( $(compgen -W \"eoa\" -- \"$cur\") );",
     "      elif [ \"$COMP_CWORD\" -eq 3 ] && [ \"${COMP_WORDS[2]}\" = \"account\" ]; then COMPREPLY=( $(compgen -W \"add list rm\" -- \"$cur\") );",
     "      elif [ \"$COMP_CWORD\" -ge 4 ] && [ \"${COMP_WORDS[2]}\" = \"account\" ]; then",
     "        local names; names=\"$(\"${COMP_WORDS[0]}\" wallet list-names 2>/dev/null)\"",
@@ -1246,7 +1231,7 @@ def bashCompletion : String :=
     "          show|address|unlock|lock|history|list)",
     "            local names; names=\"$(\"${COMP_WORDS[0]}\" wallet list-names 2>/dev/null)\"",
     "            COMPREPLY=( $(compgen -W \"$names --all -a\" -- \"$cur\") ) ;;",
-    "          deploy|delete|reveal|derive|sign-digest|sign-message|sign-tx|sign-typed-data|use)",
+    "          delete|reveal|derive|sign-digest|sign-message|sign-tx|sign-typed-data|use)",
     "            local names; names=\"$(\"${COMP_WORDS[0]}\" wallet list-names 2>/dev/null)\"",
     "            COMPREPLY=( $(compgen -W \"$names\" -- \"$cur\") ) ;;",
     "        esac;",
@@ -1435,7 +1420,7 @@ def fishCompletion : String :=
     "    $bin wallet list-names 2>/dev/null",
     "end",
     "",
-    "# --account candidates for `send`: <wallet>/<idx> for EOAs, bare name for TPM/R1.",
+    "# --account candidates for `send`: <wallet>/<idx> for EOAs.",
     "# Mirrors the bash emitter's _leancli_account_value index-mode branch.",
     "function __leancli_account_send_values",
     "    set -l bin (__leancli_bin)",
@@ -1477,7 +1462,7 @@ def fishCompletion : String :=
     "complete -c leancli -c kohaku -n __fish_use_subcommand -a daemon        -d 'Daemon control'",
     "complete -c leancli -c kohaku -n __fish_use_subcommand -a balance       -d 'Read ETH balance of one address'",
     "complete -c leancli -c kohaku -n __fish_use_subcommand -a balances      -d 'Per-token balances for one address'",
-    "complete -c leancli -c kohaku -n __fish_use_subcommand -a list          -d 'Tree view of EOA + TPM/R1 wallets'",
+    "complete -c leancli -c kohaku -n __fish_use_subcommand -a list          -d 'Tree view of wallets'",
     "complete -c leancli -c kohaku -n __fish_use_subcommand -a send          -d 'Send ETH'",
     "complete -c leancli -c kohaku -n __fish_use_subcommand -a from          -d 'Per-wallet send: from <wallet> send …'",
     "complete -c leancli -c kohaku -n __fish_use_subcommand -a chain         -d 'Low-level chain utilities'",
@@ -1493,7 +1478,7 @@ def fishCompletion : String :=
     "# --- wallet ---",
     "set -l __leancli_wallet_verbs create import deploy list show address unlock lock delete reveal derive sign-digest sign-message sign-tx sign-typed-data history account use current master enroll",
     "complete -c leancli -c kohaku -n '__fish_seen_subcommand_from wallet; and not __fish_seen_subcommand_from create import deploy list show address unlock lock delete reveal derive sign-digest sign-message sign-tx sign-typed-data history account use current master enroll' -a \"$__leancli_wallet_verbs\"",
-    "complete -c leancli -c kohaku -n '__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from create; and not __fish_seen_subcommand_from eoa r1' -a 'eoa r1' -d 'Account type'",
+    "complete -c leancli -c kohaku -n '__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from create; and not __fish_seen_subcommand_from eoa' -a 'eoa' -d 'Account type'",
     "complete -c leancli -c kohaku -n '__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from account; and not __fish_seen_subcommand_from add list rm' -a 'add list rm' -d 'Sub-account op'",
     "complete -c leancli -c kohaku -n '__fish_seen_subcommand_from wallet; and __fish_seen_subcommand_from master; and not __fish_seen_subcommand_from init status set-timeout bind-tpm' -a 'init status set-timeout bind-tpm' -d 'Master KEK op'",
     "# Dynamic wallet names for verbs that take a single <name>.",

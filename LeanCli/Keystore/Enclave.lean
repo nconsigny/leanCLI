@@ -14,9 +14,11 @@ signing services are intentionally absent.
 The model is deliberately dependency-free: it describes policy decisions,
 not runtime bindings to TPM2, FIDO2, Secure Enclave, or kernel APIs.
 
-Ethereum mainnet support is modeled through P-256/R1 signatures verified
-onchain by account logic that uses the P256VERIFY precompile. This keeps
-the local hardware key native to TPM/FIDO/Secure Enclave devices.
+`Curve.p256` and `Backend.supportsCurve` are kept as a generic guardrail:
+the capability table models which local hardware can hold and sign with a
+P-256 key without exporting private material. No on-chain P-256/R1 account
+or signing path consumes this today; it remains a generic hardware-policy
+predicate.
 -/
 
 namespace LeanCli.Keystore.Enclave
@@ -154,13 +156,7 @@ def linuxTpm2Policy : KeyPolicy :=
 def linuxFido2Policy : KeyPolicy :=
   hardwarePolicy .fido2SecurityKey .userPresence
 
-def ethereumR1HardwarePolicy : KeyPolicy :=
-  hardwarePolicy .externalHardwareWallet .userPresence
-
 def appleNativePolicy : KeyPolicy :=
-  hardwarePolicy .appleSecureEnclave .biometric
-
-def appleEthereumR1Policy : KeyPolicy :=
   hardwarePolicy .appleSecureEnclave .biometric
 
 end LeanCli.Keystore.Enclave

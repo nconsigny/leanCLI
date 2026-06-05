@@ -5,7 +5,6 @@ import LeanCli.Daemon.Server.Endpoints
 import LeanCli.Daemon.Server.Journal
 import LeanCli.Daemon.Server.BookRpc
 import LeanCli.Daemon.Server.SwapRpc
-import LeanCli.Daemon.Server.TpmRpc
 import LeanCli.Daemon.Server.MiscRpc
 import LeanCli.Daemon.Server.AccountRpc
 import LeanCli.Daemon.Server.ChatRpc
@@ -111,8 +110,6 @@ def methodHandler (cfg : Config) (state : LeanCli.Daemon.State.Shared)
     return ← BookRpc.dispatch cfg state notify req
   if req.method.startsWith "swap." then
     return ← SwapRpc.dispatch cfg state notify req
-  if req.method.startsWith "tpm." || req.method.startsWith "r1." then
-    return ← TpmRpc.dispatch cfg state notify req
   if req.method.startsWith "llm." || req.method.startsWith "skills."
       || req.method.startsWith "clearsign." || req.method.startsWith "aave." then
     return ← MiscRpc.dispatch cfg state notify req

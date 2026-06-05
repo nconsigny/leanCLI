@@ -330,8 +330,8 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                 pure <| .ok <| .obj #[("ttlMs", .num (Int.ofNat newTtl))]
   | "wallet.lean_verified_addresses" =>
       -- Phase 1d: trusted-registry RPC. Returns the BIP-44-derived
-      -- addresses for currently-unlocked seeds, plus any TPM-backed R1
-      -- accounts. Read-only; no chain I/O. See
+      -- addresses for currently-unlocked seeds (plus SPHINCS-hybrid smart
+      -- accounts). Read-only; no chain I/O. See
       -- `docs/PHASE1D_THREAT_MODEL.md` for the full threat model.
       --
       -- Params (all optional):
@@ -341,8 +341,6 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       --   count      : Nat — per-path enumeration window; clamped to
       --                `cfg.trustedRegistryMaxPerPath` (default 5).
       --                Clamped silently, not errored — see threat 2.
-      --   includeR1  : Bool — default true. When false, omits TPM-
-      --                backed R1 entries.
       --
       -- Failure modes documented in the threat model:
       --   `locked`     — no seeds unlocked
@@ -360,10 +358,6 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
         | _ => defaultPaths
       let requestedCount := paramNatD req.params "count" 5
       let count := min requestedCount cfg.trustedRegistryMaxPerPath
-      let includeR1 :=
-        match getField "includeR1" req.params >>= asBool with
-        | some b => b
-        | none => true
       -- Path-allowlist gate (threat 4).
       let badPath? : Option String :=
         paths.toList.find? (fun p => !(allowedPrefixes.contains p))
@@ -379,16 +373,12 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       | none =>
       let unlockedSlots ← LeanCli.Daemon.State.unlockedNames state
       -- Locked-seed gate (threat 3). The threat-model contract is
-      -- explicit: when no BIP-44 seed is unlocked we return `locked`
-      -- **regardless** of whether the keystore has TPM-backed R1
-      -- entries on disk. Reasons:
+      -- explicit: when no BIP-44 seed is unlocked we return `locked`.
+      -- Reasons:
       --   • The prompt's "Trusted Registry" header tells the LLM the
-      --     list is "from your seed"; rendering only R1 entries under
-      --     that header would be misleading.
+      --     list is "from your seed".
       --   • The user has not authorized address disclosure for this
       --     session; the unlock event is what gates that.
-      --   • R1-only registries are still served separately via
-      --     `account.list`; this RPC is the seed-anchored surface.
       if unlockedSlots.isEmpty then
         pure <| .ok <| .obj #[
           ("ok", .bool false),
@@ -468,7 +458,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       --    holds the funds. Records without a computed
       --    `smartAccountAddress` are skipped (factory not yet wired up
       --    for that paramSet/chain). Enumeration failure is non-fatal —
-      --    we still want EOA + R1 entries to land.
+      --    we still want EOA entries to land.
       try
         let sphincsNames ← LeanCli.Wallet.SphincsHybridStore.listSlotNames
         for sname in sphincsNames do
@@ -488,26 +478,6 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                     ("address",             .str sa)
                   ]
       catch _ => pure ()
-      -- 4. Optionally include R1 entries from the TPM keystore — only
-      -- now that we know at least one seed is unlocked, so the user
-      -- has authorized disclosure. Uses the same enumeration path as
-      -- `account.list`; no new keystore API.
-      if includeR1 then
-        try
-          let tpmNames ← listSepoliaKeys
-          let stateDir : System.FilePath := ".leancli/keystore/tpm2"
-          for name in tpmNames do
-            let addrFile := stateDir / name / "r1-account-address.txt"
-            if ← addrFile.pathExists then
-              let raw ← IO.FS.readFile addrFile
-              let addr := raw.trimAscii.toString
-              if !addr.isEmpty then
-                entries := entries.push <| .obj #[
-                  ("kind",         .str "r1"),
-                  ("credentialId", .str name),
-                  ("address",      .str addr)
-                ]
-        catch _ => pure ()  -- TPM listing failure is non-fatal
       -- Combine fingerprints into a single stable string. If multiple
       -- seeds are unlocked simultaneously the registry shows all of
       -- their fingerprints joined by ","; rotation of any one will

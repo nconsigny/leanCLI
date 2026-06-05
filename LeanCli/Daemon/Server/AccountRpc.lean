@@ -12,7 +12,7 @@ import LeanCli.Wallet.SphincsHybridStore
 
 Default-account state file management (process-user state, owned by the
 daemon so the CLI stays a thin forwarder) plus the unified
-`account.list` projection over EOA + TPM2 + SPHINCS+ stores.
+`account.list` projection over EOA + SPHINCS+ stores.
 
 Four methods:
   account.getDefault / setDefault / clearDefault
@@ -84,23 +84,9 @@ def dispatch (_cfg : Config) (_state : LeanCli.Daemon.State.Shared)
               ("indices", .arr indices)
             ]
         | .error _ => pure ()
-      let tpmNames ← listSepoliaKeys
-      let stateDir : System.FilePath := ".leancli/keystore/tpm2"
-      for name in tpmNames do
-        let addrFile := stateDir / name / "r1-account-address.txt"
-        let address ←
-          if ← addrFile.pathExists then
-            let raw ← IO.FS.readFile addrFile
-            pure raw.trimAscii.toString
-          else pure ""
-        entries := entries.push <| .obj #[
-          ("type",    .str "tpm"),
-          ("name",    .str name),
-          ("address", .str address)
-        ]
       -- SPHINCS- hybrid smart accounts. Each slot's identity is its
       -- CREATE2 smart-account address; we surface it as `address` so
-      -- the TUI / CLI can treat it uniformly with EOA / TPM rows. When
+      -- the TUI / CLI can treat it uniformly with EOA rows. When
       -- the counterfactual hasn't been computed yet the field stays
       -- empty — the SphincsAccountsHub detail view exposes "Compute
       -- counterfactual address" to populate it.

@@ -61,36 +61,29 @@ inductive AccountKindHint where
   /-- Plain EOA (BIP-39/k1). Multi-tx flows are emitted as a sequential
       list; the LLM proposes them one-by-one through `propose_send`. -/
   | eoa
-  /-- Locally-deployed P-256/R1 ERC-4337 account. Multi-tx flows are
-      collapsed into a single `executeBatch` callData inside one UserOp. -/
-  | r1Smart
-  /-- SPHINCs- hybrid 4337 account. Same batching shape as `r1Smart`;
-      the signature stack differs but the on-chain account exposes the
-      same `BaseAccount.executeBatch` entry. -/
+  /-- SPHINCs- hybrid 4337 account. Multi-tx flows are collapsed into a
+      single `executeBatch` callData inside one UserOp; the on-chain
+      account exposes the standard `BaseAccount.executeBatch` entry. -/
   | sphincsHybrid
   deriving DecidableEq, Repr
 
 /-- Is this hint a smart wallet that supports `executeBatch`? -/
 def AccountKindHint.isSmartWallet : AccountKindHint → Bool
   | .eoa           => false
-  | .r1Smart       => true
   | .sphincsHybrid => true
 
 /-- Display string for `summaryForConfirm`. -/
 def AccountKindHint.label : AccountKindHint → String
   | .eoa           => "EOA"
-  | .r1Smart       => "R1 smart account"
   | .sphincsHybrid => "SPHINCS- hybrid account"
 
-/-- Parse `"eoa"` / `"r1Smart"` / `"sphincsHybrid"` (case-insensitive).
-    Returns `none` for an unknown kind so the caller can surface a
-    stable error rather than silently defaulting. -/
+/-- Parse `"eoa"` / `"sphincsHybrid"` (case-insensitive). Returns `none`
+    for an unknown kind so the caller can surface a stable error rather
+    than silently defaulting. -/
 def AccountKindHint.parse? (s : String) : Option AccountKindHint :=
   match s.toLower with
   | "eoa"            => some .eoa
   | "eoak1"          => some .eoa
-  | "r1smart"        => some .r1Smart
-  | "r1"             => some .r1Smart
   | "sphincshybrid"  => some .sphincsHybrid
   | "sphincs"        => some .sphincsHybrid
   | _                => none

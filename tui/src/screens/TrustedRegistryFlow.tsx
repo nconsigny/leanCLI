@@ -20,12 +20,11 @@ type VersionsSnap = {
  *  `wallet.lean_verified_addresses` response (see
  *  LeanCli/Agent/ToolDefs/TrustedRegistry.lean#TrustedAddress). */
 type WalletEntry = {
-  kind: string; // "eoa" | "sphincs" | "r1"
+  kind: string; // "eoa" | "sphincs"
   slot?: string;
   path?: string;
   label?: string;
   unlocked?: boolean;
-  credentialId?: string;
   ownerAddress?: string;
   smartAccountAddress?: string;
   paramSet?: string;
@@ -283,7 +282,7 @@ function WalletRow({ a }: { a: WalletEntry }) {
     ) : null;
   const name = displayName(a);
   const kindBadge =
-    a.kind === "sphincs" ? "SC " : a.kind === "r1" ? "R1 " : "EOA";
+    a.kind === "sphincs" ? "SC " : "EOA";
   return (
     <Box>
       <Text color={theme.accent}>{kindBadge} </Text>
@@ -295,7 +294,6 @@ function WalletRow({ a }: { a: WalletEntry }) {
 }
 
 function displayName(a: WalletEntry): string {
-  if (a.kind === "r1") return a.credentialId ?? "?";
   if (a.kind === "sphincs")
     return `${a.slot ?? "?"} [${a.paramSet ?? ""}]`;
   // EOA: prefer slot/label, then slot/index, then slot, then path.

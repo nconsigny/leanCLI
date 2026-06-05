@@ -81,22 +81,16 @@ inductive Confidence where
 * `.eoa` — secp256k1 keypair derived from a BIP-39 mnemonic (12 or 24
   words). The mnemonic is the user's recovery path; the seed is
   persisted on disk encrypted under the master KEK (which is TPM-sealed
-  at rest). Signing happens in process memory. Default.
-* `.r1` — secp256r1 (P-256) keypair generated inside the TPM. The
-  private key never leaves the chip; signing is hardware-bound. Used
-  as an ERC-4337 R1 smart account; deployment is a separate optional
-  step (the wallet can receive without deployment, but cannot send
-  until deployed).
+  at rest). Signing happens in process memory. The sole kind after the
+  P-256/R1 account path was removed from the core.
 -/
 inductive WalletKind where
   | eoa
-  | r1
   deriving Repr, DecidableEq
 
 /-- Render `WalletKind` as the wire tag string. -/
 def WalletKind.toString : WalletKind → String
   | .eoa => "eoa"
-  | .r1  => "r1"
 
 /-- Semantic intent — what the user wants to do, before encoding to
 calldata. Each constructor carries exactly the fields it needs; no
@@ -335,18 +329,16 @@ inductive Intent where
       (chainId : ChainId)
       (protocol : String)
   /-- Generate a new local wallet. **Not a chain action** — `chainId` is
-  recorded only as request context (some R1 deployment flows are
-  chain-specific, and we may surface the chain in the wallet's label).
-  No on-chain interaction happens here; an active send from the new
-  address later flows through the usual signing pipeline.
+  recorded only as request context (we may surface the chain in the
+  wallet's label). No on-chain interaction happens here; an active send
+  from the new address later flows through the usual signing pipeline.
 
-  * `kind` — defaults to `.eoa` (BIP-39 mnemonic + software signing).
-    `.r1` is the TPM-hardware-key opt-in.
+  * `kind` — always `.eoa` (BIP-39 mnemonic + software signing); the
+    P-256/R1 hardware-key kind has been removed from the core.
   * `label` — local-only nickname. The parser strips PII patterns
     before accepting (see IntentParser).
-  * `deployImmediately` — meaningful only for `.r1`; ignored for
-    `.eoa`. Default `false`: R1 wallets can receive without being
-    deployed, deployment is needed only before the first outbound tx. -/
+  * `deployImmediately` — retained for wire compatibility; ignored for
+    `.eoa` (an EOA needs no deployment step). -/
   | freshAddress
       (chainId : ChainId)
       (kind : WalletKind)
@@ -560,7 +552,6 @@ example : Action.toString .stake             = "stake"                      := b
 example : Action.toString .unstake           = "unstake"                    := by native_decide
 example : Action.toString .freshAddress      = "address.fresh"              := by native_decide
 example : WalletKind.toString .eoa           = "eoa"                := by native_decide
-example : WalletKind.toString .r1            = "r1"                 := by native_decide
 
 /-- Render `Confidence` as a tag string. -/
 def Confidence.toString : Confidence → String

@@ -7,7 +7,6 @@ import LeanCli.Invariants.Keystore
 import LeanCli.Invariants.Mainnet
 import LeanCli.Invariants.Nonce
 import LeanCli.Invariants.Network
-import LeanCli.Invariants.R1Account
 import LeanCli.Invariants.SphincsAccount
 import LeanCli.Invariants.TxWellFormed
 import LeanCli.Invariants.Wallet

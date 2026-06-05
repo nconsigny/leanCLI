@@ -54,12 +54,11 @@ type Props = {
     wallet?: { kind: "eoa" | "tpm"; name: string; address: string },
   ) => void;
   /** Routes an `address.fresh` directive to the existing wallet-creation
-   *  flow. Parent navigates to CreateEoaFlow (kind="eoa") or
-   *  CreateR1Flow (kind="r1") with the label pre-known. The chat does
-   *  NOT dispatch eoa.create / tpm.create directly because those RPCs
-   *  need a passphrase / TPM PIN prompt that the existing flow already
+   *  flow. Parent navigates to CreateEoaFlow (kind="eoa") with the label
+   *  pre-known. The chat does NOT dispatch eoa.create directly because
+   *  that RPC needs a passphrase prompt that the existing flow already
    *  handles correctly (with confirm + masking). */
-  onCreateWallet?: (kind: "eoa" | "r1", label: string | undefined) => void;
+  onCreateWallet?: (kind: "eoa", label: string | undefined) => void;
   /** Open the read-only `HistoryFlow` screen. Wired to `/history`
    *  typed in chat — same silent-handoff pattern as `/clear`. The
    *  parent is expected to push HistoryFlow onto its navigation stack
@@ -143,9 +142,9 @@ export type DraftResponse = {
     params: Record<string, unknown>;
   };
   create?: {
-    rpc: "eoa.create" | "tpm.create";
+    rpc: "eoa.create";
     params: {
-      kind: "eoa" | "r1";
+      kind: "eoa";
       deployImmediately: boolean;
       chainId: number;
       label?: string;
@@ -180,7 +179,7 @@ export type DispatchState =
   | { kind: "running" }
   | { kind: "auditDone"; data: AuditResult }
   | { kind: "prepareDone"; txs: PreparedTx[]; meta?: Record<string, unknown> }
-  | { kind: "createHandedOff"; walletKind: "eoa" | "r1"; label?: string }
+  | { kind: "createHandedOff"; walletKind: "eoa"; label?: string }
   | { kind: "error"; message: string };
 
 export type Turn =
@@ -637,7 +636,7 @@ export default function LlmChatFlow({
    *  ConfirmGate path); the prepared-tx list is also shown so the
    *  user sees what they're walking through. Create hands off to the
    *  existing wallet-creation flow via onCreateWallet — that flow
-   *  already handles passphrase / TPM PIN prompts. */
+   *  already handles the passphrase prompt. */
   const executeDirective = async (turn: Extract<Turn, { kind: "assistant" }>) => {
     const r = turn.result;
     if (!r) return;
@@ -694,7 +693,7 @@ export default function LlmChatFlow({
       if (!onCreateWallet) {
         updateTurnDispatch(turn, {
           kind: "error",
-          message: "wallet creation flow not wired; open WalletsHub > Create EOA / R1 from the main menu",
+          message: "wallet creation flow not wired; open WalletsHub > Create EOA from the main menu",
         });
         return;
       }
@@ -1513,9 +1512,6 @@ function DirectiveBlock({
           <Text color={theme.dim}>
             {"  "}kind: {create.params.kind}
             {create.params.label ? ` · label: ${create.params.label}` : ""}
-            {create.params.kind === "r1" && create.params.deployImmediately
-              ? " · deploy: yes"
-              : ""}
           </Text>
           {create.params.kind === "eoa" && (
             <Text color={theme.warn}>

@@ -3,9 +3,8 @@ import LeanCli.Contract.SphincsAccount
 /-!
 # Sphincs hybrid account invariants
 
-Properties the on-chain `SphincsAccount` must satisfy.  These mirror the
-R1-account invariants for chain restriction and nonce monotonicity, plus
-hybrid-specific invariants:
+Properties the on-chain `SphincsAccount` must satisfy.  These cover chain
+restriction and nonce monotonicity, plus hybrid-specific invariants:
 
 * both signature halves verify against the **pre-state** keys (12.3);
 * the three payloads each preserve exactly the half of the key material
@@ -24,7 +23,7 @@ cannot be accepted by the oracle's "old-keys" branch.
 namespace LeanCli.Invariants.SphincsAccount
 
 open LeanCli.Contract.SphincsAccount
-open LeanCli.Ethereum.P256Precompile
+open LeanCli.Ethereum.Chain
 
 /-- 12.1 — accepted ops use a wallet-supported chain id. -/
 theorem applySomeSupportedChainOnly

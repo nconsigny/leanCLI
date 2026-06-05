@@ -1,4 +1,4 @@
-import LeanCli.Ethereum.P256Precompile
+import LeanCli.Ethereum.Chain
 
 /-!
 # Verified wallet core
@@ -11,46 +11,30 @@ the core handles only key references and typed intents.
 
 namespace LeanCli.Core
 
-open LeanCli.Ethereum.P256Precompile
+open LeanCli.Ethereum.Chain
 
 inductive SignerKind where
   | eoa
-  | r1
   deriving Repr, DecidableEq
 
 inductive SignatureScheme where
   | secp256k1
-  | p256
   deriving Repr, DecidableEq
 
 inductive TxType where
   | eip1559
-  | r1Account
   | eip7702
   deriving Repr, DecidableEq
 
 inductive KeyRef where
   | eoa (derivationPath : String)
-  | r1 (handle : String)
   deriving Repr, DecidableEq
 
 def KeyRef.kind : KeyRef → SignerKind
   | .eoa _ => .eoa
-  | .r1 _ => .r1
 
 def schemeForKind : SignerKind → SignatureScheme
   | .eoa => .secp256k1
-  | .r1 => .p256
-
-structure TPMPolicy where
-  userPresence        : Bool
-  antiHammering       : Bool
-  keyNonExportable    : Bool
-  accountDigestsOnly  : Bool
-  deriving Repr, DecidableEq
-
-def TPMPolicy.satisfied (p : TPMPolicy) : Bool :=
-  p.userPresence && p.antiHammering && p.keyNonExportable && p.accountDigestsOnly
 
 structure Intent where
   chainId          : Nat
@@ -63,7 +47,6 @@ structure Intent where
   approved         : Bool
   rpcChainId       : Option Nat
   rawSigning       : Bool := false
-  tpmPolicy        : Option TPMPolicy := none
   is7702           : Bool := false
   delegateApproved : Bool := false
   deriving Repr, DecidableEq
@@ -92,11 +75,12 @@ inductive Output where
 def containsPrivateKeyMaterial : Output → Bool
   | _ => false
 
-def tpmPolicySatisfied (intent : Intent) : Bool :=
-  match intent.signerKind, intent.tpmPolicy with
-  | .r1, some policy => policy.satisfied
-  | .r1, none => false
-  | .eoa, _ => true
+/-- Local-key signing carries no hardware-policy precondition after the
+    P-256/R1 enclave path was removed; this is constantly `true` for the
+    sole `eoa` signer kind. Kept as a conjunct of `verifiedIntent` so the
+    gate's shape is stable if a future hardware kind reintroduces a
+    precondition. -/
+def tpmPolicySatisfied (_intent : Intent) : Bool := true
 
 def delegationPolicySatisfied (intent : Intent) : Bool :=
   if intent.is7702 then
@@ -130,7 +114,6 @@ inductive Command where
   | SyncChain (chainId : Nat)
   | BuildTx (intent : Intent)
   | SignEOA (intent : Intent)
-  | SignR1 (intent : Intent)
   | Submit (intent : Intent)
   | Delegate7702 (intent : Intent)
   | ResetDelegation7702 (intent : Intent)
@@ -150,8 +133,6 @@ def step (s : State) : Command → Except Error (State × Output)
         .error .unsupportedChain
   | .SignEOA intent =>
       signIntent s intent .eoa
-  | .SignR1 intent =>
-      signIntent s intent .r1
   | .Submit intent =>
       if verifiedIntent s intent then
         .ok ({ s with pending := intent :: s.pending }, .submitted intent)

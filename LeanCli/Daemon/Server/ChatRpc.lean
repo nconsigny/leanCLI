@@ -174,7 +174,7 @@ the TUI should call next:
 * `shielded.deposit`  → `prepare = {rpc: "shielded.prepareDeposit",  …}`
 * `shielded.withdraw` → `prepare = {rpc: "shielded.prepareWithdraw", …}`
 * `approvals.audit`   → `audit   = {rpc: "daemon.approvals.list",    …}`
-* `address.fresh`     → `create  = {rpc: "eoa.create"|"tpm.create",  …}`
+* `address.fresh`     → `create  = {rpc: "eoa.create",  …}`
 
 The TUI dispatches the directive, then per-tx ConfirmGate over the
 returned prepared txs (for shielded) or shows the read-only result
@@ -309,7 +309,6 @@ private def chatDraftIntentResponse
       let rpc : String :=
         match kind with
         | .eoa => "eoa.create"
-        | .r1  => "tpm.create"
       let labelEntry : Array (String × Json) :=
         match label with
         | some l => #[("label", .str l)]
@@ -403,9 +402,8 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
           -- *re-derive* an unlocked EOA seed at the recorded path and
           -- structurally compare against the on-disk address. The third
           -- slot is `some (slotName, path)` for EOA entries (BIP-44
-          -- derivable) and `none` for TPM/R1 entries (hardware-bound,
-          -- not re-derivable). See Invariants/AddressOwnership.lean for
-          -- the safety proof.
+          -- derivable). See Invariants/AddressOwnership.lean for the
+          -- safety proof.
           let eoaNames ← LeanCli.Wallet.EoaStore.list
           let mut walletEntries : List (String × String × Option (String × String)) := []
           for name in eoaNames do
@@ -421,24 +419,15 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   walletEntries := walletEntries ++
                     [(subKey, acct.address, some (rec.name, acct.path))]
             | .error _ => pure ()
-          let tpmNames ← listSepoliaKeys
-          let tpmStateDir : System.FilePath := ".leancli/keystore/tpm2"
-          for name in tpmNames do
-            let addrFile := tpmStateDir / name / "r1-account-address.txt"
-            if ← addrFile.pathExists then
-              let raw ← IO.FS.readFile addrFile
-              let addr := raw.trimAscii.toString
-              if !addr.isEmpty then
-                walletEntries := walletEntries ++ [(name, addr, none)]
           let bookEntries ← LeanCli.Daemon.AddressBook.loadIO
           let book := match bookEntries with
             | .ok xs => xs
             | .error _ => []
           -- Per-entry ownership status. EOA + unlocked → re-derive and
-          -- compare; EOA + locked → `.locked`; TPM → `.hardware`. The
-          -- only branch that emits `.verified` performs the actual
-          -- `deriveAddressFromSeed` and structurally compares
-          -- (invariant 14.1).
+          -- compare; EOA + locked → `.locked`; non-derivable (no recorded
+          -- path) → `.hardware`. The only branch that emits `.verified`
+          -- performs the actual `deriveAddressFromSeed` and structurally
+          -- compares (invariant 14.1).
           let computeOwnership :
               String → Option (String × String) →
               IO LeanCli.Ethereum.Ownership.Status :=

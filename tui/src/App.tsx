@@ -24,7 +24,6 @@ import SwapFlow from "./screens/SwapFlow.js";
 import ShieldFlow from "./screens/ShieldFlow.js";
 import WalletUnshieldFlow from "./screens/WalletUnshieldFlow.js";
 import CreateEoaFlow from "./screens/CreateEoaFlow.js";
-import CreateR1Flow from "./screens/CreateR1Flow.js";
 import CreateSphincsHybridFlow from "./screens/CreateSphincsHybridFlow.js";
 import SphincsAccountsHub from "./screens/SphincsAccountsHub.js";
 import ManageWalletScreen from "./screens/ManageWalletScreen.js";
@@ -103,7 +102,6 @@ type Screen =
   | { kind: "unstick"; wallet: Wallet; chain: string }
   | { kind: "create-wallet" }
   | { kind: "create-eoa" }
-  | { kind: "create-r1" }
   | { kind: "create-sphincs-hybrid" }
   | {
       kind: "sphincs-accounts";
@@ -407,7 +405,6 @@ export default function App() {
     // entry but is now folded in here.
     const next: Screen =
       k === "eoa" ? { kind: "create-eoa" }
-      : k === "r1" ? { kind: "create-r1" }
       : k === "sphincs-hybrid" ? { kind: "create-sphincs-hybrid" }
       : k === "import-bip39" ? { kind: "import-eoa" }
       : { kind: "add-account" };
@@ -503,10 +500,10 @@ export default function App() {
           onApprove={(tx, chainId, wallet) =>
             push({ kind: "send-raw", tx, chainId, wallet })
           }
-          onCreateWallet={(kind, _label) => {
+          onCreateWallet={(_kind, _label) => {
             // Same contract as the full chat: the trusted creation flow
             // owns labels/passphrases; the chat never pre-fills them.
-            push({ kind: kind === "eoa" ? "create-eoa" : "create-r1" });
+            push({ kind: "create-eoa" });
           }}
           onOpenFullChat={() => push({ kind: "llm-chat" })}
           onOpenChatHistory={() => push({ kind: "chat-history" })}
@@ -592,8 +589,6 @@ export default function App() {
       return <CreateWalletPicker onPick={handleCreatePick} />;
     case "create-eoa":
       return <CreateEoaFlow onDone={finishAction} />;
-    case "create-r1":
-      return <CreateR1Flow onDone={finishAction} />;
     case "create-sphincs-hybrid":
       return <CreateSphincsHybridFlow onDone={finishAction} />;
     case "sphincs-accounts":
@@ -698,7 +693,7 @@ export default function App() {
           onApprove={(tx, chainId, wallet) =>
             push({ kind: "send-raw", tx, chainId, wallet })
           }
-          onCreateWallet={(kind, _label) => {
+          onCreateWallet={(_kind, _label) => {
             // The existing creation flows ask the user to type the
             // label themselves (with validation + uniqueness checks),
             // so we don't pre-fill from the chat — the model's
@@ -706,7 +701,7 @@ export default function App() {
             // `createHandedOff` and the user re-types if they want
             // that exact name. This keeps the trusted creation path
             // owning the canonical label vocabulary.
-            push({ kind: kind === "eoa" ? "create-eoa" : "create-r1" });
+            push({ kind: "create-eoa" });
           }}
           onOpenHistory={() => push({ kind: "chat-history" })}
         />
