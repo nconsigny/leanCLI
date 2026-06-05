@@ -117,11 +117,9 @@ def detectExistingDaemon (path : String) : IO (Option String) := do
 def requiredNativeHelpers : Array String := #[
   LeanCli.Crypto.Hacl.helperKeccak,
   LeanCli.Crypto.Hacl.helperSha256,
-  LeanCli.Crypto.Hacl.helperHmacSha256,
   LeanCli.Crypto.Hacl.helperHmacSha512,
   LeanCli.Crypto.Hacl.helperRipemd160,
   LeanCli.Crypto.Hacl.helperPbkdf2,
-  LeanCli.Crypto.Hacl.helperHmacDrbg,
   LeanCli.Crypto.Hacl.helperChacha20Poly1305,
   LeanCli.Crypto.Secp256k1Native.helperSign,
   LeanCli.Crypto.Secp256k1Native.helperPubkey,

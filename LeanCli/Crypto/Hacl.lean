@@ -23,15 +23,11 @@ opaque keccak256Ethereum : ByteArray → ByteArray
 
 opaque sha256 : ByteArray → ByteArray
 
-opaque hmacSha256 : ByteArray → ByteArray → ByteArray
-
 opaque hmacSha512 : ByteArray → ByteArray → ByteArray
 
 opaque ripemd160 : ByteArray → ByteArray
 
 opaque pbkdf2HmacSha512 : ByteArray → ByteArray → Nat → Nat → ByteArray
-
-opaque hmacDrbgSha256 : ByteArray → ByteArray → ByteArray → ByteArray → Nat → ByteArray
 
 opaque chacha20Poly1305Seal : ByteArray → ByteArray → ByteArray → ByteArray → ByteArray
 
@@ -41,11 +37,9 @@ def ethereumKeccakDelimiter : UInt8 := 0x01
 
 def helperKeccak : String := "leancli-hacl-keccak256"
 def helperSha256 : String := "leancli-hacl-sha256"
-def helperHmacSha256 : String := "leancli-hacl-hmac-sha256"
 def helperHmacSha512 : String := "leancli-hacl-hmac-sha512"
 def helperRipemd160 : String := "leancli-hacl-ripemd160"
 def helperPbkdf2 : String := "leancli-hacl-pbkdf2"
-def helperHmacDrbg : String := "leancli-hacl-hmac-drbg"
 def helperChacha20Poly1305 : String := "leancli-hacl-chacha20poly1305"
 
 /-- Resolve a `leancli-hacl-*` helper binary.
@@ -91,9 +85,6 @@ def keccak256EthereumIO (inputHex : String) : IO (Except String ByteArray) :=
 def sha256IO (inputHex : String) : IO (Except String ByteArray) :=
   runHexHelper helperSha256 #[inputHex]
 
-def hmacSha256IO (keyHex msgHex : String) : IO (Except String ByteArray) :=
-  runHexHelper helperHmacSha256 #[keyHex, msgHex]
-
 def hmacSha512IO (keyHex msgHex : String) : IO (Except String ByteArray) :=
   runHexHelper helperHmacSha512 #[keyHex, msgHex]
 
@@ -103,11 +94,6 @@ def ripemd160IO (inputHex : String) : IO (Except String ByteArray) :=
 def pbkdf2HmacSha512IO (passwordHex saltHex : String) (iters dkLen : Nat) :
     IO (Except String ByteArray) :=
   runHexHelper helperPbkdf2 #[passwordHex, saltHex, toString iters, toString dkLen]
-
-def hmacDrbgSha256IO (entropyHex nonceHex personalizationHex additionalHex : String)
-    (outLen : Nat) : IO (Except String ByteArray) :=
-  runHexHelper helperHmacDrbg
-    #[entropyHex, nonceHex, personalizationHex, additionalHex, toString outLen]
 
 def chacha20Poly1305SealIO (keyHex nonceHex aadHex payloadHex : String) :
     IO (Except String ByteArray) :=

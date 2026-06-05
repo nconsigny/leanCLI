@@ -84,6 +84,7 @@ Lean, auditable, maintainable, clean root. **Not a strip-down** — keep every u
 
 - [x] Branch created; green baseline (263 jobs, no sorry).
 - [x] Recon (7 explorers) + verification of load-bearing claims.
-- [ ] Phase 1 — layout move.
-- [ ] Phase 2 — Streams A–E.
+- [x] Phase 1 — layout move (commit `94b9045a`).
+- [x] Phase 2 Stream A — crypto hygiene (pins, CRYPTO_POLICY.md, native/README.md, pruned 2 dead helpers).
+- [ ] Phase 2 Streams B, C, D, E.
 - [ ] Phase 3 — Stream-F reconciliation + integration gate.
