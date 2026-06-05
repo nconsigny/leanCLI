@@ -18,7 +18,5 @@ Governance docs live at the repo root: [`CLAUDE.md`](../CLAUDE.md), [`INVARIANTS
 
 ## Active refactor
 - [REFACTOR_PLAN.md](REFACTOR_PLAN.md) — audit & maintainability refactor (orchestration source of truth).
+- [CRYPTO_POLICY.md](CRYPTO_POLICY.md) — one-library-per-primitive crypto sourcing policy + pins.
 - `CHANGES-*.md` — per-stream change logs, merged by Stream-F.
-
-## R1 (slated for removal in the refactor's Stream C)
-- [R1_SEPOLIA.md](R1_SEPOLIA.md), [r1-mainnet-port.md](r1-mainnet-port.md) — to be deleted with the R1 account path.
