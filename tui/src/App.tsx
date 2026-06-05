@@ -135,8 +135,8 @@ type Screen =
       chainId: number;
       /** Pre-selected signing wallet. Currently set by LlmChatFlow when the
        *  user's prompt carried a `from <name>` hint that the regex
-       *  resolved to one of their EOAs/TPMs — skips the picker. */
-      wallet?: { kind: "eoa" | "tpm"; name: string; address: string };
+       *  resolved to one of their EOAs — skips the picker. */
+      wallet?: { kind: "eoa"; name: string; address: string };
     };
 
 /** Turn the raw RPC result from a sign+broadcast into a single in-chat
@@ -436,7 +436,7 @@ export default function App() {
    *  (BIP-44 + cousins for EOA, admin/rotation for sphincs, plus the
    *  ERC-20 token list which itself can launch SEND with a token
    *  preselected). `chain` is the WalletsHub toggle (mainnet/sepolia for
-   *  EOAs, "sepolia" for TPM). */
+   *  EOAs). */
   const handleHubPick = (a: WalletsAction, w: Wallet, chain: string) => {
     // SPHINCS- hybrid smart accounts all dispatch through the same hub
     // (the only place dual-sign UserOps live), but we deep-link the

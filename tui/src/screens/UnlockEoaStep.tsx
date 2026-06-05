@@ -29,17 +29,16 @@ type EoaListRow = {
 };
 
 /** Minimal slot shape consumed by `UnlockEoaStep`. EOA-only by contract —
- *  callers must pre-filter TPM/R1 wallets to the PIN paths in their
- *  respective flows. Kept structural (not `Wallet`) so flows that have
- *  only an `EoaListEntry` / `EoaSlot` can pass through without a cast. */
+ *  callers must pre-filter non-EOA wallets. Kept structural (not `Wallet`)
+ *  so flows that have only an `EoaListEntry` / `EoaSlot` can pass through
+ *  without a cast. */
 export type UnlockEoaTarget = {
   name: string;
   address: string;
 };
 
 type Props = {
-  /** EOA wallet to unlock. Caller asserts kind === "eoa"; TPM/R1 wallets
-   *  go through the PIN path in their respective flows. */
+  /** EOA wallet to unlock. Caller asserts kind === "eoa". */
   wallet: UnlockEoaTarget;
   /** Proceed callback once the slot is held in memory. */
   onUnlocked: () => void;
@@ -73,8 +72,7 @@ type Phase =
  *   4. Slot has a custom passphrase (or auto-unlock failed)
  *      → prompt for the per-slot passphrase (the historic behaviour).
  *
- *  TPM/R1 wallets are NOT routed through here — their PIN paths live in
- *  the existing flows. */
+ *  Non-EOA wallets are NOT routed through here. */
 export default function UnlockEoaStep({
   wallet,
   onUnlocked,

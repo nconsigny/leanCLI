@@ -685,8 +685,8 @@ export default function SphincsAccountsHub({
   if (state.kind === "send-confirm") {
     // SendRawFlow drives tx.decodeIntent → tx.simulate → ConfirmGate →
     // sphincs.account.send. The sphincs branch in SendRawFlow skips
-    // the EOA passphrase / TPM PIN steps (the daemon-side
-    // sphincs.account.send handles dual-sign auth via the master KEK),
+    // the EOA passphrase step (the daemon-side sphincs.account.send
+    // handles dual-sign auth via the master KEK),
     // so this hands off cleanly without any extra prompts. On success,
     // we lose the inclusion-poll affordance the old send-run had — for
     // now the user gets the new owner / inclusion status via the

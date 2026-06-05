@@ -51,7 +51,7 @@ type Props = {
      *  draft's `from` field. Set when the user wrote
      *  "approve … from leanWallet" (or any phrasing the RuleParser
      *  recognises). SendRawFlow's picker is skipped when present. */
-    wallet?: { kind: "eoa" | "tpm"; name: string; address: string },
+    wallet?: { kind: "eoa"; name: string; address: string },
   ) => void;
   /** Routes an `address.fresh` directive to the existing wallet-creation
    *  flow. Parent navigates to CreateEoaFlow (kind="eoa") with the label
@@ -200,7 +200,7 @@ type ConfiguredChain = {
 /** Compact wallet+balance card shown in the chat header so the user
  *  has running context (top 5 wallets) without leaving the screen. */
 export type WalletBalance = {
-  kind: "eoa" | "tpm";
+  kind: "eoa";
   name: string;
   address: string;
   wei?: bigint;     // undefined while pending
@@ -434,14 +434,9 @@ export default function LlmChatFlow({
       // Expand each EOA into its BIP-32 sub-accounts so a slot with
       // "leanWallet/ops" + "leanWallet/0" both show up — the user
       // expects to see (and address) any address they've created.
-      // TPM wallets have no sub-accounts; they pass through as-is.
       const expanded: WalletBalance[] = [];
       for (const x of a.result.accounts ?? []) {
         if (!x || !x.address) continue;
-        if (x.type === "tpm") {
-          expanded.push({ kind: "tpm", name: x.name, address: x.address });
-          continue;
-        }
         if (x.type !== "eoa") continue;
         const sub = await call<{
           accounts: { index: number; path: string; address: string; label?: string }[];
@@ -468,9 +463,7 @@ export default function LlmChatFlow({
         if (cancelled) return;
         const w = top5[i];
         if (!w) continue;
-        // TPM wallets only support Sepolia today; everyone else uses
-        // the chat's chain selection. The daemon does the same gate.
-        const chain = w.kind === "tpm" ? "sepolia" : chainName;
+        const chain = chainName;
         const r = await call<{ balance: string }>("chain.balance", {
           address: w.address,
           chain,
@@ -923,7 +916,7 @@ function WalletRow({ w }: { w: WalletBalance }) {
   else amount = <Text>{formatEth(w.wei)}</Text>;
   return (
     <Text>
-      <Text color={theme.dim}>{`  ${(w.kind === "tpm" ? "[tpm] " : "[eoa] ").padEnd(7)}`}</Text>
+      <Text color={theme.dim}>{`  ${"[eoa] ".padEnd(7)}`}</Text>
       <Text>{w.name.padEnd(22)}</Text>
       <Text color={theme.dim}>{w.address}{"  "}</Text>
       {amount}
@@ -1541,7 +1534,7 @@ function actionableLabel(turn: Extract<Turn, { kind: "assistant" }>): string {
   if (!r) return "(no directive)";
   if (r.audit) return "audit";
   if (r.prepare) return r.prepare.rpc === "shielded.prepareDeposit" ? "shield prepare" : "unshield prepare";
-  if (r.create) return r.create.params.kind === "eoa" ? "create EOA" : "create R1";
+  if (r.create) return "create EOA";
   return "directive";
 }
 
@@ -1621,14 +1614,12 @@ function DispatchBlock({ dispatch }: { dispatch?: DispatchState }) {
     return (
       <Box paddingLeft={5} marginTop={1} flexDirection="column">
         <Text color={theme.ok} bold>
-          ↳ handed off to wallet-creation flow ({dispatch.walletKind === "eoa" ? "EOA / BIP-39" : "R1 / TPM hardware key"}
+          ↳ handed off to wallet-creation flow (EOA / BIP-39
           {dispatch.label ? `, label: ${dispatch.label}` : ""})
         </Text>
-        {dispatch.walletKind === "eoa" && (
-          <Text color={theme.warn}>
-            ! the creation screen surfaces a 12-word BIP-39 mnemonic — write it down before leaving
-          </Text>
-        )}
+        <Text color={theme.warn}>
+          ! the creation screen surfaces a 12-word BIP-39 mnemonic — write it down before leaving
+        </Text>
       </Box>
     );
   }

@@ -6,16 +6,14 @@
  */
 
 /** Top-level account taxonomy: EOA (single-key, BIP-39 mnemonic) vs.
- *  smart accounts. The smart-account family currently has two
- *  variants — `tpm` (R1 / P-256 EIP-7951) and `sphincs` (hybrid
- *  ECDSA + post-quantum SPHINCS- ERC-4337). Future smart-account
- *  kinds (JARDIN, etc.) extend this union without touching the
- *  EOA branch. */
-export type SlotKind = "eoa" | "tpm" | "sphincs";
+ *  smart accounts. The smart-account family currently has one
+ *  variant — `sphincs` (hybrid ECDSA + post-quantum SPHINCS-
+ *  ERC-4337). Future smart-account kinds (JARDIN, etc.) extend this
+ *  union without touching the EOA branch. */
+export type SlotKind = "eoa" | "sphincs";
 
 /** Two-category grouping used for display only. The taxonomy maps:
  *    eoa     → "eoa"
- *    tpm     → "smart"
  *    sphincs → "smart"
  *  Centralizing the mapping here keeps WalletsHub's section headers
  *  in sync if a new smart-account kind is added later. */
@@ -27,11 +25,6 @@ export type EoaListEntry = {
   address: string;
   unlocked?: boolean;
   derivationPath?: string;
-};
-
-export type TpmListEntry = {
-  name: string;
-  address: string;
 };
 
 export type ChainBalance = {
@@ -75,10 +68,10 @@ export type Wallet = {
   /** wei as bigint, undefined while loading. */
   balanceWei?: bigint;
   /** Chain the balance was fetched on — used by the wallet list to render
-   *  e.g. `0.05 ETH (sepolia)` so EOAs (mainnet) and TPMs (sepolia) don't
-   *  look like they share one number. */
+   *  e.g. `0.05 ETH (sepolia)` so wallets on different chains don't look
+   *  like they share one number. */
   balanceChain?: string;
-  /** present for EOAs; absent for TPM. */
+  /** present for EOAs. */
   unlocked?: boolean;
   /** Slot-local account index. Undefined or 0 = primary account; >0 =
    *  sub-account derived via `eoa.account.add` (BIP-32 hardened branch).

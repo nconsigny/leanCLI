@@ -66,7 +66,7 @@ export default function RevealMnemonicFlow({ wallet, onDone }: Props) {
   if (wallet.kind !== "eoa") {
     return (
       <Layout title="Not applicable" hint="enter • back · esc • back">
-        <Banner kind="err" text="TPM/R1 wallets have no BIP-39 mnemonic." />
+        <Banner kind="err" text="Only EOA wallets have a BIP-39 mnemonic." />
         <BackOnEsc onDone={() => onDone(false)} />
       </Layout>
     );

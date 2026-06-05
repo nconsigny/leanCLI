@@ -191,11 +191,9 @@ type SwapCtx = {
 };
 
 type Props = {
-  /** Active wallet (EOA or TPM/R1). The signing wallet is fixed up front:
-   *  the TUI surface that opens the swap screen already knows which slot
-   *  the user picked, and TPM/R1 wallets can't share the EOA picker
-   *  (different signing path). For R1 wallets the chain selector is
-   *  pinned to sepolia because `r1.send*` mainnet does not exist. */
+  /** Active wallet (EOA). The signing wallet is fixed up front: the TUI
+   *  surface that opens the swap screen already knows which slot the user
+   *  picked. */
   wallet: Wallet;
   onDone: (success: boolean) => void;
 };
@@ -231,10 +229,6 @@ function formatBaseUnits(amount: bigint, decimals: number): string {
  *  approval + swap separately. */
 export default function SwapFlow({ wallet, onDone }: Props) {
   const fromAddress = wallet.address;
-  // R1 wallets only have a sepolia signing path today (`r1.sendRawSepolia`);
-  // hide mainnet from the chain cycle so `n` cannot land us on a chain
-  // where signing would fail at the very last step.
-  const isR1 = wallet.kind === "tpm";
   const sendRawWallet: SendRawWallet = {
     kind: wallet.kind,
     name: wallet.name,
@@ -286,13 +280,7 @@ export default function SwapFlow({ wallet, onDone }: Props) {
           .map((c) => c.name),
       );
       const currentDaemonChainId = ping.result?.chainId;
-      // R1 (TPM) wallets only have a sepolia signing path today, so we
-      // restrict the chain list at source rather than letting the user
-      // pick a chain we can't broadcast on.
-      const allowed = isR1
-        ? SWAP_CHAINS.filter((c) => c.name === "sepolia")
-        : SWAP_CHAINS;
-      const chains: ChainEntry[] = allowed.map((c) => ({
+      const chains: ChainEntry[] = SWAP_CHAINS.map((c) => ({
         name: c.name,
         chainId: c.chainId,
         hasRpc: configured.has(c.name),
@@ -301,9 +289,8 @@ export default function SwapFlow({ wallet, onDone }: Props) {
       if (ready.length === 0) {
         return setPhase({
           kind: "load-error",
-          message: isR1
-            ? "R1 wallets can only swap on sepolia — register an RPC with `leancli network set-rpc-chain sepolia <url>`"
-            : "no swappable chain has an RPC configured — register one with `leancli network set-rpc-chain mainnet <url>` or `… sepolia <url>`",
+          message:
+            "no swappable chain has an RPC configured — register one with `leancli network set-rpc-chain mainnet <url>` or `… sepolia <url>`",
         });
       }
       // Prefer the daemon's "current" chain *only* if its RPC is configured.
@@ -470,7 +457,7 @@ export default function SwapFlow({ wallet, onDone }: Props) {
     return (
       <Layout
         title="Swap — pick the token to sell"
-        subtitle={`${chainHeader(phase.chain, phase.chains, isR1)} · sender ${fromAddress}`}
+        subtitle={`${chainHeader(phase.chain, phase.chains)} · sender ${fromAddress}`}
         hint="↑/↓ move · enter pick · n cycle chain · r refresh balances · esc cancel"
       >
         <BackOnEsc onDone={() => onDone(false)} />
@@ -485,7 +472,6 @@ export default function SwapFlow({ wallet, onDone }: Props) {
             setRefreshingBalances(false);
             setPhase({ kind: "load-tokens", chain: c, chains: phase.chains });
           }}
-          enabled={!isR1}
         />
         <RefreshBalancesOnR
           chainName={phase.chain.name}
@@ -501,13 +487,6 @@ export default function SwapFlow({ wallet, onDone }: Props) {
             setRefreshingBalances(false);
           }}
         />
-        {isR1 && (
-          <Box marginBottom={1}>
-            <Text color={theme.warn}>
-              R1 wallets: ERC20 sells need 2 PIN entries (approve + swap); ETH sells need 1.
-            </Text>
-          </Box>
-        )}
         <Box marginBottom={1}>
           <Text color={balancesError !== null ? theme.err : theme.dim}>
             {balanceStatus}
@@ -556,7 +535,6 @@ export default function SwapFlow({ wallet, onDone }: Props) {
 
   if (phase.kind === "pick-to") {
     const choices = phase.tokens.filter((t) => t.symbol !== phase.from.symbol);
-    const r1NeedsTwoPrompts = isR1 && phase.from.symbol !== "ETH";
     const goBackToPickFrom = () =>
       setPhase({
         kind: "pick-from",
@@ -567,17 +545,10 @@ export default function SwapFlow({ wallet, onDone }: Props) {
     return (
       <Layout
         title={`Swap ${phase.from.symbol} → ?`}
-        subtitle={`${chainHeader(phase.chain, phase.chains, isR1)} · pick the token to receive`}
+        subtitle={`${chainHeader(phase.chain, phase.chains)} · pick the token to receive`}
         hint="↑/↓ move · enter pick · ← back · esc back"
       >
         <BackOnEsc onDone={goBackToPickFrom} />
-        {r1NeedsTwoPrompts && (
-          <Box marginBottom={1}>
-            <Text color={theme.warn}>
-              R1 ERC20 sell: 2 PIN entries will be requested (approve + swap).
-            </Text>
-          </Box>
-        )}
         {/* Wizard-frame ← only — sub-component owns ↑/↓/enter. → would
             require a token, so it's a no-op here (handled by SelectInput
             consuming enter once a token is highlighted). */}
@@ -620,7 +591,7 @@ export default function SwapFlow({ wallet, onDone }: Props) {
     return (
       <Layout
         title={`Swap ${phase.from.symbol} → ${phase.to.symbol}`}
-        subtitle={`${chainHeader(phase.chain, phase.chains, isR1)} · amount in ${phase.from.symbol} (decimals ${phase.from.decimals})`}
+        subtitle={`${chainHeader(phase.chain, phase.chains)} · amount in ${phase.from.symbol} (decimals ${phase.from.decimals})`}
         hint="enter — next · esc — back"
       >
         <BackOnEsc
@@ -759,7 +730,7 @@ export default function SwapFlow({ wallet, onDone }: Props) {
     return (
       <Layout
         title={`Swap ${phase.ctx.from.symbol} → ${phase.ctx.to.symbol}`}
-        subtitle={`${chainHeader(phase.ctx.chain, phase.ctx.chains, isR1)} · pick max slippage tolerance`}
+        subtitle={`${chainHeader(phase.ctx.chain, phase.ctx.chains)} · pick max slippage tolerance`}
         hint="↑/↓ move · enter pick · ← back · esc back"
       >
         <BackOnEsc onDone={goBack} />
@@ -831,7 +802,7 @@ export default function SwapFlow({ wallet, onDone }: Props) {
     return (
       <Layout
         title={`Quote: ${phase.ctx.from.symbol} → ${phase.ctx.to.symbol}`}
-        subtitle={`${chainHeader(phase.ctx.chain, phase.ctx.chains, isR1)} · Uniswap V3 fee tier: ${(phase.fee / 10000).toFixed(2)}%`}
+        subtitle={`${chainHeader(phase.ctx.chain, phase.ctx.chains)} · Uniswap V3 fee tier: ${(phase.fee / 10000).toFixed(2)}%`}
         hint="enter — build & confirm · → next · ← back · esc — cancel"
       >
         <BackOnEsc onDone={() => onDone(false)} />
@@ -931,9 +902,7 @@ export default function SwapFlow({ wallet, onDone }: Props) {
         wallet={sendRawWallet}
         tx={{
           ...phase.approval,
-          rationale: `Approve Uniswap V3 router to spend ${phase.ctx.from.symbol}${
-            isR1 ? " (R1: PIN entry #1 of 2)" : " (required before swap)"
-          }`,
+          rationale: `Approve Uniswap V3 router to spend ${phase.ctx.from.symbol} (required before swap)`,
         }}
         onDone={(success) => {
           if (!success) return onDone(false);
@@ -1134,17 +1103,11 @@ function bigintToHex(v: unknown): string {
 
 /** Render the chain header line shown in subtitles. Always communicates
  *  *which* chain we're on, plus a hint when toggling is available or
- *  blocked because no other chain has an RPC configured. For R1 wallets
- *  the list is sepolia-only — surface that explicitly so the user knows
- *  why `n` is a no-op. */
+ *  blocked because no other chain has an RPC configured. */
 function chainHeader(
   chain: ChainEntry,
   chains: ChainEntry[],
-  isR1: boolean = false,
 ): string {
-  if (isR1) {
-    return `chain ${chain.name} (sepolia only for R1 wallets)`;
-  }
   const ready = chains.filter((c) => c.hasRpc);
   if (ready.length <= 1) {
     const others = chains
@@ -1160,7 +1123,7 @@ function chainHeader(
 
 /** Wizard-frame chain toggle. Listens for `n` (lowercase) and cycles to
  *  the next chain that has an RPC configured. No-op when only one chain
- *  has RPC, or when `enabled === false` (R1 wallets pin to sepolia).
+ *  has RPC, or when `enabled === false`.
  *  Does NOT consume up/down/enter/esc — those still belong to whatever
  *  sub-component is in focus. */
 function ChainToggleOnN({

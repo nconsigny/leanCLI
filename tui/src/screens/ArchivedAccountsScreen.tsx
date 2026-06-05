@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { Box, Text, useInput } from "ink";
 import Spinner from "ink-spinner";
 import { call } from "../daemon.js";
-import { EoaListEntry, TpmListEntry } from "../types.js";
+import { EoaListEntry } from "../types.js";
 import { Layout, Banner } from "../widgets/Layout.js";
 import Select from "../widgets/Select.js";
 import { theme } from "../theme.js";
@@ -16,7 +16,7 @@ type EoaAccount = {
 };
 
 type Row = {
-  kind: "eoa" | "tpm";
+  kind: "eoa";
   name: string;
   accountIndex: number;
   address: string;
@@ -46,7 +46,6 @@ export default function ArchivedAccountsScreen({ onDone }: Props) {
       return;
     }
     const eoaRes = await call<EoaListEntry[]>("eoa.list");
-    const tpmRes = await call<TpmListEntry[]>("tpm.listSepoliaAddresses");
     const rows: Row[] = [];
     if (eoaRes.ok && Array.isArray(eoaRes.result)) {
       for (const e of eoaRes.result) {
@@ -81,21 +80,6 @@ export default function ArchivedAccountsScreen({ onDone }: Props) {
               archiveKey: k,
             });
           }
-        }
-      }
-    }
-    if (tpmRes.ok && Array.isArray(tpmRes.result)) {
-      for (const t of tpmRes.result) {
-        if (!t?.name || !t?.address) continue;
-        const k = archiveKey("tpm", t.name, 0);
-        if (archivedSet.has(k)) {
-          rows.push({
-            kind: "tpm",
-            name: t.name,
-            accountIndex: 0,
-            address: t.address,
-            archiveKey: k,
-          });
         }
       }
     }
@@ -140,7 +124,7 @@ export default function ArchivedAccountsScreen({ onDone }: Props) {
   }
 
   const items = phase.rows.map((r) => {
-    const tag = r.accountIndex > 0 ? "  ↳ " : (r.kind === "eoa" ? "[eoa]" : "[tpm]");
+    const tag = r.accountIndex > 0 ? "  ↳ " : "[eoa]";
     const display =
       r.accountIndex > 0
         ? r.accountLabel?.length

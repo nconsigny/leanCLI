@@ -90,8 +90,8 @@ type PrivacyCell =
 
 type Props = {
   wallet: Wallet;
-  /** The chain selected in WalletsHub (mainnet/sepolia for EOAs; sepolia
-   *  for TPM). Drives swap.balances + chain.balance. */
+  /** The chain selected in WalletsHub (mainnet/sepolia for EOAs).
+   *  Drives swap.balances + chain.balance. */
   chain: string;
   /** Jump to SendFlow with this ERC-20 pre-selected. */
   onSendToken: (token: { symbol: string; address: string; decimals: number }) => void;
@@ -106,7 +106,6 @@ type Props = {
  *  ActionPicker with a kind-aware view:
  *    EOA → BIP-44 derivation path of the primary + cousin sub-accounts
  *          (from `eoa.account.list`), each rendered as a row.
- *    TPM → minimal info card (single-key, no derivation tree).
  *  Below the kind block, every wallet sees a Tokens section: a parallel
  *  `swap.balances` fan-out filters the swap registry down to entries
  *  the wallet actually holds. Tokens with `balance > 0` become rows;
@@ -375,7 +374,6 @@ export default function ManageWalletScreen({
       <Box flexDirection="row">
         <Box flexDirection="column" flexGrow={1} flexBasis={0} minWidth={0}>
           {wallet.kind === "eoa" && <EoaBlock wallet={wallet} subs={subs} />}
-          {wallet.kind === "tpm" && <TpmBlock wallet={wallet} />}
           <Box marginTop={1} flexDirection="column">
             <Text color={theme.primary} bold>
               Native balance + privacy
@@ -650,28 +648,6 @@ function PrivacyRow({ privacy }: { privacy: PrivacyCell }) {
       </Text>
       <Text color={theme.dim}> · {privacy.reason}</Text>
     </Text>
-  );
-}
-
-function TpmBlock({ wallet }: { wallet: Wallet }) {
-  return (
-    <Box flexDirection="column">
-      <Text color={theme.primary} bold>
-        TPM / R1 (P-256 hardware key)
-      </Text>
-      <Text>
-        <Text color={theme.dim}>name </Text>
-        <Text>{wallet.name}</Text>
-      </Text>
-      <Text>
-        <Text color={theme.dim}>addr </Text>
-        <Text>{wallet.address}</Text>
-      </Text>
-      <Text color={theme.dim}>
-        TPM keys are single-purpose: no BIP-44 derivation, no cousins. Rotation
-        requires re-enrolling a fresh TPM-bound key.
-      </Text>
-    </Box>
   );
 }
 

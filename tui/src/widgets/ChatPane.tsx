@@ -52,7 +52,7 @@ type Props = {
   onApprove?: (
     tx: { to: string; value: string; data: string; rationale?: string; canonical?: string },
     chainId: number,
-    wallet?: { kind: "eoa" | "tpm"; name: string; address: string },
+    wallet?: { kind: "eoa"; name: string; address: string },
   ) => void;
   onCreateWallet?: (kind: "eoa", label: string | undefined) => void;
   onOpenFull?: () => void;

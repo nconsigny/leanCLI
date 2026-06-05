@@ -33,7 +33,7 @@ type Phase =
  *  protocol has its own on-disk encrypted store (PpSecretStore /
  *  RgSecretStore) — no shared key material between them.
  *
- *  TPM wallets are gated out at the action menu, but we double-check here. */
+ *  Non-EOA wallets are gated out at the action menu, but we double-check here. */
 export default function ShieldFlow({ wallet, onDone }: Props) {
   const [phase, setPhase] = useState<Phase>({ kind: "pickProtocol" });
 
@@ -41,12 +41,12 @@ export default function ShieldFlow({ wallet, onDone }: Props) {
     return (
       <Layout
         title="Shield deposit"
-        subtitle={`${wallet.name} is a TPM/R1 wallet`}
+        subtitle={`${wallet.name} is not an EOA wallet`}
         hint="enter • back · esc • back"
       >
         <Banner
           kind="err"
-          text="shield deposits require a secp256k1 EOA signer; not yet supported for TPM."
+          text="shield deposits require a secp256k1 EOA signer."
         />
       </Layout>
     );

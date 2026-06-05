@@ -3,14 +3,14 @@ import { Box, Text, useInput } from "ink";
 import TextInput from "ink-text-input";
 import { call } from "../daemon.js";
 import { theme } from "../theme.js";
-import { EoaListEntry, TpmListEntry } from "../types.js";
+import { EoaListEntry } from "../types.js";
 
 type OwnAccount = {
-  kind: "eoa" | "tpm" | "sphincs";
+  kind: "eoa" | "sphincs";
   name: string;
   /** lowercased address — comparisons elsewhere are case-insensitive. */
   address: string;
-  /** BIP-32 account index for EOA sub-accounts (0 = primary). TPM and
+  /** BIP-32 account index for EOA sub-accounts (0 = primary).
    *  SPHINCS- hybrid wallets have no sub-accounts so this stays
    *  `undefined`. */
   accountIndex?: number;
@@ -49,7 +49,6 @@ export default function RecipientInput({
     let cancelled = false;
     (async () => {
       const eoa = await call<EoaListEntry[]>("eoa.list");
-      const tpm = await call<TpmListEntry[]>("tpm.listSepoliaAddresses");
       if (cancelled) return;
       const out: OwnAccount[] = [];
       // Expand each EOA slot into one OwnAccount per BIP-32 sub-account
@@ -81,12 +80,6 @@ export default function RecipientInput({
             // nothing (older record format) — surface the primary.
             out.push({ kind: "eoa", name: e.name, address: e.address.toLowerCase() });
           }
-        }
-      }
-      if (tpm.ok && Array.isArray(tpm.result)) {
-        for (const t of tpm.result) {
-          if (!t?.name || !t?.address) continue;
-          out.push({ kind: "tpm", name: t.name, address: t.address.toLowerCase() });
         }
       }
       // SPHINCS- hybrid smart accounts. The unified `account.list` RPC
@@ -160,9 +153,7 @@ export default function RecipientInput({
         {isOwn && matched && (
           <Text color={theme.ok}>
             {"  ← "}
-            {matched.kind === "eoa" ? "[eoa] "
-              : matched.kind === "sphincs" ? "[sphincs] "
-              : "[tpm] "}
+            {matched.kind === "eoa" ? "[eoa] " : "[sphincs] "}
             {matched.name}
             {matched.kind === "eoa" && matched.accountIndex !== undefined
               ? `/${matched.accountIndex}`

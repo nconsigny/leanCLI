@@ -15,12 +15,12 @@ import UnlockEoaStep from "./UnlockEoaStep.js";
 type Props = {
   wallet: Wallet;
   /** The chain the user picked in WalletsHub (mainnet/sepolia for
-   *  EOAs, sepolia for TPM). Forwarded to eoa.send / r1.send* so the
-   *  daemon's per-chain endpoint override kicks in. Without this the
-   *  daemon falls back to cfg.rpcEndpoint (the configured default),
-   *  which silently misroutes sepolia testing through the mainnet
-   *  endpoint and shows "insufficient funds" because the wallet has
-   *  zero balance on whatever the default is. */
+   *  EOAs). Forwarded to eoa.send so the daemon's per-chain endpoint
+   *  override kicks in. Without this the daemon falls back to
+   *  cfg.rpcEndpoint (the configured default), which silently
+   *  misroutes sepolia testing through the mainnet endpoint and shows
+   *  "insufficient funds" because the wallet has zero balance on
+   *  whatever the default is. */
   chain?: string;
   /** When set, SendFlow runs as an ERC-20 transfer for this token
    *  instead of a native ETH send. The amount field uses the token's
@@ -40,7 +40,7 @@ type EncodedTx = { to: string; value: string; data: string };
 
 type Phase =
   | { kind: "form" }
-  | { kind: "resolving"; raw: string; amount: string; pin?: string }
+  | { kind: "resolving"; raw: string; amount: string }
   | {
       kind: "unlocking";
       to: string;
@@ -50,26 +50,23 @@ type Phase =
       kind: "simulating";
       to: string;
       amount: string;
-      pin?: string;
     }
   | {
       kind: "confirm";
       to: string;
       amount: string;
-      pin?: string;
       decoded: any;
       sim: any;
       colibri: any;
       /** When set, the run phase broadcasts `encoded` instead of building
        *  a native-ETH `{to, value}` from `amount`. This is how ERC-20
-       *  transfers reach `eoa.send` / `r1.sendRawSepolia`. */
+       *  transfers reach `eoa.send`. */
       encoded?: EncodedTx;
     }
   | {
       kind: "run";
       to: string;
       amount: string;
-      pin?: string;
       encoded?: EncodedTx;
     }
   | { kind: "resolveError"; raw: string; message: string }
@@ -87,12 +84,12 @@ function toBaseUnits(amount: string, decimals: number): bigint {
   return BigInt(whole || "0") * 10n ** BigInt(decimals) + BigInt(fracPadded || "0");
 }
 
-/** Send ETH or an ERC-20 from any wallet. EOA → eoa.send (passphrase
- *  prompt). TPM/R1 → r1.sendEthSepolia for native ETH, r1.sendRawSepolia
- *  for ERC-20 (PIN entered in form; verified by the TPM at sign time).
- *  When `token` is set, calldata is built daemon-side via
- *  `tx.encodeIntent action=erc20Transfer` so amount/decimals are
- *  validated by Lean before any signing path runs. */
+/** Send ETH or an ERC-20 from an EOA wallet → eoa.send (passphrase
+ *  prompt, handled by UnlockEoaStep). When `token` is set, calldata is
+ *  built daemon-side via `tx.encodeIntent action=erc20Transfer` so
+ *  amount/decimals are validated by Lean before any signing path runs.
+ *  Smart-account kinds (sphincs) never reach here — they are routed to
+ *  their dedicated hub in App.handleHubPick. */
 export default function SendFlow({ wallet, chain, token, colibriEnabled, onDone }: Props) {
   // Default off; can be overridden via app-level toggle (MainMenu) or the
   // LEANCLI_COLIBRI env seed at startup.
@@ -124,21 +121,9 @@ export default function SendFlow({ wallet, chain, token, colibriEnabled, onDone 
             ? null
             : `expected a decimal ${assetLabel} amount`,
       },
-      // EOA: passphrase no longer captured in this form — the
+      // Passphrase is no longer captured in this form — the
       // UnlockEoaStep below picks the right path (already-unlocked,
-      // master auto-unlock, per-slot passphrase). TPM/R1: PIN still
-      // gathered here because the daemon needs it at sign time.
-      ...(wallet.kind === "eoa"
-        ? []
-        : [
-            {
-              name: "pin",
-              label: `TPM PIN for ${wallet.name}`,
-              secret: true,
-              validate: (v: string) =>
-                v.length < 4 ? "at least 4 characters" : null,
-            } as Field,
-          ]),
+      // master auto-unlock, per-slot passphrase).
     ];
     return (
       <Layout
@@ -152,19 +137,11 @@ export default function SendFlow({ wallet, chain, token, colibriEnabled, onDone 
           onCancel={() => onDone(false)}
           onSubmit={(v) => {
             const raw = (v.to ?? "").trim();
-            const next = (to: string) =>
-              wallet.kind === "eoa"
-                ? ({
-                    kind: "unlocking",
-                    to,
-                    amount: v.amount ?? "",
-                  } as Phase)
-                : ({
-                    kind: "simulating",
-                    to,
-                    amount: v.amount ?? "",
-                    pin: v.pin,
-                  } as Phase);
+            const next = (to: string): Phase => ({
+              kind: "unlocking",
+              to,
+              amount: v.amount ?? "",
+            });
             // If the user typed a 0x address, skip ENS resolution. Otherwise
             // resolve before dispatch — the daemon's send paths expect a
             // canonical 20-byte address and reject ENS literals.
@@ -175,7 +152,6 @@ export default function SendFlow({ wallet, chain, token, colibriEnabled, onDone 
                 kind: "resolving",
                 raw,
                 amount: v.amount ?? "",
-                pin: v.pin,
               });
             }
           }}
@@ -189,20 +165,11 @@ export default function SendFlow({ wallet, chain, token, colibriEnabled, onDone 
       <ResolveStep
         raw={phase.raw}
         onResolved={(addr) =>
-          setPhase(
-            wallet.kind === "eoa"
-              ? {
-                  kind: "unlocking",
-                  to: addr,
-                  amount: phase.amount,
-                }
-              : {
-                  kind: "simulating",
-                  to: addr,
-                  amount: phase.amount,
-                  pin: phase.pin,
-                },
-          )
+          setPhase({
+            kind: "unlocking",
+            to: addr,
+            amount: phase.amount,
+          })
         }
         onError={(msg) =>
           setPhase({ kind: "resolveError", raw: phase.raw, message: msg })
@@ -241,10 +208,9 @@ export default function SendFlow({ wallet, chain, token, colibriEnabled, onDone 
     );
   }
 
-  // EOA-only: unlock the slot before simulating. R1/TPM skip this step —
-  // the TPM PIN is captured in the form and checked at sign time.
-  // UnlockEoaStep handles the four cases (already unlocked, master
-  // auto-unlock, per-slot passphrase, master-locked-and-enrolled).
+  // Unlock the slot before simulating. UnlockEoaStep handles the four
+  // cases (already unlocked, master auto-unlock, per-slot passphrase,
+  // master-locked-and-enrolled).
   if (phase.kind === "unlocking") {
     return (
       <UnlockEoaStep
@@ -261,8 +227,8 @@ export default function SendFlow({ wallet, chain, token, colibriEnabled, onDone 
     );
   }
 
-  // Pre-sign clear-signing gate. Runs for BOTH EOA and R1/TPM — every
-  // signed tx flows through this gate (ERC-7730 phase 2). For native ETH
+  // Pre-sign clear-signing gate — every signed tx flows through this gate
+  // (ERC-7730 phase 2). For native ETH
   // transfers calldata is "0x" so the descriptor returns no match (correct);
   // for ERC-20 transfers the descriptor will match (ERC-20 transfer is in
   // the registry); the simulator runs against the encoded calldata so the
@@ -281,7 +247,6 @@ export default function SendFlow({ wallet, chain, token, colibriEnabled, onDone 
             kind: "confirm",
             to: phase.to,
             amount: phase.amount,
-            pin: phase.pin,
             decoded,
             sim,
             colibri,
@@ -298,14 +263,8 @@ export default function SendFlow({ wallet, chain, token, colibriEnabled, onDone 
   if (phase.kind === "confirm") {
     return (
       <ConfirmGate
-        title={`Confirm: send ${phase.amount} ${assetLabel} from ${wallet.name}${
-          wallet.kind === "eoa" ? "" : " (TPM/R1)"
-        }`}
-        subtitle={
-          wallet.kind === "eoa"
-            ? `to ${phase.to}`
-            : `to ${phase.to} · PIN will be checked by the TPM`
-        }
+        title={`Confirm: send ${phase.amount} ${assetLabel} from ${wallet.name}`}
+        subtitle={`to ${phase.to}`}
         decoded={phase.decoded}
         sim={phase.sim}
         colibri={phase.colibri}
@@ -314,7 +273,6 @@ export default function SendFlow({ wallet, chain, token, colibriEnabled, onDone 
             kind: "run",
             to: phase.to,
             amount: phase.amount,
-            pin: phase.pin,
             encoded: phase.encoded,
           })
         }
@@ -323,82 +281,43 @@ export default function SendFlow({ wallet, chain, token, colibriEnabled, onDone 
     );
   }
 
-  // phase.kind === "run" — actually broadcast. The slot is already unlocked
-  // (EOA) or the PIN is captured in `phase.pin` (R1/TPM) for the daemon
-  // to forward to the TPM auth check.
-  if (wallet.kind === "eoa") {
-    // Pass the sub-account index when the picker handed us a derived
-    // wallet — the daemon's `resolveAccount` then signs from that branch
-    // instead of the slot's primary. Primaries (index 0 or undefined)
-    // intentionally omit the field for backward compatibility.
-    const subAcct = (wallet.accountIndex ?? 0) > 0 ? wallet.accountIndex : undefined;
-    const titleSuffix =
-      subAcct !== undefined
-        ? ` · account #${subAcct}${wallet.accountLabel ? ` (${wallet.accountLabel})` : ""}`
-        : "";
-    // ERC-20 path: broadcast the encoded `transfer(to,amount)` calldata
-    // through eoa.send with `to = token.address`, `value = 0`. The encoder
-    // ran daemon-side via tx.encodeIntent so amount/decimals are already
-    // validated by Lean. Native ETH path: value = wei, data = 0x (handled
-    // by eoa.send's default).
-    const params: Record<string, unknown> = phase.encoded
-      ? {
-          name: wallet.name,
-          to: phase.encoded.to,
-          value: 0,
-          data: phase.encoded.data,
-        }
-      : {
-          name: wallet.name,
-          to: phase.to,
-          value: toBaseUnits(phase.amount, 18),
-        };
-    if (chain) params.chain = chain;
-    if (subAcct !== undefined) params.account = subAcct;
-    return (
-      <RpcRunner
-        title={`Sending ${phase.amount} ${assetLabel} from ${wallet.name}${titleSuffix}`}
-        subtitle={`${chain ? `${chain} · ` : ""}to ${phase.to}`}
-        method="eoa.send"
-        params={params}
-        renderResult={(r) => <SendResult result={r} assetLabel={assetLabel} />}
-        onDone={onDone}
-      />
-    );
-  }
-  // TPM/R1: native ETH → r1.sendEthSepolia (the ergonomic wrapper that
-  // accepts a decimal ETH amount string). ERC-20 → r1.sendRawSepolia
-  // with the encoded calldata, since the dedicated ETH wrapper has no
-  // data slot.
-  if (phase.encoded) {
-    return (
-      <RpcRunner
-        title={`Sending ${phase.amount} ${assetLabel} from ${wallet.name} (TPM/R1)`}
-        subtitle={`${chain ? `${chain} · ` : ""}to ${phase.to} · TPM PIN will be checked at sign time`}
-        method="r1.sendRawSepolia"
-        params={{
-          name: wallet.name,
-          to: phase.encoded.to,
-          value: "0x0",
-          data: phase.encoded.data,
-          pin: phase.pin ?? "",
-        }}
-        renderResult={(r) => <SendResult result={r} assetLabel={assetLabel} />}
-        onDone={onDone}
-      />
-    );
-  }
-  return (
-    <RpcRunner
-      title={`Sending ${phase.amount} ETH from ${wallet.name} (TPM/R1)`}
-      subtitle={`${chain ? `${chain} · ` : ""}to ${phase.to} · TPM PIN will be checked at sign time`}
-      method="r1.sendEthSepolia"
-      params={{
+  // phase.kind === "run" — actually broadcast. The slot is already
+  // unlocked (EOA).
+  //
+  // Pass the sub-account index when the picker handed us a derived
+  // wallet — the daemon's `resolveAccount` then signs from that branch
+  // instead of the slot's primary. Primaries (index 0 or undefined)
+  // intentionally omit the field for backward compatibility.
+  const subAcct = (wallet.accountIndex ?? 0) > 0 ? wallet.accountIndex : undefined;
+  const titleSuffix =
+    subAcct !== undefined
+      ? ` · account #${subAcct}${wallet.accountLabel ? ` (${wallet.accountLabel})` : ""}`
+      : "";
+  // ERC-20 path: broadcast the encoded `transfer(to,amount)` calldata
+  // through eoa.send with `to = token.address`, `value = 0`. The encoder
+  // ran daemon-side via tx.encodeIntent so amount/decimals are already
+  // validated by Lean. Native ETH path: value = wei, data = 0x (handled
+  // by eoa.send's default).
+  const params: Record<string, unknown> = phase.encoded
+    ? {
+        name: wallet.name,
+        to: phase.encoded.to,
+        value: 0,
+        data: phase.encoded.data,
+      }
+    : {
         name: wallet.name,
         to: phase.to,
-        amountEth: phase.amount,
-        pin: phase.pin ?? "",
-      }}
+        value: toBaseUnits(phase.amount, 18),
+      };
+  if (chain) params.chain = chain;
+  if (subAcct !== undefined) params.account = subAcct;
+  return (
+    <RpcRunner
+      title={`Sending ${phase.amount} ${assetLabel} from ${wallet.name}${titleSuffix}`}
+      subtitle={`${chain ? `${chain} · ` : ""}to ${phase.to}`}
+      method="eoa.send"
+      params={params}
       renderResult={(r) => <SendResult result={r} assetLabel={assetLabel} />}
       onDone={onDone}
     />

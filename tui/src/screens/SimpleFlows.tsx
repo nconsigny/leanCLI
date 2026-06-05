@@ -27,7 +27,7 @@ export function LockToggleFlow({
   if (wallet.kind !== "eoa") {
     return (
       <Layout title="Not applicable" hint="enter • back · esc • back">
-        <Text color={theme.warn}>TPM/R1 wallets aren't lock/unlock-gated.</Text>
+        <Text color={theme.warn}>Only EOA wallets are lock/unlock-gated.</Text>
       </Layout>
     );
   }
@@ -120,8 +120,8 @@ export function DetailsScreen({
   return (
     <RpcRunner
       title={`Details: ${wallet.name}`}
-      method={wallet.kind === "eoa" ? "eoa.show" : "tpm.listSepolia"}
-      params={wallet.kind === "eoa" ? { name: wallet.name } : []}
+      method="eoa.show"
+      params={{ name: wallet.name }}
       onDone={onDone}
     />
   );
@@ -222,8 +222,7 @@ function HistoryRow({ entry }: { entry: any }) {
 
 /** chain.balance — re-renders the daemon's view of the wallet's balance.
  *  Daemon returns hex wei; we convert to a human-readable ETH amount so
- *  the user doesn't have to read `0x16345785d8a0000`. TPM slots query
- *  sepolia explicitly because they have no mainnet signing path. */
+ *  the user doesn't have to read `0x16345785d8a0000`. */
 export function BalanceRefreshScreen({
   wallet,
   onDone,
@@ -232,7 +231,6 @@ export function BalanceRefreshScreen({
   onDone: (s: boolean) => void;
 }) {
   const params: { address: string; chain?: string } = { address: wallet.address };
-  if (wallet.kind === "tpm") params.chain = "sepolia";
   return (
     <RpcRunner
       title={`Balance: ${wallet.name}`}
@@ -240,7 +238,7 @@ export function BalanceRefreshScreen({
       params={params}
       renderResult={(r: any) => {
         const wei = hexToBigInt(r?.balance);
-        const chainLabel: string = r?.chain ?? (wallet.kind === "tpm" ? "sepolia" : "mainnet");
+        const chainLabel: string = r?.chain ?? "mainnet";
         const block: string = r?.block ?? "latest";
         return (
           <Box flexDirection="column">

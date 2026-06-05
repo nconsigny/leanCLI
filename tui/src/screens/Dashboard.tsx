@@ -61,7 +61,7 @@ type Props = {
   onApprove: (
     tx: { to: string; value: string; data: string; rationale?: string; canonical?: string },
     chainId: number,
-    wallet?: { kind: "eoa" | "tpm"; name: string; address: string },
+    wallet?: { kind: "eoa"; name: string; address: string },
   ) => void;
   onCreateWallet: (kind: "eoa", label: string | undefined) => void;
   onOpenFullChat: () => void;
@@ -125,7 +125,7 @@ export default function Dashboard({
   // opens with the same context).
   useEffect(() => {
     const derived: WalletBalance[] = wallet.rows
-      .filter((r): r is WalletRow & { kind: "eoa" | "tpm" } => r.kind === "eoa" || r.kind === "tpm")
+      .filter((r): r is WalletRow & { kind: "eoa" } => r.kind === "eoa")
       .slice(0, 5)
       .map((r) => ({ kind: r.kind, name: r.name, address: r.address, wei: r.wei }));
     setChatWallets(derived);

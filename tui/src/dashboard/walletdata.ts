@@ -7,7 +7,7 @@ import { usePoll } from "./poll.js";
  * Wallet-box data. Cadence is deliberately tiered by cost:
  *
  *  - enumeration (`account.list` + `eoa.list`)  — on mount / manual `r`.
- *    account.list is the single unified enumerator (eoa/tpm/sphincs);
+ *    account.list is the single unified enumerator (eoa/sphincs);
  *    eoa.list adds lock state. NOTE the daemon emits `locked` (
  *    Helpers.lean slotMetadataJson) — NOT the `unlocked` field the old
  *    TUI type guessed at — so we read `locked` and invert.
@@ -29,7 +29,7 @@ import { usePoll } from "./poll.js";
 export type TokenBalance = { symbol: string; decimals: number; balance: bigint };
 
 export type WalletRow = {
-  kind: "eoa" | "tpm" | "sphincs";
+  kind: "eoa" | "sphincs";
   name: string;
   address: string;
   /** chain used for this row's balance reads. */
@@ -153,9 +153,9 @@ export function useWalletData(activeChain: string | null): WalletData {
         }
       }
       const all = (acct.result.accounts ?? []).filter(
-        (a): a is AccountEntry & { type: "eoa" | "tpm" | "sphincs" } => {
+        (a): a is AccountEntry & { type: "eoa" | "sphincs" } => {
           if (!a) return false;
-          if (a.type === "eoa" || a.type === "tpm") return !!a.address;
+          if (a.type === "eoa") return !!a.address;
           // SPHINCS slots can exist before their CREATE2 counterfactual
           // address is computed (account.list emits address=""). Keep
           // them so the user sees the slot + a "finish setup" hint
@@ -170,8 +170,8 @@ export function useWalletData(activeChain: string | null): WalletData {
         // an empty address and would otherwise collide.
         const prevByKey = new Map(prev.map((p) => [`${p.kind}:${p.name}`, p]));
         return all.slice(0, ROW_CAP).map((a) => {
-          // TPM (R1) and SPHINCS accounts are sepolia-only today; EOAs
-          // follow the daemon's active chain.
+          // SPHINCS accounts are sepolia-only today; EOAs follow the
+          // daemon's active chain.
           const chain = a.type === "eoa" ? activeChain : "sepolia";
           const old = prevByKey.get(`${a.type}:${a.name}`);
           return {

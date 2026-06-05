@@ -6,7 +6,7 @@ import {
   AddressFreshness,
   ChainBalance,
   EoaListEntry,
-  TpmListEntry,
+  SlotKind,
   Wallet,
 } from "../types.js";
 import { formatEth, hexToBigInt } from "../format.js";
@@ -21,8 +21,7 @@ export type WalletsAction = "send" | "swap" | "shield" | "unshield" | "manage";
 type Props = {
   refreshKey?: number;
   /** `chain` carries the user's WalletsHub-level chain selection — the
-   *  `eoaChain` toggle (mainnet/sepolia) for EOAs, "sepolia" for TPM
-   *  wallets (their only supported chain today). Downstream flows
+   *  `eoaChain` toggle (mainnet/sepolia) for EOAs. Downstream flows
    *  (SendFlow / SwapFlow) pass this through to eoa.send so the call
    *  hits the per-chain endpoint matching what the user just saw on
    *  the balance row. */
@@ -99,12 +98,12 @@ const TABS: { label: string; value: WalletsAction; help: string }[] = [
   {
     label: "SWAP",
     value: "swap",
-    help: "Uniswap V3 swap — EOA on mainnet/sepolia, R1/TPM on sepolia.",
+    help: "Uniswap V3 swap — EOA on mainnet/sepolia.",
   },
   {
     label: "SHIELD",
     value: "shield",
-    help: "Privacy Pools or Railgun deposit. EOA only — TPM/R1 keys can't sign the deposit transcript yet.",
+    help: "Privacy Pools or Railgun deposit. EOA only.",
   },
   {
     label: "UNSHIELD",
@@ -140,8 +139,7 @@ export default function WalletsHub({
   // daemon's network.show (cfg.chainId) on mount so the hub matches the
   // user's actual daemon config — not a hardcoded "mainnet" that
   // silently misroutes balance reads + sends on a testnet daemon. `n`
-  // toggles to the other chain and back. TPM rows stay pinned to
-  // sepolia (their only supported network today).
+  // toggles to the other chain and back.
   const [eoaChain, setEoaChain] = useState<"mainnet" | "sepolia">("mainnet");
   // Local refresh counter — `r` bumps this to force the discovery
   // useEffect to re-run without needing the parent to bump `refreshKey`.
@@ -169,12 +167,11 @@ export default function WalletsHub({
     setError(null);
     setArchived(readArchive());
     (async () => {
-      // Phase 1: enumerate every wallet kind in parallel. Three independent
+      // Phase 1: enumerate every wallet kind in parallel. Two independent
       // daemon round-trips collapse to one wall-clock RTT, so primaries
       // render almost immediately instead of after a chain of awaits.
-      const [eoaRes, tpmRes, acctRes] = await Promise.all([
+      const [eoaRes, acctRes] = await Promise.all([
         call<EoaListEntry[]>("eoa.list"),
-        call<TpmListEntry[]>("tpm.listSepoliaAddresses"),
         // SPHINCS+ hybrid smart accounts via the unified `account.list` RPC.
         // The daemon emits one entry per slot with `type: "sphincs"`. The
         // smart-account address may be empty when the counterfactual hasn't
@@ -193,7 +190,7 @@ export default function WalletsHub({
       // the rest of the list back.
       const fanout = (w: Wallet) => {
         const params: { address: string; chain?: string } = { address: w.address };
-        params.chain = w.kind === "tpm" ? "sepolia" : eoaChain;
+        params.chain = eoaChain;
         const key = balanceKey(w.kind, w.name, w.accountIndex);
         void call<ChainBalance>("chain.balance", params).then((r) => {
           if (cancelled) return;
@@ -246,8 +243,8 @@ export default function WalletsHub({
         });
       };
 
-      // Build the primaries-only list: one row per EOA slot, every TPM
-      // address, every SPHINCS slot. Cousins get spliced in beneath their
+      // Build the primaries-only list: one row per EOA slot, every
+      // SPHINCS slot. Cousins get spliced in beneath their
       // primary in Phase 2 as each `eoa.account.list` resolves.
       const eoaSlots =
         eoaRes.ok && Array.isArray(eoaRes.result)
@@ -264,12 +261,6 @@ export default function WalletsHub({
           accountIndex: 0,
         });
       }
-      if (tpmRes.ok && Array.isArray(tpmRes.result)) {
-        for (const t of tpmRes.result) {
-          if (!t?.name || !t?.address) continue;
-          primaries.push({ kind: "tpm", name: t.name, address: t.address });
-        }
-      }
       if (acctRes.ok && Array.isArray(acctRes.result?.accounts)) {
         for (const a of acctRes.result.accounts) {
           if (a?.type !== "sphincs" || !a.name) continue;
@@ -284,15 +275,13 @@ export default function WalletsHub({
       if (primaries.length === 0) {
         const failed = !eoaRes.ok
           ? eoaRes
-          : !tpmRes.ok
-            ? tpmRes
-            : !acctRes.ok
-              ? acctRes
-              : null;
+          : !acctRes.ok
+            ? acctRes
+            : null;
         setError(
           failed && !failed.ok
             ? failed.error.message
-            : "no wallets configured — run `leancli wallet create eoa <name>` or `wallet create r1 <name>`",
+            : "no wallets configured — run `leancli wallet create eoa <name>`",
         );
       }
 
@@ -468,8 +457,7 @@ export default function WalletsHub({
     const isSub = (w.accountIndex ?? 0) > 0;
     const tag = isSub ? "  ↳ "
       : w.kind === "eoa" ? "[eoa]"
-      : w.kind === "sphincs" ? "[sphincs]"
-      : "[tpm]";
+      : "[sphincs]";
     const displayName = isSub
       ? (w.accountLabel?.length
           ? `${w.name}/${w.accountLabel}`
@@ -493,14 +481,10 @@ export default function WalletsHub({
     };
   });
 
-  // Roll the per-row chain labels up into a single header line. We track
-  // the EOA chain (whatever the daemon's primary is) and the TPM chain
-  // (always sepolia today) separately and only show both badges when
-  // they diverge — a single "chain: X" line suffices when they match.
+  // Roll the per-row chain labels up into a single header line.
   // EOA falls back to the current `eoaChain` toggle so the header updates
   // the moment `n` is pressed, not only once balances repopulate.
   const eoaChainName = pickChainFor(wallets, balances, "eoa") ?? eoaChain;
-  const tpmChainName = pickChainFor(wallets, balances, "tpm");
 
   return (
     <Layout
@@ -536,7 +520,7 @@ export default function WalletsHub({
               {tab.label}
             </Text>
             <Text color={theme.dim}> with — </Text>
-            <ChainBadge eoa={eoaChainName} tpm={tpmChainName} />
+            <ChainBadge eoa={eoaChainName} />
           </Box>
           <Select
             items={items}
@@ -546,10 +530,9 @@ export default function WalletsHub({
             }}
             onSelect={(it) => {
               const cast = it as typeof items[number];
-              // TPM wallets are sepolia-only today; EOAs follow the
-              // hub's chain toggle (defaults to mainnet, `n` to flip).
-              const chain = cast.__wallet.kind === "tpm" ? "sepolia" : eoaChain;
-              onPick(tab.value, cast.__wallet, chain);
+              // EOAs follow the hub's chain toggle (defaults to mainnet,
+              // `n` to flip).
+              onPick(tab.value, cast.__wallet, eoaChain);
             }}
           />
         </Box>
@@ -569,7 +552,7 @@ function Banner({ message }: { message: string }) {
 function pickChainFor(
   wallets: Wallet[],
   balances: Record<string, BalanceCell>,
-  kind: "eoa" | "tpm",
+  kind: SlotKind,
 ): string | undefined {
   for (const w of wallets) {
     if (w.kind !== kind) continue;
@@ -579,32 +562,14 @@ function pickChainFor(
   return undefined;
 }
 
-function ChainBadge({ eoa, tpm }: { eoa?: string; tpm?: string }) {
-  // No chains resolved yet → silent. Single chain (or only one kind
-  // present) → "chain: X". Mismatch → both badges so the user always
-  // knows which kind dispatches to which network.
-  if (!eoa && !tpm) return null;
-  const same = eoa && tpm && eoa === tpm;
-  if (same || (eoa && !tpm) || (!eoa && tpm)) {
-    const label = (eoa ?? tpm)!;
-    return (
-      <>
-        <Text color={theme.dim}>chain </Text>
-        <Text color={theme.highlight} bold>
-          {label}
-        </Text>
-      </>
-    );
-  }
+function ChainBadge({ eoa }: { eoa?: string }) {
+  // No chain resolved yet → silent. Otherwise "chain: X".
+  if (!eoa) return null;
   return (
     <>
-      <Text color={theme.dim}>EOA </Text>
+      <Text color={theme.dim}>chain </Text>
       <Text color={theme.highlight} bold>
         {eoa}
-      </Text>
-      <Text color={theme.dim}>  ·  TPM </Text>
-      <Text color={theme.highlight} bold>
-        {tpm}
       </Text>
     </>
   );
@@ -615,14 +580,13 @@ function filterWalletsForTab(action: WalletsAction, wallets: Wallet[]): Wallet[]
     case "send":
     case "swap":
     case "manage":
-      // SwapFlow handles per-wallet eligibility itself (R1 → sepolia
-      // only, EOA → mainnet/sepolia), so we don't pre-filter here.
+      // SwapFlow handles per-wallet eligibility itself (EOA →
+      // mainnet/sepolia), so we don't pre-filter here.
       return wallets;
     case "shield":
     case "unshield":
       // Both protocols (PP + Railgun) sign the broadcast via an EOA —
       // PP through the relayer flow, Railgun via the 4337+7702 delegator.
-      // TPM/R1 wallets can't sign these today.
       return wallets.filter((w) => w.kind === "eoa");
   }
 }

@@ -3,19 +3,17 @@ import { Box, Text, useInput } from "ink";
 import Spinner from "ink-spinner";
 import Select from "../widgets/Select.js";
 import { Layout, Banner } from "../widgets/Layout.js";
-import Form, { Field } from "../widgets/Form.js";
 import RpcRunner from "../widgets/RpcRunner.js";
 import { call } from "../daemon.js";
 import { theme } from "../theme.js";
-import { formatEth, hexToBigInt, shortAddr } from "../format.js";
+import { hexToBigInt, shortAddr } from "../format.js";
 import { SlotKind } from "../types.js";
 import { TransfersBlock } from "../widgets/TransfersBlock.js";
 import { ProvenancePanel } from "../widgets/ProvenancePanel.js";
 import UnlockEoaStep from "./UnlockEoaStep.js";
 
 /** A pre-selected signing wallet. Threaded in by callers (e.g. SwapFlow)
- *  who already know which wallet is active — skips the EOA picker and
- *  routes TPM/R1 wallets to the TPM-PIN path. */
+ *  who already know which wallet is active — skips the EOA picker. */
 export type SendRawWallet = {
   kind: SlotKind;
   name: string;
@@ -33,41 +31,35 @@ type Props = {
   /** Optional chain id; defaults to whatever the daemon is configured for. */
   chainId?: number;
   /** Optional pre-selected wallet. When omitted, the historic behaviour
-   *  (EOA picker + passphrase) is used. When provided as `tpm`, the
-   *  flow skips the picker, prompts for the TPM PIN once, and routes
-   *  through `r1.sendRawSepolia` with the PIN in the request params. */
+   *  (EOA picker + passphrase) is used. */
   wallet?: SendRawWallet;
   /** Called when the flow ends. `success=true` only fires after the user
    *  dismisses the post-broadcast result screen; in that case `result`
-   *  carries the raw RPC payload (`eoa.send` / `r1.sendRawSepolia` /
-   *  `sphincs.account.send`) so callers can extract `txHash` / `status`
-   *  for chat-side confirmation rendering. */
+   *  carries the raw RPC payload (`eoa.send` / `sphincs.account.send`)
+   *  so callers can extract `txHash` / `status` for chat-side
+   *  confirmation rendering. */
   onDone: (success: boolean, result?: unknown) => void;
 };
 
 /** What signing path the daemon dispatches to in the final phase.
  *  - eoa     → `eoa.send` (passphrase unlock via UnlockEoaStep)
- *  - tpm     → `r1.sendRawSepolia` (TPM PIN captured in `pin` phase)
  *  - sphincs → `sphincs.account.send` (UserOp; daemon handles dual-sign,
- *              no PIN, no per-slot passphrase prompt here) */
-type SignerKind = "eoa" | "tpm" | "sphincs";
+ *              no per-slot passphrase prompt here) */
+type SignerKind = "eoa" | "sphincs";
 
 type Phase =
   | { kind: "loading-wallets" }
   | { kind: "pick-wallet"; eoas: EoaSlot[] }
   | { kind: "unlock"; wallet: EoaSlot }
-  | { kind: "pin"; wallet: EoaSlot }
   | { kind: "unlock-error"; message: string }
   | {
       kind: "simulate";
       wallet: EoaSlot;
-      pin: string;
       signerKind: SignerKind;
     }
   | {
       kind: "confirm";
       wallet: EoaSlot;
-      pin: string;
       decoded: any;
       sim: any;
       preflight: any;
@@ -76,7 +68,6 @@ type Phase =
   | {
       kind: "send";
       wallet: EoaSlot;
-      pin: string;
       signerKind: SignerKind;
     };
 
@@ -89,25 +80,21 @@ type EoaSlot = { name: string; address: string };
  *  caller is shown alongside the simulation result. */
 export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
   // If the caller already knows the wallet, skip the picker entirely:
-  //   - TPM/R1 → prompt for the TPM PIN, then simulate
   //   - EOA    → prompt for the passphrase to unlock the slot
-  //   - SPHINCS → skip both unlock & PIN. Daemon-side `sphincs.account.send`
+  //   - SPHINCS → skip the unlock. Daemon-side `sphincs.account.send`
   //     handles dual-sign auth via the master keystore and the per-slot
   //     passphrase (optional). We go straight to the sim step so the user
   //     still sees ConfirmGate before any UserOp is submitted.
   const initialPhase: Phase =
-    wallet?.kind === "tpm"
-      ? { kind: "pin", wallet: { name: wallet.name, address: wallet.address } }
-      : wallet?.kind === "eoa"
-        ? { kind: "unlock", wallet: { name: wallet.name, address: wallet.address } }
-        : wallet?.kind === "sphincs"
-          ? {
-              kind: "simulate",
-              wallet: { name: wallet.name, address: wallet.address },
-              pin: "",
-              signerKind: "sphincs",
-            }
-          : { kind: "loading-wallets" };
+    wallet?.kind === "eoa"
+      ? { kind: "unlock", wallet: { name: wallet.name, address: wallet.address } }
+      : wallet?.kind === "sphincs"
+        ? {
+            kind: "simulate",
+            wallet: { name: wallet.name, address: wallet.address },
+            signerKind: "sphincs",
+          }
+        : { kind: "loading-wallets" };
   const [phase, setPhase] = useState<Phase>(initialPhase);
 
   // Step 1: list EOA wallets the user can sign with. Only runs when
@@ -192,42 +179,11 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
           setPhase({
             kind: "simulate",
             wallet: phase.wallet,
-            pin: "",
             signerKind: "eoa",
           })
         }
         onCancel={() => onDone(false)}
       />
-    );
-  }
-
-  if (phase.kind === "pin") {
-    const fields: Field[] = [
-      {
-        name: "pin",
-        label: `TPM PIN for ${phase.wallet.name}`,
-        secret: true,
-        validate: (v) => (v.length < 4 ? "at least 4 characters" : null),
-      },
-    ];
-    return (
-      <Layout
-        title={`Authorize ${phase.wallet.name} (TPM/R1)`}
-        subtitle={`address: ${phase.wallet.address}`}
-      >
-        <Form
-          fields={fields}
-          onCancel={() => onDone(false)}
-          onSubmit={(v) =>
-            setPhase({
-              kind: "simulate",
-              wallet: phase.wallet,
-              pin: v.pin ?? "",
-              signerKind: "tpm",
-            })
-          }
-        />
-      </Layout>
     );
   }
 
@@ -242,7 +198,6 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
           setPhase({
             kind: "confirm",
             wallet: phase.wallet,
-            pin: phase.pin,
             decoded,
             sim,
             preflight,
@@ -268,7 +223,6 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
           setPhase({
             kind: "send",
             wallet: phase.wallet,
-            pin: phase.pin,
             signerKind: phase.signerKind,
           })
         }
@@ -279,8 +233,6 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
 
   // Phase 6: actually sign + broadcast. Branches on signerKind:
   //   eoa     → `eoa.send` (already accepts `data`)
-  //   tpm     → `r1.sendRawSepolia` with the captured PIN forwarded to the
-  //              TPM auth check
   //   sphincs → `sphincs.account.send` (UserOp via the configured bundler;
   //              daemon performs the dual ECDSA + SPHINCS+ sign internally)
   // The chain badge in the subtitle keeps the destination network
@@ -288,24 +240,6 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
   // which chain a failure refers to.
   const chainBadge = chainTag(chainId);
   const chainName = chainIdToName(chainId);
-  if (phase.signerKind === "tpm") {
-    return (
-      <RpcRunner
-        title={`Sending tx as ${phase.wallet.name} (TPM/R1)`}
-        subtitle={`${chainBadge} · to ${tx.to} · TPM PIN will be checked at sign time`}
-        method="r1.sendRawSepolia"
-        params={{
-          name: phase.wallet.name,
-          to: tx.to,
-          value: hexToBigInt(tx.value),
-          data: tx.data,
-          pin: phase.pin,
-        }}
-        renderResult={(r) => <RawResult result={r} />}
-        onDone={onDone}
-      />
-    );
-  }
   if (phase.signerKind === "sphincs") {
     // `sphincs.account.send` accepts `value` as decimal-wei string or
     // `valueEth` as decimal-ETH; we pass the wei value (parsed from the
@@ -386,8 +320,8 @@ function SimulateOnly({
     let cancelled = false;
     (async () => {
       // EOA slots are pre-unlocked by `UnlockEoaStep` before we reach
-      // this phase; TPM/R1 slots carry the PIN in send params and the
-      // TPM authorises at sign time. Either way, no unlock call here.
+      // this phase; sphincs slots authorise dual-sign daemon-side at
+      // send time. Either way, no unlock call here.
 
       // Decode + simulate + preflight context in parallel. preflight is
       // a separate daemon round-trip rather than baked into simulate so
@@ -472,14 +406,12 @@ function ConfirmGate({
   const okSim = sim?.ok === true;
   // Signer-specific labelling threaded through the title + subtitle so the
   // user always knows which key path will sign — and what extra auth
-  // happens at sign time (TPM PIN, sphincs dual-sign via bundler).
+  // happens at sign time (sphincs dual-sign via bundler).
   const titleSuffix =
-    signerKind === "tpm" ? " (TPM/R1)"
-    : signerKind === "sphincs" ? " (SPHINCS-)"
+    signerKind === "sphincs" ? " (SPHINCS-)"
     : "";
   const subtitleSuffix =
-    signerKind === "tpm" ? " · TPM PIN will be checked at sign time"
-    : signerKind === "sphincs" ? " · dual-sign UserOp via configured bundler"
+    signerKind === "sphincs" ? " · dual-sign UserOp via configured bundler"
     : "";
   return (
     <Layout
