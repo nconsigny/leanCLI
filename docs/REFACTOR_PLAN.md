@@ -96,6 +96,15 @@ Lean, auditable, maintainable, clean root. **Not a strip-down** — keep every u
       rewrite, no `Colibri.Persistent` rename. Scope: delete llm-legacy, add pinned `plugins.lock.json`,
       thin provider/privacy flags + `listEnabled`, complete inv 5.7 (policy gate on `Bridge.call`).
 - [x] Phase 2 Stream B — Kohaku plugin host (commit a9f02b47; inv 5.7 ✅ proved; build 256).
-- [ ] Phase 2 Stream E — swap/DeFi (in progress; recon: Aave/Swap already consolidated, Cat 11 proved).
-- [ ] Phase 3 Stream F — reconcile INVARIANTS.md (apply C/D/B deltas + flip 5.7 ✅) + governance docs + final gate.
+- [x] Phase 2 Stream E — swap/DeFi (commit 3ec29371; verified already-consolidated, Cat 11 intact).
+- [x] Phase 3 Stream F — INVARIANTS.md reconciled (removed Cat 9/10/3.3/8.4/13.8/R1-half-0.5, 0.4/4.3
+      R1 props trimmed; 5.7 flipped ✅); CLAUDE/README/SECURITY/.env.example/ARCHITECTURE/DAEMON updated;
+      final gate: build 256 green, zero sorryAx, tui bundles, grep-clean, root clean. Every ✅ verified.
+
+## Deferred (require a running daemon + network + built native helpers — not feasible offline)
+- Sepolia end-to-end through decode→simulate→confirm (EOA send, SPHINCS send, Uniswap-V3 swap, Railgun
+  shield/unshield, agent-drafted tx); runtime flag behavior (`LEANCLI_PROVIDER`/`LEANCLI_PRIVACY` dispatch);
+  `leancli network show` / `leancli doctor`. Verify these on a real host with `setup-helpers` run.
+- `docs/DAEMON.md` RPC-catalog still narrates `r1.*`/`tpm.signSepolia` + a `bridge/llm` description
+  (Stream F fixed path-refs only) — needs a dedicated RPC-catalog pass.
 - [ ] Phase 3 — Stream-F reconciliation + integration gate.

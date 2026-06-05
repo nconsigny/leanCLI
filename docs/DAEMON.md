@@ -129,7 +129,7 @@ TPM/R1 compatibility:
 - `r1.sendSepolia`
 - `r1.sendEthSepolia`
 
-Chain RPC (all policy-gated through `Privacy.NetworkPolicy`):
+Chain RPC (all policy-gated through `LeanCli.Network.Policy`):
 
 - `chain.balance`
 - `chain.nonce`
@@ -160,7 +160,7 @@ EOA:
 
 Sidecar bridges (all policy-gated; one-shot spawn per call):
 
-- `shielded.*` — Privacy Pools / Railgun (`bridge/`).
+- `shielded.*` — Privacy Pools / Railgun (`sidecars/kohaku/`).
 - `clearsign.ping`
 - `tx.decodeIntent` — params `{chainId, to, value, data, from?}` → ERC-7730 descriptor walker. Daemon prefetches ERC-20 metadata for the `to` address and threads it into the bridge call as `tokenMetadata` so amount fields render with real decimals + ticker. Falls back to a bundled 4byte dictionary when no descriptor matches.
 - `eip712.decodeIntent` — params `{chainId, domain, types, primaryType, message}` → walks `display.formats[encodeType]` for the matching descriptor (e.g. CowSwap order). Daemon prefetches token metadata for any address-shaped fields in `message`.
@@ -171,8 +171,8 @@ Sidecar bridges (all policy-gated; one-shot spawn per call):
 ## Regression Checks
 
 ```bash
-./script/check_m6_keystore_daemon.sh
-./script/check_daemon_config.sh
-./script/check_m10_autospawn.sh
-./script/check_m8_chain_rpc.sh
+./ops/scripts/check_m6_keystore_daemon.sh
+./ops/scripts/check_daemon_config.sh
+./ops/scripts/check_m10_autospawn.sh
+./ops/scripts/check_m8_chain_rpc.sh
 ```

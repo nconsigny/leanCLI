@@ -22,8 +22,8 @@ Domain              Wallet/   Ethereum/   Keystore/   Contract/   Privacy/   Net
                         │
 Primitives          Crypto/   Encoding/
                         │
-FFI boundary        c/hacl_helpers   c/secp256k1_helpers   c/lean_uds   c/lean_http
-                    c/lean_sqlite    c/rustcrypto_helpers
+FFI boundary        native/hacl_helpers   native/secp256k1_helpers   native/lean_uds
+                    native/lean_http   native/lean_sqlite   native/rustcrypto_helpers
 ```
 
 `LeanCli.lean` is import-only and re-exports every module; downstream code
@@ -42,7 +42,7 @@ the abstract models defined alongside it (not about runtime IO).
 - `LeanCli/App/AgentMain.lean` — `leancli-agent` executable root.
   Lean-native replacement for the former Node LLM sidecar (now removed).
   One-shot JSON-RPC over `--rpc '<json>'`; speaks to a local
-  loopback LLM via `c/lean_http/` and to the daemon over UDS.
+  loopback LLM via `native/lean_http/` and to the daemon over UDS.
 - `LeanCli/App/AgentDaemonMain.lean` — `leancli-agentd` executable
   root. Phase-1a long-running sibling of `leancli-agent`. Listens on
   `$XDG_RUNTIME_DIR/leancli/agent.sock`; persists session history
@@ -89,17 +89,20 @@ the abstract models defined alongside it (not about runtime IO).
   (`CreateStatus`, `SignStatus`, report types).
 
 ### `Contract/`
-- `R1Account.lean` — Lean spec of the R1 smart-account contract: `PublicKey`,
-  `Signature`, `UserOperation`, `State`, `toPrecompileInput`. Verifier hook is
-  abstract over EIP-7951.
+- `SphincsAccount.lean` — Lean spec of the hybrid ECDSA + stateless SPHINCS+
+  ERC-4337 account: `Key`, `UserOperation`, `State`, `VerifyOracle`, rotation
+  payloads. Verifier hooks are abstract over ECDSA recovery and SPHINCS+.
 
 ### `Privacy/`
-- `NetworkPolicy.lean` — deny-by-default `Peer × Purpose × Transport → Bool`.
+- `Bridge.lean` — the only spawn path for the Kohaku privacy-plugin host
+  (`sidecars/kohaku/`). `callGated` enforces the network-policy gate before
+  any shielded request reaches the sidecar (invariant 5.7).
+
+### `Network/`
+- `Policy.lean` — deny-by-default `Peer × Purpose × Transport → Bool`.
   `strictCliPolicy` (CLI may only talk to the local daemon),
   `strictDaemonPolicy` (loopback to local node),
   `torDaemonPolicy` (Tor to a configured node).
-
-### `Network/`
 - `Provider.lean` — transport-only `Backend` and `RpcMethod` enums.
 - `Endpoint.lean` — endpoint descriptor.
 
@@ -136,7 +139,7 @@ the abstract models defined alongside it (not about runtime IO).
 ### `Agent/` — Lean-native LLM agent (Phase 0)
 - `State.lean` — `Role`, `ToolCall`, `AgentMessage`, `AgentConfig`,
   `AgentState`. No IO. No crypto imports.
-- `Http.lean` — loopback-only HTTP wrapper over `c/lean_http`. The
+- `Http.lean` — loopback-only HTTP wrapper over `native/lean_http`. The
   string-prefix loopback check is redundant with the C floor.
 - `DaemonClient.lean` — one-shot UDS JSON-RPC client used by every
   chain-reading tool. Contains the only `partial def` in the agent
@@ -224,28 +227,32 @@ joins this gated set; the CI grep gate is extended accordingly.
 
 ### `Invariants/` — all proofs closed, no `sorry`
 - `Core.lean` — top-level safety: no key exfiltration, verified-only signing,
-  chain match, approval requirement, signer/path separation, R1 ↔ TPM policy.
+  chain match, approval requirement, signer/path separation, EIP-7702 delegation
+  guardrails (`no_silent_7702_delegation`).
 - `Amount.lean` — invariant **1.1** (`subChecked_preserves_total`).
 - `Wallet.lean` — invariant **1.2** (`apply_some_affordable`,
   `apply_sender_debited`, `apply_non_sender_balance`).
 - `TxWellFormed.lean` — invariants **2.1**, **2.3** by definition.
 - `Account.lean`, `Keystore.lean`, `Network.lean`, `Nonce.lean`,
-  `Mainnet.lean`, `R1Account.lean` — domain-specific safety theorems.
+  `Mainnet.lean`, `Bridge.lean`, `Swap.lean`, `SphincsAccount.lean`,
+  `AddressOwnership.lean` — domain-specific safety theorems.
 
-## Native side (`c/`, Rust)
+## Native side (`native/`, Rust)
 
 | Path | Wraps | Purpose |
 |------|-------|---------|
-| `c/hacl_helpers/` | HACL\* | keccak256 (Ethereum, delim 0x01), sha256, hmac-sha256/512, pbkdf2, hmac-drbg, chacha20-poly1305 |
-| `c/hacl_helpers/ripemd160_*` | HACL\* | RIPEMD-160 for BIP-32 HASH160 |
-| `c/secp256k1_helpers/` | libsecp256k1 | sign / pubkey / recover / verify (hex in/out CLI helpers) |
-| `c/lean_uds/lean_uds.c` | POSIX | `bind/accept/connect/read/write/close/shutdown`, peer-uid/current-uid |
-| `c/lean_http/lean_http.c` | libcurl | loopback-only HTTP POST for `leancli-agent`. Refuses non-`http://127.0.0.1`/`http://[::1]`/`http://localhost` URLs at the C layer. 8 MiB response cap. No TLS, no redirects. |
-| `c/lean_sqlite/lean_sqlite.c` | libsqlite3 | Phase-1a SQLite shim consumed by `LeanCli/Agent/Session.lean`. Links against the system libsqlite3 (Arch + Debian 12+ ship FTS5 enabled). Column-text bytes are copied out before further DB calls. |
-| `c/rustcrypto_helpers/` | RustCrypto | optional Rust ripemd160 binary |
+| `native/hacl_helpers/` | HACL\* | keccak256 (Ethereum, delim 0x01), sha256, hmac-sha512, pbkdf2, chacha20-poly1305 |
+| `native/rustcrypto_helpers/` | RustCrypto | RIPEMD-160 for BIP-32 HASH160 (HACL does not expose it) |
+| `native/secp256k1_helpers/` | libsecp256k1 | sign / pubkey / recover / verify (hex in/out CLI helpers) |
+| `native/lean_uds/lean_uds.c` | POSIX | `bind/accept/connect/read/write/close/shutdown`, peer-uid/current-uid |
+| `native/lean_http/lean_http.c` | libcurl | loopback-only HTTP POST for `leancli-agent`. Refuses non-`http://127.0.0.1`/`http://[::1]`/`http://localhost` URLs at the C layer. 8 MiB response cap. No TLS, no redirects. |
+| `native/lean_sqlite/lean_sqlite.c` | libsqlite3 | Phase-1a SQLite shim consumed by `LeanCli/Agent/Session.lean`. Links against the system libsqlite3 (Arch + Debian 12+ ship FTS5 enabled). Column-text bytes are copied out before further DB calls. |
 
-Build automation: `script/setup_hacl.sh`, `script/setup_secp256k1.sh`,
-`script/setup_uds.sh`, `script/setup_http.sh`, `script/setup_sqlite.sh`
+The HMAC-SHA-256 and HMAC-DRBG HACL helpers were pruned (zero consumers).
+See [`native/README.md`](../native/README.md) for pins + consumers.
+
+Build automation: `ops/scripts/setup_hacl.sh`, `ops/scripts/setup_secp256k1.sh`,
+`ops/scripts/setup_uds.sh`, `ops/scripts/setup_http.sh`, `ops/scripts/setup_sqlite.sh`
 (Phase 1a; header + FTS5 probe). The UDS, HTTP, and SQLite C libs are
 linked into the Lean library via `extern_lib liblean_uds`,
 `extern_lib liblean_http`, and `extern_lib liblean_sqlite` in
@@ -257,21 +264,17 @@ The other helpers are external binaries invoked at runtime.
 
 ## Companion artifacts outside the main library
 
-- `Contracts/R1Account/` — separate Lean tree for the R1 smart-account
-  contract: `R1Account.lean`, `Spec.lean` (Verity formalism: `initializedSpec`,
-  `executeAcceptedSpec`, `executeRejectedSpec`), `Invariants.lean`,
-  `Proofs/Basic.lean`. Toolchain integration is still being settled.
-- `solidity/dev/R1AccountDev.sol` — Solidity dev variant for Sepolia.
-- `script/r1_sepolia.sh`, `script/setup_verity.sh`,
-  `script/compile_r1_verity.sh`, `script/check_privacy_cli.sh` — provisioning
-  and CI helpers.
-- `packaging/arch/PKGBUILD` — Arch Linux package (lake build, install both
+- `sidecars/sphincs/` — local SPHINCS+ signer shims (C / Rust) with vendored
+  signers; cross-checked against the deployed on-chain verifier.
+- `ops/scripts/check_privacy_cli.sh` and the `ops/scripts/check_*.sh` family
+  — provisioning and CI helpers.
+- `ops/packaging/arch/PKGBUILD` — Arch Linux package (lake build, install both
   binaries plus `docs/`).
 - `docs/CLI.md`, `docs/DAEMON.md`, `docs/PRIVACY_SECURITY.md`,
-  `docs/R1_SEPOLIA.md`, `SECURITY.md` — user
-  documentation.
+  `docs/PLUGIN_ARCHITECTURE.md`, `docs/CRYPTO_POLICY.md`, `SECURITY.md` —
+  user documentation.
 
-### Sidecar bridges (`bridge/`) and the Lean-native agent
+### Sidecar host (`sidecars/`) and the Lean-native agent
 
 Phase 0 split the LLM backend into a Lean-native primary (`leancli-agent`)
 and an opt-in legacy Node sidecar. Phase 1a adds a long-running sibling
@@ -302,19 +305,18 @@ existing decode → simulate → ConfirmGate gate before any signing.
 
 | Backend | Lean wrapper | Executable env var | Purpose |
 |---|---|---|---|
-| `leancli-agent` (in-tree Lean, one-shot) | `LeanCli/LlmAgent/Bridge.lean` | `LEANCLI_LLM_BRIDGE` (override) | Phase 0 primary. Spawn-per-call. Loopback HTTP via `c/lean_http`; talks to wallet daemon over UDS. |
+| `leancli-agent` (in-tree Lean, one-shot) | `LeanCli/LlmAgent/Bridge.lean` | — | Phase 0 primary. Spawn-per-call. Loopback HTTP via `native/lean_http`; talks to wallet daemon over UDS. |
 | `leancli-agentd` (in-tree Lean, persistent) | `LeanCli/LlmAgent/Bridge.lean` | `LEANCLI_AGENT_MODE`, `LEANCLI_AGENT_SOCKET` | Phase 1a opt-in. Long-running UDS sidecar; persists session history in `$XDG_DATA_HOME/leancli/sessions.db` via FTS5. Auto-detected. |
-| `bridge/` | `LeanCli/Privacy/Bridge.lean` | `LEANCLI_BRIDGE` | Privacy Pools / Railgun (snarkjs, libp2p) |
-| `bridge/clearsign/` | `LeanCli/Clearsign/Bridge.lean` | `LEANCLI_CLEARSIGN_BRIDGE` | ERC-7730 calldata + EIP-712 walker |
+| `sidecars/kohaku/` | `LeanCli/Privacy/Bridge.lean` | `LEANCLI_PRIVACY` (multi-select), `LEANCLI_BRIDGE` | Privacy Pools / Railgun / Tornado (snarkjs, libp2p) + provider host (helios/colibri/safenode) |
+| `sidecars/clearsign/` | `LeanCli/Clearsign/Bridge.lean` | `LEANCLI_CLEARSIGN_BRIDGE` | ERC-7730 calldata + EIP-712 walker |
 
 The clearsign sidecar bundles ERC-7730 descriptors under
-`bridge/clearsign/registry/` (ERC-20, Uniswap V3 SwapRouter02, Permit2,
+`sidecars/clearsign/registry/` (ERC-20, Uniswap V3 SwapRouter02, Permit2,
 CowSwap order EIP-712, plus a `4byte.json` fallback dict). The Lean
 agent's chain-context surface lives in `LeanCli/Agent/ToolDefs/Chain.lean`
 and routes every read through the daemon's `chain.ethCall` /
 `chain.nonce` / `chain.gasPrice` RPCs under the standard
-`Privacy.NetworkPolicy` gate — same trust model as the legacy sidecar's
-`daemon-callback.mjs`, but no Node process involved.
+`LeanCli.Network.Policy` gate — no Node process involved.
 
 ### Skills pack (`skills/`)
 
@@ -402,12 +404,12 @@ Trusted (not proved in Lean):
   helper binaries).
 - TPM2 hardware operations (`Keystore/Tpm2Runtime.lean` — `tpm2-tools` shell-out).
 - POSIX UDS syscalls (`Daemon/Uds.lean` — `@[extern]`).
-- The loopback HTTP shim (`Agent/Http.lean` + `c/lean_http/` — `@[extern]`).
+- The loopback HTTP shim (`Agent/Http.lean` + `native/lean_http/` — `@[extern]`).
   Trusted as an *opaque transport* only: the loopback restriction is
   C-enforced and re-checked in Lean, and the agent treats every byte the
   LLM returns as adversarial input that must traverse the standard
   decode → simulate → ConfirmGate pipeline before any signing.
-- The SQLite shim (`Agent/Session.lean` + `c/lean_sqlite/` — `@[extern]`)
+- The SQLite shim (`Agent/Session.lean` + `native/lean_sqlite/` — `@[extern]`)
   used only by `leancli-agentd`. Trusted as an *opaque local store* —
   it never sees key material (the agent import graph forbids signing
   modules) and DB content never authorises signing.
@@ -420,7 +422,7 @@ Trusted (not proved in Lean):
   prompt itself (`MemoryPrompts.extractionInstructions`) is the
   first. Memory content is read into every new session's system
   prompt; it never authorises signing.
-- The C/Rust helpers in `c/` and the binaries on `$PATH`.
+- The C/Rust helpers in `native/` and the binaries on `$PATH`.
 
 The split is deliberate: the wallet's signing path is reasoned about in Lean,
 while the underlying field/group/hash math is delegated to audited C libraries

@@ -42,26 +42,24 @@ match the observed RPC chain id.
 **Status:** ✅ proved — `LeanCli/Invariants/Core.lean`
 
 ### 0.4 Approval and signer path correspondence
-Signatures require user approval, and R1/EOA paths cannot silently substitute
-for each other.
+Signatures require user approval, and the signer path cannot silently
+substitute its key reference.
 
 **Props:**
 - `verifiedIntent s intent → intent.approved = true`
 - `verifiedIntent s intent → intent.keyRef.kind = intent.signerKind`
 - `SignEOA` outputs secp256k1 signatures
-- `SignR1` outputs P-256 signatures
 
 **Status:** ✅ proved — `LeanCli/Invariants/Core.lean`
 
-### 0.5 R1 TPM policy and EIP-7702 guardrails
-R1 signing requires an explicit satisfied TPM policy. EIP-7702-style intents
-require explicit delegation approval and cannot use global chain id `0`.
+### 0.5 EIP-7702 guardrails
+EIP-7702-style intents require explicit delegation approval and cannot use
+global chain id `0`.
 
-**Props:**
-- `verifiedIntent s intent → intent.signerKind = r1 → ∃ policy, intent.tpmPolicy = some policy ∧ policy.satisfied = true`
+**Prop:**
 - `verifiedIntent s intent → intent.is7702 = true → intent.delegateApproved = true ∧ intent.chainId ≠ 0`
 
-**Status:** ✅ proved — `LeanCli/Invariants/Core.lean`
+**Status:** ✅ proved — `LeanCli/Invariants/Core.lean::no_silent_7702_delegation`
 
 ---
 
@@ -133,14 +131,6 @@ another tx with nonce `≤ k` for `a`.
 **Prop:** `∀ l a n, validNext l a n → n > (l a).getD 0`
 **Status:** 📝 stated — `LeanCli/Invariants/Nonce.lean`
 
-### 3.3 R1 signature verifiability
-For every operation signed by the local keystore, the account logic can
-verify the P-256/R1 signature against the stored public key through the
-Ethereum P256VERIFY precompile model.
-
-**Prop:** TBD (depends on account validation model + P256 precompile call encoding)
-**Status:** 📝 stated
-
 ---
 
 ## Category 4 — Encoding
@@ -177,19 +167,21 @@ inverses of the matching constructors and reject mismatched shapes
 **Status:** ✅ proved — `LeanCli/Invariants/Encoding.lean`
 
 ### 4.3 Account policies are supported-chain/local-only
-The CLI supports regular BIP-39 k1 EOAs and local R1 smart accounts. Both
-accepted policies are local custody only and limited to explicitly supported
-Ethereum chains: mainnet for production and Sepolia for development.
+The CLI supports regular BIP-39 k1 EOAs (and, on Sepolia, the experimental
+SPHINCS+ hybrid family — see Cat 12). Accepted EOA policies are local
+custody only and limited to explicitly supported Ethereum chains: mainnet
+for production and Sepolia for development.
 
 **Props:**
 - `accepted p = true → supportedChainId p.chainId = true`
 - `accepted p = true → p.localOnly = true`
 - `accepted defaultEoaK1 = true`
-- `accepted defaultR1Smart = true`
 - `accepted sepoliaEoaK1 = true`
-- `accepted sepoliaR1Smart = true`
+- `accepted p = true → p.usesBip39` (k1 EOAs derive from a BIP-39 seed)
 
-**Status:** ✅ proved — `LeanCli/Invariants/Account.lean`
+**Status:** ✅ proved — `LeanCli/Invariants/Account.lean::acceptedSupportedChainOnly`,
+`::acceptedLocalOnly`, `::defaultEoaK1Accepted`, `::sepoliaEoaK1Accepted`,
+`::eoaK1UsesBip39WhenAccepted`
 
 ---
 
@@ -208,13 +200,21 @@ Sum of values shielded in = sum of notes created + fee.
 **Prop:** TBD
 **Status:** 📝 stated (future)
 
-### 5.7 Bridge methods are policy-classified
-Every method exposed by the leancli-bridge sidecar is mapped to a
-`NetworkPolicy.Purpose`: broadcast methods to `shieldedBroadcast`,
+### 5.7 Bridge methods are policy-classified and runtime-gated
+Every method exposed by the kohaku bridge sidecar is mapped to a
+`Network.Policy.Purpose`: broadcast methods to `shieldedBroadcast`,
 local introspection (`ping`, `version`, `listProtocols`) to
 `daemonControl`, and everything else to `shieldedRead`. `strictDaemonPolicy`
 denies every shielded purpose; `torDaemonPolicy` permits shielded purposes
 only over Tor to a configured node.
+
+The runtime gate now lives inside `Privacy.Bridge.callGated` — the sole path
+`shieldedBridgeCall` takes into the sidecar. A policy-denied shielded request
+returns a denial **before** the sidecar is spawned, so no shielded operation
+can reach the network when policy refuses it. The gate evaluates the request
+as `peer := .configuredNode, transport := .direct`, matching the pre-existing
+call-site gate exactly (shielded purposes are only ever permitted for
+`.configuredNode`).
 
 **Props (proved):**
 - `methodPurpose "shielded.broadcast" = .shieldedBroadcast`
@@ -224,10 +224,13 @@ only over Tor to a configured node.
 - `∀ peer transport, strictDaemonPolicy { shieldedBroadcast, … } = false`
 - `torDaemonPolicy { shieldedRead, … } = true → peer = configuredNode ∧ transport = tor`
 - `torDaemonPolicy { shieldedBroadcast, … } = true → peer = configuredNode ∧ transport = tor`
+- policy-denied ⇒ gate returns `.error (policyDenial req)` (no spawn)
+- denied ⇒ `callGated` returns `pure (policyDenial req)` without entering `callWithEnv`
+- allowed ⇒ `callGated` proceeds to `callWithEnv`
 
-**Status:** 🚧 in-progress — classification + strict/tor lemmas proved in
-`LeanCli/Invariants/Bridge.lean`. Runtime gate that *forces* every
-`Bridge.call` through `policyAllows` still pending.
+**Status:** ✅ proved — classification + strict/tor lemmas and the runtime
+gate proved in `LeanCli/Invariants/Bridge.lean::gateDecision_denied_when_policy_denies`,
+`::callGated_denied_when_policy_denies`, `::callGated_allowed_proceeds`.
 
 ### 5.8 Bridge responses cannot be confused
 The JSON envelope `responseToJson` carries an `ok : Bool` that is `true`
@@ -404,14 +407,6 @@ as biometrics or explicit user presence.
 **Prop:** `policyAccepts { op := signDigest, policy := policy } = true → policy.requiredAuth = biometric ∨ policy.requiredAuth = userPresence`
 **Status:** ✅ proved — `LeanCli/Invariants/Keystore.lean::acceptedSigningRequiresUserAuth`
 
-### 8.4 Apple Secure Enclave accepts local Ethereum R1 signing policy
-Native Apple Secure Enclave is modeled for P-256/R1. Ethereum mainnet
-support uses account logic plus P256VERIFY rather than an EOA secp256k1
-key.
-
-**Prop:** `policyAccepts { op := signDigest, policy := appleEthereumR1Policy } = true`
-**Status:** ✅ proved — `LeanCli/Invariants/Keystore.lean::appleSecureEnclaveAcceptsEthereumR1Signing`
-
 ### 8.6 Wallet master KEK never leaves the daemon process
 The wallet-level master KEK (see `LeanCli/Keystore/MasterPassphrase.lean`)
 is a freshly-generated 32-byte secret stored on disk only as ciphertext —
@@ -460,42 +455,6 @@ the Linux kernel keyring is handle storage only.
 - `selectHandleStore hpBusinessNotebook = some linuxKernelKeyring`
 
 **Status:** ✅ proved — `LeanCli/Invariants/Keystore.lean`
-
----
-
-## Category 9 — Ethereum EIP-7951 P256VERIFY
-
-### 9.1 EIP-7951 P256VERIFY constants and chain ids
-The wallet targets Ethereum L1 mainnet for production and Sepolia for
-development. It models the EIP-7951 R1 verification precompile at address
-`0x100`, input length `160`, success output length `32`, failure output
-length `0`, and gas cost `6900`.
-
-**Prop:** `mainnetChainId = 1 ∧ sepoliaChainId = 11155111 ∧ address = 0x100 ∧ inputLength = 160 ∧ gasCost = 6900`
-**Status:** ✅ proved — `LeanCli/Invariants/Mainnet.lean`
-
----
-
-## Category 10 — R1 account contract
-
-### 10.1 R1 account accepts only supported-chain operations
-The account model rejects any operation whose chain id is not explicitly
-supported by the wallet policy.
-
-**Prop:** `apply st op verify = some st' → supportedChainId op.chainId = true`
-**Status:** ✅ proved — `LeanCli/Invariants/R1Account.lean::applySomeSupportedChainOnly`
-
-### 10.2 R1 account nonce advances only after EIP-7951 verification
-Accepted operations must consume the current nonce, use valid EIP-7951
-precompile input, and pass the verifier hook before nonce advances.
-
-**Props:**
-- `apply st op verify = some st' → op.nonce = st.nonce`
-- `apply st op verify = some st' → validInput (toPrecompileInput st.key op)`
-- `apply st op verify = some st' → verify (toPrecompileInput st.key op) = true`
-- `apply st op verify = some st' → st'.nonce = st.nonce + 1`
-
-**Status:** ✅ proved — `LeanCli/Invariants/R1Account.lean`
 
 ---
 
@@ -719,20 +678,9 @@ ECDSA half of the Sphincs hybrid gate (12.3, 12.7).
 ECDSA over secp256k1 with low-S signatures, and faithful behavior of
 libsecp256k1.
 
-### 13.8 P-256 / EIP-7951 P256VERIFY is EUF-CMA
-Modeled by the `verify : PrecompileInput → Bool` parameter of
-`Invariants/R1Account.lean::apply`; on-chain by the EIP-7951 precompile
-at address `0x100`. Hardware backends are modeled in Category 8. The 9.1
-and 10.x proofs are vacuous unless the oracle reflects ECDSA-P-256
-EUF-CMA.
-
-**Assumption:** existential unforgeability under chosen-message attack of
-ECDSA over NIST P-256, and faithful implementation by the deployed
-EIP-7951 precompile.
-
 ### 13.9 SPHINCS+ is EUF-CMA (post-quantum)
 Modeled by `Contract/SphincsAccount.lean::VerifyOracle.sphincsVerify`;
-runtime signing goes through the SPHINCS+ sidecars under `bridge/`. The
+runtime signing goes through the SPHINCS+ sidecars under `sidecars/sphincs/`. The
 12.3 and 12.6 proofs are vacuous unless the oracle reflects SPHINCS+
 EUF-CMA, in particular preimage-resistance of the underlying tweakable
 hash family.

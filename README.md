@@ -21,7 +21,7 @@ trust surface.
 One-liner :
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/nconsigny/leanCLI/master/script/leanclispawn | bash
+curl -fsSL https://raw.githubusercontent.com/nconsigny/leanCLI/master/ops/scripts/leanclispawn | bash
 exec $SHELL -l                                 # pick up PATH
 leancli help
 ```
@@ -36,7 +36,7 @@ If you'd prefer to clone the repo yourself first:
 ```bash
 git clone https://github.com/nconsigny/leanCLI.git && cd leanCLI
 elan toolchain install $(cat lean-toolchain)   # one-time: installs Lean 4.29.1
-./script/leanclispawn                            # build + install in-tree
+./ops/scripts/leanclispawn                       # build + install in-tree
 exec $SHELL -l
 leancli help
 ```
@@ -50,7 +50,7 @@ leancli update         # git pull + rebuild + relink
 leancli uninstall      # remove ~/.leancli/bin symlinks
 ```
 
-These three subcommands delegate to `script/leanclispawn` under the hood,
+These three subcommands delegate to `ops/scripts/leanclispawn` under the hood,
 so any `leanclispawn` flag still works if you call the script directly.
 
 What the bootstrap does:
@@ -65,7 +65,7 @@ What the bootstrap does:
    `leancli install` / `leancli update` runs know where to rebuild from.
 5. Appends a guarded `export PATH="$HOME/.leancli/bin:$PATH"` block to
    your shell rc (`.zshrc`, `.bashrc`, or `config.fish`). Skip with
-   `./script/leanclispawn --no-modify-path`.
+   `./ops/scripts/leanclispawn --no-modify-path`.
 
 Direct script flags (when you want finer control than the subcommands):
 `--no-build`, `--no-tui`, `--rebuild-tui`, `--force` (overwrite a stale
@@ -95,7 +95,7 @@ nix build
 nix develop
 ```
 
-The Arch Linux scaffold lives in `packaging/arch/`. Replace the placeholder
+The Arch Linux scaffold lives in `ops/packaging/arch/`. Replace the placeholder
 repository URL before publishing a package.
 
 ### macOS notes
@@ -171,8 +171,7 @@ leancli policy lightclient      # provider-policy plan
 leancli policy all              # everything in one print
 leancli network                 # current network config (rpc urls + sources)
 leancli doctor                  # privacy/security status
-leancli wallet create r1 work-key
-leancli wallet deploy work-key
+leancli wallet create eoa work-key
 leancli wallet list
 leancli balance 0x0000000000000000000000000000000000000000
 leancli send 0x0000000000000000000000000000000000000000 1
@@ -205,10 +204,11 @@ leancli tui                     # opens the Ink TUI (menu → Dashboard for the
   classified by peer / purpose / transport, with strict and Tor modes
   proved against third-party API access.
 - **Local enclave-first key custody.** TPM2 / FIDO2 / Apple Secure Enclave
-  for P-256/R1; never an online keystore, never raw secret import/export.
-- **Two account families plus an experimental third.** BIP-39/32 EOAs (k1)
-  and local hardware-backed R1 smart accounts; SPHINCS+ hybrid accounts on
-  Sepolia as a research third family.
+  for local custody; never an online keystore, never raw secret
+  import/export. TPM2 backs the wallet master-KEK (PIN-bound), not an
+  account kind.
+- **Two account families.** BIP-39/32 EOAs (k1) and, on Sepolia, SPHINCS+
+  hybrid accounts as a research post-quantum family.
 - **Ethereum mainnet first, Sepolia for dev.**
 
 ## Non-goals (for now)
@@ -234,23 +234,24 @@ These properties have non-`sorry` Lean proofs. See
 
 - Verified-core properties (Cat 0): no key exfiltration, no raw signing
   oracle, no wrong-chain signing, approval / signer-kind correspondence,
-  R1 TPM policy and EIP-7702 guardrails.
+  EIP-7702 delegation guardrails.
 - Amount arithmetic (Cat 1): checked subtraction never underflows;
   multi-output sends conserve total balance and only debit affordable
   amounts.
 - EIP-1559 fee relation and chain-ID match (Cat 2, by definition).
 - Account policies are supported-chain and local-only (4.3); JSON
   destructors agree with constructors (4.4).
+- Bridge policy classification AND runtime gate (5.7): every shielded
+  method maps to a network purpose, and a policy-denied shielded request
+  is refused before the sidecar is spawned (no shielded egress without
+  policy permission).
 - Network policy (Cat 6 + 7): CLI only contacts the local daemon; daemon
   policies deny third-party peers; strict mode denies configured-node
   access; Tor mode is transport-scoped; non-broadcast methods classify as
   reads.
 - Keystore (Cat 8): accepted requests never export secrets, are local-
   only, require user authorization; Linux HP/Lenovo profiles select TPM2
-  first; Apple Secure Enclave accepts the local R1 signing policy.
-- EIP-7951 P256VERIFY constants and chain ids (9.1).
-- R1 account contract (Cat 10): only supported chains; nonce advances
-  only after EIP-7951 verification.
+  first.
 - SPHINCS+ hybrid account contract (Cat 12): nonce monotonicity, hybrid
   signature gate (ECDSA AND SPHINCS+), rotation isolation, key
   supersession after rotation, owner-rotation safety.
@@ -258,6 +259,8 @@ These properties have non-`sorry` Lean proofs. See
   candidates are chain-correct.
 - Bridge response framing (5.8): the daemon cannot mistake a sidecar
   crash for a successful proof.
+- LLM-agent address resolution (Cat 14): `.verified` witnesses are backed
+  by an actual on-disk-seed derivation, not a sidecar claim.
 
 ### 🚧 Stated but not yet proved
 
@@ -269,7 +272,6 @@ absent. Treat these as design intent, not guarantees.
 - 3.1 Signed-amount integrity through CLI/TUI — requires threading a
   `UserIntent` type end-to-end.
 - 3.2 Deterministic nonce use across restarts.
-- 3.3 R1 signature verifiability against the stored public key.
 - 4.1 RLP roundtrip — only structural lemmas; full round-trip blocked on
   a non-`partial` decoder.
 - 4.2 Hex roundtrip — nibble-level proved; byte-level lift pending.
@@ -278,10 +280,6 @@ absent. Treat these as design intent, not guarantees.
   are not re-derived in Lean.
 - 5.3 Bridge cannot return spending-key material — by-construction
   inspection of `Privacy/Bridge.lean`, not a machine-checked predicate yet.
-- 5.7 Bridge methods are policy-classified — classification + strict/tor
-  lemmas proved; the runtime gate that *forces* every `Bridge.call`
-  through `policyAllows` is still pending. There is no Lean theorem yet
-  saying the daemon cannot bypass the gate.
 
 ### 🔒 Cryptographically axiomatized
 
@@ -290,15 +288,17 @@ signature unforgeability, AEAD authenticity, KDF/PRF, and ZK soundness are
 standard cryptographic *assumptions*. Each is documented in
 `INVARIANTS.md` Cat 13 and bound to a specific external implementation:
 
-- Keccak-256, SHA-256, HMAC-SHA-256/512, PBKDF2-HMAC-SHA-512, HMAC-DRBG,
+- Keccak-256, SHA-256, HMAC-SHA-512, PBKDF2-HMAC-SHA-512,
   ChaCha20-Poly1305 → HACL Packages binaries (Project Everest).
 - RIPEMD-160 → RustCrypto `ripemd` helper (HASH160 only, never
   Ethereum addresses).
 - secp256k1 ECDSA → Bitcoin Core libsecp256k1 helpers.
-- P-256 / EIP-7951 P256VERIFY → on-chain precompile + hardware backends.
 - SPHINCS+ → vendored `sphincs/sphincsplus` reference (C) for
   SLH-DSA-SHA2-128-24, vendored `nconsigny/SPHINCS-/signer-wasm` (Rust)
   for the C9 parameter set.
+
+See [`docs/CRYPTO_POLICY.md`](./docs/CRYPTO_POLICY.md) for exact pins and
+the one-library-per-primitive policy.
 
 
 ### 🔌 Trusted external code (not modeled in Lean)
@@ -312,12 +312,11 @@ The proof corpus does not extend to:
   used for `colibri_simulateTransaction`.
 - The viem ABI walker, ERC-7730 descriptors, and 4-byte selector dict
   used by the clearsign sidecar.
-- The LLM tool-use loop in the LLM sidecar (model output is treated as
-  adversarial regardless).
-- The Solidity contracts deployed on Sepolia: `R1Account`,
-  `SphincsAccount` at `0xA941116763AE386a50133c5af40356c9D93b2978`, the
-  C9 verifier at `0x18F005EECd41624644AA364bA8857258FEB3C26D`, EntryPoint
-  v0.9.
+- The LLM tool-use loop in the native `leancli-agent` (model output is
+  treated as adversarial regardless).
+- The Solidity contracts deployed on Sepolia: `SphincsAccount` at
+  `0xA941116763AE386a50133c5af40356c9D93b2978`, the C9 verifier at
+  `0x18F005EECd41624644AA364bA8857258FEB3C26D`, EntryPoint v0.9.
 - The 0xBow ASP (third-party Approval Service Provider for Privacy Pools)
   and FastRelay broadcaster.
 
@@ -333,41 +332,48 @@ leanCLI/
 ├─ lakefile.lean                  # Lake build config
 ├─ lean-toolchain                 # pinned Lean version (4.29.1)
 ├─ flake.nix / default.nix        # Nix scaffold
-├─ LeanCli.lean                # Root module (re-exports)
+├─ LeanCli.lean                   # Root module (re-exports)
 ├─ LeanCli/
-│  ├─ App/         CLI / daemon executable roots
+│  ├─ App/         CLI / daemon / agent executable roots
 │  ├─ Crypto/      Hex, Hacl (opaque + IO helpers), Secp256k1Native
 │  ├─ Encoding/    Json, Rlp
-│  ├─ Ethereum/    Address, Chain, P256Precompile, Tx, Abi, Eip712, Ens
-│  ├─ Privacy/     NetworkPolicy, Bridge (privacy-pools/railgun spawn)
+│  ├─ Ethereum/    Address, Chain, Tx, Abi, Eip712, Ens
+│  ├─ Network/     Policy, Endpoint, Provider (incl. debug_traceCall)
+│  ├─ Privacy/     Bridge (kohaku privacy-plugin host spawn)
 │  ├─ Clearsign/   Bridge (ERC-7730 + EIP-712 spawn)
-│  ├─ LlmAgent/    Bridge (NL → tx draft spawn)
-│  ├─ Colibri/     Bridge, Persistent (light-client spawn)
+│  ├─ Helios/      Bridge, Persistent (light-client provider spawn)
+│  ├─ Colibri/     Bridge, Persistent (light-client provider spawn)
+│  ├─ SafeNode/    Persistent (TDX-attested ORAM proxy provider spawn)
+│  ├─ LlmAgent/    Bridge, IntentParser (NL → tx draft)
 │  ├─ Sphincs/     Bridge, UserOp (SPHINCS+ shim spawn, EIP-712 userOpHash)
-│  ├─ Network/     Endpoint, Provider (incl. debug_traceCall)
 │  ├─ Keystore/    Enclave, Linux, Tpm2Runtime, MasterKey
-│  ├─ Contract/    R1Account, SphincsAccount (abstract)
+│  ├─ Contract/    SphincsAccount (abstract)
 │  ├─ Swap/        UniV3, Tokens (abstract)
 │  ├─ Wallet/      Account, Bip39Wordlist, Bip44, HDKey, EOA, EoaStore, …
+│  ├─ Agent/       Loop, Llm, Session, Skills, Memory, Compression, …
 │  ├─ RPC/         JsonRpc, Outbound, Server
 │  ├─ Daemon/      Config, Log, State, TokenMeta, TxJournal, Uds, Server
 │  ├─ Cli/         Commands, DaemonClient, Passphrase, NetworkConfig
-│  └─ Invariants/  Amount, Wallet, TxWellFormed, Network, R1Account,
-│                  SphincsAccount, Swap, Bridge, Encoding, Keystore,
-│                  Core, Mainnet, …
-├─ Contracts/R1Account/           # Lean source for the deployable R1 contract
-├─ solidity/dev/R1AccountDev.sol  # Sepolia dev fallback (not canonical)
-├─ bridge/                        # Untrusted Node sidecars
-│  ├─ <root>/      Privacy Pools / Railgun (snarkjs, libp2p, viem)
+│  └─ Invariants/  Amount, Wallet, TxWellFormed, Network, SphincsAccount,
+│                  Swap, Bridge, Encoding, Keystore, Core, Mainnet,
+│                  Account, AddressOwnership, …
+├─ native/                        # Loopback FFI shims + crypto helper sources
+│  ├─ hacl_helpers/    HACL* hashes / HMAC / KDF / AEAD / RIPEMD-160
+│  ├─ secp256k1_helpers/  Bitcoin Core libsecp256k1
+│  ├─ rustcrypto_helpers/ RustCrypto RIPEMD-160 (HASH160 only)
+│  ├─ lean_uds/        Unix-domain socket primitives
+│  ├─ lean_http/       loopback-only HTTP (agent LLM I/O, ENS)
+│  └─ lean_sqlite/     SQLite shim (agent session store, FTS5)
+├─ sidecars/                      # Untrusted sidecars (Kohaku plugin host)
+│  ├─ kohaku/      Provider host (helios/, colibri/, safenode/) + privacy
+│  │              plugins (@kohaku-eth/{railgun,privacy-pools}); plugins.lock.json
 │  ├─ clearsign/   ERC-7730 walker + 4byte fallback + EIP-712 (viem)
-│  ├─ llm/         LLM tool-use loop + viem
-│  └─ colibri/     Colibri stateless light client (one-shot or --listen)
-├─ sidecars/sphincs/              # Untrusted local SPHINCS+ shims (C / Rust)
-│  ├─ vendor-slhdsa-sha2-128-24/  vendored sphincsplus reference (C)
-│  ├─ vendor-c9/                  vendored signer-wasm (Rust)
-│  └─ shim/                       JSON-RPC dispatcher around the C signer
+│  └─ sphincs/     Local SPHINCS+ shims (C / Rust), vendored signers
+├─ vendor/sphincs-minus/          # SPHINCS- signer submodule
+├─ ops/                           # scripts/, packaging/, tests/
+├─ docs/                          # ARCHITECTURE, DAEMON, CLI, PLUGIN_ARCHITECTURE,
+│                                 # CRYPTO_POLICY, PRIVACY_SECURITY, …
 ├─ tui/                           # Ink-based TUI (esbuild-bundled)
-├─ packaging/arch/                # Arch Linux PKGBUILD scaffold
 ├─ INVARIANTS.md                  # Living invariant inventory + proof status
 ├─ SECURITY.md                    # Trust boundary statement
 └─ README.md
@@ -375,8 +381,8 @@ leanCLI/
 
 ## Pre-sign pipeline
 
-Every signing flow goes through the same gate before reaching `eoa.send`,
-`r1.send*`, or any SPHINCS+ flow:
+Every signing flow goes through the same gate before reaching `eoa.send`
+or any SPHINCS+ flow:
 
 ```
   build {to, value, data}
@@ -384,22 +390,24 @@ Every signing flow goes through the same gate before reaching `eoa.send`,
   tx.decodeIntent  ──→  ERC-7730 descriptor (or 4byte fallback) → human intent
                           + token-decimals prefetched daemon-side
         ↓
-  tx.simulate      ──→  eth_call + eth_estimateGas
-                          (or colibri_simulateTransaction when enabled)
+  tx.simulate      ──→  eth_call + eth_estimateGas against the selected
+                          provider (default helios = consensus-verified REVM;
+                          rpc = direct; colibri = stateless light client)
                           + (opt) debug_traceCall walked daemon-side
                           → token movements rendered with real decimals
         ↓
   ConfirmGate (TUI) ──→ user inspects intent + sim outcome + transfers
         ↓                   Esc bails; Enter advances
-  eoa.send / r1.send* / sphincs.*  ──→ daemon signs and broadcasts
+  eoa.send / sphincs.*  ──→ daemon signs and broadcasts
 ```
 
-`SendFlow` and `SendRawFlow` (TUI) implement this pipeline. The LLM
-agent in `bridge/llm/` produces a structured `Intent` (validated by
+`SendFlow` and `SendRawFlow` (TUI) implement this pipeline. The native
+`leancli-agent` produces a structured `Intent` (validated by
 `LeanCli/LlmAgent/IntentParser.lean` with hard-rejects) that flows
 through the same gate via `LlmChatFlow → SendRawFlow`. Pasted calldata
 flows through `DecodeIntentFlow` (read-only) and the same `ConfirmGate`
-when the user chooses to sign.
+when the user chooses to sign. Simulation output is informational — the
+user's `ConfirmGate` decision is the trust anchor, never the provider.
 
 If you're adding a new "produces calldata" surface, wire it through this
 gate — never call `eoa.send` directly. The `SendRawFlow` component is the
@@ -407,26 +415,46 @@ canonical reusable confirm path.
 
 ## Bridges and sidecars
 
-Five untrusted external processes sit at the boundary. Each is spawned
-only by its dedicated Lean module, treated as malicious, and never the
-final authority on a signing decision.
+Untrusted external processes sit at the boundary, hosted under the Kohaku
+plugin model. Each is spawned only by its dedicated Lean module, treated as
+malicious, and never the final authority on a signing decision. See
+[`docs/PLUGIN_ARCHITECTURE.md`](./docs/PLUGIN_ARCHITECTURE.md) for the full
+flag surface (`LEANCLI_PROVIDER` / `LEANCLI_PRIVACY`) and the
+pinned-and-lazy plugin load model.
 
-| Sidecar | Purpose | Lean wrapper | Transport | Trusted for | Never trusted for |
-|---|---|---|---|---|---|
-| `bridge/` | Privacy Pools v1 / Railgun (snarkjs, libp2p, viem) | `Privacy/Bridge.lean` | one-shot stdio JSON-RPC | producing valid ZK witnesses + relayer broadcast results | transaction structure, asset/amount semantics |
-| `bridge/clearsign/` | ERC-7730 walker + 4byte fallback + EIP-712 | `Clearsign/Bridge.lean` | one-shot stdio JSON-RPC | rendering a human-readable intent string | the calldata bytes themselves; the daemon re-decodes |
-| `bridge/llm/` | NL → tx draft via rule-based matcher + (optional) LLM tool-use loop | `LlmAgent/Bridge.lean` | one-shot stdio JSON-RPC | proposing draft `{to, value, data}` candidates | any signing decision; every draft re-flows the standard pipeline |
-| `bridge/colibri/` | Stateless light-client EVM simulation + `eth_*` proxy | `Colibri/Bridge.lean`, `Colibri/Persistent.lean` | persistent UDS (`--listen`), one-shot fallback | sim outcomes used as confirmation UI | calldata bytes; sim output is informational, daemon still re-decodes |
-| `sidecars/sphincs/` | SPHINCS+ post-quantum signer (C and Rust binaries) | `Sphincs/Bridge.lean` | one-shot stdio JSON-RPC | producing a sig blob of the right shape | the signature itself: every `signWithVerify` re-runs verify locally before returning success; size mismatches are rejected |
+**Providers** (chain reads + simulation, single-select via
+`LEANCLI_PROVIDER`, default `helios`):
 
-### Privacy Pools / Railgun (`bridge/`)
+| Provider | Lean wrapper | What it is | Trusted for | Never trusted for |
+|---|---|---|---|---|
+| `helios` | `Helios/{Bridge,Persistent}.lean` | `@a16z/helios` light client + REVM; consensus-verified state | sim outcomes used as confirmation UI | calldata bytes / signing |
+| `colibri` | `Colibri/{Bridge,Persistent}.lean` | Colibri stateless light client (WASM EVM + committee proofs) | sim outcomes used as confirmation UI | calldata bytes / signing |
+| `rpc` | `RPC/Outbound.lean` | Direct configured RPC endpoint | sim outcomes used as confirmation UI | calldata bytes / signing |
+| `safenode` | `SafeNode/Persistent.lean` (+ helios) | Helios behind a TDX-attested ORAM proxy (`LEANCLI_SAFE_NODE_URL`) | sim outcomes used as confirmation UI | calldata bytes / signing |
 
-Wraps `@kohaku-eth/{plugins,railgun,privacy-pools}`. Methods: `ping`,
-`version`, `listProtocols`, `shielded.balance`, `shielded.prepareDeposit`,
-`shielded.prepareWithdraw`, `shielded.unshieldDrain`. Spending secrets are
-derived from a separate mnemonic (`LEANCLI_PP_MNEMONIC`), never the EOA
-mnemonic. Persistent PP state is cached on disk so deposit/note bookkeeping
-survives across one-shot invocations.
+**Privacy plugins** (shielded flows, multi-select via `LEANCLI_PRIVACY`,
+default none) + the other sidecars:
+
+| Sidecar | Purpose | Lean wrapper | Trusted for | Never trusted for |
+|---|---|---|---|---|
+| `sidecars/kohaku/` (`railgun`, `privacy-pools`, `tornado`) | `@kohaku-eth/*` shielded flows (snarkjs, libp2p, viem) | `Privacy/Bridge.lean` | producing valid ZK witnesses + relayer broadcast results | transaction structure, asset/amount semantics |
+| `sidecars/clearsign/` | ERC-7730 walker + 4byte fallback + EIP-712 | `Clearsign/Bridge.lean` | rendering a human-readable intent string | the calldata bytes themselves; the daemon re-decodes |
+| `sidecars/sphincs/` | SPHINCS+ post-quantum signer (C and Rust binaries) | `Sphincs/Bridge.lean` | producing a sig blob of the right shape | the signature itself: every `signWithVerify` re-runs verify locally before returning success; size mismatches are rejected |
+
+The native `leancli-agent` exe handles NL → tx-draft (`LlmAgent/Bridge.lean`
+parses its structured `Intent`); there is no Node LLM sidecar.
+
+### Privacy plugins (`sidecars/kohaku/`)
+
+Wraps `@kohaku-eth/{plugins,railgun,privacy-pools}`, multi-selected via
+`LEANCLI_PRIVACY` (comma list; default empty = nothing enabled; a
+`shielded.*` call for a disabled plugin is refused before its code loads).
+Methods: `ping`, `version`, `listProtocols`, `listEnabled`,
+`shielded.balance`, `shielded.prepareDeposit`, `shielded.prepareWithdraw`,
+`shielded.unshieldDrain`. Spending secrets are derived from a separate
+mnemonic (`LEANCLI_PP_MNEMONIC`), never the EOA mnemonic. Persistent PP
+state is cached on disk so deposit/note bookkeeping survives across
+one-shot invocations.
 
 External dependencies the daemon does *not* re-derive in Lean:
 - 0xBow ASP (Approval Service Provider) for deposit approvals.
@@ -436,10 +464,12 @@ External dependencies the daemon does *not* re-derive in Lean:
 Network egress from this process is policy-classified under the
 `shieldedRead` / `shieldedBroadcast` purposes (see invariant 5.7).
 `strictDaemonPolicy` denies both; `torDaemonPolicy` permits them only over
-Tor to a configured node. *Note:* the runtime gate that forces every
-`Bridge.call` through `policyAllows` is not yet a theorem — see 5.7 above.
+Tor to a configured node. The runtime gate now lives in
+`Privacy.Bridge.callGated`: a policy-denied shielded request is refused
+before the sidecar is spawned — proved in `Invariants/Bridge.lean`
+(invariant 5.7, now ✅).
 
-### Clearsign (`bridge/clearsign/`)
+### Clearsign (`sidecars/clearsign/`)
 
 Walks ERC-7730 descriptors (calldata + EIP-712 typed data). Methods:
 `ping`, `version`, `tx.decodeIntent`, `eip712.decodeIntent`. Bundled
@@ -453,37 +483,39 @@ Reachable from the TUI's *More commands* menu as "Decode transaction
 (ERC-7730)" and "Decode typed data (EIP-712)", and called internally by
 `tx.decodeIntent` / `eip712.decodeIntent` before every confirm screen.
 
-### LLM agent (`bridge/llm/`)
+### LLM agent (native `leancli-agent`)
 
-Two-tier:
+The LLM agent is a Lean-native executable (`leancli-agent` /
+`leancli-agentd`), not a Node sidecar. Two-tier:
 
 1. **Rule-based matcher** (always on, free, deterministic) — recognizes
    send / approve / Aave supply+withdraw / Aave withdraw patterns.
 2. **LLM tool-use loop** — fires only when the rule matcher misses *and*
-   an LLM API key is configured in the daemon's environment.
+   an LLM endpoint is configured in the daemon's environment.
 
 Tools the model can call: `lookup_token`, `lookup_protocol`,
 `get_eth_balance`, `get_token_balance`, `get_gas_price`,
 `get_uniswap_v3_quote`, `get_uniswap_v3_multi_hop_quote`,
 `get_aave_health_factor`, `get_morpho_blue_position`, plus `emit_*` tools
-that build calldata via viem. Read tools route back into the daemon over
-UDS (`bridge/llm/src/daemon-callback.mjs`) so every chain RPC is policy-
-gated identically to CLI/TUI requests.
+that build calldata. Read tools route back into the wallet daemon over UDS
+(`LeanCli/Agent/DaemonClient.lean`) so every chain RPC is policy-gated
+identically to CLI/TUI requests.
 
-Adding a new daemon-callback tool: encode calldata via viem, call
-`chain.ethCall` (the general policy-gated `eth_call` primitive). No per-
-protocol daemon RPC needed — see the existing `get_aave_health_factor`,
-`get_uniswap_v3_quote`, and `get_morpho_blue_position` tools under
-`bridge/llm/src/` as templates.
+Adding a new daemon-callback tool: encode calldata, call `chain.ethCall`
+(the general policy-gated `eth_call` primitive). No per-protocol daemon RPC
+needed — see the existing `get_aave_health_factor`, `get_uniswap_v3_quote`,
+and `get_morpho_blue_position` tools under `LeanCli/Agent/ToolDefs/` as
+templates.
 
 The trust model is uniform across both tiers: the agent **never signs**.
 Drafts flow through the standard decode → simulate → confirm pipeline. An
 adversarial model (or prompt-injected context) can produce nonsense
 calldata; the worst case is a confusing simulation the user rejects.
 
-### Colibri light client (`bridge/colibri/`)
+### Colibri light client (`sidecars/kohaku/colibri/`)
 
-Wraps `@corpus-core/colibri-stateless` to give the daemon committee-signed
+The `colibri` provider (`LEANCLI_PROVIDER=colibri`) wraps
+`@corpus-core/colibri-stateless` to give the daemon committee-signed
 EVM simulation locally. Methods: `ping`, `eth.proxy` (raw RPC pass-through),
 `tx.simulate` (`colibri_simulateTransaction`). Two modes:
 
@@ -538,39 +570,46 @@ reimplement crypto:
 |---|---|---|
 | `leancli-hacl-keccak256` | HACL Packages | Ethereum keccak (delimiter `0x01`) |
 | `leancli-hacl-sha256` | HACL Packages | BIP-39 checksum, BIP-32 fingerprint input |
-| `leancli-hacl-hmac-sha256` / `-sha512` | HACL Packages | BIP-32 child-key derivation, generic HMAC |
+| `leancli-hacl-hmac-sha512` | HACL Packages | BIP-32 child-key derivation |
 | `leancli-hacl-pbkdf2` | HACL Packages | BIP-39 seed, keystore wrapping |
-| `leancli-hacl-hmac-drbg` | HACL Packages | DRBG for k1 nonce |
 | `leancli-hacl-chacha20poly1305` | HACL Packages | At-rest keystore encryption |
 | `leancli-hacl-ripemd160` | RustCrypto `ripemd` | BIP-32 HASH160 fingerprint only |
 | `leancli-secp256k1-{sign,pubkey,recover,verify}` | Bitcoin Core libsecp256k1 | EOA k1 signing/verify/recovery/pubkey |
 
+The HMAC-SHA-256 and HMAC-DRBG helpers were pruned (zero consumers). See
+[`native/README.md`](./native/README.md) for pins + consumers and
+[`docs/CRYPTO_POLICY.md`](./docs/CRYPTO_POLICY.md) for the policy.
+
 Set up the helpers with:
 
 ```bash
-./script/setup_hacl.sh
-./script/setup_secp256k1.sh
+./ops/scripts/setup_hacl.sh
+./ops/scripts/setup_secp256k1.sh
 export PATH="$PWD/.lake/build/bin:$PATH"
 ```
 
-`script/check_native_helpers.sh` smoke-tests every helper. A compromised
-or substituted helper defeats every higher-level invariant
+`ops/scripts/check_native_helpers.sh` smoke-tests every helper. A
+compromised or substituted helper defeats every higher-level invariant
 (see 13.10).
 
 ## Running the daemon with sidecars
 
-Three of the five sidecars are zero-config from the monorepo: when no
-env var is set, the daemon walks the working directory upward (≤ 8 hops)
-looking for the in-repo entrypoint. The other two need explicit wiring
-because they each require their own credential.
+Most sidecars are zero-config from the monorepo: when no env var is set,
+the daemon walks the working directory upward (≤ 8 hops) looking for the
+in-repo entrypoint. Privacy plugins need explicit opt-in (`LEANCLI_PRIVACY`)
+plus their own spending credential.
 
 | Sidecar | Default behavior with no env var | Explicit override |
 |---|---|---|
-| Clearsign | walks up for `bridge/clearsign/bridge.mjs`; fallback PATH basename | `LEANCLI_CLEARSIGN_BRIDGE` |
-| Colibri | walks up for `bridge/colibri/bridge.mjs`; fallback PATH basename | `LEANCLI_COLIBRI_BRIDGE` |
+| Clearsign | walks up for `sidecars/clearsign/bridge.mjs`; fallback PATH basename | `LEANCLI_CLEARSIGN_BRIDGE` |
+| Helios (default provider) | walks up for `sidecars/kohaku/helios/bridge.mjs`; fallback PATH basename | `LEANCLI_PROVIDER=helios` (default) |
+| Colibri | walks up for `sidecars/kohaku/colibri/bridge.mjs`; fallback PATH basename | `LEANCLI_PROVIDER=colibri` |
 | Sphincs (C9, SLHDSA) | walks up for `sidecars/sphincs/bin/sphincs-{c9,slhdsa-128-24}`; fallback PATH basename. Requires you to have run `make` under `sidecars/sphincs/` first. | `LEANCLI_SPHINCS_C9` / `LEANCLI_SPHINCS_SLHDSA` |
-| Privacy Pools / Railgun | basename `leancli-bridge` on PATH (likely missing) | `LEANCLI_BRIDGE` plus `LEANCLI_PP_MNEMONIC` (separate spending secret) |
-| LLM | basename `leancli-llm-bridge` on PATH (likely missing) | `LEANCLI_LLM_BRIDGE`; the model tool-use loop only fires when an LLM API key is also configured in the daemon's environment, otherwise the rule-based matcher is the only path |
+| Privacy plugins (Railgun / Privacy Pools / Tornado) | disabled unless listed in `LEANCLI_PRIVACY` | `LEANCLI_PRIVACY=railgun,privacy-pools` plus `LEANCLI_PP_MNEMONIC` (separate spending secret) |
+
+The LLM agent is the native `leancli-agent` exe — no sidecar to wire; the
+model tool-use loop fires only when an LLM endpoint is configured in the
+daemon's environment, otherwise the rule-based matcher is the only path.
 
 So the minimal local-dev launch is just:
 
@@ -581,20 +620,20 @@ leancli-daemon
 …provided you've run `(cd sidecars/sphincs && make)` once. Without that,
 SPHINCS+ flows fail with a spawn error; the other surfaces work.
 
-To enable the credentialed sidecars:
+To enable a privacy plugin (opt-in, with its own spending secret):
 
 ```bash
-LEANCLI_BRIDGE=$PWD/bridge/bridge.mjs                                  \
+LEANCLI_PRIVACY=railgun,privacy-pools                                  \
 LEANCLI_PP_MNEMONIC="abandon abandon …"                                \
-LEANCLI_LLM_BRIDGE=$PWD/bridge/llm/bridge.mjs                          \
 leancli-daemon
 ```
 
 Any defaulted entry can still be force-overridden by setting the matching
 `LEANCLI_*` env var explicitly — useful when iterating on a sidecar
-under a non-standard path.
+under a non-standard path. Switch read providers with
+`LEANCLI_PROVIDER=helios|colibri|rpc|safenode` (default `helios`).
 
-The TUI bundle is built by `script/install.sh`. To rebuild it on its own:
+The TUI bundle is built by `ops/scripts/leanclispawn` (`build_tui`). To rebuild it on its own:
 
 ```bash
 (cd tui && npm install && npm run build)
@@ -604,10 +643,12 @@ leancli tui
 ## Keystore
 
 `LeanCli.Keystore.Enclave` models local-only enclave-backed key custody.
-Secret import/export is denied by the accepted policy. Native macOS/iOS
-Secure Enclave support is modeled for P-256/R1. Linux TPM, FIDO2, Apple
-Secure Enclave, and external hardware signers are local-only P-256/R1
-custody options.
+Secret import/export is denied by the accepted policy. Linux TPM2, FIDO2,
+Apple Secure Enclave, and external hardware signers are local-only custody
+backends. TPM2 in particular backs the wallet **master-KEK** custody path
+(`wallet master init` → TPM-bound PIN), not a distinct account kind — the
+R1/P-256 smart-account path has been removed; EOAs and the SPHINCS+ hybrid
+family are the account kinds.
 
 `LeanCli.Keystore.Linux` prefers TPM2 for common HP business
 notebook/workstation and Lenovo ThinkPad/ThinkCentre profiles, falls
@@ -625,7 +666,7 @@ Nix and Arch packaging list `tpm2-tools`, `libfido2`, and `fprintd` only
 as optional host-integration tools. The Lean wallet does not link to
 those libraries or trust them as crypto implementations.
 
-`script/leanclispawn` ends each install with a TPM2 readiness probe and
+`ops/scripts/leanclispawn` ends each install with a TPM2 readiness probe and
 prints the exact distro-specific install line (`pacman` / `apt` /
 `dnf`) when `tpm2-tools` is missing, plus the `usermod -aG tss $USER`
 hint when device permissions block access — so users who want
@@ -639,13 +680,13 @@ post-install verification: `tpmHardwareReady: true` means
 `LeanCli.Wallet.Account` defines:
 
 - regular BIP-39/BIP-32 Ethereum EOAs (k1) — proven local-only;
-- local hardware-backed P-256/R1 smart accounts — proven local-only;
 - *(experimental, Sepolia)* SPHINCS+ hybrid accounts — abstract Lean
   model proved (Cat 12), runtime depends on the Sepolia-deployed
   `SphincsAccount.sol` plus the C9 verifier and EntryPoint v0.9.
 
 Mainnet policies are the defaults; Sepolia policies are available for
-explicit dev/testnet use.
+explicit dev/testnet use. (The earlier R1/P-256 smart-account family was
+removed; TPM2 now backs master-KEK custody rather than an account kind.)
 
 ## SPHINCS+ hybrid account (experimental, Sepolia)
 
@@ -697,34 +738,36 @@ Summary:
 
 | # | Invariant | Status |
 |---|-----------|--------|
-| 0.1–0.5 | Verified-core properties (no exfil, no raw signing, chain match, approval, R1/EIP-7702 guardrails) | ✅ |
+| 0.1–0.5 | Verified-core properties (no exfil, no raw signing, chain match, approval, EIP-7702 guardrails) | ✅ |
 | 1.1, 1.2 | Checked subtraction; multi-output sends conserve total | ✅ |
 | 2.1, 2.3 | EIP-1559 fee relation; chain-ID match | ✅ (by definition) |
 | 2.2 | Calldata-aware intrinsic gas lower bound | 🚧 |
-| 3.1–3.3 | Signed-amount integrity / deterministic nonce / R1 verifiability | 📝 |
+| 3.1, 3.2 | Signed-amount integrity / deterministic nonce | 📝 |
 | 4.1, 4.2 | RLP / hex roundtrip | 🚧 |
 | 4.3, 4.4 | Account policies; JSON destructors | ✅ |
 | 5.1, 5.2 | Railgun no-double-spend / shield conservation | 📝 (future) |
 | 5.3 | Bridge cannot return spending-key material | 🔒 by-construction |
-| 5.7 | Bridge methods policy-classified (runtime gate pending) | 🚧 |
+| 5.7 | Bridge methods policy-classified + runtime gate (no shielded egress without policy permission) | ✅ |
 | 5.8–5.11 | Bridge response framing; CLI preflight; modeled provider ops; endpoint hygiene | ✅ |
 | 6.1–6.6 | Network policy | ✅ |
 | 7.1–7.3 | Provider policy | ✅ |
-| 8.1–8.5 | Keystore | ✅ |
-| 9.1 | EIP-7951 precompile constants and chain ids | ✅ |
-| 10.1, 10.2 | R1 account contract | ✅ |
+| 8.1–8.3, 8.5 | Keystore (local-only, no export, user-auth, TPM2 profiles) | ✅ |
+| 8.6, 8.7 | Master KEK never leaves daemon; PP/EOA secrets split | 🔒 axiomatized |
 | 11.1, 11.2 | Uniswap V3 swap helper | ✅ |
 | 12.1–12.7 | SPHINCS+ hybrid account contract | ✅ |
-| 13.1–13.10 | Cryptographic primitives + helper integrity | 🔒 axiomatized |
+| 14.1 | LLM-agent address resolution (`.verified` is derivation-backed) | ✅ |
+| 13.1–13.7, 13.9, 13.10 | Cryptographic primitives + helper integrity | 🔒 axiomatized |
 
 ## Documentation
 
 - [CLI](./docs/CLI.md)
 - [Daemon](./docs/DAEMON.md) — full RPC catalog
 - [Architecture](./docs/ARCHITECTURE.md) — module map, sidecars, TUI
+- [Plugin architecture](./docs/PLUGIN_ARCHITECTURE.md) — Kohaku provider/privacy host
+- [Crypto policy](./docs/CRYPTO_POLICY.md) — one-library-per-primitive pins
+- [Native shims](./native/README.md) — FFI + crypto helper dependencies
 - [Security](./SECURITY.md) — trust boundary statement
 - [Privacy and Security](./docs/PRIVACY_SECURITY.md)
-- [Sepolia R1 account dev flow](./docs/R1_SEPOLIA.md)
 
 ## License
 
