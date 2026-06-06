@@ -169,7 +169,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                       let quoter := LeanCli.Swap.UniV3.quoterFor chainId
                       let router := LeanCli.Swap.UniV3.routerFor chainId
                       let fees : List Nat := [500, 3000, 10000]
-                      let via? ← colibriVia state chainId.toNat
+                      let via? ← verifiedReadVia state chainId.toNat ep
                       let mut best : Option (Nat × Nat) := none
                       for fee in fees do
                         let data := LeanCli.Swap.UniV3.encodeQuoteExactInputSingle
@@ -270,7 +270,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                             LeanCli.Swap.UniV3.encodeMulticall [exactCall, unwrapCall]
                           let allowanceData :=
                             LeanCli.Swap.UniV3.encodeAllowance fromAddr router
-                          let via? ← colibriVia state chainId.toNat
+                          let via? ← verifiedReadVia state chainId.toNat ep
                           let approval ←
                             (do
                               match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep tinAddr allowanceData "latest" via? with
@@ -323,7 +323,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                                 amountOutMinimum := amountOutMin }
                           let allowanceData :=
                             LeanCli.Swap.UniV3.encodeAllowance fromAddr router
-                          let via? ← colibriVia state chainId.toNat
+                          let via? ← verifiedReadVia state chainId.toNat ep
                           let approval ←
                             (do
                               match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep tinAddr allowanceData "latest" via? with
@@ -399,7 +399,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
           | .ok ep =>
               let shim : LeanCli.Swap.Prepare.ChainEthCallShim :=
                 fun to data chainIdForCall => do
-                  let via? ← colibriVia state chainIdForCall
+                  let via? ← verifiedReadVia state chainIdForCall ep
                   match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep to data "latest" via? with
                   | .ok ret =>
                       match asString ret with

@@ -439,7 +439,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                     | none =>
                         pure (d.note s!"ENS resolution unavailable: set ens_rpc_url to auto-resolve {s}")
                     | some ensEp =>
-                        let viaEns? ← colibriVia state 1
+                        let viaEns? ← verifiedReadVia state 1 ensEp
                         match ← LeanCli.Ethereum.Ens.resolveIO cfg.policy ensEp 1 s viaEns? with
                         | .ok r =>
                             pure ((d.setField key r.address).note s!"resolved {s} → {r.address}")
@@ -837,7 +837,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                           (regex.field? "slippage") >>= parseSlippagePctToBps
                         let shim : LeanCli.Swap.Prepare.ChainEthCallShim :=
                           fun to data cid => do
-                            let via? ← colibriVia state cid
+                            let via? ← verifiedReadVia state cid ep
                             match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep to data "latest" via? with
                             | .ok ret =>
                                 match asString ret with

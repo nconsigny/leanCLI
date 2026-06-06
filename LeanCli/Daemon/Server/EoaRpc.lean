@@ -378,7 +378,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                                     | .ok ep =>
                                         let cid := (LeanCli.RPC.Outbound.chainNameToId name).getD cfg.chainId
                                         { cfg with rpcEndpoint := ep, chainId := cid }
-                              let via? ← colibriVia state cfgEff.chainId
+                              let via? ← verifiedReadVia state cfgEff.chainId cfgEff.rpcEndpoint
                               let r ← buildSignBroadcastTx cfgEff slot' privateKey to toAddress value data none (some notify) via?
                               -- Why: best-effort journal write; never fails the tx.
                               match r with
@@ -438,7 +438,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                       match LeanCli.Ethereum.Address.fromHex fromAddr with
                       | none => pure (.error invalidParams)
                       | some selfAddr =>
-                          let via? ← colibriVia state cfgEff.chainId
+                          let via? ← verifiedReadVia state cfgEff.chainId cfgEff.rpcEndpoint
                           let r ← buildSignBroadcastTx cfgEff slot' privateKey fromAddr selfAddr 0
                             ByteArray.empty (some nonce) (some notify) via? (some tipWei)
                           match r with

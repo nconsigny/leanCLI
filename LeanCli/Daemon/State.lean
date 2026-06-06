@@ -508,4 +508,45 @@ def buildColibriVia (state : Shared) (chainId : Nat) :
                       pure (.transportDead s!"second crash after respawn: {reason2}")
       pure (some { chainId := chainId, runCall := runCall })
 
+/-- One proofable read through the persistent Helios client. Mirrors
+    `runColibriOnce`, but Helios's `eth.proxy` additionally requires the
+    untrusted `executionRpc` it fetches proofs from and verifies against the
+    sync-committee state root. Maps the transport-crash case to
+    `.transportDead` so `Outbound.call` falls back to the configured HTTP
+    endpoint (flagged unverified) rather than hanging. -/
+private def runHeliosOnce (client : LeanCli.Helios.Persistent.Client)
+    (chainId : Nat) (executionRpc : String)
+    (method : LeanCli.Network.Provider.RpcMethod)
+    (params : LeanCli.Encoding.Json.Json) :
+    IO LeanCli.RPC.Outbound.ColibriOutcome := do
+  let proxyParams : LeanCli.Encoding.Json.Json := .obj #[
+    ("chainId",      .num (Int.ofNat chainId)),
+    ("executionRpc", .str executionRpc),
+    ("method",       .str method.asString),
+    ("params",       params)
+  ]
+  let resp ← LeanCli.Helios.Persistent.call client "eth.proxy" proxyParams
+  match resp with
+  | .ok j => pure (.ok j)
+  | .err code msg _ => pure (.rpcError s!"helios rpc-error code={code}: {msg}")
+  | .crash reason => pure (.rpcError s!"helios transport: {reason}")
+  | .transportCrash reason => pure (.transportDead reason)
+
+/-- Build the verified-read backend if the persistent Helios client is
+    running. Parallel to `buildColibriVia` — returns `none` when helios is
+    off so reads fall through to direct HTTP. `executionRpc` is threaded per
+    call (Helios is multi-chain: ENS reads on mainnet, balances on the
+    daemon's chain, …), so the caller supplies the resolved endpoint URL.
+    Note: the Helios sidecar bypasses `eth_getLogs` to raw RPC today (see
+    `Helios/Bridge.lean`); Phase 3 tiers logs (helios recent / colibri deep)
+    and the verdict surfaces whether a given read was actually verified. -/
+def buildHeliosVia (state : Shared) (chainId : Nat) (executionRpc : String) :
+    IO (Option LeanCli.RPC.Outbound.VerifyVia) := do
+  match ← heliosClient? state with
+  | none => pure none
+  | some client =>
+      let runCall := fun method params =>
+        runHeliosOnce client chainId executionRpc method params
+      pure (some { chainId := chainId, runCall := runCall })
+
 end LeanCli.Daemon.State

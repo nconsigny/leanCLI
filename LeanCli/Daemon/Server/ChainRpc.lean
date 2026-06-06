@@ -105,7 +105,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                     | .ok ep =>
                         let cid := (LeanCli.RPC.Outbound.chainNameToId name).getD cfg.chainId
                         { cfg with rpcEndpoint := ep, chainId := cid }
-              let via? ← colibriVia state cfgEff.chainId
+              let via? ← verifiedReadVia state cfgEff.chainId cfgEff.rpcEndpoint
               match ← LeanCli.RPC.Outbound.getTransactionCount cfgEff.policy cfgEff.rpcEndpoint address block via? with
               | .ok nonce =>
                   pure <| .ok <| .obj #[
@@ -209,14 +209,14 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                                 ("reason", .str "eth_getLogs unavailable on this RPC")
                               ]
   | "chain.gasPrice" =>
-      let via? ← colibriVia state cfg.chainId
+      let via? ← verifiedReadVia state cfg.chainId cfg.rpcEndpoint
       match ← LeanCli.RPC.Outbound.gasPrice cfg.policy cfg.rpcEndpoint via? with
       | .ok gasPrice =>
           pure <| .ok <| .obj #[("gasPrice", gasPrice)]
       | .error err =>
           pure <| .error { code := -32020, message := "chain RPC failed", data := some (.str err) }
   | "chain.maxPriorityFeePerGas" =>
-      let via? ← colibriVia state cfg.chainId
+      let via? ← verifiedReadVia state cfg.chainId cfg.rpcEndpoint
       match ← LeanCli.RPC.Outbound.maxPriorityFeePerGas cfg.policy cfg.rpcEndpoint via? with
       | .ok maxPriorityFeePerGas =>
           pure <| .ok <| .obj #[("maxPriorityFeePerGas", maxPriorityFeePerGas)]
@@ -227,7 +227,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       | .error err => pure (.error err)
       | .ok tx =>
           let block := paramStringD req.params "block" "latest"
-          let via? ← colibriVia state cfg.chainId
+          let via? ← verifiedReadVia state cfg.chainId cfg.rpcEndpoint
           match ← LeanCli.RPC.Outbound.estimateGas cfg.policy cfg.rpcEndpoint tx block via? with
           | .ok gas =>
               pure <| .ok <| .obj #[
@@ -257,7 +257,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               | .ok ep =>
                   let chainIdParam :=
                     ((getField "chainId" req.params) >>= asNat).getD cfg.chainId
-                  let via? ← colibriVia state chainIdParam
+                  let via? ← verifiedReadVia state chainIdParam ep
                   match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep to data block via? with
                   | .ok ret =>
                       pure <| .ok <| .obj #[
@@ -276,7 +276,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
           | some _, some ownerAddr =>
               let block := paramStringD req.params "block" "latest"
               let data := erc20BalanceOfData ownerAddr
-              let via? ← colibriVia state cfg.chainId
+              let via? ← verifiedReadVia state cfg.chainId cfg.rpcEndpoint
               match ← LeanCli.RPC.Outbound.ethCall cfg.policy cfg.rpcEndpoint token data block via? with
               | .ok balance =>
                   pure <| .ok <| .obj #[
@@ -323,7 +323,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                 data := none }
           | some ensEndpoint =>
               -- ENS is mainnet (chainId 1), independent of cfg.chainId.
-              let viaEns? ← colibriVia state 1
+              let viaEns? ← verifiedReadVia state 1 ensEndpoint
               match ← LeanCli.Ethereum.Ens.resolveIO cfg.policy ensEndpoint 1 name viaEns? with
               | .ok r =>
                   pure <| .ok <| .obj #[
@@ -426,7 +426,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                     | none => pure 5000
               let chainIdForScan :=
                 ((getField "chainId" req.params) >>= asNat).getD cfg.chainId
-              let viaScan? ← colibriVia state chainIdForScan
+              let viaScan? ← verifiedReadVia state chainIdForScan scanEndpoint
               -- Resolve fromBlock/toBlock.
               let fromBlock ← do
                 match getField "fromBlock" req.params >>= asNat with

@@ -82,6 +82,32 @@ def colibriVia (state : LeanCli.Daemon.State.Shared) (chainId : Nat) :
     IO (Option LeanCli.RPC.Outbound.VerifyVia) :=
   LeanCli.Daemon.State.buildColibriVia state chainId
 
+/-- Helios verified-read backend (parallel to `colibriVia`). `executionRpc`
+    is the untrusted source Helios fetches proofs from and verifies against
+    the sync-committee state; supply the resolved endpoint URL for the chain
+    being read. -/
+def heliosVia (state : LeanCli.Daemon.State.Shared) (chainId : Nat)
+    (executionRpc : String) : IO (Option LeanCli.RPC.Outbound.VerifyVia) :=
+  LeanCli.Daemon.State.buildHeliosVia state chainId executionRpc
+
+/-- Provider-aware verified-read selector — the single point that maps the
+    daemon's active read backend (single-select provider) onto the right
+    light client for EVERY proofable read:
+      * `helios`  → `heliosVia` (uses `endpoint.url` as executionRpc)
+      * `colibri` → `colibriVia`
+      * `rpc`     → `none` (direct, unverified)
+    Read sites pass this to `Outbound.*`. Before this, the read path was
+    hardwired to `colibriVia`, so `provider=helios` left general reads
+    (balance, allowance, nonce, …) on unverified direct RPC while only
+    `tx.simulate` went through helios. -/
+def verifiedReadVia (state : LeanCli.Daemon.State.Shared) (chainId : Nat)
+    (endpoint : LeanCli.RPC.Outbound.Endpoint) :
+    IO (Option LeanCli.RPC.Outbound.VerifyVia) := do
+  match ← LeanCli.Daemon.State.getReadBackend state with
+  | .colibri => colibriVia state chainId
+  | .helios  => heliosVia state chainId endpoint.url
+  | .rpc     => pure none
+
 /-- Resolve an RPC endpoint from a request. Honors an explicit `chain`
     string in `params` first; falls back to a tiny chainId → name map for
     the common cases (1 → "mainnet", 11155111 → "sepolia") so callers that

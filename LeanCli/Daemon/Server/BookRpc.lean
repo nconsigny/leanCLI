@@ -74,7 +74,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
             | none =>
                 pure <| .error { code := -32030, message := "no ENS RPC configured; cannot resolve before adding", data := none }
             | some ensEp =>
-                let viaEns? ← colibriVia state 1
+                let viaEns? ← verifiedReadVia state 1 ensEp
                 match ← LeanCli.Ethereum.Ens.resolveIO cfg.policy ensEp 1 addrOrEns viaEns? with
                 | .error (code, msg) =>
                     pure <| .error { code := code, message := msg, data := none }

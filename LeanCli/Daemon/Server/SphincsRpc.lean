@@ -801,7 +801,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                                       match LeanCli.Ethereum.Address.fromHex factory with
                                       | none => pure (.error invalidParams)
                                       | some factoryAddr =>
-                                          let via? ← colibriVia state cfgEff.chainId
+                                          let via? ← verifiedReadVia state cfgEff.chainId cfgEff.rpcEndpoint
                                           match ← buildSignBroadcastTx cfgEff dslot' privKey factory factoryAddr 0 dataBytes none none via? with
                                           | .error e => pure (.error e)
                                           | .ok j =>

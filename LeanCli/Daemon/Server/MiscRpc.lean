@@ -84,7 +84,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
           | .ok ep =>
               let shim : LeanCli.Aave.Prepare.ChainEthCallShim :=
                 fun to data chainIdForCall => do
-                  let via? ← colibriVia state chainIdForCall
+                  let via? ← verifiedReadVia state chainIdForCall ep
                   match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep to data "latest" via? with
                   | .ok ret =>
                       match asString ret with
