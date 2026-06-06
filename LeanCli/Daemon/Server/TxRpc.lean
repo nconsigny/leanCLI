@@ -324,7 +324,26 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               -- from direct RPC or a number from a sidecar.
               let gasHint? := getField "gasEstimate" simJson >>= jsonHexOrNat?
               let affordField ← affordabilityField cfg.policy endpoint from? value block gasHint?
-              pure <| .ok <| mergeFields simJson affordField
+              -- Honest verification verdict (Phase 1). The daemon knows which
+              -- backend executed this simulation, so it never has to guess:
+              --   helios/colibri → consensus-verified; rpc → unverified.
+              -- `provenAtBlock` is the consensus-verified head the sidecar
+              -- ran against (helios/colibri report it nested under `result`);
+              -- `block` is the height the caller targeted. The TUI renders
+              -- this instead of a hardcoded "configured RPC" source string,
+              -- so a `✓ verified` badge can never appear over a raw-RPC sim.
+              let isVerified : Bool := match backend with | .rpc => false | _ => true
+              let provenBlock? : Option Json :=
+                getField "result" simJson >>= getField "provenAtBlock"
+              let verifFields : Array (String × Json) := #[
+                ("_verification", .obj <| #[
+                  ("verified",   .bool isVerified),
+                  ("verifiedBy", .str backend.asString),
+                  ("block",      .str block)
+                ] ++ (match provenBlock? with
+                      | some b => #[("provenAtBlock", b)]
+                      | none   => #[]))]
+              pure <| .ok <| mergeFields (mergeFields simJson affordField) verifFields
   | "tx.preflightContext" =>
       -- Why: surface "what does the chain currently say?" alongside the
       -- deterministic simulate output. For approves we read the current

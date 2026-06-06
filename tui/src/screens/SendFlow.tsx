@@ -7,7 +7,7 @@ import Form, { Field } from "../widgets/Form.js";
 import RpcRunner from "../widgets/RpcRunner.js";
 import { call } from "../daemon.js";
 import { theme } from "../theme.js";
-import { formatEth, hexToBigInt, shortAddr } from "../format.js";
+import { formatEth, hexToBigInt, shortAddr, verificationSourceLine } from "../format.js";
 import { TransfersBlock } from "../widgets/TransfersBlock.js";
 import { ProvenancePanel } from "../widgets/ProvenancePanel.js";
 import UnlockEoaStep from "./UnlockEoaStep.js";
@@ -670,9 +670,7 @@ function ColibriBlock({ colibri }: { colibri: any }) {
  *  Same shape as the SendRawFlow helper but kept local to avoid a
  *  circular dependency between the two screens. */
 function sendFlowSimSourceLines(sim: any): string[] {
-  const lines: string[] = [
-    "eth_call + eth_estimateGas on the configured RPC endpoint (untrusted execution node)",
-  ];
+  const lines: string[] = [verificationSourceLine(sim)];
   if (sim?.traceUnavailable) {
     lines.push("debug_traceCall not exposed by this RPC — token-flow trace unavailable");
   } else if (sim?.trace) {

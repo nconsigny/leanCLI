@@ -6,7 +6,7 @@ import { Layout, Banner } from "../widgets/Layout.js";
 import RpcRunner from "../widgets/RpcRunner.js";
 import { call } from "../daemon.js";
 import { theme } from "../theme.js";
-import { hexToBigInt, shortAddr } from "../format.js";
+import { hexToBigInt, shortAddr, verificationSourceLine } from "../format.js";
 import { SlotKind } from "../types.js";
 import { TransfersBlock } from "../widgets/TransfersBlock.js";
 import { ProvenancePanel } from "../widgets/ProvenancePanel.js";
@@ -624,9 +624,7 @@ function PreflightBlock({ preflight }: { preflight: any }) {
  *  reflecting which RPC primitives the daemon actually used. The trace
  *  line only appears when the daemon attempted `debug_traceCall`. */
 function simulationSourceLines(sim: any): string[] {
-  const lines: string[] = [
-    "eth_call + eth_estimateGas on the configured RPC endpoint (untrusted execution node)",
-  ];
+  const lines: string[] = [verificationSourceLine(sim)];
   if (sim?.traceUnavailable) {
     lines.push("debug_traceCall not exposed by this RPC — token-flow trace unavailable");
   } else if (sim?.trace) {

@@ -143,7 +143,18 @@ async function dispatch(method, params, id) {
           method: "colibri_simulateTransaction",
           params: [txObj, block],
         });
-        return ok(id, stripSyntheticLogs(result));
+        // Block this simulation was verified against, so the daemon can
+        // report an honest height (block height proven against). Best-effort.
+        let provenAtBlock = null;
+        try {
+          provenAtBlock = await getClient(chainId).request({
+            method: "eth_blockNumber",
+            params: [],
+          });
+        } catch {
+          // leave null; daemon still reports verifiedBy=colibri
+        }
+        return ok(id, { ...stripSyntheticLogs(result), provenAtBlock });
       } catch (e) {
         return err(id, -32603, `simulate failed: ${e?.message ?? e}`, {
           stack: String(e?.stack ?? ""),

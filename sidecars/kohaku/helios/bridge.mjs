@@ -282,7 +282,21 @@ async function dispatch(method, params, id) {
           // didn't already capture one from eth_call above.
           if (revertReason == null) revertReason = e?.message ?? String(e);
         }
-        return ok(id, { gasUsed, returnValue, revertReason });
+        // The block this simulation was verified against. For "latest"
+        // we ask helios for its consensus-verified head so the daemon can
+        // report an honest height (block height proven against), not just
+        // the literal "latest" the caller passed.
+        let provenAtBlock = null;
+        try {
+          provenAtBlock =
+            block === "latest" || block === "pending"
+              ? await provider.request({ method: "eth_blockNumber", params: [] })
+              : block;
+        } catch {
+          // best-effort; the daemon still reports verifiedBy=helios without
+          // a height if the head lookup fails.
+        }
+        return ok(id, { gasUsed, returnValue, revertReason, provenAtBlock });
       } catch (e) {
         return err(id, -32603, `simulate failed: ${e?.message ?? e}`, {
           stack: String(e?.stack ?? ""),

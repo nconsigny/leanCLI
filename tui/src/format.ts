@@ -77,3 +77,23 @@ export function parseEthToWei(s: string): bigint | null {
 export function bigIntToHex(n: bigint): string {
   return "0x" + n.toString(16);
 }
+
+/** Honest "source" line for a simulation panel, derived from the daemon's
+ *  `_verification` verdict — which backend actually executed the sim and the
+ *  block height proven against. Never claims verification for a raw-RPC sim:
+ *  the badge must reflect what was cryptographically checked, not merely
+ *  which backend the request was routed to. Shared by every confirm screen
+ *  (SendRaw / Send / DecodeIntent) so the wording can't drift between them. */
+export function verificationSourceLine(sim: any): string {
+  const v = sim?._verification;
+  const blk = v?.provenAtBlock;
+  const at =
+    blk != null
+      ? ` @ block ${typeof blk === "string" && blk.startsWith("0x") ? parseInt(blk, 16) : blk}`
+      : "";
+  if (v?.verifiedBy === "helios")
+    return `eth_call + eth_estimateGas via Helios — consensus-verified REVM${at}`;
+  if (v?.verifiedBy === "colibri")
+    return `eth_call + eth_estimateGas via Colibri — committee-verified${v?.verified ? "" : " (proof unconfirmed)"}${at}`;
+  return "eth_call + eth_estimateGas on the configured RPC endpoint — UNVERIFIED (untrusted execution node)";
+}

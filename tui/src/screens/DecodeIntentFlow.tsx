@@ -4,6 +4,7 @@ import Spinner from "ink-spinner";
 import { Layout, Banner } from "../widgets/Layout.js";
 import Form, { Field } from "../widgets/Form.js";
 import { call } from "../daemon.js";
+import { verificationSourceLine } from "../format.js";
 import { theme } from "../theme.js";
 import { TransfersBlock } from "../widgets/TransfersBlock.js";
 import { ProvenancePanel } from "../widgets/ProvenancePanel.js";
@@ -135,9 +136,7 @@ export default function DecodeIntentFlow({ onDone }: Props) {
  *  panel — the daemon RPC is identical (`tx.simulate` → eth_call +
  *  eth_estimateGas + optional debug_traceCall on the untrusted RPC). */
 function decodeIntentSimSourceLines(sim: any): string[] {
-  const lines: string[] = [
-    "eth_call + eth_estimateGas on the configured RPC endpoint (untrusted execution node)",
-  ];
+  const lines: string[] = [verificationSourceLine(sim)];
   if (sim?.traceUnavailable) {
     lines.push("debug_traceCall not exposed by this RPC — token-flow trace unavailable");
   } else if (sim?.trace) {
