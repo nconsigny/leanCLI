@@ -218,6 +218,44 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
         ("outcome", .str outcome.toString),
         ("baseUrl", .str baseUrl)
       ] ++ modelField
+  | "llm.models" =>
+      -- Predefined llama.cpp launch profiles for the dashboard picker.
+      -- Read-only: returns name + description; the verbatim args/binary
+      -- stay daemon-side. Empty list ⇒ LLM_MODELS_CONFIG unset/missing.
+      let models ← LeanCli.Daemon.LlmServer.loadModels
+      let arr : Array Json := models.map (fun m =>
+        .obj <| #[("name", .str m.name)] ++
+          (match m.description with
+           | some d => #[("description", .str d)]
+           | none   => #[]))
+      -- The resolved config path lets the picker tell the operator exactly
+      -- where to drop a profiles file when the list is empty.
+      let pathField : Array (String × Json) :=
+        match ← LeanCli.Daemon.LlmServer.modelsConfigPath with
+        | some p => #[("configPath", .str p)]
+        | none   => #[]
+      pure <| .ok <| .obj <| #[("models", .arr arr)] ++ pathField
+  | "llm.launch" =>
+      -- Switch the local model: stop the running llama-server and spawn
+      -- the named profile (kill-then-launch, since :8080 is single-bind).
+      -- Purely an operator convenience for the read/chat backend — it
+      -- never touches signing; the trust boundary is unchanged.
+      match getField "name" req.params >>= asString with
+      | none =>
+          pure <| .error { code := -32602, message := "llm.launch requires a string `name`", data := none }
+      | some name =>
+          let models ← LeanCli.Daemon.LlmServer.loadModels
+          match models.find? (fun m => m.name = name) with
+          | none =>
+              pure <| .error { code := -32024, message := s!"no model profile named {name}", data := none }
+          | some spec =>
+              let outcome ← LeanCli.Daemon.LlmServer.launchModel spec
+              let baseUrl := ((← IO.getEnv "LLM_BASE_URL").getD "http://127.0.0.1:8080/v1")
+              pure <| .ok <| .obj #[
+                ("outcome", .str outcome.toString),
+                ("baseUrl", .str baseUrl),
+                ("model", .str spec.name)
+              ]
   | "llm.parseIntent" =>
       -- Forward the prompt + regex seed + chainId to the LLM sidecar,
       -- which returns the raw model output (a JSON string) unchanged.

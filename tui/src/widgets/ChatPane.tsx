@@ -48,6 +48,11 @@ type Props = {
   isFocused: boolean;
   /** Content line budget (pane height minus border/title rows). */
   contentHeight: number;
+  /** Show the welcome-state Kohaku koi. The dashboard sets this only when
+   *  chat occupies the MAIN pane — a demoted side-column chat suppresses
+   *  it so the koi is the main pane's identity cue, not a side decoration.
+   *  Defaults to true (full-screen le-chat keeps the koi). */
+  showKoi?: boolean;
   modelName?: string;
   onApprove?: (
     tx: { to: string; value: string; data: string; rationale?: string; canonical?: string },
@@ -65,6 +70,7 @@ export default function ChatPane({
   wallets,
   isFocused,
   contentHeight,
+  showKoi = true,
   modelName,
   onApprove,
   onCreateWallet,
@@ -406,7 +412,7 @@ export default function ChatPane({
         // The koi is 24×12; only render it when the pane has the room,
         // and it costs nothing once the conversation starts (this whole
         // block is replaced by the transcript below).
-        contentHeight >= 14 ? (
+        showKoi && contentHeight >= 14 ? (
           <Box flexDirection="row">
             <Box width={24} minWidth={24} height={12} flexShrink={0} marginRight={2}>
               <AnimatedKoi size="tiny" />
@@ -535,10 +541,18 @@ function turnToLines(
   }
   const r = t.result;
   if (!r) return [];
+  // Head label: a friendly action name for a drafted intent, else the
+  // model's plain-text answer, else a neutral dash. Deliberately NOT the
+  // raw regex action ("swap" / "unknown") — that read as a cryptic
+  // one-word reply with no explanation.
+  const head =
+    r.intentActionTag ? friendlyAction(r.intentActionTag)
+    : (r.llmRaw && r.llmRaw.trim().length > 0) ? r.llmRaw.trim()
+    : "—";
   const lines: React.ReactElement[] = [
     <Text key={k("h")} wrap="truncate-end">
       <Text color={theme.ok} bold>{"› le chat  "}</Text>
-      <Text>{r.intentActionTag ? friendlyAction(r.intentActionTag) : (r.regex?.action ?? "answer")}</Text>
+      <Text>{head}</Text>
     </Text>,
   ];
   if (r.modelAsk) {
@@ -549,7 +563,7 @@ function turnToLines(
       </Text>,
     );
   }
-  const firstErr = r.llmError ?? r.validateError ?? r.encodeError;
+  const firstErr = r.swapError ?? r.llmError ?? r.validateError ?? r.encodeError;
   if (firstErr) {
     lines.push(
       <Text key={k("err")} wrap="truncate-end" color={theme.err}>
@@ -570,7 +584,9 @@ function turnToLines(
   if (r.encoded && isLatestSignable) {
     lines.push(
       <Text key={k("sig")} wrap="truncate-end" color={theme.dim}>
-        {"  ↳ draft ready — confirm screen shows decoded action + simulation before any signature"}
+        {"  ↳ ready to sign: "}
+        {friendlyAction(r.intentActionTag)}
+        {" — confirm screen shows the full decode + simulation before any signature"}
       </Text>,
     );
   }

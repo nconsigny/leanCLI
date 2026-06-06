@@ -518,6 +518,24 @@ private def chainEndpointJson
     ("isCurrent", .bool isCurrent)
   ]
 
+/-- Active read provider + per-light-client run state, read from the
+    *persistent* clients (NOT a fresh `--rpc ping` spawn — a one-shot helios
+    spawn is expensive, which is why helios is absent from the `sidecars`
+    ping loop above). Mirrors the single-select provider model: exactly one
+    of helios/colibri is expected running, matching `readBackend`. `oram`
+    reflects whether the SafeNode TDX proxy layer is active. -/
+private def providerJson (state : LeanCli.Daemon.State.Shared) : IO Json := do
+  let backend ← LeanCli.Daemon.State.getReadBackend state
+  let helios  ← LeanCli.Daemon.State.heliosClient? state
+  let colibri ← LeanCli.Daemon.State.colibriClient? state
+  let oram    ← LeanCli.Daemon.State.safeNodeClient? state
+  pure <| .obj #[
+    ("provider", .str backend.asString),
+    ("helios",  .obj #[("running", .bool helios.isSome)]),
+    ("colibri", .obj #[("running", .bool colibri.isSome)]),
+    ("oram",    .obj #[("running", .bool oram.isSome)])
+  ]
+
 /-- Build the full snapshot. `chainId`/`policy` are mirrored from the
     daemon config so the Status page's Network sub-section can render
     without an extra `network.show` round-trip. The per-chain endpoint
@@ -547,6 +565,7 @@ def buildSnapshot
         ("pingError", .str "snapshot task failed")
       ])
   let daemon ← daemonJson state
+  let provider ← providerJson state
   let sandbox ← sandboxJson
   let versions ← versionsJson
   let wallet ← walletJson state
@@ -557,6 +576,7 @@ def buildSnapshot
   let chainsJson ← chainEndpoints.mapM (chainEndpointJson chainId)
   pure <| .obj #[
     ("daemon", daemon),
+    ("provider", provider),
     ("sidecars", .arr sidecarResults),
     ("sandbox", sandbox),
     ("versions", versions),

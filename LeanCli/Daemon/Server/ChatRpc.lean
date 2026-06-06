@@ -20,6 +20,7 @@ import LeanCli.LlmAgent.IntentParser
 import LeanCli.LlmAgent.RuleParser
 import LeanCli.RPC.Outbound
 import LeanCli.RPC.Server
+import LeanCli.Swap.Prepare
 import LeanCli.Util.Units
 
 /-!
@@ -340,6 +341,60 @@ private def chatDraftIntentResponse
               ("chainId", .num (Int.ofNat chainId))
             ])
           ]
+
+/-- `"0.5%"` / `"0.5"` → `50` bps; `"1%"` → `100`. Strips a trailing `%`
+    and reads the percentage with two implied decimals (pct × 100 = bps,
+    which is exactly `parseUnits pct 2`). `none` on a non-numeric body. -/
+private def parseSlippagePctToBps (s : String) : Option Nat :=
+  let body := if s.endsWith "%" then (s.take (s.length - 1)).toString else s
+  LeanCli.Util.Units.parseUnits body 2
+
+/-- Encode a `Swap.Prepare.TxFrame` as the `encoded` object the TUI feeds
+    into `tx.simulate` + ConfirmGate. `value` is a `0x`-quantity STRING,
+    never a JSON number (JS `JSON.parse` would round wei > 2^53). -/
+private def swapFrameEncoded (f : LeanCli.Swap.Prepare.TxFrame) (chainId : Nat) : Json :=
+  .obj #[
+    ("to",      .str f.to),
+    ("value",   .str (natQuantityHex f.value)),
+    ("data",    .str f.data),
+    ("chainId", .num (Int.ofNat chainId))
+  ]
+
+/-- Map a deterministic `prepareUniswapV3Swap` result into a `chat.draft`
+    response. `.ready` drafts the swap leg directly; `.needsApproval`
+    drafts the ERC-20 approve leg FIRST — re-issuing the same swap prompt
+    after it broadcasts yields leg 2 (allowance now suffices), matching the
+    EOA "one leg per confirm" model. Both land in the standard `encoded`
+    shape so the TUI's existing simulate → ConfirmGate path renders them
+    unchanged. `.err` surfaces a deterministic `swapError` rather than
+    detouring through the LLM. -/
+private def swapResultToDraftJson
+    (result : LeanCli.Swap.Prepare.PrepareResult)
+    (baseFields : Array (String × Json)) (chainId : Nat) : Json :=
+  let common := baseFields ++ #[("backend", .str "wallet-direct-swap")]
+  match result with
+  | .ready swap _ _ _ _ _ summary =>
+      .obj <| common ++ #[
+        ("intentActionTag", .str "uniswapV3SwapSingle"),
+        ("canonical",       .str summary),
+        ("encoded",         swapFrameEncoded swap chainId)
+      ]
+  | .needsApproval approve _ _ _ _ _ _ _ _ summary =>
+      .obj <| common ++ #[
+        ("intentActionTag", .str "erc20Approve"),
+        ("canonical",       .str s!"Approve router (leg 1 of 2) — then {summary}"),
+        ("swapNote",        .str "router approval first; re-issue the swap to broadcast leg 2"),
+        ("encoded",         swapFrameEncoded approve chainId)
+      ]
+  | .err kind msg =>
+      -- Give the failure a friendly head + one-line reason (no `encoded`,
+      -- so it is NOT signable) instead of letting the TUI fall back to the
+      -- bare regex action "swap" with the cause hidden.
+      .obj <| common ++ #[
+        ("intentActionTag", .str "uniswapV3SwapSingle"),
+        ("canonical",       .str s!"Swap not prepared ({kind})"),
+        ("swapError",       .str msg)
+      ]
 
 /-- Handle every `chat.*` JSON-RPC method. -/
 def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
@@ -744,6 +799,66 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   (some "wallet-direct")
                   chainId
           match earlyReturn with
+          | some j => return .ok j
+          | none   => pure ()
+          -- 1f. Chain-aware swap short-circuit (no LLM). The regex already
+          -- recognizes `swap <a> <X> to <Y>` (and the `with <name>` signing
+          -- hint); here we COMPLETE the missing fields deterministically
+          -- rather than hand the prompt to the agent — which free-plans and
+          -- tends to draft a bare approve. Same engine as
+          -- `swap.prepareUniswapV3`: on-chain QuoterV2 quote → minOut at the
+          -- default-or-stated slippage, allowance read → approve leg when
+          -- needed. Reads are policy-gated; the calldata still flows through
+          -- tx.simulate → ConfirmGate. Falls back to the LLM only when the
+          -- pre-quote inputs (sender / token / amount) don't parse.
+          let swapEarly : Option Json ← do
+            let isSwap :=
+              (regex.action == LeanCli.Ethereum.Intent.Action.swap)
+                && (regex.confidence != LeanCli.Ethereum.Intent.Confidence.rejected)
+            if !isSwap then pure none
+            else
+              match effectiveSenderAddr?, regex.field? "amountIn",
+                    regex.field? "tokenIn", regex.field? "tokenOut" with
+              | some sender, some amtHuman, some tokenIn, some tokenOut =>
+                  match decimalsForAsset tokenIn with
+                  | none => pure none
+                  | some d =>
+                    match LeanCli.Util.Units.parseUnits amtHuman d with
+                    | none => pure none
+                    | some amountBase =>
+                      let chainName : Option String :=
+                        if chainId = 1 then some "mainnet"
+                        else if chainId = 11155111 then some "sepolia" else none
+                      match endpointForChain cfg chainName with
+                      | .error _ => pure none
+                      | .ok ep =>
+                        let fee := (regex.field? "feeTier" >>= (·.toNat?)).getD 3000
+                        let slippageBps? :=
+                          (regex.field? "slippage") >>= parseSlippagePctToBps
+                        let shim : LeanCli.Swap.Prepare.ChainEthCallShim :=
+                          fun to data cid => do
+                            let via? ← colibriVia state cid
+                            match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep to data "latest" via? with
+                            | .ok ret =>
+                                match asString ret with
+                                | some hex => pure (.ok hex)
+                                | none     => pure (.error "non-string return from eth_call")
+                            | .error e => pure (.error e)
+                        let request : LeanCli.Swap.Prepare.SwapRequest :=
+                          { chainId            := chainId,
+                            sender             := sender,
+                            recipient          := sender,
+                            tokenIn            := tokenIn,
+                            tokenOut           := tokenOut,
+                            amountIn           := amountBase,
+                            fee                := fee,
+                            slippageBps        := slippageBps?.getD 50,
+                            slippageWasDefault := slippageBps?.isNone,
+                            deadlineSeconds    := 1200 }
+                        let result ← LeanCli.Swap.Prepare.prepareUniswapV3Swap request shim
+                        pure (some (swapResultToDraftJson result #[("regex", regexJson)] chainId))
+              | _, _, _, _ => pure none
+          match swapEarly with
           | some j => return .ok j
           | none   => pure ()
           -- 1f. Regex-clarification short-circuit. When the regex has

@@ -485,6 +485,10 @@ function ConfirmGate({
     if (key.escape) onCancel();
   });
   const okSim = sim?.ok === true;
+  // eth_call logic ok, but `from` can't cover gas (e.g. 0 ETH) — folded
+  // into the single result line below rather than a second warning.
+  const unaffordable =
+    sim?.affordability?.checked === true && sim.affordability.affordable === false;
   const matched = decoded?.matched === true;
   return (
     <Layout
@@ -537,10 +541,12 @@ function ConfirmGate({
           <Text color={theme.dim}>result: </Text>
           {sim?.simRpcError ? (
             <Text color={theme.warn}>(daemon error)</Text>
-          ) : okSim ? (
-            <Text color={theme.ok}>✓ would succeed</Text>
-          ) : (
+          ) : !okSim ? (
             <Text color={theme.err}>✗ would revert</Text>
+          ) : unaffordable ? (
+            <Text color={theme.err}>logic ok, but ETH balance too low for gas</Text>
+          ) : (
+            <Text color={theme.ok}>✓ would succeed</Text>
           )}
         </Text>
         {sim?.gasEstimate && (
@@ -556,6 +562,12 @@ function ConfirmGate({
               })()}{" "}
               units
             </Text>
+          </Text>
+        )}
+        {sim?.affordability?.checked === true && sim.affordability.affordable === true && (
+          <Text color={theme.dim}>
+            fee ≈ {String(sim.affordability.feeHuman)} · balance{" "}
+            {String(sim.affordability.senderBalanceHuman)}
           </Text>
         )}
         {sim?.revertReason && (

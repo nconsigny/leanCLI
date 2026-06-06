@@ -462,23 +462,39 @@ patterns (see matchProtocolAction), but those parsers run after this
 one in the dispatch order so there's no ambiguity for the supported
 templates. -/
 def extractFromHint (toks : List String) : List (String × String) :=
-  -- Accept both "from <name>" and "using <name>" — both phrasings are
-  -- common ("approve 42 USDC for vitalik.eth from leanWallet",
-  -- "supply 10 USDC into aave V3 using leanWallet/0"). First hit wins
-  -- so a literal "from" beats a stray "using" elsewhere in the
-  -- sentence, matching the historical canonical form.
+  -- Accept "from <name>", "using <name>", and "with <name>" — each lets
+  -- the user pin the signing wallet inline ("approve 42 USDC for
+  -- vitalik.eth from leanWallet", "swap 1 USDC to ETH with mainEOA").
+  -- `with` is ALSO the swap slippage keyword ("with 0.5% slippage"), so a
+  -- `with` whose next token is a percentage is NOT a sender hint. Earliest
+  -- keyword position wins, matching the historical canonical form.
+  let withIdx? : Option Nat :=
+    (indexOfKeyword toks "with").bind (fun i =>
+      match at? toks (i + 1) with
+      | some t => if t.endsWith "%" then none else some i
+      | none   => none)
   let firstIndex : Option Nat :=
-    match indexOfKeyword toks "from", indexOfKeyword toks "using" with
-    | some i, some j => some (Nat.min i j)
-    | some i, none   => some i
-    | none,   some j => some j
-    | none,   none   => none
+    [indexOfKeyword toks "from", indexOfKeyword toks "using", withIdx?].foldl
+      (fun acc o => match acc, o with
+        | some a, some b => some (Nat.min a b)
+        | some a, none   => some a
+        | none,   b      => b)
+      none
   match firstIndex with
   | none => []
   | some idx =>
+      -- A leading filler is skipped so "with wallet mainEOA" picks the
+      -- name, not the word "wallet"; "with mainEOA wallet" already picks
+      -- the name (the trailing "wallet" is simply ignored).
+      let isFiller (s : String) : Bool := s == "wallet" || s == "account"
       match at? toks (idx + 1) with
       | none => []
-      | some name => [("from", name)]
+      | some name =>
+          if isFiller name then
+            match at? toks (idx + 2) with
+            | some n2 => [("from", n2)]
+            | none    => []
+          else [("from", name)]
 
 /-- `send/transfer <amount> <asset> to <recipient>`. -/
 def matchSendOrTransfer (toks : List String) : Option RegexDraft := do
@@ -692,6 +708,7 @@ def matchSwap (toks : List String) : Option RegexDraft := do
     [("verb", verb), ("amountIn", amount), ("tokenIn", assetIn), ("tokenOut", assetOut),
      ("feeTier", toString feeTier),
      ("feeTierSource", "default-from-pair-class")]
+    ++ extractFromHint toks  -- inline "with <name>" signing-wallet override
     ++ (match amountMax? with | some hi => [("amountInMax", hi)] | none => [])
     ++ (match slippage with   | some s  => [("slippage", s)]    | none => [])
     ++ (match minOut?  with   | some m  => [("minAmountOut", m)] | none => [])
@@ -700,6 +717,16 @@ def matchSwap (toks : List String) : Option RegexDraft := do
     else if inOk ∧ outOk then .medium
     else .low
   some { action := .swap, fields := fields, unresolved := unresolved, confidence := confidence }
+
+-- `with <name>` is a signing-wallet hint on swaps; the trailing "wallet"
+-- filler is ignored and the name lands in the `from` field.
+example :
+    (matchSwap (tokenize "swap 1 usdc to eth with maineoa wallet")).bind
+      (fun d => d.field? "from") = some "maineoa" := by native_decide
+-- The slippage form `with <N>%` is NOT mistaken for a sender hint.
+example :
+    (matchSwap (tokenize "swap 1 usdc to eth with 0.5% slippage")).bind
+      (fun d => d.field? "from") = none := by native_decide
 
 /-- Generic protocol-action template: verb + amount + asset + from/to + protocol.
 

@@ -269,7 +269,8 @@ inductive Command where
   | daemonVersion
   | daemonStop
   | daemonStart   -- start (systemd: `systemctl --user start`; autospawn: same as `.daemon`)
-  | daemonRestart -- restart (systemd: `systemctl --user restart`; autospawn: stop+start)
+  | daemonRestart (build : Bool) -- restart; `build` rebuilds the checkout + relinks before bouncing
+
   | daemonStatus  -- one-line status (systemctl is-active + UDS probe)
   | daemonLogs    -- tail logs (systemd only; autospawn prints a message)
   | daemon      -- run the daemon (same as `leancli-daemon`)
@@ -635,7 +636,9 @@ def parse : List String → Command
   | ["daemon", "version"] => .daemonVersion
   | ["daemon", "stop"] => .daemonStop
   | ["daemon", "start"] => .daemonStart
-  | ["daemon", "restart"] => .daemonRestart
+  | ["daemon", "restart"] => .daemonRestart true
+  | ["daemon", "restart", "--no-build"] => .daemonRestart false
+  | ["daemon", "restart", "--quick"] => .daemonRestart false
   | ["daemon", "status"] => .daemonStatus
   | ["daemon", "logs"] => .daemonLogs
   | ["daemon", walletName, "help"] => .daemonHelp (some walletName)
@@ -901,7 +904,8 @@ def daemonHelpText (walletName? : Option String) : String :=
      leancli daemon                   Start the daemon (foreground or via systemd).\n\
      leancli daemon start             Same as above; explicit form.\n\
      leancli daemon stop              Stop the daemon (RPC shutdown or systemctl).\n\
-     leancli daemon restart           Restart in place.\n\
+     leancli daemon restart           Rebuild this checkout (lake build) + relink + bounce.\n\
+     leancli daemon restart --no-build  Just bounce the running daemon (fast; no rebuild).\n\
      leancli daemon ping              JSON-RPC ping over the UDS.\n\
      leancli daemon status            One-line is-active + UDS-probe summary.\n\
      leancli daemon logs              Tail the journal (systemd install only).\n\

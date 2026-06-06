@@ -26,6 +26,16 @@ type Sidecar = {
 
 type Snapshot = {
   daemon: { pid: number; uptimeMs: number; version: string };
+  /** Active read provider + per-light-client run state (from the persistent
+   *  clients, mirrors `Daemon/Status.lean`'s `providerJson`). Single-select:
+   *  exactly one of helios/colibri should be running, matching `provider`.
+   *  `oram` is the SafeNode TDX proxy layer over the active provider. */
+  provider?: {
+    provider: string;
+    helios: { running: boolean };
+    colibri: { running: boolean };
+    oram: { running: boolean };
+  };
   sidecars: Sidecar[];
   sandbox: {
     mode: string;
@@ -84,6 +94,10 @@ type Props = {
   onLiveMonitor: () => void;
   onTrustedRegistry: () => void;
   onBack: () => void;
+  /** When false, the page-level shortcuts (r/m/t/esc/q) go quiet — set by
+   *  the dashboard when Status is embedded as a pane but not focused.
+   *  Defaults to true so the standalone full-screen mount is unaffected. */
+  isActive?: boolean;
 };
 
 /** Status page — cypherpunk-styled debugging surface. Single
@@ -94,6 +108,7 @@ export default function StatusFlow({
   onLiveMonitor,
   onTrustedRegistry,
   onBack,
+  isActive = true,
 }: Props) {
   const [snap, setSnap] = useState<Snapshot | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -124,16 +139,19 @@ export default function StatusFlow({
     };
   }, [refreshKey]);
 
-  useInput((input, key) => {
-    if (actionBusy) return;
-    if (key.escape || key.leftArrow || input === "q") {
-      onBack();
-      return;
-    }
-    if (input === "r" || input === "R") setRefreshKey((k) => k + 1);
-    if (input === "m" || input === "M") onLiveMonitor();
-    if (input === "t" || input === "T") onTrustedRegistry();
-  });
+  useInput(
+    (input, key) => {
+      if (actionBusy) return;
+      if (key.escape || key.leftArrow || input === "q") {
+        onBack();
+        return;
+      }
+      if (input === "r" || input === "R") setRefreshKey((k) => k + 1);
+      if (input === "m" || input === "M") onLiveMonitor();
+      if (input === "t" || input === "T") onTrustedRegistry();
+    },
+    { isActive },
+  );
 
   return (
     <Layout
@@ -164,6 +182,7 @@ export default function StatusFlow({
             </Box>
           )}
           <HealthBar snap={snap} />
+          <ProviderPanel provider={snap.provider} />
           <SidecarsPanel sidecars={snap.sidecars} />
           <SandboxPanel sandbox={snap.sandbox} />
           <NetworkPanel network={snap.network} />
@@ -530,6 +549,53 @@ function Section({
         {children}
       </Box>
     </Box>
+  );
+}
+
+/** Active read provider + light-client / ORAM state. Sourced from the
+ *  snapshot's persistent-client view (`Daemon/Status.lean#providerJson`),
+ *  NOT the `--rpc ping` sidecar loop — so helios appears here even though a
+ *  one-shot helios spawn is too heavy to ping. Single-select: exactly one
+ *  light client should be on, matching `provider`. The verified line is the
+ *  same trust statement the dashboard shows: simulate is consensus-verified
+ *  only when the matching light client is actually running. */
+function ProviderPanel({ provider }: { provider: Snapshot["provider"] }) {
+  if (!provider) return null;
+  const dot = (on: boolean) =>
+    on ? <Text color={theme.ok}>● on</Text> : <Text color={theme.dim}>○ off</Text>;
+  const p = provider.provider;
+  const lcRunning =
+    p === "helios" ? provider.helios.running
+      : p === "colibri" ? provider.colibri.running
+        : null;
+  const verified =
+    lcRunning === true ? (
+      <Text color={theme.ok}>✓ verified: tx simulate via {p} · balances direct</Text>
+    ) : lcRunning === false ? (
+      <Text color={theme.warn}>⚠ provider {p} but light client OFF — simulate NOT verified</Text>
+    ) : (
+      <Text color={theme.dim}>simulate uses raw RPC — not consensus-verified</Text>
+    );
+  return (
+    <Section title="Provider / light clients">
+      <Text>
+        <Text color={theme.dim}>provider </Text>
+        <Text color={theme.highlight} bold>
+          {p}
+        </Text>
+        <Text color={theme.dim}>{"  ·  light-client "}</Text>
+        {p === "helios" ? (
+          dot(provider.helios.running)
+        ) : p === "colibri" ? (
+          dot(provider.colibri.running)
+        ) : (
+          <Text color={theme.dim}>○ none (rpc)</Text>
+        )}
+        <Text color={theme.dim}>{"  ·  oram-tee "}</Text>
+        {dot(provider.oram.running)}
+      </Text>
+      <Text>{verified}</Text>
+    </Section>
   );
 }
 

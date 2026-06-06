@@ -172,7 +172,7 @@ def resolve : IO LeanCli.Daemon.Server.Config := do
       ← envNat? "LEANCLI_CHAIN_ID",
       configNat? fileCfg "chain_id",
       configNat? fileCfg "chainId"
-    ] |>.getD 1
+    ] |>.getD 11155111  -- sepolia: this is a dev wallet; never default to mainnet
   -- Default policy: when neither env nor daemon.json names one we use
   -- the chain-aware mainnetSafeDaemonPolicy (what `parsePolicy "strict"`
   -- now returns). The previous bare `strictDaemonPolicy` fallback was

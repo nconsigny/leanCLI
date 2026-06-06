@@ -401,7 +401,8 @@ private partial def executeSphincsUserOp
                                                     -- AND `userOpHash` so existing readers don't have
                                                     -- to change shape, and a future inclusion-tx
                                                     -- lookup can rewrite `txHash` in a status update.
-                                                    let innerDataHex := "0x" ++ LeanCli.Crypto.Hex.encode innerData
+                                                    -- `Hex.encode` already prepends `0x`; don't double it.
+                                                    let innerDataHex := LeanCli.Crypto.Hex.encode innerData
                                                     journalRecord rec.name sender innerTo userOpHash innerDataHex
                                                       "sphincs.userOp" innerValue 0 rec.chainId none
                                                       none none none

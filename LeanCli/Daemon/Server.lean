@@ -103,6 +103,13 @@ open LeanCli.RPC.Server
 def methodHandler (cfg : Config) (state : LeanCli.Daemon.State.Shared)
     (notify : LeanCli.Keystore.Tpm2Runtime.Notifier)
     (req : Request) : IO (Except RpcError Json) := do
+  -- Runtime chain override (`network.use`): re-target the daemon's
+  -- default chain for *every* handler without a restart. Per-call
+  -- `chain:` params are unaffected. `network.use` reads/writes the
+  -- override via `state`, so re-targeting `cfg` here is harmless for it.
+  let cfg := match ← LeanCli.Daemon.State.activeChain? state with
+    | some cid => cfg.withChain cid
+    | none     => cfg
   -- Phase-4 onwards: per-family dispatch modules under
   -- `Server/<Family>Rpc.lean`. Prefix-route here, then fall through
   -- to the in-file match for families still pending extraction.
@@ -129,6 +136,18 @@ def methodHandler (cfg : Config) (state : LeanCli.Daemon.State.Shared)
     return ← ShieldedRpc.dispatch cfg state notify req
   if req.method.startsWith "eoa." then
     return ← EoaRpc.dispatch cfg state notify req
+  -- Light-client / read-backend controls (`daemon.helios.*`,
+  -- `daemon.colibri.*`, `daemon.readBackend.*`) and the verified read
+  -- proxies (`eth.proxy*`) live in the TxRpc module, next to the
+  -- `tx.simulate{Helios,Colibri}` helpers they share. Route them there
+  -- explicitly BEFORE the generic `daemon.*` → DaemonRpc fallthrough: the
+  -- dispatch-extraction refactor split `daemon.*` out to DaemonRpc but left
+  -- these arms in TxRpc, so without this they fall through to DaemonRpc and
+  -- 404 — which is exactly what blanked the TUI provider toggle
+  -- (`daemon.readBackend.status` → method not found).
+  if req.method.startsWith "daemon.helios." || req.method.startsWith "daemon.colibri."
+      || req.method.startsWith "daemon.readBackend." || req.method.startsWith "eth." then
+    return ← TxRpc.dispatch cfg state notify req
   if req.method.startsWith "daemon." || req.method.startsWith "status."
       || req.method.startsWith "network." then
     return ← DaemonRpc.dispatch cfg state notify req
@@ -276,51 +295,30 @@ def run (cfg : Config) : IO Unit := do
         LeanCli.Daemon.Uds.bind cfg.socketPath
   let state ← LeanCli.Daemon.State.new
   IO.eprintln s!"leancli-daemon: listening on {cfg.socketPath}"
-  -- Default-on Colibri stateless verification. Spawning the sidecar is
-  -- cheap (no committee bootstrap until the first proofable read), so
-  -- enabling at startup costs us almost nothing and means proofable
-  -- reads are verified out-of-the-box. Opt out with `LEANCLI_COLIBRI=0`.
-  -- Failure is non-fatal: the daemon keeps serving and reads transparently
-  -- fall through to the configured HTTP RPC.
-  let colibriDisabled :=
-    match ← IO.getEnv "LEANCLI_COLIBRI" with
-    | some "0" | some "off" | some "false" | some "no" => true
-    | _ => false
-  unless colibriDisabled do
-    let runtimeRoot ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
-      | some d => pure d
-      | none =>
-          match ← IO.getEnv "TMPDIR" with
-          | some d => pure d
-          | none => pure "/tmp"
-    let colibriSocket := s!"{runtimeRoot}/leancli/colibri.sock"
-    try
-      let _ ← LeanCli.Daemon.State.colibriEnable state colibriSocket
-      IO.eprintln s!"leancli-daemon: colibri verified-reads enabled (socket={colibriSocket})"
-    catch e =>
-      IO.eprintln s!"leancli-daemon: colibri auto-enable failed ({e}); reads will use the configured RPC"
-  -- Default-on Helios sidecar (helios is now the default `readBackend`,
-  -- so the persistent client should be running for it to be useful — a
-  -- cold one-shot spawn pays ~10s consensus sync per simulate). Spawning
-  -- itself is cheap; the sync defers until the first proofable request.
-  -- Opt out with `LEANCLI_HELIOS=0`. Failure is non-fatal: the daemon
-  -- keeps serving and per-call `tx.simulateHelios` falls back to a fresh
-  -- one-shot spawn (slower but functional).
-  let heliosEnabled :=
-    match ← IO.getEnv "LEANCLI_HELIOS" with
-    | some "0" | some "off" | some "false" | some "no" => false
-    | _ => true
-  -- Provider selection (single-select read backend). `LEANCLI_PROVIDER`
-  -- is the documented flag (helios|colibri|rpc|safenode); it maps onto the
-  -- existing `ReadBackend` mechanism so `daemon.readBackend.set` and the
-  -- per-call `backend:` param keep working unchanged.
+  -- Provider selection — SINGLE-SELECT (CLAUDE.md: helios/colibri are
+  -- mutually exclusive). We resolve the active read backend FIRST, then
+  -- auto-start ONLY that provider's light client. This is the fix for the
+  -- "both light clients boot, colibri serves chain.ethCall (and errors)
+  -- while helios is the nominal provider" confusion: exactly one light
+  -- client is ever live, so reads and simulation share one backend.
+  --
+  -- `LEANCLI_PROVIDER` is the documented flag (helios|colibri|rpc|safenode);
+  -- it maps onto the existing `ReadBackend` mechanism so
+  -- `daemon.readBackend.set` and the per-call `backend:` param keep working.
   --   * helios|colibri|rpc → that ReadBackend directly.
-  --   * safenode → helios fronted by the TDX-attested SafeNode proxy; we
-  --     select `.helios` and require `LEANCLI_SAFE_NODE_URL` (warned if
-  --     absent — the SafeNode spawn below only fires when the URL is set).
-  -- `LEANCLI_READ_BACKEND` remains an accepted alias for back-compat;
-  -- `LEANCLI_PROVIDER` wins when both are set. Default stays helios when
-  -- neither is set. Unrecognized values fall through with a warning.
+  --   * safenode → helios fronted by the TDX-attested SafeNode proxy
+  --     (select `.helios`; the SafeNode spawn below fires only when
+  --     `LEANCLI_SAFE_NODE_URL` is set).
+  -- `LEANCLI_READ_BACKEND` is an accepted back-compat alias; `LEANCLI_PROVIDER`
+  -- wins. Default stays helios. `LEANCLI_COLIBRI=0` / `LEANCLI_HELIOS=0`
+  -- still force the matching client down even when it is the selected
+  -- provider (reads then fall through to the configured RPC).
+  let runtimeRoot ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
+    | some d => pure d
+    | none =>
+        match ← IO.getEnv "TMPDIR" with
+        | some d => pure d
+        | none => pure "/tmp"
   let applyBackend (envName raw : String) : IO Unit := do
     match LeanCli.Daemon.State.ReadBackend.parse? raw with
     | some b =>
@@ -342,13 +340,28 @@ def run (cfg : Config) : IO Unit := do
       match ← IO.getEnv "LEANCLI_READ_BACKEND" with
       | some raw => applyBackend "LEANCLI_READ_BACKEND" raw
       | none => pure ()
-  if heliosEnabled then
-    let runtimeRoot ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
-      | some d => pure d
-      | none =>
-          match ← IO.getEnv "TMPDIR" with
-          | some d => pure d
-          | none => pure "/tmp"
+  -- Effective provider after env parsing (State default is `.helios`).
+  let provider ← LeanCli.Daemon.State.getReadBackend state
+  let colibriForcedOff :=
+    match ← IO.getEnv "LEANCLI_COLIBRI" with
+    | some "0" | some "off" | some "false" | some "no" => true
+    | _ => false
+  let heliosForcedOff :=
+    match ← IO.getEnv "LEANCLI_HELIOS" with
+    | some "0" | some "off" | some "false" | some "no" => true
+    | _ => false
+  -- Auto-start ONLY the selected provider's light client. Spawning is cheap
+  -- (committee/consensus sync defers to the first proofable request);
+  -- failure is non-fatal — reads fall through to the configured HTTP RPC.
+  -- `provider = .rpc` starts neither (direct, unverified reads).
+  if provider == .colibri && !colibriForcedOff then
+    let colibriSocket := s!"{runtimeRoot}/leancli/colibri.sock"
+    try
+      let _ ← LeanCli.Daemon.State.colibriEnable state colibriSocket
+      IO.eprintln s!"leancli-daemon: colibri verified-reads enabled (socket={colibriSocket})"
+    catch e =>
+      IO.eprintln s!"leancli-daemon: colibri auto-enable failed ({e}); reads will use the configured RPC"
+  if provider == .helios && !heliosForcedOff then
     let heliosSocket := s!"{runtimeRoot}/leancli/helios.sock"
     try
       let _ ← LeanCli.Daemon.State.heliosEnable state heliosSocket

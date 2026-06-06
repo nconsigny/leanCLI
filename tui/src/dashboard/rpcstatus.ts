@@ -61,16 +61,59 @@ export type RpcConfig = {
   /** Non-null iff the ORAM proxy is actually substituted as the active
    *  execution endpoint (running + chainId in {1, 11155111}). */
   oramProxyUrl: string | null;
+  /** Configured chains (from network.show perChain) for the chain
+   *  cycler. `isCurrent` marks the daemon's active chain. */
+  perChain: { name: string; chainId: number; isCurrent: boolean }[];
   error: string | null;
 };
 
 export type RpcActions = {
-  cycleReadBackend: () => void;
-  toggleHelios: () => void;
-  toggleColibri: () => void;
+  /** Cycle the single-select provider rpc → helios → colibri → rpc.
+   *  Atomic: starts the chosen light client, tears the other down, and
+   *  points readBackend at it — so `✓ verified` is reached in one action
+   *  instead of needing the backend and sidecar flipped separately. */
+  cycleProvider: () => void;
+  /** Set the provider directly (settings-menu rows). Same atomic switch. */
+  setProvider: (p: ReadBackend) => void;
+  /** ORAM-TEE (SafeNode) is an orthogonal on/off layer over whichever
+   *  light client is active — NOT a third mutually-exclusive provider. */
   toggleSafeNode: () => void;
+  /** Switch the daemon-wide active chain at runtime (network.use). */
+  setChain: (chainId: number) => void;
   pending: string | null;
 };
+
+/** Providers in cycle order. Single-select: exactly one is the active
+ *  read/simulate backend at a time. `rpc` is direct + unverified; helios
+ *  and colibri are mutually-exclusive light clients. ORAM is not here —
+ *  it is a separate layer (see `toggleSafeNode`). */
+const PROVIDER_CYCLE: ReadBackend[] = ["rpc", "helios", "colibri"];
+
+/**
+ * Atomically switch the active provider. The daemon exposes three
+ * decoupled knobs (`daemon.helios.toggle`, `daemon.colibri.toggle`,
+ * `daemon.readBackend.set`); flipping only one leaves the others stale —
+ * e.g. `backend=helios` with the helios sidecar down reads as "never
+ * verified". This flips all of them together: it starts the chosen light
+ * client, tears the other down (mutual exclusion), and sets readBackend.
+ * SafeNode (ORAM) is left untouched — it layers over whichever provider
+ * is active. Selecting `rpc` stops both light clients.
+ */
+async function applyProvider(p: ReadBackend): Promise<void> {
+  if (p === "helios") {
+    await call("daemon.helios.toggle", { enable: true }, { timeoutMs: 60_000 });
+    await call("daemon.readBackend.set", { backend: "helios" });
+    await call("daemon.colibri.toggle", { enable: false }, { timeoutMs: 60_000 });
+  } else if (p === "colibri") {
+    await call("daemon.colibri.toggle", { enable: true }, { timeoutMs: 60_000 });
+    await call("daemon.readBackend.set", { backend: "colibri" });
+    await call("daemon.helios.toggle", { enable: false }, { timeoutMs: 60_000 });
+  } else {
+    await call("daemon.readBackend.set", { backend: "rpc" });
+    await call("daemon.helios.toggle", { enable: false }, { timeoutMs: 60_000 });
+    await call("daemon.colibri.toggle", { enable: false }, { timeoutMs: 60_000 });
+  }
+}
 
 function chainIdToName(id: number): string | null {
   if (id === 1) return "mainnet";
@@ -92,6 +135,7 @@ const INITIAL: RpcConfig = {
   colibri: null,
   safeNode: null,
   oramProxyUrl: null,
+  perChain: [],
   error: null,
 };
 
@@ -137,6 +181,9 @@ export function useRpcConfig(intervalMs: number): { cfg: RpcConfig; actions: Rpc
         colibri: colibri.ok ? colibri.result : null,
         safeNode: sn,
         oramProxyUrl: oramActive ? (sn?.attestation?.proxyUrl ?? null) : null,
+        perChain: (s.perChain ?? [])
+          .filter((c) => c.chainId > 0)
+          .map((c) => ({ name: c.name, chainId: c.chainId, isCurrent: c.isCurrent })),
         error: null,
       });
     },
@@ -159,25 +206,36 @@ export function useRpcConfig(intervalMs: number): { cfg: RpcConfig; actions: Rpc
 
   const actions: RpcActions = {
     pending,
-    cycleReadBackend: guard("backend", async () => {
-      const next: ReadBackend =
-        cfg.readBackend === "rpc"
-          ? "colibri"
-          : cfg.readBackend === "colibri"
-            ? "helios"
-            : "rpc";
-      await call("daemon.readBackend.set", { backend: next });
+    cycleProvider: guard("provider", async () => {
+      const cur = cfg.readBackend ?? "rpc";
+      const idx = PROVIDER_CYCLE.indexOf(cur);
+      const next = PROVIDER_CYCLE[(idx + 1) % PROVIDER_CYCLE.length] ?? "rpc";
+      await applyProvider(next);
     }),
-    toggleHelios: guard("helios", async () => {
-      await call("daemon.helios.toggle", { enable: !(cfg.helios?.running === true) }, { timeoutMs: 60_000 });
-    }),
-    toggleColibri: guard("colibri", async () => {
-      await call("daemon.colibri.toggle", { enable: !(cfg.colibri?.running === true) }, { timeoutMs: 60_000 });
-    }),
+    setProvider: (p: ReadBackend) => {
+      if (pending) return;
+      setPending("provider");
+      void applyProvider(p)
+        .catch(() => {})
+        .finally(() => {
+          setPending(null);
+          refresh();
+        });
+    },
     toggleSafeNode: guard("oram-tee", async () => {
       // Enabling runs the full TDX quote-verify flow — seconds of latency.
       await call("daemon.safeNode.toggle", { enable: !(cfg.safeNode?.running === true) }, { timeoutMs: 120_000 });
     }),
+    setChain: (chainId: number) => {
+      if (pending) return;
+      setPending("chain");
+      void call("network.use", { chainId })
+        .catch(() => {})
+        .finally(() => {
+          setPending(null);
+          refresh();
+        });
+    },
   };
 
   return { cfg, actions };

@@ -513,11 +513,37 @@ def daemonStopHandler : IO UInt32 := do
   else
     DaemonClient.printCall "daemon.shutdown"
 
-/-- Handler for `leancli daemon restart`. systemd: one `systemctl restart`.
-    Autospawn: shutdown via RPC, then `ensureDaemon` will re-spawn on the
-    next request — but the user typed `restart`, so we explicitly probe
-    to bring it back up before returning. -/
-def daemonRestartHandler : IO UInt32 := do
+/-- Handler for `leancli daemon restart` (= `kohaku daemon restart`).
+
+    Default (`build := true`) is the "do everything" button: rebuild the
+    daemon from the current checkout, refresh the `~/.leancli/bin` symlinks,
+    then bounce the running daemon so the freshly built binary is actually
+    live. The rebuild+relink is delegated to `leanclispawn`, which locates
+    its own checkout from its symlink and runs `lake build`. This closes the
+    trap where `lake build` updates `.lake/build/bin/leancli-daemon` but the
+    long-running daemon keeps serving old in-memory code until it is bounced
+    — the failure mode that makes new RPCs return `-32601` after a "rebuild".
+
+    `--no-build` (`build := false`) skips the rebuild and just bounces the
+    daemon — the fast path when the binary is already current.
+
+    The bounce itself is systemd-aware: `systemctl --user restart` when the
+    marker is present, otherwise `daemon.shutdown` via RPC followed by a
+    foreground re-spawn (the user typed `restart`, so we bring it back up
+    rather than waiting for the next request to autospawn). -/
+def daemonRestartHandler (build : Bool) : IO UInt32 := do
+  if build then
+    IO.println "Rebuilding leanCLI from the current checkout (lake build via leanclispawn) …"
+    -- Pure build + relink: skip the onboarding wizard, shell-rc edits, and
+    -- completion install. The TUI bundle / node sidecars have their own
+    -- update paths — `daemon restart` is about the daemon binary. We do NOT
+    -- pass `--restart` here: leanclispawn only restarts already-active
+    -- units, so we keep a single restart path below that also covers
+    -- autospawn mode.
+    let code ← runLeanclispawn #["--no-init", "--no-completion", "--no-modify-path", "--no-tui"]
+    if code ≠ 0 then
+      IO.eprintln "rebuild/reinstall failed (see output above); daemon NOT restarted."
+      return code
   if ← DaemonClient.systemdManaged then
     let code ← systemctlUser "restart"
     if code ≠ 0 then return code
@@ -526,6 +552,7 @@ def daemonRestartHandler : IO UInt32 := do
       pure 0
     else
       IO.eprintln "systemctl reported restart success but the daemon socket did not reappear within 2s."
+      IO.eprintln "Run `leancli daemon logs` to investigate."
       pure 2
   else
     -- Best-effort stop (the daemon may already be down — that's fine).
@@ -1886,8 +1913,8 @@ def run (args : List String) : IO UInt32 := do
       daemonStopHandler
   | .daemonStart =>
       daemonStartHandler
-  | .daemonRestart =>
-      daemonRestartHandler
+  | .daemonRestart build =>
+      daemonRestartHandler build
   | .daemonStatus =>
       daemonStatusHandler
   | .daemonLogs =>

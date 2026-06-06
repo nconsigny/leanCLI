@@ -133,6 +133,14 @@ structure DaemonState where
   wallet is locked at the master level — slot unlocks must come through
   the per-slot `eoa.unlock` path. Populated by `wallet.unlock`. -/
   masterKek : Option MasterKekSlot := none
+  /-- Runtime override of the daemon's active/default chain, set via the
+  `network.use` RPC. `none` ⇒ fall back to the start-up `cfg.chainId`.
+  Applied at the dispatch boundary (`Server.methodHandler`) through
+  `Config.withChain`, so one switch re-targets every handler — chat
+  default, balance reads, `tx.simulate`, `network.show` — with no daemon
+  restart. Per-call `chain:` params still win; this only moves the
+  default. Read/endpoint plumbing only — no signing impact. -/
+  activeChainId : Option Nat := none
 
 abbrev Shared := IO.Ref DaemonState
 
@@ -385,6 +393,14 @@ def getReadBackend (state : Shared) : IO ReadBackend := do
 /-- Set the daemon's default read backend. -/
 def setReadBackend (state : Shared) (b : ReadBackend) : IO Unit := do
   state.modify (fun s => { s with readBackend := b })
+
+/-- Override the daemon's active/default chain at runtime (`network.use`). -/
+def setActiveChain (state : Shared) (chainId : Nat) : IO Unit := do
+  state.modify (fun s => { s with activeChainId := some chainId })
+
+/-- The current runtime chain override, or `none` to use `cfg.chainId`. -/
+def activeChain? (state : Shared) : IO (Option Nat) := do
+  pure (← state.get).activeChainId
 
 /-! ## Verified-read backend builder
 

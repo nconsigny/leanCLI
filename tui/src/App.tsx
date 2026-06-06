@@ -215,6 +215,17 @@ export default function App() {
   // `onDone` callback unrolls the stack onto MainMenu, so navigating Back
   // from MainMenu never lands the user on the gate again.
   const [stack, setStack] = useState<Screen[]>([{ kind: "boot" }]);
+  // Dashboard sub-stack: flows launched from a dashboard pane (wallet-hub
+  // SEND/SWAP/MANAGE, CREATE, settings → More commands, …) render INSIDE
+  // the dashboard's main pane instead of replacing the whole screen. They
+  // live on this separate stack; while it's non-empty the Dashboard stays
+  // mounted as the shell (so its pane state persists) and the top entry is
+  // injected as the main-pane overlay. `push`/`pop` below auto-target this
+  // stack while it's active, so nested navigation (More → resolve, manage
+  // → send) just works without leaving the dashboard.
+  const [dashSub, setDashSub] = useState<Screen[]>([]);
+  const inSub = dashSub.length > 0;
+  const pushSub = (s: Screen) => setDashSub((d) => [...d, s]);
   // Browser-style forward history. A `pop()` archives the just-popped
   // screen here; a subsequent `forward()` replays it. Any new `push()`
   // discards the forward stack (mirrors the standard "navigating from
@@ -328,8 +339,15 @@ export default function App() {
     setReadBackendPending(false);
   };
 
-  const top = stack[stack.length - 1]!;
+  // While the dashboard sub-stack is active, `top` is its head and
+  // push/pop target it — so every flow's own push/pop/onDone navigates
+  // within the dashboard's main pane rather than the whole-screen stack.
+  const top = inSub ? dashSub[dashSub.length - 1]! : stack[stack.length - 1]!;
   const push = (s: Screen) => {
+    if (inSub) {
+      setDashSub((d) => [...d, s]);
+      return;
+    }
     setStack((prev) => [...prev, s]);
     // Any new navigation truncates the forward chain — standard
     // browser-history semantics. Without this you could end up in an
@@ -338,6 +356,10 @@ export default function App() {
     setForwardStack([]);
   };
   const pop = () => {
+    if (inSub) {
+      setDashSub((d) => d.slice(0, -1));
+      return;
+    }
     setStack((prev) => {
       if (prev.length <= 1) return prev;
       const popped = prev[prev.length - 1]!;
@@ -369,11 +391,13 @@ export default function App() {
     (input) => {
       if (input === "]") forward();
     },
-    { isActive: !textInputScreen },
+    // Forward only walks the main stack; disable it while a dashboard
+    // sub-flow owns the keys (its own esc/back drives `pop`).
+    { isActive: !textInputScreen && !inSub },
   );
   const navApi: NavApi = {
-    canBack: stack.length > 1,
-    canForward: forwardStack.length > 0,
+    canBack: inSub ? true : stack.length > 1,
+    canForward: !inSub && forwardStack.length > 0,
     back: pop,
     forward,
   };
@@ -409,6 +433,19 @@ export default function App() {
       : k === "import-bip39" ? { kind: "import-eoa" }
       : { kind: "add-account" };
     setStack((prev) => [...prev.slice(0, -1), next]);
+  };
+
+  // CREATE tab in WalletsHub (standalone or embedded in the dashboard):
+  // PUSH the chosen flow on top (unlike handleCreatePick, which replaces
+  // the picker). Same flow targets as handleCreatePick.
+  const pushCreate = (k: CreateKind) => {
+    if (k === "back") return;
+    push(
+      k === "eoa" ? { kind: "create-eoa" }
+      : k === "sphincs-hybrid" ? { kind: "create-sphincs-hybrid" }
+      : k === "import-bip39" ? { kind: "import-eoa" }
+      : { kind: "add-account" },
+    );
   };
 
   const handleWalletAction = (w: Wallet, a: WalletAction, chainHint?: string) => {
@@ -471,6 +508,76 @@ export default function App() {
     pop();
   };
 
+  // Surface a broadcast outcome back into the conversation as a single
+  // system turn and (on success) arm the one-shot auto-continue receipt.
+  // Shared by the full-screen send-raw path and the dashboard's in-pane
+  // send so both render the confirmation inside the chat instead of
+  // bouncing back to an unchanged conversation. See broadcastResultToTurn.
+  const injectBroadcastIntoChat = (success: boolean, result?: unknown) => {
+    const turn = broadcastResultToTurn(success, result);
+    const cont = success ? extractBroadcastReceipt(result) : null;
+    setChatPhase((p) => {
+      if (p.kind !== "chat") return p;
+      const turns = turn ? [...p.turns, turn] : p.turns;
+      return { ...p, turns, pendingContinuation: cont ?? undefined };
+    });
+  };
+
+  // Dashboard-pane SEND/SWAP/SHIELD/UNSHIELD/MANAGE: render the flow in
+  // the dashboard's main pane (sub-stack) rather than full-screen, so the
+  // user stays in the dashboard. SPHINCS hybrids keep the full-screen
+  // accounts hub (a multi-screen surface of its own).
+  const dashWalletAction = (a: WalletsAction, w: Wallet, chain: string) => {
+    if (w.kind === "sphincs") return handleHubPick(a, w, chain);
+    pushSub(
+      a === "send" ? { kind: "send", wallet: w, chain }
+      : a === "swap" ? { kind: "swap", wallet: w }
+      : a === "shield" ? { kind: "shield", wallet: w }
+      : a === "unshield" ? { kind: "unshield", wallet: w }
+      : { kind: "manage", wallet: w, chain },
+    );
+  };
+  // CREATE tab in the embedded hub → render the create/add/import flow in
+  // the main pane (sub-stack).
+  const dashCreate = (k: CreateKind) => {
+    if (k === "back") return;
+    pushSub(
+      k === "eoa" ? { kind: "create-eoa" }
+      : k === "sphincs-hybrid" ? { kind: "create-sphincs-hybrid" }
+      : k === "import-bip39" ? { kind: "import-eoa" }
+      : { kind: "add-account" },
+    );
+  };
+
+  // The dashboard shell. `mainOverlay`, when set, is a sub-flow injected
+  // into its main pane (see dashSub). Defined as a function so the same
+  // element is used both as the `dashboard` screen and, while a sub-flow
+  // is active, as the persistent shell wrapped around `renderScreen()`.
+  const renderDashboard = (mainOverlay?: React.ReactNode): React.ReactElement => (
+    <Dashboard
+      chatPhase={chatPhase}
+      setChatPhase={setChatPhase}
+      chatWallets={chatWallets}
+      setChatWallets={setChatWallets}
+      onChatBroadcastResult={injectBroadcastIntoChat}
+      onCreateWallet={(_kind, _label) => pushSub({ kind: "create-eoa" })}
+      // ctrl+o (expand le chat) and /history stay IN the dashboard: render
+      // the full chat / history in the main pane via the sub-stack, with
+      // the side panes still visible. Esc collapses back to the pane.
+      onOpenFullChat={() => pushSub({ kind: "llm-chat" })}
+      onOpenChatHistory={() => pushSub({ kind: "chat-history" })}
+      onOpenWallets={() => push({ kind: "wallets" })}
+      onWalletAction={dashWalletAction}
+      onWalletCreate={dashCreate}
+      onOpenStatus={() => push({ kind: "status" })}
+      onOpenNetworkMonitor={() => pushSub({ kind: "network-monitor" })}
+      onOpenTrustedRegistry={() => pushSub({ kind: "trusted-registry" })}
+      onOpenMore={() => pushSub({ kind: "more" })}
+      onBack={pop}
+      mainOverlay={mainOverlay}
+    />
+  );
+
   // Render the current screen, then wrap the result in NavContext so
   // any Layout-rendered NavBar (and any other consumer) sees the live
   // back/forward state without having to thread it through every
@@ -491,28 +598,7 @@ export default function App() {
         />
       );
     case "dashboard":
-      return (
-        <Dashboard
-          chatPhase={chatPhase}
-          setChatPhase={setChatPhase}
-          chatWallets={chatWallets}
-          setChatWallets={setChatWallets}
-          onApprove={(tx, chainId, wallet) =>
-            push({ kind: "send-raw", tx, chainId, wallet })
-          }
-          onCreateWallet={(_kind, _label) => {
-            // Same contract as the full chat: the trusted creation flow
-            // owns labels/passphrases; the chat never pre-fills them.
-            push({ kind: "create-eoa" });
-          }}
-          onOpenFullChat={() => push({ kind: "llm-chat" })}
-          onOpenChatHistory={() => push({ kind: "chat-history" })}
-          onOpenWallets={() => push({ kind: "wallets" })}
-          onOpenStatus={() => push({ kind: "status" })}
-          onOpenNetworkMonitor={() => push({ kind: "network-monitor" })}
-          onBack={pop}
-        />
-      );
+      return renderDashboard();
     case "master-unlock":
       return (
         <MasterUnlockGate
@@ -527,6 +613,7 @@ export default function App() {
         <WalletsHub
           refreshKey={walletsRefreshKey}
           onPick={handleHubPick}
+          onCreate={pushCreate}
           onBack={pop}
         />
       );
@@ -721,36 +808,15 @@ export default function App() {
           onDone={(success, result) => {
             // If the user reached send-raw FROM the chat (llm-chat or
             // the dashboard's chat pane sits underneath us on the
-            // stack), surface the broadcast outcome
-            // back into the conversation as a single system turn. Lets
-            // the user "see the confirmation inside the chat" rather
-            // than just bouncing back to an unchanged conversation
-            // — which would leave them wondering whether the tx
-            // actually went out.
-            //
-            // On a successful broadcast we ALSO arm a one-shot
-            // `pendingContinuation` on the chat phase. LlmChatFlow's
-            // auto-continue effect picks it up and fires a single
-            // chat.draft round so the agent can propose the next leg
-            // of a multi-step flow (e.g. supply after erc20Approve)
-            // or acknowledge completion. The agent decides — we don't
-            // pre-judge whether there IS a next step.
+            // stack), surface the broadcast outcome back into the
+            // conversation (and arm the one-shot auto-continue receipt)
+            // so they "see the confirmation inside the chat" rather than
+            // bouncing back to an unchanged conversation. Trusted paths
+            // (SwapFlow / SendFlow) aren't from chat → no injection.
             const fromChat = stack.some(
               (s) => s.kind === "llm-chat" || s.kind === "dashboard",
             );
-            if (fromChat) {
-              const turn = broadcastResultToTurn(success, result);
-              const cont = success ? extractBroadcastReceipt(result) : null;
-              setChatPhase((p) => {
-                if (p.kind !== "chat") return p;
-                const turns = turn ? [...p.turns, turn] : p.turns;
-                return {
-                  ...p,
-                  turns,
-                  pendingContinuation: cont ?? undefined,
-                };
-              });
-            }
+            if (fromChat) injectBroadcastIntoChat(success, result);
             finishAction();
           }}
         />
@@ -784,7 +850,11 @@ export default function App() {
 
   return (
     <NavContext.Provider value={navApi}>
-      {renderScreen()}
+      {/* While a dashboard sub-flow is active, keep the Dashboard mounted
+          as the shell and inject the flow (renderScreen → the sub-stack
+          top) into its main pane, so pane state survives and the flow
+          renders in-pane. Otherwise render the current screen normally. */}
+      {inSub ? renderDashboard(renderScreen()) : renderScreen()}
     </NavContext.Provider>
   );
 }

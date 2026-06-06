@@ -19,6 +19,7 @@ import LeanCli.Helios.Persistent
 import LeanCli.Keystore.Tpm2Runtime
 import LeanCli.RPC.Outbound
 import LeanCli.RPC.Server
+import LeanCli.Util.Units
 
 /-!
 # Daemon server: `tx.*` RPC family
@@ -43,6 +44,101 @@ namespace LeanCli.Daemon.Server.TxRpc
 open LeanCli.Encoding.Json
 open LeanCli.RPC.Server
 open LeanCli.Daemon.Server
+
+/-- Read a JSON value that may be a `0x`-hex "quantity" string OR a plain
+non-negative number into a `Nat`. Gas estimates come back as hex strings
+from direct RPC but can arrive as numbers from a sidecar's `responseToJson`. -/
+def jsonHexOrNat? (j : Json) : Option Nat :=
+  (asString j >>= parseHexQuantity) <|> asNat j
+
+/-- Append `extra` fields to `j` when it is a JSON object; pass through
+otherwise. Used to graft the affordability block onto a backend's
+simulate result without caring which backend produced it. -/
+def mergeFields (j : Json) (extra : Array (String × Json)) : Json :=
+  match j with
+  | .obj fields => .obj (fields ++ extra)
+  | _ => j
+
+/-- Affordability — a signal DISTINCT from simulate's `ok` (revert). `eth_call`
+never enforces the sender's gas balance (it executes against state without
+debiting `from`), so a 0-ETH account's `approve()` simulates as "ok = would
+not revert". That says nothing about whether the tx can be broadcast. This
+asks the separate question: does `from` hold enough ETH for `gas × price +
+value`? Reads `eth_getBalance(from)` + `eth_gasPrice` (policy-gated,
+display-only) and uses whatever gas figure the simulate path produced.
+Computed uniformly for every backend. Never folded into `ok`, never gates
+signing — ConfirmGate is the trust anchor; this just stops "✓ would succeed"
+from masking "you cannot pay for this". -/
+def affordabilityField
+    (policy : LeanCli.Network.Policy.Policy)
+    (endpoint : LeanCli.RPC.Outbound.Endpoint)
+    (from? : Option String) (value block : String)
+    (gas? : Option Nat) : IO (Array (String × Json)) := do
+  match from? with
+  | none =>
+      pure #[("affordability", .obj #[
+        ("checked", .bool false),
+        ("reason", .str "no from address supplied")])]
+  | some fromAddr =>
+    -- ALWAYS read the balance — even when the gas estimate is missing. A
+    -- node that rejects `eth_estimateGas` with "insufficient funds" (the
+    -- 0-balance case here) leaves us no fee figure, but a balance that
+    -- can't even cover `value` definitively can't pay gas on top, so we
+    -- still return a hard `affordable:false` rather than silently checking
+    -- nothing and letting "✓ would succeed" stand.
+    let balRes ← LeanCli.RPC.Outbound.getBalance policy endpoint fromAddr block none
+    let priceRes ← LeanCli.RPC.Outbound.gasPrice policy endpoint none
+    let bal? :=
+      (match balRes with | .ok j => asString j | .error _ => none) >>= parseHexQuantity
+    let price? :=
+      (match priceRes with | .ok j => asString j | .error _ => none) >>= parseHexQuantity
+    let val := (parseHexQuantity value).getD 0
+    let balHuman (b : Nat) : String := LeanCli.Util.Units.formatUnits b 18 ++ " ETH"
+    match bal? with
+    | none =>
+        pure #[("affordability", .obj #[
+          ("checked", .bool false),
+          ("reason", .str "balance probe failed")])]
+    | some bal =>
+      match gas?, price? with
+      | some gas, some price =>
+          -- Precise: gas × price + value vs balance.
+          let fee := gas * price
+          let cost := fee + val
+          pure #[("affordability", .obj #[
+            ("checked", .bool true),
+            ("affordable", .bool (cost ≤ bal)),
+            ("feeWei", .str (natQuantityHex fee)),
+            ("feeHuman", .str (balHuman fee)),
+            ("requiredWei", .str (natQuantityHex cost)),
+            ("requiredHuman", .str (balHuman cost)),
+            ("senderBalanceWei", .str (natQuantityHex bal)),
+            ("senderBalanceHuman", .str (balHuman bal)),
+            ("note", .str "eth_gasPrice estimate; eth_call cannot enforce gas balance")])]
+      | _, _ =>
+          -- No fee figure (estimate and/or gas-price unavailable). We can
+          -- still give a hard verdict when the balance can't cover even
+          -- `value` (0 ETH being the common case) — every tx needs gas on
+          -- top of `value`, so `bal ≤ val` ⇒ unaffordable.
+          if bal ≤ val then
+            pure #[("affordability", .obj #[
+              ("checked", .bool true),
+              ("affordable", .bool false),
+              ("requiredWei", .str (natQuantityHex val)),
+              ("requiredHuman",
+                .str (if val == 0 then "gas (estimate unavailable)"
+                      else balHuman val ++ " + gas")),
+              ("senderBalanceWei", .str (natQuantityHex bal)),
+              ("senderBalanceHuman", .str (balHuman bal)),
+              ("note", .str "gas estimate unavailable — balance cannot cover gas")])]
+          else
+            -- Balance covers `value` but we can't price the gas → don't
+            -- assert affordability either way; surface the balance.
+            pure #[("affordability", .obj #[
+              ("checked", .bool false),
+              ("senderBalanceWei", .str (natQuantityHex bal)),
+              ("senderBalanceHuman", .str (balHuman bal)),
+              ("reason", .str "gas estimate unavailable — gas affordability not verified")])]
 
 /-- Handle every `tx.*` JSON-RPC method. -/
 def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
@@ -105,7 +201,11 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
           | .error err =>
               pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
           | .ok endpoint =>
-              match backend with
+              -- Run the selected backend's simulate, producing the base
+              -- result JSON. Affordability is computed once afterwards so it
+              -- applies to EVERY backend (the daemon default is helios, not
+              -- rpc) rather than only the direct-RPC path.
+              let simJson : Json ← match backend with
               | .colibri =>
                   -- Route to the persistent Colibri client if running;
                   -- fall back to the one-shot sidecar otherwise. Same
@@ -117,11 +217,11 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   match ← LeanCli.Daemon.State.colibriClient? state with
                   | some c =>
                       let resp ← LeanCli.Colibri.Persistent.call c "tx.simulate" cParams
-                      pure <| .ok <| LeanCli.Colibri.Persistent.responseToJson resp
+                      pure <| LeanCli.Colibri.Persistent.responseToJson resp
                   | none =>
                       let resp ← LeanCli.Colibri.Bridge.call
                         { method := "tx.simulate", params := cParams, id := 0 }
-                      pure <| .ok <| LeanCli.Colibri.Bridge.responseToJson resp
+                      pure <| LeanCli.Colibri.Bridge.responseToJson resp
               | .helios =>
                   -- When safenode is running, substitute its TDX-pinned
                   -- proxy URL for executionRpc on mainnet/sepolia so
@@ -131,11 +231,11 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   match ← LeanCli.Daemon.State.heliosClient? state with
                   | some c =>
                       let resp ← LeanCli.Helios.Persistent.call c "tx.simulate" hParams
-                      pure <| .ok <| LeanCli.Helios.Persistent.responseToJson resp
+                      pure <| LeanCli.Helios.Persistent.responseToJson resp
                   | none =>
                       let resp ← LeanCli.Helios.Bridge.call
                         { method := "tx.simulate", params := hParams, id := 0 }
-                      pure <| .ok <| LeanCli.Helios.Bridge.responseToJson resp
+                      pure <| LeanCli.Helios.Bridge.responseToJson resp
               | .rpc =>
                 -- Build the call object once; eth_call and eth_estimateGas
                 -- accept the same shape.
@@ -210,11 +310,21 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   | .ok j => #[("gasEstimate", j)]
                   | .error e =>
                       #[("gasEstimateError", Json.str e)]
-                pure <| .ok <| .obj <| #[
+                pure <| .obj <| #[
                   ("ok", .bool okBool),
                   ("block", .str block),
                   ("tx", txObj)
                 ] ++ returnField ++ revertField ++ gasField ++ traceField
+              -- Uniform affordability across backends. The balance / gas-
+              -- price reads run against the resolved chain endpoint (for
+              -- helios/colibri that's the configured execution RPC; these
+              -- reads are display-only and not part of light-client
+              -- verification). The gas figure is whatever the backend's
+              -- simulate produced — `gasEstimate` arrives as a hex string
+              -- from direct RPC or a number from a sidecar.
+              let gasHint? := getField "gasEstimate" simJson >>= jsonHexOrNat?
+              let affordField ← affordabilityField cfg.policy endpoint from? value block gasHint?
+              pure <| .ok <| mergeFields simJson affordField
   | "tx.preflightContext" =>
       -- Why: surface "what does the chain currently say?" alongside the
       -- deterministic simulate output. For approves we read the current

@@ -361,7 +361,8 @@ def seedFingerprintFromSeed (seed : ByteArray) :
       true
     let digest ← expectExcept <| ← LeanCli.Crypto.Hacl.keccak256EthereumIO
       (LeanCli.Crypto.Hex.encode pub)
-    pure (.ok ("0x" ++ LeanCli.Crypto.Hex.encode (LeanCli.Wallet.HDKey.take digest 0 8)))
+    -- `Hex.encode` is already `0x`-prefixed — no manual prefix (would double it).
+    pure (.ok (LeanCli.Crypto.Hex.encode (LeanCli.Wallet.HDKey.take digest 0 8)))
   catch e =>
     pure (.error e.toString)
 
@@ -453,7 +454,10 @@ def estimateTxJson (fromAddr to : String) (value : Nat) (data : ByteArray) : Jso
     ("from",  .str fromAddr),
     ("to",    .str to),
     ("value", .str (natQuantityHex value)),
-    ("data",  .str ("0x" ++ LeanCli.Crypto.Hex.encode data))
+    -- `Hex.encode` already emits a `0x`-prefixed string; do NOT prepend
+    -- another `0x` or the node rejects `data` as an invalid hex string
+    -- ("cannot unmarshal ... TransactionArgs.data") at eth_estimateGas.
+    ("data",  .str (LeanCli.Crypto.Hex.encode data))
   ]
 
 /-- Canonical `{to, value, raw, txHash, nonce, gasLimit, ..., signature}`

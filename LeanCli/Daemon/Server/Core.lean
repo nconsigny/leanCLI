@@ -85,4 +85,17 @@ instance : Repr Config where
       ", chainId := " ++ repr cfg.chainId ++
       ", policy := <function>)"
 
+/-- Re-target the daemon's *default* chain at runtime: switch `chainId`
+and the default `rpcEndpoint` to the configured per-chain endpoint that
+carries `target`. The chain-aware `policy` needs no rebuild — it gates on
+`endpoint.chainId` (see `RPC.Outbound.requestAllowed`), which the swapped
+endpoint already carries. Per-call `chain:`-parameterised requests are
+unaffected (they resolve via `chainEndpoints` directly). If no configured
+endpoint matches `target`, `chainId` still updates but the default
+endpoint is left as-is (callers must validate before switching). -/
+def Config.withChain (cfg : Config) (target : Nat) : Config :=
+  match cfg.chainEndpoints.find? (fun (_, ep) => ep.chainId == some target) with
+  | some (_, ep) => { cfg with chainId := target, rpcEndpoint := ep }
+  | none         => { cfg with chainId := target }
+
 end LeanCli.Daemon.Server

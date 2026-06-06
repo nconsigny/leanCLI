@@ -400,7 +400,7 @@ if [[ "$MODE" == "uninstall" ]]; then
   for bridge_exe in leancli-bridge leancli-clearsign-bridge \
                     leancli-colibri-bridge leancli-helios-bridge \
                     leancli-safenode-bridge \
-                    leancli-llm-bridge; do
+                    leancli-llm-bridge leancli-llm-legacy; do
     if [[ -e "$LEANCLI_BIN/$bridge_exe" ]]; then
       rm -f "$LEANCLI_BIN/$bridge_exe"
       echo "removed $LEANCLI_BIN/$bridge_exe"
@@ -1020,6 +1020,20 @@ EOF
   if [[ $installed -eq 0 ]]; then
     echo "==> bridge wrappers: none installed (no bridge.mjs targets found in $CHECKOUT/sidecars/kohaku/)"
   fi
+
+  # Self-heal: purge wrapper shims for sidecars that no longer exist so a
+  # plain `leancli install` cleans up after a refactor — not just
+  # `--uninstall`. `leancli-llm-legacy`/`leancli-llm-bridge` were the
+  # pre-native-agent LLM shims (the LLM path is now the `leancli-agent`
+  # binary; see commit a9f02b47). Only ever removes generated shims, never
+  # the symlinked real binaries.
+  local dead_exe
+  for dead_exe in leancli-llm-legacy leancli-llm-bridge; do
+    if [[ -f "$LEANCLI_BIN/$dead_exe" && ! -L "$LEANCLI_BIN/$dead_exe" ]]; then
+      rm -f "$LEANCLI_BIN/$dead_exe"
+      echo "==> removed stale wrapper $LEANCLI_BIN/$dead_exe (sidecar no longer exists)"
+    fi
+  done
 }
 
 install_bridge_wrappers

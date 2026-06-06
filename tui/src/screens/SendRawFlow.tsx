@@ -404,6 +404,11 @@ function ConfirmGate({
     if (key.escape) onCancel();
   });
   const okSim = sim?.ok === true;
+  // eth_call says the logic wouldn't revert, but `from` can't cover gas
+  // (e.g. 0 ETH). Folded into the single result line below rather than
+  // shown as a second, easily-missed warning.
+  const unaffordable =
+    sim?.affordability?.checked === true && sim.affordability.affordable === false;
   // Signer-specific labelling threaded through the title + subtitle so the
   // user always knows which key path will sign — and what extra auth
   // happens at sign time (sphincs dual-sign via bundler).
@@ -492,10 +497,12 @@ function ConfirmGate({
           <Text color={theme.dim}>result: </Text>
           {sim?.simRpcError ? (
             <Text color={theme.warn}>(daemon error)</Text>
-          ) : okSim ? (
-            <Text color={theme.ok}>✓ would succeed</Text>
-          ) : (
+          ) : !okSim ? (
             <Text color={theme.err}>✗ would revert</Text>
+          ) : unaffordable ? (
+            <Text color={theme.err}>logic ok, but ETH balance too low for gas</Text>
+          ) : (
+            <Text color={theme.ok}>✓ would succeed</Text>
           )}
         </Text>
         {sim?.gasEstimate && (
@@ -511,6 +518,12 @@ function ConfirmGate({
               })()}{" "}
               units
             </Text>
+          </Text>
+        )}
+        {sim?.affordability?.checked === true && sim.affordability.affordable === true && (
+          <Text color={theme.dim}>
+            fee ≈ {String(sim.affordability.feeHuman)} · balance{" "}
+            {String(sim.affordability.senderBalanceHuman)}
           </Text>
         )}
         {sim?.revertReason && (

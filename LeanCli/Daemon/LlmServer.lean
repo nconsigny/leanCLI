@@ -1,5 +1,6 @@
 import LeanCli.Daemon.Log
 import LeanCli.Util.Sandbox
+import LeanCli.Encoding.Json
 
 /-!
 # Llama-server discovery + lazy spawn
@@ -31,6 +32,11 @@ on daemon boot. Users who never enter chat never see a model load.
 * `LLM_SPAWN_TIMEOUT_MS` — health-wait window, default 30000
 * `LLM_AUTO_SPAWN`    — `true` (default) / `false`; if false, the daemon
                         only probes, never spawns
+* `LLM_MODELS_CONFIG` — path to a JSON file of predefined launch profiles
+                        (see `loadModels`/`ModelSpec`). Powers the
+                        dashboard's `m`-key model picker (`llm.models` /
+                        `llm.launch`); independent of the lazy `ensureUp`
+                        path above.
 -/
 
 namespace LeanCli.Daemon.LlmServer
@@ -104,6 +110,7 @@ def parseSpawnArgs (raw : Option String) : Array String :=
 inductive Outcome where
   | alreadyUp      -- probe succeeded; nothing to do
   | spawnedHealthy -- we spawned a child and it became healthy
+  | spawning       -- we spawned a child; it is still loading (watch the pane)
   | spawnFailed (msg : String)  -- spawn attempted but failed (or server didn't become healthy)
   | spawnDisabled  -- LLM_SERVER_BINARY unset or LLM_AUTO_SPAWN=false
   deriving Repr
@@ -113,6 +120,7 @@ introspection. -/
 def Outcome.toString : Outcome → String
   | .alreadyUp        => "alreadyUp"
   | .spawnedHealthy   => "spawnedHealthy"
+  | .spawning         => "spawning"
   | .spawnFailed msg  => s!"spawnFailed: {msg}"
   | .spawnDisabled    => "spawnDisabled"
 
@@ -148,5 +156,130 @@ def ensureUp : IO Outcome := do
         return .spawnFailed (toString e)
   | none, _ => return .spawnDisabled
   | _, none => return .spawnFailed "LLM_SERVER_BINARY set but LLM_MODEL_PATH is not"
+
+/-! ## Predefined launch profiles + runtime model switching
+
+The lazy `ensureUp` path above starts a single `-m <path>` model from
+env. Operators with more than one local model — and especially those
+running MoE / speculative-decode setups — want to switch between
+hardware-tuned invocations from the dashboard. A single `LLM_MODEL_PATH`
+can't express `-hf …`, `--n-cpu-moe 22`, `-ngl 99`, `--spec-type
+draft-mtp`, etc.; those args are host-specific. So a launch *profile*
+carries its **complete** arg list, passed verbatim to `llama-server`. -/
+
+open LeanCli.Encoding.Json in
+/-- A predefined `llama-server` launch profile. `args` is the full,
+verbatim invocation (e.g. `-hf unsloth/…:UD-Q4_K_XL --n-cpu-moe 22
+--ctx-size 32768 -ngl 99 …`) — we deliberately do NOT synthesize args
+from a model path, because the right flags are hardware-dependent.
+`--host`/`--port` are appended only if absent, so the daemon's
+loopback `:8080` health probe stays valid. -/
+structure ModelSpec where
+  /-- Display name shown in the picker; the `llm.launch` key. -/
+  name : String
+  /-- Per-profile binary override; falls back to `LLM_SERVER_BINARY`. -/
+  binary : Option String := none
+  /-- Optional one-line description for the picker. -/
+  description : Option String := none
+  /-- Verbatim `llama-server` args. -/
+  args : Array String
+  deriving Repr
+
+open LeanCli.Encoding.Json in
+/-- Parse one profile object. A missing `name` or `args` drops the entry
+(filtered out by `loadModels`). -/
+def parseSpec (j : Json) : Option ModelSpec := do
+  let name ← getField "name" j >>= asString
+  let argsJson ← getField "args" j >>= asArray
+  let args := argsJson.filterMap asString
+  some {
+    name,
+    binary := getField "binary" j >>= asString,
+    description := getField "description" j >>= asString,
+    args
+  }
+
+/-- Where to read launch profiles from. `LLM_MODELS_CONFIG` wins; if it
+is unset we fall back to `models.json` in the daemon's config dir
+(`$XDG_CONFIG_HOME/leancli/` or `$HOME/.config/leancli/`) — the same
+directory as `daemon.env`/`daemon.json`, so operators can drop the file
+in place without touching the systemd `EnvironmentFile`. Returns `none`
+only when neither the env var nor `$HOME`/`$XDG_CONFIG_HOME` is set. -/
+def modelsConfigPath : IO (Option String) := do
+  if let some p ← IO.getEnv "LLM_MODELS_CONFIG" then
+    return some p
+  if let some d ← IO.getEnv "XDG_CONFIG_HOME" then
+    return some s!"{d}/leancli/models.json"
+  if let some h ← IO.getEnv "HOME" then
+    return some s!"{h}/.config/leancli/models.json"
+  return none
+
+open LeanCli.Encoding.Json in
+/-- Read predefined model profiles from `modelsConfigPath`. The file is a
+JSON array of objects:
+`[{"name": "...", "args": ["-hf","unsloth/…","--n-cpu-moe","22", …],
+   "binary": "/abs/llama-server", "description": "…"}]`.
+Returns `#[]` when no path resolves or the file is missing/unparseable
+(the picker then surfaces "no models configured"); malformed entries are
+skipped rather than failing the whole list. -/
+def loadModels : IO (Array ModelSpec) := do
+  let some path ← modelsConfigPath | return #[]
+  if !(← System.FilePath.pathExists path) then return #[]
+  let raw ← IO.FS.readFile path
+  match parse raw with
+  | .error _ => return #[]
+  | .ok j =>
+      match asArray j with
+      | some arr => return arr.filterMap parseSpec
+      | none     => return #[]
+
+/-- Stop any running `llama-server`. We shell out to `pkill -f` (matching
+the command line, so a relative `./build/bin/llama-server` is caught too)
+and then pause to let the loopback `:8080` socket free up before a
+respawn binds it. `pkill` exiting non-zero (no match) is not an error.
+This deliberately mirrors the operator's own `pkill -9 llama-server;
+sleep 2` switch ritual — `ensureUp` keeps no child handle to kill. -/
+def stopServer : IO Unit := do
+  try
+    let _ ← IO.Process.output {
+      cmd := "/usr/bin/env",
+      args := #["pkill", "-TERM", "-f", "llama-server"]
+    }
+  catch _ => pure ()
+  sleepMs 2000
+
+/-- Switch to a predefined model: stop the current `llama-server`, then
+spawn `spec`'s verbatim invocation on loopback `:8080`. We block only
+briefly (a few seconds) to catch a fast crash on bad args; we do NOT wait
+out a full model load — a 30B+ MoE or a first-run `-hf` download can take
+minutes, and the pane's read-only poll already surfaces loading → up. -/
+def launchModel (spec : ModelSpec) : IO Outcome := do
+  let baseUrl := ((← IO.getEnv "LLM_BASE_URL").getD "http://127.0.0.1:8080/v1")
+  let binary ← match spec.binary with
+    | some b => pure b
+    | none   => pure ((← IO.getEnv "LLM_SERVER_BINARY").getD "")
+  if binary.isEmpty then
+    return .spawnFailed "no binary: set LLM_SERVER_BINARY or the profile's `binary`"
+  if !(← System.FilePath.pathExists binary) then
+    return .spawnFailed s!"llama-server binary does not exist: {binary}"
+  -- Guarantee the loopback+port the health probe expects, without
+  -- clobbering an explicit host/port the operator chose.
+  let mut finalArgs := spec.args
+  if !spec.args.contains "--host" then finalArgs := finalArgs ++ #["--host", "127.0.0.1"]
+  if !spec.args.contains "--port" then finalArgs := finalArgs ++ #["--port", "8080"]
+  stopServer
+  try
+    let _child ← IO.Process.spawn {
+      cmd := binary,
+      args := finalArgs,
+      stdin := .null,
+      stdout := .inherit,
+      stderr := .inherit
+    }
+    let now ← IO.monoMsNow
+    let healthy ← waitHealthy baseUrl (now + 4000)
+    if healthy then return .spawnedHealthy else return .spawning
+  catch e =>
+    return .spawnFailed (toString e)
 
 end LeanCli.Daemon.LlmServer

@@ -156,6 +156,54 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
         ("lightclient", .bool lightclientFlag),
         ("indexers", .arr indexersArr)
       ]
+  | "network.use" =>
+      -- Runtime, daemon-wide chain switch. Accepts `chainId` (Nat) or a
+      -- `chain` name; validates the target has a configured per-chain
+      -- endpoint, then records the override in shared state. Every later
+      -- request is re-targeted at the dispatch boundary
+      -- (`Server.methodHandler` → `Config.withChain`). No restart. This
+      -- moves read/endpoint plumbing only — signing still terminates at
+      -- ConfirmGate, and per-call `chain:` params continue to win.
+      let target? : Option Nat :=
+        ((getField "chainId" req.params) >>= asNat) <|>
+        ((getField "chain" req.params) >>= asString >>= LeanCli.RPC.Outbound.chainNameToId)
+      match target? with
+      | none =>
+          pure <| .error { code := -32602, message := "network.use requires `chainId` or `chain`", data := none }
+      | some target =>
+          -- Only switch to a chain we actually have an endpoint for; the
+          -- name→id map in `chainNumId` mirrors what `network.show`
+          -- reports, so the TUI's perChain list and this check agree.
+          let known : Bool :=
+            cfg.chainEndpoints.any fun (name, _) =>
+              (LeanCli.RPC.Outbound.chainNameToId name) = some target
+          if known then
+            LeanCli.Daemon.State.setActiveChain state target
+            pure <| .ok <| .obj #[("ok", .bool true), ("chainId", .num (Int.ofNat target))]
+          else
+            pure <| .error {
+              code := -32021,
+              message := s!"no configured endpoint for chainId {target}",
+              data := none
+            }
+  | "daemon.privacy.status" =>
+      -- Display-only: report the enabled privacy plugins (the
+      -- `LEANCLI_PRIVACY` allow-list, set at daemon boot) and the active
+      -- provider (`LEANCLI_PROVIDER`). No runtime toggle RPC exists — the
+      -- settings pane surfaces these read-only with an "edit daemon.env &
+      -- restart" note. Reads env directly; never spawns the sidecar.
+      let known := ["railgun", "privacy-pools", "tornado"]
+      let raw := ((← IO.getEnv "LEANCLI_PRIVACY").getD "")
+      let enabled : Array Json :=
+        ((raw.splitOn ",").filterMap (fun part =>
+          let name := (part.trimAscii.toString).map Char.toLower
+          if name ≠ "" && known.contains name then some (Json.str name) else none)).toArray
+      let providerRaw := (((← IO.getEnv "LEANCLI_PROVIDER").getD "helios").trimAscii.toString).map Char.toLower
+      let provider := if providerRaw = "" then "helios" else providerRaw
+      pure <| .ok <| .obj #[
+        ("enabledPrivacy", .arr enabled),
+        ("provider", .str provider)
+      ]
   | "daemon.preflight" =>
       -- Why: pushes the CLI's "preflight" dry-run check into the daemon so
       -- the CLI is a thin printer per CLAUDE.md. Accepts an action JSON

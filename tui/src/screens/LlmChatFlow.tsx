@@ -120,6 +120,11 @@ export type DraftResponse = {
   // parses the 0x-string exactly.
   encoded?: { to: string; value: string; data: string; chainId: number; sender?: string };
   encodeError?: string;
+  /** Deterministic swap short-circuit error (chat.draft's `swapEarly`,
+   *  e.g. a failed on-chain quote/allowance read). Surfaced like the other
+   *  *Error fields so the failure reason is visible instead of the bubble
+   *  silently falling back to the bare "swap" action label. */
+  swapError?: string;
   modelAsk?: { error: string; question: string };
   // New non-tx-encoded action directives. Returned by chat.draft for
   // the privacy / hygiene / wallet-mgmt Intent variants. The TUI is
@@ -239,6 +244,7 @@ export function summariseAssistantTurn(t: Extract<Turn, { kind: "assistant" }>):
     const canon = r.canonical ? ` · ${r.canonical}` : "";
     return `[drafted ${r.intentActionTag}]${canon}`;
   }
+  if (r.swapError) return `[swapError] ${r.swapError}`;
   if (r.validateError) return `[validateError] ${r.validateError}`;
   if (r.encodeError) return `[encodeError] ${r.encodeError}`;
   if (r.llmError) return `[llmError] ${r.llmError}`;
@@ -1298,7 +1304,11 @@ function TurnRow({
       <Box>
         <Text color={theme.ok} bold>{"› le chat  "}</Text>
         <Text>
-          {r.intentActionTag ?? r.regex?.action ?? "(no action)"}
+          {r.intentActionTag
+            ? friendlyAction(r.intentActionTag)
+            : (r.llmRaw && r.llmRaw.trim().length > 0)
+              ? r.llmRaw.trim()
+              : "—"}
         </Text>
         <Text color={theme.dim}>{" · regex="}{r.regex?.confidence ?? "?"}</Text>
       </Box>
@@ -1306,11 +1316,12 @@ function TurnRow({
       {/* Compact body. Each block omitted when absent. */}
       {r.regex && <RegexLine regex={r.regex} />}
       {r.modelAsk && <AskLine ask={r.modelAsk} />}
-      {(r.validateError || r.encodeError || r.llmError) && (
+      {(r.validateError || r.encodeError || r.llmError || r.swapError) && (
         <RejectLine
           validateErr={r.validateError}
           encodeErr={r.encodeError}
           llmErr={r.llmError}
+          swapErr={r.swapError}
         />
       )}
       {r.canonical && <CanonicalLines canonical={r.canonical} />}
@@ -1745,13 +1756,16 @@ function RejectLine({
   validateErr,
   encodeErr,
   llmErr,
+  swapErr,
 }: {
   validateErr?: string;
   encodeErr?: string;
   llmErr?: string;
+  swapErr?: string;
 }) {
   return (
     <Box paddingLeft={5} flexDirection="column">
+      {swapErr && <Text color={theme.err}>swap: {swapErr}</Text>}
       {llmErr && <Text color={theme.err}>llm: {llmErr}</Text>}
       {validateErr && <Text color={theme.err}>rejected: {validateErr}</Text>}
       {encodeErr && <Text color={theme.err}>encode: {encodeErr}</Text>}

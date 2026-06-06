@@ -15,8 +15,9 @@ import { Layout } from "../widgets/Layout.js";
 import TabStrip from "../widgets/TabStrip.js";
 import Select from "../widgets/Select.js";
 import { archiveKey, readArchive, toggleArchive } from "../archiveStore.js";
+import { type CreateKind } from "./CreateWalletPicker.js";
 
-export type WalletsAction = "send" | "swap" | "shield" | "unshield" | "manage";
+export type WalletsAction = "send" | "swap" | "shield" | "unshield" | "manage" | "create";
 
 type Props = {
   refreshKey?: number;
@@ -26,7 +27,19 @@ type Props = {
    *  hits the per-chain endpoint matching what the user just saw on
    *  the balance row. */
   onPick: (action: WalletsAction, wallet: Wallet, chain: string) => void;
+  /** CREATE tab: there is no selected wallet — route the chosen kind to
+   *  the create/add/import flows (App pushes CreateEoaFlow / AddAccountFlow
+   *  / ImportEoaFlow / CreateSphincsHybridFlow). */
+  onCreate?: (kind: CreateKind) => void;
   onBack: () => void;
+  /** When false, the hub ignores all keys (its `useInput`, TabStrip, and
+   *  Select go quiet) — needed when embedded as a pane in the dashboard
+   *  alongside other input-capturing panes. Defaults to true so the
+   *  standalone full-screen mount is unaffected. */
+  isActive?: boolean;
+  /** When true, drop the koi frame (it eats 24 cols) so wallet rows get
+   *  the full pane width. Set by the dashboard's in-pane mount. */
+  embedded?: boolean;
 };
 
 type BalanceCell =
@@ -91,6 +104,11 @@ const TABS: { label: string; value: WalletsAction; help: string }[] = [
     help: "Per-account admin — EOA: BIP-44 path + cousin sub-accounts. Smart accounts: key rotation / social recovery. Also lists ERC-20 balances from the swap registry.",
   },
   {
+    label: "CREATE",
+    value: "create",
+    help: "New wallet, new hardened account, or import — fresh EOA, sub-account, BIP-39 import, or SPHINCS+ hybrid smart account.",
+  },
+  {
     label: "SEND",
     value: "send",
     help: "Move ETH (or signed calldata) from a wallet to a recipient.",
@@ -120,7 +138,10 @@ const TABS: { label: string; value: WalletsAction; help: string }[] = [
 export default function WalletsHub({
   refreshKey = 0,
   onPick,
+  onCreate,
   onBack,
+  isActive = true,
+  embedded = false,
 }: Props) {
   const [wallets, setWallets] = useState<Wallet[]>([]);
   const [balances, setBalances] = useState<Record<string, BalanceCell>>({});
@@ -404,21 +425,24 @@ export default function WalletsHub({
   // archives the currently-highlighted wallet (or unarchives if it's
   // somehow visible while archived — toggle semantics). Both `r` and
   // `a` bump a dep on the useEffect above so the wallet list re-fetches.
-  useInput((input, key) => {
-    if (key.escape || input === "q") onBack();
-    else if (input === "n") {
-      setEoaChain((c) => (c === "mainnet" ? "sepolia" : "mainnet"));
-    } else if (input === "r") {
-      setLocalRefresh((k) => k + 1);
-    } else if (input === "a" && highlightedKey) {
-      // archiveKey/balanceKey share the same `kind|name|idx` shape;
-      // `highlightedKey` from the Select callback is the balanceKey we
-      // composed for that row. Pass it straight to toggleArchive.
-      const next = toggleArchive(highlightedKey);
-      setArchived(next);
-      setLocalRefresh((k) => k + 1);
-    }
-  });
+  useInput(
+    (input, key) => {
+      if (key.escape || input === "q") onBack();
+      else if (input === "n") {
+        setEoaChain((c) => (c === "mainnet" ? "sepolia" : "mainnet"));
+      } else if (input === "r") {
+        setLocalRefresh((k) => k + 1);
+      } else if (input === "a" && highlightedKey) {
+        // archiveKey/balanceKey share the same `kind|name|idx` shape;
+        // `highlightedKey` from the Select callback is the balanceKey we
+        // composed for that row. Pass it straight to toggleArchive.
+        const next = toggleArchive(highlightedKey);
+        setArchived(next);
+        setLocalRefresh((k) => k + 1);
+      }
+    },
+    { isActive },
+  );
 
   const tab = TABS[tabIdx]!;
   const tabFiltered = filterWalletsForTab(tab.value, wallets);
@@ -491,13 +515,18 @@ export default function WalletsHub({
       title="Wallets"
       subtitle={`${tab.label} — ${tab.help}`}
       hint="←/→ action · ↑/↓ wallet · enter run · n chain · r refresh · a archive · esc back"
+      koi={!embedded}
     >
       <Text color={theme.koiCream} backgroundColor={theme.koiInk} bold>
         {" leanCLI · wallets "}
       </Text>
       <Box marginTop={1}>
-        <TabStrip tabs={TABS} activeIndex={tabIdx} onChange={setTabIdx} />
+        <TabStrip tabs={TABS} activeIndex={tabIdx} onChange={setTabIdx} isActive={isActive} />
       </Box>
+      {tab.value === "create" ? (
+        <CreatePickerInline isActive={isActive} onCreate={onCreate} />
+      ) : (
+        <>
       {loading && (
         <Text>
           <Text color={theme.primary}>
@@ -524,6 +553,7 @@ export default function WalletsHub({
           </Box>
           <Select
             items={items}
+            isFocused={isActive}
             onHighlight={(it) => {
               const cast = it as typeof items[number];
               setHighlightedKey(cast.value);
@@ -537,7 +567,40 @@ export default function WalletsHub({
           />
         </Box>
       )}
+        </>
+      )}
     </Layout>
+  );
+}
+
+/** CREATE-tab body: a kind picker (no wallet selection). Routes to the
+ *  create/add/import flows via `onCreate`. */
+function CreatePickerInline({
+  isActive,
+  onCreate,
+}: {
+  isActive: boolean;
+  onCreate?: (kind: CreateKind) => void;
+}) {
+  const items: { label: string; value: CreateKind }[] = [
+    { label: "New EOA — fresh BIP-39 mnemonic, passphrase-encrypted", value: "eoa" },
+    { label: "Add account — new hardened branch on an existing EOA", value: "add-account" },
+    { label: "Import BIP-39 mnemonic (12 or 24 words)", value: "import-bip39" },
+    { label: "SPHINCS+ hybrid — ECDSA + post-quantum ERC-4337", value: "sphincs-hybrid" },
+  ];
+  return (
+    <Box flexDirection="column">
+      <Box marginBottom={1}>
+        <Text color={theme.dim}>new wallet, account, or import — </Text>
+        <Text color={theme.highlight} bold>enter</Text>
+        <Text color={theme.dim}> to start</Text>
+      </Box>
+      <Select
+        items={items}
+        isFocused={isActive}
+        onSelect={(it) => onCreate?.((it as { value: CreateKind }).value)}
+      />
+    </Box>
   );
 }
 
@@ -577,6 +640,9 @@ function ChainBadge({ eoa }: { eoa?: string }) {
 
 function filterWalletsForTab(action: WalletsAction, wallets: Wallet[]): Wallet[] {
   switch (action) {
+    case "create":
+      // No wallet list — the CREATE tab renders its own kind picker.
+      return [];
     case "send":
     case "swap":
     case "manage":
