@@ -101,16 +101,15 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   | .error err =>
                       pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
                   | .ok ep =>
-                      -- Route ALL balance reads through the active verifier
-                      -- (helios/colibri) — no direct bypass. The verified
-                      -- client is a single serial UDS connection, so we read
-                      -- SEQUENTIALLY (the old concurrent IO.asTask fan-out
-                      -- would interleave on that one conn and corrupt the
-                      -- wire). Slower than the burst, but every balance is
-                      -- verified; balance-poll frequency is cut on the TUI
-                      -- side to keep the sequential cost bounded, and token
-                      -- discovery only runs on the wallet-hub screen.
-                      let via? ← verifiedReadVia state chainId.toNat ep
+                      -- DIRECT RPC, read sequentially. We can't safely route
+                      -- this through the verified client: it's a single shared
+                      -- UDS connection and the daemon serves requests
+                      -- concurrently, so concurrent verified reads queue/corrupt
+                      -- on that one conn (the balance-timeout we hit). Verified
+                      -- token balances need a connection-pooled / mutex-guarded
+                      -- verified client (follow-up). Token discovery is hub-only
+                      -- now, so sequential direct reads are an acceptable cost.
+                      let via? : Option LeanCli.RPC.Outbound.VerifyVia := none
                       let calldata := erc20BalanceOfData ownerAddr
                       let candidates :
                           List (LeanCli.Swap.Tokens.Token × String) :=

@@ -446,10 +446,10 @@ function formatBytes(n: number): string {
  *  every column readable on an 80-col terminal. */
 function rowLayout(cols: number) {
   const usable = Math.max(60, cols - 2);
-  // Fixed mini-columns: glyph(2) + time(7) + kind(12) + status(8) + ms(7)
-  // = 36. Remaining is shared between method (60%) and host (40%), with
-  // a small detail tail when the terminal is wide enough.
-  const fixed = 2 + 7 + 12 + 8 + 7;
+  // Fixed mini-columns: glyph(2) + verdict(10) + time(7) + kind(12) +
+  // status(8) + ms(7) = 46. Remaining is shared between method (60%) and
+  // host (40%), with a small detail tail when the terminal is wide enough.
+  const fixed = 2 + 10 + 7 + 12 + 8 + 7;
   const flex = Math.max(20, usable - fixed - 2);
   const wMethod = Math.max(14, Math.floor(flex * 0.45));
   const wHost = Math.max(10, Math.floor(flex * 0.30));
@@ -464,9 +464,9 @@ function HeaderRow({ cols }: { cols: number }) {
   return (
     <Text wrap="truncate-end" color={theme.dim} bold>
       {"  "}
-      {cell("t", 7)} {cell("kind", 12)} {cell("method", wMethod)}{" "}
+      {cell("vfy", 9)} {cell("t", 7)} {cell("kind", 12)} {cell("method", wMethod)}{" "}
       {cell("host", wHost)} {cell("status", 8)} {cell("ms", 6)}
-      {wDetail > 0 ? "  " + cell("verdict · detail", wDetail) : ""}
+      {wDetail > 0 ? "  " + cell("detail", wDetail) : ""}
     </Text>
   );
 }
@@ -483,11 +483,15 @@ function EventRow({ e, cols }: { e: LogEvent; cols: number }) {
   // threaded up, not yet built). For balances / eth_call / in-window logs the
   // ✓ is genuine verification.
   const viaVerifier = e.backend === "helios" || e.backend === "colibri";
-  const verdict =
-    e.backend === "helios" ? "✓ verified · helios"
-      : e.backend === "colibri" ? "✓ verified · colibri"
-        : e.backend === "local" ? "· unverified · local node"
-          : "· unverified · direct RPC";
+  // Verdict tag in the LEADING column — always visible. (A right-side detail
+  // column gets pushed off-screen by the padded method/host columns and just
+  // shows "…", which is why the verdict can't live there.) Names the backend
+  // so it's more than a bare letter: ✓helios / ✓colibri / ·direct / ·local.
+  const verdictTag =
+    e.backend === "helios" ? "✓helios"
+      : e.backend === "colibri" ? "✓colibri"
+        : e.backend === "local" ? "·local"
+          : "·direct";
   const cell = (s: string, n: number) =>
     s.length >= n ? s.slice(0, Math.max(0, n - 1)) + "…" : s + " ".repeat(n - s.length);
   const method = cell(e.method ?? "?", wMethod);
@@ -500,7 +504,7 @@ function EventRow({ e, cols }: { e: LogEvent; cols: number }) {
       : (e.transport ?? "").padStart(7);
   const statusPadded = cell(status, 8);
   const ms = e.ms !== undefined ? String(e.ms).padStart(4) : "    ";
-  const extra = describeDetail(e);
+  const detail = wDetail > 0 ? cell(describeDetail(e), wDetail) : "";
   const statusColor =
     e.httpStatus !== undefined
       ? e.httpStatus >= 200 && e.httpStatus < 300
@@ -515,18 +519,14 @@ function EventRow({ e, cols }: { e: LogEvent; cols: number }) {
   return (
     <Text wrap="truncate-end">
       <Text color={kindColor}>{glyph} </Text>
+      <Text color={viaVerifier ? theme.ok : theme.dim}>{cell(verdictTag, 9)} </Text>
       <Text color={theme.dim}>{t} </Text>
       <Text color={kindColor}>{kind} </Text>
       <Text color={theme.primary}>{method} </Text>
       <Text color={theme.accent}>{host} </Text>
       <Text color={statusColor}>{statusPadded} </Text>
       <Text color={theme.dim}>{ms}ms</Text>
-      {wDetail > 0 && (
-        <>
-          <Text color={viaVerifier ? theme.ok : theme.warn}>{"  " + verdict}</Text>
-          {extra ? <Text color={theme.dim}>{"  " + extra}</Text> : null}
-        </>
-      )}
+      {wDetail > 0 && <Text color={theme.dim}>{"  " + detail}</Text>}
     </Text>
   );
 }
