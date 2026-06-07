@@ -105,7 +105,14 @@ function shieldedSection(
   };
 }
 
-export function useWalletData(activeChain: string | null): WalletData {
+export function useWalletData(
+  activeChain: string | null,
+  /** When false, the balance poll is paused — used to stop background
+   *  polling while the user isn't looking at the wallet (e.g. they're in
+   *  the network monitor). Flipping it back to true triggers an immediate
+   *  refresh. Defaults true so other callers are unaffected. */
+  enabled: boolean = true,
+): WalletData {
   const [rows, setRows] = useState<WalletRow[]>([]);
   const [droppedRows, setDroppedRows] = useState(0);
   const [enumErr, setEnumErr] = useState<string | null>(null);
@@ -190,6 +197,9 @@ export function useWalletData(activeChain: string | null): WalletData {
   // ETH balance only: sequential per row through the active provider.
   usePoll(
     async (isCancelled) => {
+      // Paused when the wallet isn't in view (see `enabled`) — no background
+      // balance traffic while the user is elsewhere (e.g. network monitor).
+      if (!enabled) return;
       const snapshot = rowsRef.current;
       // ETH balance ONLY on the dashboard: one verified eth_getBalance per
       // row (chain.balance routes through the active provider). Token
@@ -221,7 +231,7 @@ export function useWalletData(activeChain: string | null): WalletData {
       }
     },
     60_000,
-    [activeChain, refreshKey],
+    [activeChain, refreshKey, enabled],
   );
 
   const syncShielded = () => {

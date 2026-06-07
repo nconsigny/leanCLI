@@ -101,15 +101,12 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   | .error err =>
                       pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
                   | .ok ep =>
-                      -- DIRECT RPC, read sequentially. We can't safely route
-                      -- this through the verified client: it's a single shared
-                      -- UDS connection and the daemon serves requests
-                      -- concurrently, so concurrent verified reads queue/corrupt
-                      -- on that one conn (the balance-timeout we hit). Verified
-                      -- token balances need a connection-pooled / mutex-guarded
-                      -- verified client (follow-up). Token discovery is hub-only
-                      -- now, so sequential direct reads are an acceptable cost.
-                      let via? : Option LeanCli.RPC.Outbound.VerifyVia := none
+                      -- Verify ALL token balances through the mutex-guarded
+                      -- verified client (State.verifyLock). Reads are sequential
+                      -- here and the lock serializes against other handlers, so
+                      -- the single shared conn is safe. Hub-only + sequential
+                      -- keeps the cost bounded.
+                      let via? ← verifiedReadVia state chainId.toNat ep
                       let calldata := erc20BalanceOfData ownerAddr
                       let candidates :
                           List (LeanCli.Swap.Tokens.Token × String) :=

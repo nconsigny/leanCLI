@@ -1,3 +1,4 @@
+import Std.Sync.Mutex
 import LeanCli.Colibri.Persistent
 import LeanCli.Helios.Persistent
 import LeanCli.SafeNode.Persistent
@@ -141,11 +142,21 @@ structure DaemonState where
   restart. Per-call `chain:` params still win; this only moves the
   default. Read/endpoint plumbing only — no signing impact. -/
   activeChainId : Option Nat := none
+  /-- Serializes access to the single-connection verified-read clients
+  (helios / colibri `Persistent.call`). The daemon answers TUI polls
+  CONCURRENTLY, but each light client holds ONE UDS connection — without
+  this lock, concurrent verified reads interleave writes/reads on that one
+  conn and corrupt the wire (observed as rpc-errors + 60s hangs on the
+  balance poll). Held only around the client round-trip in
+  `buildHeliosVia` / `buildColibriVia`, so verified reads queue safely
+  instead of colliding. -/
+  verifyLock : Std.BaseMutex
 
 abbrev Shared := IO.Ref DaemonState
 
 def new : IO Shared := do
-  IO.mkRef { startedAtMs := ← IO.monoMsNow }
+  let verifyLock ← Std.BaseMutex.new
+  IO.mkRef { startedAtMs := ← IO.monoMsNow, verifyLock }
 
 /-- Reset the scan-cancellation flag at the start of a new scan. -/
 def beginScan (state : Shared) : IO Unit := do
@@ -480,32 +491,41 @@ def buildColibriVia (state : Shared) (chainId : Nat) :
   match (← state.get).colibri with
   | none => pure none
   | some client =>
+      let lock := (← state.get).verifyLock
       let runCall :
           LeanCli.Network.Provider.RpcMethod →
           LeanCli.Encoding.Json.Json →
           IO LeanCli.RPC.Outbound.ColibriOutcome :=
         fun method params => do
-          match ← runColibriOnce client chainId method params with
-          | .ok j => pure (.ok j)
-          | .rpcError m => pure (.rpcError m)
-          | .transportDead reason =>
-              logColibriRespawnEvent method "start"
-                #[("reason", .str reason)]
-              match ← colibriRespawn state with
-              | none =>
-                  logColibriRespawnEvent method "failed"
-                    #[("reason", .str "spawn-failed")]
-                  pure (.transportDead s!"respawn failed after {reason}")
-              | some fresh =>
-                  logColibriRespawnEvent method "ok" #[]
-                  match ← runColibriOnce fresh chainId method params with
-                  | .ok j => pure (.ok j)
-                  | .rpcError m => pure (.rpcError m)
-                  | .transportDead reason2 =>
-                      colibriDisable state
-                      logColibriRespawnEvent method "second-crash"
-                        #[("reason", .str reason2)]
-                      pure (.transportDead s!"second crash after respawn: {reason2}")
+          -- Serialize on the single colibri connection (see `verifyLock`): a
+          -- concurrent daemon handler must wait rather than interleave on the
+          -- shared UDS conn. `finally` guarantees the lock is released even if
+          -- the round-trip throws.
+          lock.lock
+          try
+            match ← runColibriOnce client chainId method params with
+            | .ok j => pure (.ok j)
+            | .rpcError m => pure (.rpcError m)
+            | .transportDead reason =>
+                logColibriRespawnEvent method "start"
+                  #[("reason", .str reason)]
+                match ← colibriRespawn state with
+                | none =>
+                    logColibriRespawnEvent method "failed"
+                      #[("reason", .str "spawn-failed")]
+                    pure (.transportDead s!"respawn failed after {reason}")
+                | some fresh =>
+                    logColibriRespawnEvent method "ok" #[]
+                    match ← runColibriOnce fresh chainId method params with
+                    | .ok j => pure (.ok j)
+                    | .rpcError m => pure (.rpcError m)
+                    | .transportDead reason2 =>
+                        colibriDisable state
+                        logColibriRespawnEvent method "second-crash"
+                          #[("reason", .str reason2)]
+                        pure (.transportDead s!"second crash after respawn: {reason2}")
+          finally
+            lock.unlock
       pure (some { chainId := chainId, label := "colibri", runCall := runCall })
 
 /-- One proofable read through the persistent Helios client. Mirrors
@@ -545,8 +565,14 @@ def buildHeliosVia (state : Shared) (chainId : Nat) (executionRpc : String) :
   match ← heliosClient? state with
   | none => pure none
   | some client =>
-      let runCall := fun method params =>
-        runHeliosOnce client chainId executionRpc method params
+      let lock := (← state.get).verifyLock
+      let runCall := fun method params => do
+        -- Serialize on the single helios connection (see `verifyLock`).
+        lock.lock
+        try
+          runHeliosOnce client chainId executionRpc method params
+        finally
+          lock.unlock
       pure (some { chainId := chainId, label := "helios", runCall := runCall })
 
 end LeanCli.Daemon.State

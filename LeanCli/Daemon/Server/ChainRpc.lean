@@ -65,15 +65,12 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               | .error err =>
                   pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
               | .ok ep =>
-                  -- Balance polling stays on DIRECT RPC. The verified client is
-                  -- a single shared UDS connection, but the daemon serves TUI
-                  -- polls concurrently — routing the frequently-polled balance
-                  -- through it makes concurrent reads queue on that one conn
-                  -- and time out (60s) on mainnet. A working balance beats a
-                  -- verified-but-hung one. Verified balances need a
-                  -- connection-pooled / mutex-guarded verified client
-                  -- (follow-up); until then, display-only balance stays direct.
-                  let via? : Option LeanCli.RPC.Outbound.VerifyVia := none
+                  -- Verify balance reads through the active provider. Safe now
+                  -- that the verified client is MUTEX-GUARDED (State.verifyLock):
+                  -- concurrent daemon handlers serialize on the shared conn
+                  -- instead of corrupting it (the earlier 60s hang). Outbound
+                  -- falls back to direct HTTP if the light client is down.
+                  let via? ← verifiedReadVia state (ep.chainId.getD cfg.chainId) ep
                   match ← LeanCli.RPC.Outbound.getBalance cfg.policy ep address block via? with
                   | .ok balance =>
                       pure <| .ok <| .obj #[
@@ -138,11 +135,8 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               | .error err =>
                   pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
               | .ok ep =>
-                  -- Direct RPC: this freshness nonce is part of the same
-                  -- frequent poll as the balance above — keep it off the
-                  -- shared verified connection to avoid the concurrent-queue
-                  -- timeout (see the balance note).
-                  let via? : Option LeanCli.RPC.Outbound.VerifyVia := none
+                  -- Verified via the mutex-guarded client (see balance note).
+                  let via? ← verifiedReadVia state (ep.chainId.getD cfg.chainId) ep
                   let lookback := paramNatD req.params "lookback" 5000
                   -- Nonce (pending) — primary "did this account ever send a tx" signal.
                   let nonceRes ← LeanCli.RPC.Outbound.getTransactionCount cfg.policy ep address "pending" via?
