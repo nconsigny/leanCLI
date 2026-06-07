@@ -83,27 +83,28 @@ export type RpcActions = {
   pending: string | null;
 };
 
-/** Providers in cycle order. Single-select: exactly one is the active
- *  read/simulate backend at a time. `rpc` is direct + unverified; helios
- *  and colibri are mutually-exclusive light clients. ORAM is not here —
- *  it is a separate layer (see `toggleSafeNode`). */
+/** Providers in cycle order. `rpc` is direct + unverified. helios and
+ *  colibri are the two verifiers, but they are NOT symmetric: helios mode
+ *  also runs colibri as a DEEP-LOG fallback (helios only verifies getLogs
+ *  within ~8191 blocks of head), whereas colibri mode is 100% colibri.
+ *  ORAM is not here — it is a separate layer (see `toggleSafeNode`). */
 const PROVIDER_CYCLE: ReadBackend[] = ["rpc", "helios", "colibri"];
 
 /**
- * Atomically switch the active provider. The daemon exposes three
- * decoupled knobs (`daemon.helios.toggle`, `daemon.colibri.toggle`,
- * `daemon.readBackend.set`); flipping only one leaves the others stale —
- * e.g. `backend=helios` with the helios sidecar down reads as "never
- * verified". This flips all of them together: it starts the chosen light
- * client, tears the other down (mutual exclusion), and sets readBackend.
- * SafeNode (ORAM) is left untouched — it layers over whichever provider
- * is active. Selecting `rpc` stops both light clients.
+ * Atomically switch the active provider, matching the daemon's boot model
+ * (`Server.lean`): flip the read backend AND the light-client sidecars
+ * together so the displayed state always matches reality.
+ *   * helios  → helios (primary) + colibri (deep-log fallback) both up.
+ *   * colibri → colibri only; helios torn down.
+ *   * rpc     → both torn down (direct, unverified).
+ * SafeNode (ORAM) is left untouched — it layers over the active provider.
  */
 async function applyProvider(p: ReadBackend): Promise<void> {
   if (p === "helios") {
     await call("daemon.helios.toggle", { enable: true }, { timeoutMs: 60_000 });
+    // Keep colibri up as the deep-log fallback (NOT torn down in helios mode).
+    await call("daemon.colibri.toggle", { enable: true }, { timeoutMs: 60_000 });
     await call("daemon.readBackend.set", { backend: "helios" });
-    await call("daemon.colibri.toggle", { enable: false }, { timeoutMs: 60_000 });
   } else if (p === "colibri") {
     await call("daemon.colibri.toggle", { enable: true }, { timeoutMs: 60_000 });
     await call("daemon.readBackend.set", { backend: "colibri" });

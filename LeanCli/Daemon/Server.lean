@@ -350,22 +350,31 @@ def run (cfg : Config) : IO Unit := do
     match ← IO.getEnv "LEANCLI_HELIOS" with
     | some "0" | some "off" | some "false" | some "no" => true
     | _ => false
-  -- Auto-start ONLY the selected provider's light client. Spawning is cheap
-  -- (committee/consensus sync defers to the first proofable request);
-  -- failure is non-fatal — reads fall through to the configured HTTP RPC.
-  -- `provider = .rpc` starts neither (direct, unverified reads).
-  if provider == .colibri && !colibriForcedOff then
+  -- Light-client startup by provider (decision: helios mode keeps colibri as
+  -- a DEEP-LOG fallback, since helios can only verify eth_getLogs within
+  -- ~8191 blocks of head and colibri verifies deeper ranges):
+  --   * helios  → helios (primary) + colibri (deep-log fallback)
+  --   * colibri → colibri only (100% colibri)
+  --   * rpc     → neither (direct, unverified reads)
+  -- Spawning is cheap (sync defers to the first proofable request); failure
+  -- is non-fatal — reads fall through to the configured HTTP RPC.
+  -- `LEANCLI_COLIBRI=0` / `LEANCLI_HELIOS=0` force the matching client down
+  -- even when the provider would start it.
+  let startColibri := (provider == .colibri || provider == .helios) && !colibriForcedOff
+  let startHelios  := provider == .helios && !heliosForcedOff
+  if startColibri then
     let colibriSocket := s!"{runtimeRoot}/leancli/colibri.sock"
+    let role := if provider == .helios then "deep-log fallback" else "primary"
     try
       let _ ← LeanCli.Daemon.State.colibriEnable state colibriSocket
-      IO.eprintln s!"leancli-daemon: colibri verified-reads enabled (socket={colibriSocket})"
+      IO.eprintln s!"leancli-daemon: colibri verified-reads enabled ({role}, socket={colibriSocket})"
     catch e =>
       IO.eprintln s!"leancli-daemon: colibri auto-enable failed ({e}); reads will use the configured RPC"
-  if provider == .helios && !heliosForcedOff then
+  if startHelios then
     let heliosSocket := s!"{runtimeRoot}/leancli/helios.sock"
     try
       let _ ← LeanCli.Daemon.State.heliosEnable state heliosSocket
-      IO.eprintln s!"leancli-daemon: helios enabled (socket={heliosSocket})"
+      IO.eprintln s!"leancli-daemon: helios enabled (primary, socket={heliosSocket})"
     catch e =>
       IO.eprintln s!"leancli-daemon: helios auto-enable failed ({e}); use daemon.helios.toggle to retry"
   -- Opt-in safenode (TDX-attested ORAM proxy). Only spawned when the

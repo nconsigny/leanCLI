@@ -108,6 +108,35 @@ def verifiedReadVia (state : LeanCli.Daemon.State.Shared) (chainId : Nat)
   | .helios  => heliosVia state chainId endpoint.url
   | .rpc     => pure none
 
+/-- Helios's verified `eth_getLogs` window (one sync-committee period). A
+    query spanning more blocks than this cannot be verified by helios, so
+    `verifiedLogsVia` routes it to colibri instead (decision: helios mode
+    keeps colibri as the deep-log fallback). Mirrors `HELIOS_LOG_WINDOW` in
+    the helios sidecar. -/
+def heliosLogWindow : Nat := 8191
+
+/-- Verified-read backend selector specialised for `eth_getLogs`, honoring
+    the tiered model. Under `provider=helios`:
+      * a span ≤ `heliosLogWindow` → helios (recent logs are verifiable);
+      * a deeper span → colibri when it is running (it verifies deeper
+        ranges); if colibri is down, fall back to helios (whose sidecar
+        then bypasses to raw — flagged unverified).
+    `provider=colibri`/`rpc` behave exactly like `verifiedReadVia`. The
+    `span` is `toBlock - fromBlock` (a safe proxy for "deep scan"); the
+    helios sidecar still applies the precise head-relative window per call. -/
+def verifiedLogsVia (state : LeanCli.Daemon.State.Shared) (chainId : Nat)
+    (endpoint : LeanCli.RPC.Outbound.Endpoint) (span : Nat) :
+    IO (Option LeanCli.RPC.Outbound.VerifyVia) := do
+  match ← LeanCli.Daemon.State.getReadBackend state with
+  | .helios =>
+      if span > heliosLogWindow then
+        match ← colibriVia state chainId with
+        | some via => pure (some via)
+        | none     => heliosVia state chainId endpoint.url
+      else heliosVia state chainId endpoint.url
+  | .colibri => colibriVia state chainId
+  | .rpc     => pure none
+
 /-- Resolve an RPC endpoint from a request. Honors an explicit `chain`
     string in `params` first; falls back to a tiny chainId → name map for
     the common cases (1 → "mainnet", 11155111 → "sepolia") so callers that

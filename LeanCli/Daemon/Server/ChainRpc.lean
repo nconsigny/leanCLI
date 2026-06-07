@@ -440,6 +440,11 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                     | .ok j =>
                         pure ((asString j >>= parseHexQuantity).getD 0)
                     | .error _ => pure 0
+              -- getLogs uses the tiered selector: deep history spans route to
+              -- colibri (verifies deeper), recent spans to helios. The
+              -- blockNumber read above stays on `viaScan?` (a plain state read).
+              let viaLogs? ← verifiedLogsVia state chainIdForScan scanEndpoint
+                (if toBlock ≥ fromBlock then toBlock - fromBlock else 0)
               let topic0 := "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
               let padAddr (a : String) : String :=
                 let raw := stripHexPrefix a |>.toLower
@@ -502,7 +507,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                                 ("fromBlock", .str fromHex),
                                 ("toBlock", .str toHex),
                                 ("topics", .arr topicsArr)
-                              ]]) viaScan? with
+                              ]]) viaLogs? with
                           | .error e => errAcc := some e
                           | .ok logsJson =>
                               match asArray logsJson with

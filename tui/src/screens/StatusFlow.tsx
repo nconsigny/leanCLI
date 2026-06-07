@@ -595,6 +595,15 @@ function ProviderPanel({ provider }: { provider: Snapshot["provider"] }) {
         {dot(provider.oram.running)}
       </Text>
       <Text>{verified}</Text>
+      {p === "helios" && (
+        <Text color={theme.dim}>
+          {"deep-log fallback: colibri "}
+          {dot(provider.colibri.running)}
+          {provider.colibri.running
+            ? " — getLogs >8191 blocks verified via colibri"
+            : " — deep getLogs fall back to raw RPC"}
+        </Text>
+      )}
     </Section>
   );
 }
