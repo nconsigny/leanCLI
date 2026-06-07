@@ -194,6 +194,10 @@ inductive ColibriOutcome where
     so respawn lives there rather than here. -/
 structure VerifyVia where
   chainId : Nat
+  /-- Human label for the network log's `backend`/`host` fields and the
+      verbose `[rpc→…]` lines, so the monitor shows which verifier actually
+      served a read ("colibri" | "helios") instead of always "colibri". -/
+  label : String
   runCall : RpcMethod → Json → IO ColibriOutcome
 
 /-- Invariant: every daemon call site must pass `cfg.rpcEndpoint` (the
@@ -219,10 +223,10 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
         let v ← verboseLevel
         if v ≥ 1 then
           let paramsRender := if v ≥ 2 then compact params else "..."
-          IO.eprintln s!"[rpc→colibri] {method.asString} chainId={chainId} params={paramsRender}"
+          IO.eprintln s!"[rpc→{via.label}] {method.asString} chainId={chainId} params={paramsRender}"
         logEvent "request" method.asString
-          #[("backend", .str "colibri"),
-            ("host", .str "colibri.uds"),
+          #[("backend", .str via.label),
+            ("host", .str s!"{via.label}.uds"),
             ("transport", .str "loopback"),
             ("chainId", .num (Int.ofNat chainId)),
             ("params", params)]
@@ -236,19 +240,19 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
         | .ok j =>
             if v ≥ 1 then
               let resRender := if v ≥ 2 then s!" result={compact j}" else ""
-              IO.eprintln s!"[rpc←colibri] {method.asString} {dt}ms ok{resRender}"
+              IO.eprintln s!"[rpc←{via.label}] {method.asString} {dt}ms ok{resRender}"
             logEvent "response" method.asString
-              #[("backend", .str "colibri"),
-                ("host", .str "colibri.uds"),
+              #[("backend", .str via.label),
+                ("host", .str s!"{via.label}.uds"),
                 ("transport", .str "loopback"),
                 ("ms", .num (Int.ofNat dt)),
                 ("result", j)]
             return .ok j
         | .rpcError e =>
-            if v ≥ 1 then IO.eprintln s!"[rpc✗colibri] {method.asString} {dt}ms {e}"
+            if v ≥ 1 then IO.eprintln s!"[rpc✗{via.label}] {method.asString} {dt}ms {e}"
             logEvent "rpc-error" method.asString
-              #[("backend", .str "colibri"),
-                ("host", .str "colibri.uds"),
+              #[("backend", .str via.label),
+                ("host", .str s!"{via.label}.uds"),
                 ("transport", .str "loopback"),
                 ("ms", .num (Int.ofNat dt)),
                 ("error", .str e)]
@@ -262,15 +266,15 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
             -- after the fall-through; the colibri side has already logged
             -- its own rpc-error / respawn / disabled events.
             if v ≥ 1 then
-              IO.eprintln s!"[rpc✗colibri] {method.asString} {dt}ms transport-dead: {reason}"
-            logEvent "colibri-disabled" method.asString
-              #[("backend", .str "colibri"),
-                ("host", .str "colibri.uds"),
+              IO.eprintln s!"[rpc✗{via.label}] {method.asString} {dt}ms transport-dead: {reason}"
+            logEvent s!"{via.label}-disabled" method.asString
+              #[("backend", .str via.label),
+                ("host", .str s!"{via.label}.uds"),
                 ("transport", .str "loopback"),
                 ("ms", .num (Int.ofNat dt)),
                 ("reason", .str reason),
                 ("fallback", .str "http")]
-            IO.eprintln s!"leancli-daemon: colibri verified-reads disabled ({reason}); falling back to HTTP for {method.asString}. Re-enable with `daemon.colibri.toggle` once the sidecar is back."
+            IO.eprintln s!"leancli-daemon: {via.label} verified-reads disabled ({reason}); falling back to HTTP for {method.asString}. Re-enable with `daemon.{via.label}.toggle` once the sidecar is back."
             -- fall through
   | none => pure ()
   if endpoint.url.trimAscii.toString.isEmpty then

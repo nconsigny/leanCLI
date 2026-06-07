@@ -506,7 +506,7 @@ def buildColibriVia (state : Shared) (chainId : Nat) :
                       logColibriRespawnEvent method "second-crash"
                         #[("reason", .str reason2)]
                       pure (.transportDead s!"second crash after respawn: {reason2}")
-      pure (some { chainId := chainId, runCall := runCall })
+      pure (some { chainId := chainId, label := "colibri", runCall := runCall })
 
 /-- One proofable read through the persistent Helios client. Mirrors
     `runColibriOnce`, but Helios's `eth.proxy` additionally requires the
@@ -547,6 +547,6 @@ def buildHeliosVia (state : Shared) (chainId : Nat) (executionRpc : String) :
   | some client =>
       let runCall := fun method params =>
         runHeliosOnce client chainId executionRpc method params
-      pure (some { chainId := chainId, runCall := runCall })
+      pure (some { chainId := chainId, label := "helios", runCall := runCall })
 
 end LeanCli.Daemon.State
