@@ -249,14 +249,22 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
                 ("result", j)]
             return .ok j
         | .rpcError e =>
-            if v ≥ 1 then IO.eprintln s!"[rpc✗{via.label}] {method.asString} {dt}ms {e}"
+            -- The verified backend(s) errored on this read — e.g. an
+            -- unverifiable `pending` (no light client can prove unconfirmed
+            -- state) or a revert. The helios via has already cascaded to
+            -- colibri before surfacing this, so FALL THROUGH to the configured
+            -- HTTP path (direct) as the genuine last resort rather than
+            -- hard-failing or skipping a verifier. "direct is bad" → only ever
+            -- after helios AND colibri couldn't serve it.
+            if v ≥ 1 then IO.eprintln s!"[rpc✗{via.label}] {method.asString} {dt}ms {e} → direct"
             logEvent "rpc-error" method.asString
               #[("backend", .str via.label),
                 ("host", .str s!"{via.label}.uds"),
                 ("transport", .str "loopback"),
                 ("ms", .num (Int.ofNat dt)),
-                ("error", .str e)]
-            return .error e
+                ("error", .str e),
+                ("fallback", .str "http")]
+            -- fall through to the HTTP path below
         | .transportDead reason =>
             -- Verified-read backend is gone for this call. Log the
             -- transport death, log the explicit colibri-disabled event so

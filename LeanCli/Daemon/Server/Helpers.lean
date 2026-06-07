@@ -592,6 +592,12 @@ def buildSignBroadcastTx
       match nonceOverride? with
       | some n => pure n
       | none =>
+          -- `pending` is unverifiable by a light client (no consensus proof
+          -- for unconfirmed state), but we still route it through `via?` so
+          -- it degrades helios → colibri → direct (direct only as last
+          -- resort) rather than hitting the raw RPC directly. The verifier
+          -- forwards what it can't prove; Outbound falls to direct only when
+          -- neither light client can serve it.
           let nonceJson ← expectExcept <| (← LeanCli.RPC.Outbound.getTransactionCount cfg.policy cfg.rpcEndpoint slot.address "pending" via?)
           jsonHexNatIO nonceJson "nonce"
     let priorityJson ← expectExcept <| (← LeanCli.RPC.Outbound.maxPriorityFeePerGas cfg.policy cfg.rpcEndpoint via?)

@@ -582,16 +582,22 @@ def heliosRespawn (state : Shared) : IO (Option LeanCli.Helios.Persistent.Client
     direct (unverified) HTTP read. -/
 private def heliosCascadeColibri (state : Shared) (chainId : Nat)
     (method : LeanCli.Network.Provider.RpcMethod)
-    (params : LeanCli.Encoding.Json.Json) (reason : String) :
+    (params : LeanCli.Encoding.Json.Json) (reason : String) (disableHelios : Bool) :
     IO LeanCli.RPC.Outbound.ColibriOutcome := do
-  heliosDisable state
+  -- Disable helios only when its CONNECTION is dead (transportDead) so we stop
+  -- hammering it. On a plain rpcError helios is alive — it just can't serve
+  -- this particular read (e.g. unverifiable `pending`, or a revert) — so keep
+  -- it enabled for subsequent reads. Either way we cascade THIS read to
+  -- colibri; if colibri also can't serve it, the colibri outcome
+  -- (rpcError / transportDead) propagates and Outbound degrades to direct
+  -- (the last resort). Never a hard fail, never a skip straight to direct.
+  if disableHelios then heliosDisable state
   match (← state.get).colibri with
   | some cclient =>
-      IO.eprintln s!"leancli-daemon: helios down ({reason}); cascading verified reads to colibri"
+      IO.eprintln s!"leancli-daemon: helios couldn't serve ({reason}); cascading to colibri"
       runColibriOnce cclient chainId method params
   | none =>
-      IO.eprintln s!"leancli-daemon: helios down ({reason}) and colibri unavailable; reads go direct (unverified)"
-      pure (.transportDead s!"helios down and colibri unavailable: {reason}")
+      pure (.transportDead s!"helios+colibri unavailable: {reason}")
 
 /-- Build the verified-read backend if the persistent Helios client is
     running. Parallel to `buildColibriVia` — returns `none` when helios is
@@ -611,21 +617,24 @@ def buildHeliosVia (state : Shared) (chainId : Nat) (executionRpc : String) :
         try
           match ← runHeliosOnce client chainId executionRpc method params with
           | .ok j => pure (.ok j)
-          | .rpcError m => pure (.rpcError m)
+          | .rpcError m =>
+              -- Helios is alive but can't serve this read (e.g. unverifiable
+              -- `pending`, or a revert) → cascade to colibri, keep helios up.
+              heliosCascadeColibri state chainId method params m false
           | .transportDead reason =>
               -- Helios conn dead → respawn the sidecar once and retry (keep
               -- helios alive across transient drops). If it's still dead,
-              -- cascade to colibri (helios → colibri → direct).
+              -- disable + cascade to colibri (helios → colibri → direct).
               IO.eprintln s!"leancli-daemon: helios transport dead ({reason}); respawning…"
               match ← heliosRespawn state with
               | some fresh =>
                   match ← runHeliosOnce fresh chainId executionRpc method params with
                   | .ok j => pure (.ok j)
-                  | .rpcError m => pure (.rpcError m)
+                  | .rpcError m => heliosCascadeColibri state chainId method params m false
                   | .transportDead reason2 =>
-                      heliosCascadeColibri state chainId method params reason2
+                      heliosCascadeColibri state chainId method params reason2 true
               | none =>
-                  heliosCascadeColibri state chainId method params reason
+                  heliosCascadeColibri state chainId method params reason true
         finally
           lock.unlock
       pure (some { chainId := chainId, label := "helios", runCall := runCall })
