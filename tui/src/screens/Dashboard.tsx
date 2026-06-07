@@ -669,7 +669,9 @@ function WalletHead({ r }: { r: WalletRow }) {
       ) : r.balErr ? (
         <Text color={theme.err}>balance error</Text>
       ) : r.wei === undefined ? (
-        <Text color={theme.dim}>…</Text>
+        <Text color={theme.dim}>
+          <Spinner type="dots" />
+        </Text>
       ) : (
         <Text color={theme.ok}>{formatEthCompact(r.wei, 4)}</Text>
       )}

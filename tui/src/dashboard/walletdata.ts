@@ -124,6 +124,10 @@ export function useWalletData(
   // the interval on every balance landing).
   const rowsRef = useRef<WalletRow[]>([]);
   rowsRef.current = rows;
+  // Per-(chain,address) balance cache so rotating chains shows the last-known
+  // value for that chain INSTANTLY (then refreshes), instead of clearing to a
+  // spinner every switch. Keyed "chain:address"; survives re-enumeration.
+  const balCacheRef = useRef<Map<string, bigint>>(new Map());
   // Liveness guard for the manual one-shot shielded sync, which is NOT
   // driven by usePoll (so it has no isCancelled): a 30-240s sidecar call
   // can resolve after the dashboard unmounts.
@@ -183,8 +187,12 @@ export function useWalletData(
             address: a.address,
             chain,
             locked: a.type === "eoa" ? (lockByName.get(a.name) ?? undefined) : undefined,
-            // keep last-known balances across re-enumeration to avoid flicker
-            wei: old?.chain === chain ? old.wei : undefined,
+            // Show the cached balance for THIS chain immediately (instant on
+            // chain rotate); fall back to the un-re-enumerated last value, else
+            // undefined (spinner) until the poll lands.
+            wei:
+              (a.address ? balCacheRef.current.get(`${chain}:${a.address}`) : undefined) ??
+              (old?.chain === chain ? old.wei : undefined),
             tokens: old?.chain === chain ? old.tokens : undefined,
           };
         });
@@ -219,15 +227,27 @@ export function useWalletData(
           chain: row.chain,
         });
         if (isCancelled()) return;
-        setRows((prev) =>
-          prev.map((p) =>
-            p.address === row.address && p.chain === row.chain
-              ? b.ok
-                ? { ...p, wei: hexToBigInt(b.result?.balance), balErr: undefined }
-                : { ...p, balErr: b.error.message }
-              : p,
-          ),
-        );
+        if (b.ok) {
+          const wei = hexToBigInt(b.result?.balance);
+          // Cache per (chain,address) so a later switch back to this chain is
+          // instant.
+          balCacheRef.current.set(`${row.chain}:${row.address}`, wei);
+          setRows((prev) =>
+            prev.map((p) =>
+              p.address === row.address && p.chain === row.chain
+                ? { ...p, wei, balErr: undefined }
+                : p,
+            ),
+          );
+        } else {
+          setRows((prev) =>
+            prev.map((p) =>
+              p.address === row.address && p.chain === row.chain
+                ? { ...p, balErr: b.error.message }
+                : p,
+            ),
+          );
+        }
       }
     },
     60_000,
