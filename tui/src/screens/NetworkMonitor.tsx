@@ -407,12 +407,11 @@ function Panel({
       {rows.length === 0 && <Text color={theme.dim}>—</Text>}
       {rows.map((r) => {
         const countStr = String(r.count);
-        // Reserve room for the count + at least one separator space, then
-        // truncate the key with an ellipsis so the row always fits inner
-        // width on a single line.
+        // Reserve room for the count + a separator space, then HARD-CUT the
+        // key (no "…") so the row fits inner width on one line.
         const keyMax = Math.max(3, inner - countStr.length - 1);
         const key =
-          r.key.length > keyMax ? r.key.slice(0, keyMax - 1) + "…" : r.key;
+          r.key.length > keyMax ? r.key.slice(0, keyMax) : r.key;
         const pad = " ".repeat(Math.max(1, inner - key.length - countStr.length));
         return (
           <Text key={r.key} wrap="truncate-end">
@@ -458,7 +457,7 @@ function rowLayout(cols: number) {
 }
 
 function HeaderRow({ cols }: { cols: number }) {
-  const { wMethod, wHost, wDetail } = rowLayout(cols);
+  const { wMethod, wHost } = rowLayout(cols);
   const cell = (s: string, n: number) =>
     s.length >= n ? s.slice(0, n) : s + " ".repeat(n - s.length);
   return (
@@ -466,34 +465,29 @@ function HeaderRow({ cols }: { cols: number }) {
       {"  "}
       {cell("vfy", 9)} {cell("t", 7)} {cell("kind", 12)} {cell("method", wMethod)}{" "}
       {cell("host", wHost)} {cell("status", 8)} {cell("ms", 6)}
-      {wDetail > 0 ? "  " + cell("detail", wDetail) : ""}
     </Text>
   );
 }
 
 function EventRow({ e, cols }: { e: LogEvent; cols: number }) {
-  const { wMethod, wHost, wDetail } = rowLayout(cols);
+  const { wMethod, wHost } = rowLayout(cols);
   const kindColor = colorForKind(e.kind);
   const glyph = glyphForKind(e.kind);
   const t = formatRelTime(e.ts_ms);
-  // Per-row verdict, shown verbosely in the detail column: which backend ran
-  // the call + whether that path is verified. Reflects ROUTING (helios
-  // bypasses deep getLogs to raw internally, so a ✓ on a deep getLogs means
-  // "routed to helios", not a per-byte proof — that needs the sidecar verdict
-  // threaded up, not yet built). For balances / eth_call / in-window logs the
-  // ✓ is genuine verification.
+  // Verdict tag in the LEADING column — always visible. Reflects ROUTING
+  // (helios bypasses deep getLogs to raw internally, so a ✓ on a deep
+  // getLogs means "routed to helios", not a per-byte proof). For balances /
+  // eth_call / in-window logs the ✓ is genuine verification.
   const viaVerifier = e.backend === "helios" || e.backend === "colibri";
-  // Verdict tag in the LEADING column — always visible. (A right-side detail
-  // column gets pushed off-screen by the padded method/host columns and just
-  // shows "…", which is why the verdict can't live there.) Names the backend
-  // so it's more than a bare letter: ✓helios / ✓colibri / ·direct / ·local.
   const verdictTag =
     e.backend === "helios" ? "✓helios"
       : e.backend === "colibri" ? "✓colibri"
         : e.backend === "local" ? "·local"
           : "·direct";
+  // Hard-cut columns — no "…" ellipsis (it carried no information and just
+  // cluttered every row). Content beyond the column width is clipped clean.
   const cell = (s: string, n: number) =>
-    s.length >= n ? s.slice(0, Math.max(0, n - 1)) + "…" : s + " ".repeat(n - s.length);
+    s.length >= n ? s.slice(0, n) : s + " ".repeat(n - s.length);
   const method = cell(e.method ?? "?", wMethod);
   const kind = cell(e.kind ?? "?", 12);
   const host = cell(e.host ?? e.backend ?? "—", wHost);
@@ -504,7 +498,6 @@ function EventRow({ e, cols }: { e: LogEvent; cols: number }) {
       : (e.transport ?? "").padStart(7);
   const statusPadded = cell(status, 8);
   const ms = e.ms !== undefined ? String(e.ms).padStart(4) : "    ";
-  const detail = wDetail > 0 ? cell(describeDetail(e), wDetail) : "";
   const statusColor =
     e.httpStatus !== undefined
       ? e.httpStatus >= 200 && e.httpStatus < 300
@@ -526,7 +519,6 @@ function EventRow({ e, cols }: { e: LogEvent; cols: number }) {
       <Text color={theme.accent}>{host} </Text>
       <Text color={statusColor}>{statusPadded} </Text>
       <Text color={theme.dim}>{ms}ms</Text>
-      {wDetail > 0 && <Text color={theme.dim}>{"  " + detail}</Text>}
     </Text>
   );
 }
@@ -573,16 +565,6 @@ function glyphForKind(kind: string): string {
   }
 }
 
-function describeDetail(e: LogEvent): string {
-  if (e.error) {
-    const s = typeof e.error === "string" ? e.error : safeJson(e.error);
-    return truncate(s, 70);
-  }
-  if (e.url) return truncate(e.url, 70);
-  if (e.kind === "response" && e.method) return "ok";
-  return "";
-}
-
 function formatRelTime(tsMs: number): string {
   // The daemon stamps `ts_ms` from `IO.monoMsNow`, which is a monotonic
   // value not aligned to wall-clock — formatting it as wall-clock would
@@ -595,7 +577,7 @@ function formatRelTime(tsMs: number): string {
 
 function truncate(s: string, n: number): string {
   if (s.length <= n) return s;
-  return s.slice(0, n - 1) + "…";
+  return s.slice(0, n);
 }
 
 function safeJson(v: unknown): string {

@@ -570,7 +570,18 @@ def buildHeliosVia (state : Shared) (chainId : Nat) (executionRpc : String) :
         -- Serialize on the single helios connection (see `verifyLock`).
         lock.lock
         try
-          runHeliosOnce client chainId executionRpc method params
+          let outcome ← runHeliosOnce client chainId executionRpc method params
+          match outcome with
+          | .transportDead reason =>
+              -- The helios connection is dead. DISABLE helios so subsequent
+              -- reads skip it and go direct immediately, instead of paying the
+              -- transport-failure latency on EVERY read (the "balances very
+              -- slow" symptom — helios has no respawn, so a dead conn was being
+              -- re-tried forever). Re-enable with `daemon.helios.toggle` (or a
+              -- daemon restart) once the sidecar is healthy/synced.
+              heliosDisable state
+              pure (.transportDead reason)
+          | other => pure other
         finally
           lock.unlock
       pure (some { chainId := chainId, label := "helios", runCall := runCall })
