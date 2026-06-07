@@ -11,12 +11,13 @@ import { usePoll } from "./poll.js";
  *    eoa.list adds lock state. NOTE the daemon emits `locked` (
  *    Helpers.lean slotMetadataJson) — NOT the `unlocked` field the old
  *    TUI type guessed at — so we read `locked` and invert.
- *  - native balances (`chain.balance`)          — sequential, every poll
- *    tick (cheap single eth_getBalance, direct RPC by design — these
- *    reads deliberately bypass Helios/Colibri for latency, so never
- *    present them as consensus-verified).
- *  - ERC-20 (`swap.balances`)                   — every 3rd tick, first
- *    few rows only (it fans out one eth_call per registry token).
+ *  - native balances (`chain.balance`)          — sequential, every 60s
+ *    poll tick (single eth_getBalance, routed through the active provider
+ *    so it's consensus-verified under provider=helios; falls back to
+ *    direct RPC if the light client is down).
+ *  - ERC-20 (`swap.balances`)                   — NOT polled here. It's a
+ *    large verified eth_call fan-out (one balanceOf per registry token),
+ *    so token discovery runs only on the wallet-hub screen on demand.
  *  - shielded (railgun + privacy pools)         — ON DEMAND only (`s`).
  *    Both spawn the privacy sidecar and can take 30-60s+ on first call
  *    (Subsquid sync / POI fetch) and require an unlocked wallet. They
@@ -60,7 +61,6 @@ export type WalletData = {
 };
 
 const ROW_CAP = 6;
-const TOKEN_ROWS = 2; // fetch ERC-20 for the first N rows only
 
 type AccountEntry = { type: string; name: string; address: string };
 
@@ -117,10 +117,6 @@ export function useWalletData(activeChain: string | null): WalletData {
   // the interval on every balance landing).
   const rowsRef = useRef<WalletRow[]>([]);
   rowsRef.current = rows;
-  // Balance-poll tick counter: ERC-20 fan-out only piggybacks on every
-  // third native-balance tick (~60s) — swap.balances is one eth_call per
-  // registry token and would triple RPC load on the 20s loop.
-  const tickRef = useRef(0);
   // Liveness guard for the manual one-shot shielded sync, which is NOT
   // driven by usePoll (so it has no isCancelled): a 30-240s sidecar call
   // can resolve after the dashboard unmounts.
@@ -191,14 +187,17 @@ export function useWalletData(activeChain: string | null): WalletData {
     [activeChain, refreshKey],
   );
 
-  // Balances: sequential per row (public RPCs throttle bursts).
-  // ERC-20 piggybacks on the same loop for the first TOKEN_ROWS rows on
-  // mainnet/sepolia (swap.balances only accepts those selectors).
+  // ETH balance only: sequential per row through the active provider.
   usePoll(
     async (isCancelled) => {
       const snapshot = rowsRef.current;
-      const tokensThisTick = tickRef.current % 3 === 0;
-      tickRef.current += 1;
+      // ETH balance ONLY on the dashboard: one verified eth_getBalance per
+      // row (chain.balance routes through the active provider). Token
+      // discovery (swap.balances) is intentionally NOT polled here — it's a
+      // large verified eth_call fan-out (one balanceOf per registry token,
+      // now serialized through the verifier), so it runs only on the
+      // wallet-hub screen (ManageWalletScreen) on demand, not continuously.
+      // Slowed to 60s (was 20s) to keep the verified-read + privacy cost low.
       for (let i = 0; i < snapshot.length; i++) {
         if (isCancelled()) return;
         const row = snapshot[i];
@@ -219,30 +218,9 @@ export function useWalletData(activeChain: string | null): WalletData {
               : p,
           ),
         );
-        const wantTokens =
-          tokensThisTick &&
-          i < TOKEN_ROWS &&
-          (row.chain === "mainnet" || row.chain === "sepolia");
-        if (wantTokens) {
-          const t = await call<{
-            balances: { symbol: string; address: string | null; decimals: number; balance: string }[];
-          }>("swap.balances", { chainId: row.chain, address: row.address }, { timeoutMs: 30_000 });
-          if (isCancelled()) return;
-          if (t.ok && Array.isArray(t.result?.balances)) {
-            const tokens: TokenBalance[] = t.result.balances
-              .filter((x) => x && x.address !== null)
-              .map((x) => ({ symbol: x.symbol, decimals: x.decimals, balance: hexToBigInt(x.balance) }))
-              .filter((x) => x.balance > 0n);
-            setRows((prev) =>
-              prev.map((p) =>
-                p.address === row.address && p.chain === row.chain ? { ...p, tokens } : p,
-              ),
-            );
-          }
-        }
       }
     },
-    20_000,
+    60_000,
     [activeChain, refreshKey],
   );
 
@@ -275,13 +253,10 @@ export function useWalletData(activeChain: string | null): WalletData {
     enumErr,
     shielded,
     refresh: () => {
-      // Pin the ERC-20 piggyback parity to 1 so a manual refresh does the
-      // cheap native-balance pass immediately (usePoll fires on dep change)
-      // but does NOT trigger a registry-wide swap.balances eth_call
-      // fan-out on every keypress — token balances refresh on the normal
-      // 3rd-tick cadence (~60s). Deterministic cost regardless of how many
-      // times 'r' is pressed.
-      tickRef.current = 1;
+      // Manual refresh re-runs the native-balance pass (usePoll fires on dep
+      // change). Token discovery isn't polled on the dashboard — it's
+      // wallet-hub only — so 'r' never triggers a registry-wide eth_call
+      // fan-out regardless of how many times it's pressed.
       setRefreshKey((k) => k + 1);
     },
     syncShielded,

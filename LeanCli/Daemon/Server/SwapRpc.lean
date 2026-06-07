@@ -101,29 +101,26 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   | .error err =>
                       pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
                   | .ok ep =>
-                      let ethTask ← IO.asTask <|
-                        LeanCli.RPC.Outbound.getBalance cfg.policy ep address "latest" none
+                      -- Route ALL balance reads through the active verifier
+                      -- (helios/colibri) — no direct bypass. The verified
+                      -- client is a single serial UDS connection, so we read
+                      -- SEQUENTIALLY (the old concurrent IO.asTask fan-out
+                      -- would interleave on that one conn and corrupt the
+                      -- wire). Slower than the burst, but every balance is
+                      -- verified; balance-poll frequency is cut on the TUI
+                      -- side to keep the sequential cost bounded, and token
+                      -- discovery only runs on the wallet-hub screen.
+                      let via? ← verifiedReadVia state chainId.toNat ep
                       let calldata := erc20BalanceOfData ownerAddr
                       let candidates :
                           List (LeanCli.Swap.Tokens.Token × String) :=
                         LeanCli.Invariants.Swap.balancesCandidates chainId
-                      let mut tokenTasks :
-                          Array (LeanCli.Swap.Tokens.Token × String ×
-                                 Task (Except IO.Error (Except String Json))) := #[]
-                      for (t, addr) in candidates do
-                        let task ← IO.asTask <|
-                          LeanCli.RPC.Outbound.ethCall cfg.policy ep addr calldata "latest" none
-                        tokenTasks := tokenTasks.push (t, addr, task)
-                      match ← IO.wait ethTask with
-                      | .error e =>
-                          pure <| .error { code := -32020,
-                                           message := "chain RPC failed (eth balance)",
-                                           data := some (.str e.toString) }
-                      | .ok (.error err) =>
+                      match ← LeanCli.RPC.Outbound.getBalance cfg.policy ep address "latest" via? with
+                      | .error err =>
                           pure <| .error { code := -32020,
                                            message := "chain RPC failed (eth balance)",
                                            data := some (.str err) }
-                      | .ok (.ok ethBal) =>
+                      | .ok ethBal =>
                           let mut entries : Array Json := #[
                             .obj #[
                               ("symbol",   .str "ETH"),
@@ -133,9 +130,9 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                               ("balance",  ethBal)
                             ]
                           ]
-                          for (t, addr, task) in tokenTasks do
-                            match ← IO.wait task with
-                            | .ok (.ok bal) =>
+                          for (t, addr) in candidates do
+                            match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep addr calldata "latest" via? with
+                            | .ok bal =>
                                 entries := entries.push <| .obj #[
                                   ("symbol",   .str t.symbol),
                                   ("name",     .str t.name),

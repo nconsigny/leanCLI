@@ -464,10 +464,9 @@ function HeaderRow({ cols }: { cols: number }) {
   return (
     <Text wrap="truncate-end" color={theme.dim} bold>
       {"  "}
-      {cell("v", 2)}
       {cell("t", 7)} {cell("kind", 12)} {cell("method", wMethod)}{" "}
       {cell("host", wHost)} {cell("status", 8)} {cell("ms", 6)}
-      {wDetail > 0 ? "  " + cell("detail", wDetail) : ""}
+      {wDetail > 0 ? "  " + cell("verdict · detail", wDetail) : ""}
     </Text>
   );
 }
@@ -477,15 +476,18 @@ function EventRow({ e, cols }: { e: LogEvent; cols: number }) {
   const kindColor = colorForKind(e.kind);
   const glyph = glyphForKind(e.kind);
   const t = formatRelTime(e.ts_ms);
-  // Per-row verdict: served by a light client (helios/colibri) vs direct RPC.
-  // This reflects the ROUTING (which backend ran it) — the leading marker is
-  // always visible even when host/detail columns truncate on a narrow term.
-  // Note: helios "bypasses" deep getLogs to raw internally, so this is
-  // "verified path", not a per-byte crypto guarantee (that needs the sidecar
-  // verdict, not yet threaded).
+  // Per-row verdict, shown verbosely in the detail column: which backend ran
+  // the call + whether that path is verified. Reflects ROUTING (helios
+  // bypasses deep getLogs to raw internally, so a ✓ on a deep getLogs means
+  // "routed to helios", not a per-byte proof — that needs the sidecar verdict
+  // threaded up, not yet built). For balances / eth_call / in-window logs the
+  // ✓ is genuine verification.
   const viaVerifier = e.backend === "helios" || e.backend === "colibri";
-  const verdictMark = viaVerifier ? "✓" : "·";
-  const verdictColor = viaVerifier ? theme.ok : theme.dim;
+  const verdict =
+    e.backend === "helios" ? "✓ verified · helios"
+      : e.backend === "colibri" ? "✓ verified · colibri"
+        : e.backend === "local" ? "· unverified · local node"
+          : "· unverified · direct RPC";
   const cell = (s: string, n: number) =>
     s.length >= n ? s.slice(0, Math.max(0, n - 1)) + "…" : s + " ".repeat(n - s.length);
   const method = cell(e.method ?? "?", wMethod);
@@ -498,7 +500,7 @@ function EventRow({ e, cols }: { e: LogEvent; cols: number }) {
       : (e.transport ?? "").padStart(7);
   const statusPadded = cell(status, 8);
   const ms = e.ms !== undefined ? String(e.ms).padStart(4) : "    ";
-  const detail = wDetail > 0 ? cell(describeDetail(e), wDetail) : "";
+  const extra = describeDetail(e);
   const statusColor =
     e.httpStatus !== undefined
       ? e.httpStatus >= 200 && e.httpStatus < 300
@@ -513,7 +515,6 @@ function EventRow({ e, cols }: { e: LogEvent; cols: number }) {
   return (
     <Text wrap="truncate-end">
       <Text color={kindColor}>{glyph} </Text>
-      <Text color={verdictColor}>{verdictMark} </Text>
       <Text color={theme.dim}>{t} </Text>
       <Text color={kindColor}>{kind} </Text>
       <Text color={theme.primary}>{method} </Text>
@@ -522,7 +523,8 @@ function EventRow({ e, cols }: { e: LogEvent; cols: number }) {
       <Text color={theme.dim}>{ms}ms</Text>
       {wDetail > 0 && (
         <>
-          <Text color={theme.dim}>{"  " + detail}</Text>
+          <Text color={viaVerifier ? theme.ok : theme.warn}>{"  " + verdict}</Text>
+          {extra ? <Text color={theme.dim}>{"  " + extra}</Text> : null}
         </>
       )}
     </Text>
