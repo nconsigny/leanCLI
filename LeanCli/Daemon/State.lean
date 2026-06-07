@@ -552,14 +552,53 @@ private def runHeliosOnce (client : LeanCli.Helios.Persistent.Client)
   | .crash reason => pure (.rpcError s!"helios transport: {reason}")
   | .transportCrash reason => pure (.transportDead reason)
 
+/-- Respawn the helios sidecar + reconnect after a transport crash. Mirrors
+    `colibriRespawn`: close the dead client, re-spawn from the cached
+    `heliosSocket`, store the fresh client. Returns `none` if respawn fails.
+    This is the "keep helios up / restart" tier — a dropped connection or a
+    sidecar crash recovers automatically instead of leaving helios dead. -/
+def heliosRespawn (state : Shared) : IO (Option LeanCli.Helios.Persistent.Client) := do
+  let s ← state.get
+  match s.heliosSocket with
+  | none => pure none
+  | some socketPath =>
+      match s.helios with
+      | some c => try LeanCli.Helios.Persistent.close c catch _ => pure ()
+      | none => pure ()
+      try
+        let c ← LeanCli.Helios.Persistent.start socketPath
+        state.modify (fun s => { s with helios := some c })
+        pure (some c)
+      catch _ =>
+        state.modify (fun s => { s with helios := none })
+        pure none
+
+/-- Cascade a verified read from a dead helios to colibri (the degradation
+    order is helios → colibri → direct). Called only after a helios respawn
+    failed to recover. Disables helios so subsequent reads route straight to
+    colibri (via `verifiedReadVia`) without re-paying the helios attempt, and
+    serves THIS read through colibri so it stays verified. Only if colibri is
+    also down do we signal `.transportDead`, which Outbound turns into a
+    direct (unverified) HTTP read. -/
+private def heliosCascadeColibri (state : Shared) (chainId : Nat)
+    (method : LeanCli.Network.Provider.RpcMethod)
+    (params : LeanCli.Encoding.Json.Json) (reason : String) :
+    IO LeanCli.RPC.Outbound.ColibriOutcome := do
+  heliosDisable state
+  match (← state.get).colibri with
+  | some cclient =>
+      IO.eprintln s!"leancli-daemon: helios down ({reason}); cascading verified reads to colibri"
+      runColibriOnce cclient chainId method params
+  | none =>
+      IO.eprintln s!"leancli-daemon: helios down ({reason}) and colibri unavailable; reads go direct (unverified)"
+      pure (.transportDead s!"helios down and colibri unavailable: {reason}")
+
 /-- Build the verified-read backend if the persistent Helios client is
     running. Parallel to `buildColibriVia` — returns `none` when helios is
-    off so reads fall through to direct HTTP. `executionRpc` is threaded per
-    call (Helios is multi-chain: ENS reads on mainnet, balances on the
-    daemon's chain, …), so the caller supplies the resolved endpoint URL.
-    Note: the Helios sidecar bypasses `eth_getLogs` to raw RPC today (see
-    `Helios/Bridge.lean`); Phase 3 tiers logs (helios recent / colibri deep)
-    and the verdict surfaces whether a given read was actually verified. -/
+    off so `verifiedReadVia` cascades to colibri / direct. `executionRpc` is
+    threaded per call (Helios is multi-chain). The runCall implements the
+    helios → colibri → direct degradation: try helios, respawn-once on a
+    transport crash, and on persistent failure cascade to colibri. -/
 def buildHeliosVia (state : Shared) (chainId : Nat) (executionRpc : String) :
     IO (Option LeanCli.RPC.Outbound.VerifyVia) := do
   match ← heliosClient? state with
@@ -570,18 +609,23 @@ def buildHeliosVia (state : Shared) (chainId : Nat) (executionRpc : String) :
         -- Serialize on the single helios connection (see `verifyLock`).
         lock.lock
         try
-          let outcome ← runHeliosOnce client chainId executionRpc method params
-          match outcome with
+          match ← runHeliosOnce client chainId executionRpc method params with
+          | .ok j => pure (.ok j)
+          | .rpcError m => pure (.rpcError m)
           | .transportDead reason =>
-              -- The helios connection is dead. DISABLE helios so subsequent
-              -- reads skip it and go direct immediately, instead of paying the
-              -- transport-failure latency on EVERY read (the "balances very
-              -- slow" symptom — helios has no respawn, so a dead conn was being
-              -- re-tried forever). Re-enable with `daemon.helios.toggle` (or a
-              -- daemon restart) once the sidecar is healthy/synced.
-              heliosDisable state
-              pure (.transportDead reason)
-          | other => pure other
+              -- Helios conn dead → respawn the sidecar once and retry (keep
+              -- helios alive across transient drops). If it's still dead,
+              -- cascade to colibri (helios → colibri → direct).
+              IO.eprintln s!"leancli-daemon: helios transport dead ({reason}); respawning…"
+              match ← heliosRespawn state with
+              | some fresh =>
+                  match ← runHeliosOnce fresh chainId executionRpc method params with
+                  | .ok j => pure (.ok j)
+                  | .rpcError m => pure (.rpcError m)
+                  | .transportDead reason2 =>
+                      heliosCascadeColibri state chainId method params reason2
+              | none =>
+                  heliosCascadeColibri state chainId method params reason
         finally
           lock.unlock
       pure (some { chainId := chainId, label := "helios", runCall := runCall })

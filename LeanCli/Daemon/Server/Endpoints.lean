@@ -105,7 +105,15 @@ def verifiedReadVia (state : LeanCli.Daemon.State.Shared) (chainId : Nat)
     IO (Option LeanCli.RPC.Outbound.VerifyVia) := do
   match ← LeanCli.Daemon.State.getReadBackend state with
   | .colibri => colibriVia state chainId
-  | .helios  => heliosVia state chainId endpoint.url
+  | .helios  =>
+      -- Degradation order helios → colibri → direct: prefer the helios via
+      -- (its runCall respawns + cascades internally); once helios is disabled
+      -- (heliosVia returns none), route straight to colibri so reads stay
+      -- verified instead of dropping to direct. Outbound only hits direct
+      -- HTTP when BOTH are unavailable.
+      match ← heliosVia state chainId endpoint.url with
+      | some v => pure (some v)
+      | none   => colibriVia state chainId
   | .rpc     => pure none
 
 /-- Helios's verified `eth_getLogs` window (one sync-committee period). A
