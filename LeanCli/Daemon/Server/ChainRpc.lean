@@ -65,12 +65,13 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               | .error err =>
                   pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
               | .ok ep =>
-                  -- Balance reads are display-only — mirror `swap.balances`
-                  -- and skip the Colibri verifier so a stale or slow light
-                  -- client can't poison the wallets hub with dust amounts /
-                  -- intermittent failures. Soundness still comes from
-                  -- `cfg.policy` gating; the result is never used for signing.
-                  let via? : Option LeanCli.RPC.Outbound.VerifyVia := none
+                  -- Verify balance reads too: helios proves eth_getBalance via
+                  -- eth_getProof against the state root. This is a SINGLE read,
+                  -- so it's safe to route through the serial verified client
+                  -- (unlike swap.balances' concurrent fan-out). Outbound falls
+                  -- back to HTTP if the light client is down/slow, so the
+                  -- wallet display degrades to unverified rather than stalling.
+                  let via? ← verifiedReadVia state (ep.chainId.getD cfg.chainId) ep
                   match ← LeanCli.RPC.Outbound.getBalance cfg.policy ep address block via? with
                   | .ok balance =>
                       pure <| .ok <| .obj #[
@@ -135,11 +136,11 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               | .error err =>
                   pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
               | .ok ep =>
-                  -- Freshness is a best-effort display signal — never used
-                  -- for signing decisions (see handler-level comment).
-                  -- Match `chain.balance` / `swap.balances` and skip Colibri
-                  -- so stale light-client state can't flip 0-link tags.
-                  let via? : Option LeanCli.RPC.Outbound.VerifyVia := none
+                  -- Verify the freshness nonce read too (single read → safe to
+                  -- route through the serial verified client; helios/colibri
+                  -- prove getTransactionCount against state). Falls back to
+                  -- HTTP if the verifier is down.
+                  let via? ← verifiedReadVia state (ep.chainId.getD cfg.chainId) ep
                   let lookback := paramNatD req.params "lookback" 5000
                   -- Nonce (pending) — primary "did this account ever send a tx" signal.
                   let nonceRes ← LeanCli.RPC.Outbound.getTransactionCount cfg.policy ep address "pending" via?
