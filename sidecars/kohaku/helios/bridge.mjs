@@ -160,9 +160,52 @@ async function getClient(chainId, executionRpc, consensusRpcOverride, checkpoint
   return entry;
 }
 
-// eth_getLogs is unsupported in the verified path — fall back to a raw
-// fetch against the configured executionRpc. Mirrors upstream's
-// `bypassGetLogs` helper in ethereum/kohaku.
+// Helios verifies eth_getLogs only within ~8191 blocks of head (one sync
+// committee period); deeper / unbounded ranges (indexer sync, deep history)
+// have no verified path. So we TIER: in-window queries go through the
+// verified helios client; everything else (or any failure) degrades to a
+// raw bypass against the configured executionRpc. This narrows — rather than
+// blanket-removes — upstream's `bypassGetLogs` (ethereum/kohaku), so recent
+// history / approvals / prior-interactions become consensus-verified while
+// deep scans stay functional. DIVERGENCE from upstream documented here.
+const HELIOS_LOG_WINDOW = 8191;
+
+// Decide whether a getLogs filter is verifiable by helios, and serve it via
+// the verified client when so. Falls back to logsBypass on out-of-window
+// ranges or any verified-path error. Returns the logs array either way
+// (callers see the same shape; whether it was verified is the daemon's call
+// to surface — it knows the range it asked for).
+async function getLogsTiered(provider, executionRpc, filter) {
+  let head = null;
+  try {
+    head = parseInt(await provider.request({ method: "eth_blockNumber", params: [] }), 16);
+  } catch {
+    head = null;
+  }
+  const norm = (b) => {
+    if (b == null || b === "latest" || b === "pending") return head;
+    if (b === "earliest") return 0;
+    if (typeof b === "string") return parseInt(b, 16);
+    if (typeof b === "number") return b;
+    return null;
+  };
+  const from = norm(filter?.fromBlock);
+  const to = norm(filter?.toBlock);
+  const inWindow =
+    head != null && from != null && to != null && from <= to && head - from <= HELIOS_LOG_WINDOW;
+  if (inWindow) {
+    try {
+      return await provider.request({ method: "eth_getLogs", params: [filter] });
+    } catch {
+      // helios couldn't serve it verified (older client / unsupported) —
+      // degrade to the raw bypass rather than fail the read.
+    }
+  }
+  return await logsBypass(executionRpc, [filter]);
+}
+
+// Raw, UNVERIFIED eth_getLogs against the configured executionRpc — the
+// fallback for out-of-window ranges (see getLogsTiered).
 async function logsBypass(executionRpc, params) {
   const body = {
     jsonrpc: "2.0",
@@ -215,11 +258,11 @@ async function dispatch(method, params, id) {
       }
       const inner = Array.isArray(params.params) ? params.params : [];
       try {
+        const { provider } = await getClient(chainId, params.executionRpc, params.consensusRpc, params.checkpoint);
         if (params.method === "eth_getLogs") {
-          const result = await logsBypass(params.executionRpc, inner);
+          const result = await getLogsTiered(provider, params.executionRpc, inner[0] ?? {});
           return ok(id, result);
         }
-        const { provider } = await getClient(chainId, params.executionRpc, params.consensusRpc, params.checkpoint);
         const result = await provider.request({ method: params.method, params: inner });
         return ok(id, result);
       } catch (e) {
