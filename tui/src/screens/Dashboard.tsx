@@ -172,14 +172,14 @@ export default function Dashboard({
   const feed = useNetFeed(cfg.logPath);
   const llama = useLlamaStatus(llmInfo.baseUrl, 5_000);
   const sys = useSystemStats(2_500);
-  // Only poll wallet balances when the wallet is actually in view — the
-  // wallet pane is focused, or its hub is open in the main slot. Otherwise
-  // (chat, network monitor, llm, settings) the poll pauses, so balances
-  // don't keep hitting the chain in the background. Re-focusing refreshes.
-  const wallet = useWalletData(
-    cfg.chainName,
-    activePane === "wallet" || mainPane === "wallet",
-  );
+  // The wallet pane is ALWAYS visible on the dashboard, so poll its balance
+  // whenever the dashboard is mounted (every 60s — minimal, and token
+  // discovery is already hub-only). usePoll stops automatically when the
+  // dashboard unmounts for a full-screen view, so there's no background
+  // polling while you're off the dashboard. (Gating this on wallet-focus was
+  // wrong: it left the always-visible pane stale until focused — the "slow on
+  // the dashboard, fast in the hub" symptom.)
+  const wallet = useWalletData(cfg.chainName);
 
   // Mirror wallet rows into the lifted chat wallets so draft sender
   // hints can pre-select a signing wallet (and the full chat screen
