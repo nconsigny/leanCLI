@@ -446,6 +446,32 @@ private def runColibriOnce (client : LeanCli.Colibri.Persistent.Client)
   | .crash reason => pure (.rpcError s!"colibri transport: {reason}")
   | .transportCrash reason => pure (.transportDead reason)
 
+/-- Run a colibri read, retrying TRANSIENT rpcErrors up to `attempts` times
+    (120 ms backoff) before giving up — so we exhaust colibri before the cascade
+    drops to direct ("direct is bad"). Does NOT retry a deterministic revert
+    (`execution reverted`): it would revert every time, just slower, and the
+    revert should surface. `.ok` and `.transportDead` return immediately
+    (transportDead is the caller's respawn concern, not a retry one). -/
+private def runColibriRetry (client : LeanCli.Colibri.Persistent.Client)
+    (chainId : Nat) (method : LeanCli.Network.Provider.RpcMethod)
+    (params : LeanCli.Encoding.Json.Json) (attempts : Nat := 3) :
+    IO LeanCli.RPC.Outbound.ColibriOutcome := do
+  let mut last : LeanCli.RPC.Outbound.ColibriOutcome :=
+    .transportDead "colibri: no attempt made"
+  for i in [0:attempts] do
+    last ← runColibriOnce client chainId method params
+    match last with
+    | .ok _ => return last
+    | .transportDead _ => return last
+    | .rpcError m =>
+        -- Deterministic revert → surface immediately, don't waste retries.
+        if (m.toLower.splitOn "revert").length > 1 then return last
+        -- Transient → brief backoff, then retry (unless this was the last try).
+        if i + 1 < attempts then
+          IO.eprintln s!"leancli-daemon: colibri transient error ({m}); retry {i + 2}/{attempts}"
+          IO.sleep 120
+  pure last
+
 /-- Append a JSONL line to the daemon network log under a colibri-respawn
     event kind. Mirrors `Outbound.logEvent` but is reproduced here to
     avoid widening the public surface of `Outbound`. -/
@@ -503,7 +529,9 @@ def buildColibriVia (state : Shared) (chainId : Nat) :
           -- the round-trip throws.
           lock.lock
           try
-            match ← runColibriOnce client chainId method params with
+            -- runColibriRetry exhausts transient colibri errors (3×) before
+            -- surfacing; transportDead still drives the respawn-once path.
+            match ← runColibriRetry client chainId method params with
             | .ok j => pure (.ok j)
             | .rpcError m => pure (.rpcError m)
             | .transportDead reason =>
@@ -516,7 +544,7 @@ def buildColibriVia (state : Shared) (chainId : Nat) :
                     pure (.transportDead s!"respawn failed after {reason}")
                 | some fresh =>
                     logColibriRespawnEvent method "ok" #[]
-                    match ← runColibriOnce fresh chainId method params with
+                    match ← runColibriRetry fresh chainId method params with
                     | .ok j => pure (.ok j)
                     | .rpcError m => pure (.rpcError m)
                     | .transportDead reason2 =>
@@ -595,7 +623,9 @@ private def heliosCascadeColibri (state : Shared) (chainId : Nat)
   match (← state.get).colibri with
   | some cclient =>
       IO.eprintln s!"leancli-daemon: helios couldn't serve ({reason}); cascading to colibri"
-      runColibriOnce cclient chainId method params
+      -- Retry transient colibri errors (3×) before surfacing — exhaust colibri
+      -- before Outbound drops to direct.
+      runColibriRetry cclient chainId method params
   | none =>
       pure (.transportDead s!"helios+colibri unavailable: {reason}")
 

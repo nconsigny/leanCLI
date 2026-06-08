@@ -69,7 +69,12 @@ type Props = { onDone: () => void };
  *  with a stats bar and the most recent N events. ESC quits and kills the
  *  child process. */
 export default function NetworkMonitor({ onDone }: Props) {
-  const cols = useTerminalColumns();
+  // Layout wraps content in KoiFrame, which eats ~34 cols of chrome before our
+  // table: koi art (24) + its marginRight (2) + double border (2) + content
+  // paddingX (4) + Layout paddingX (2). Size the table to the actual CONTENT
+  // width so rows fit instead of overrunning and getting truncated to "…"
+  // (the table never saw that the koi gutter had stolen its width).
+  const cols = Math.max(48, useTerminalColumns() - 34);
   const [logPath, setLogPath] = useState<string | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [events, setEvents] = useState<LogEvent[]>([]);
