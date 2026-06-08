@@ -727,23 +727,25 @@ function RpcBox({
       {" · oram-tee "}
       {onOff(cfg.safeNode, pending === "oram-tee")}
     </Line>,
-    // The headline answer to "am I verified?": the read backend only
-    // governs tx.simulate (the pre-sign check). It is consensus-verified
-    // ONLY when the matching sidecar is actually running — backend=helios
-    // with the sidecar down is NOT verified. Balance/token reads always
-    // go direct RPC (display-only), so we say so explicitly.
+    // The headline answer to "am I verified?": balances, reads (eth_call,
+    // latest nonce, in-window logs) AND tx.simulate all route through the
+    // active light client and are consensus-verified — ONLY when the matching
+    // sidecar is actually running (backend=helios with the sidecar down is NOT
+    // verified). Unverifiable-by-design reads (pending nonce, gas/fee
+    // heuristics, deep logs) degrade helios→colibri→direct; those are the
+    // exception, not the rule, so the headline says reads ARE verified.
     (() => {
       const rb = cfg.readBackend;
       const v =
         rb === "helios" && cfg.helios?.running
-          ? { c: theme.ok, t: "✓ verified: tx simulate via helios · balances direct" }
+          ? { c: theme.ok, t: "✓ verified: balances + reads + simulate via helios" }
           : rb === "colibri" && cfg.colibri?.running
-            ? { c: theme.ok, t: "✓ verified: tx simulate via colibri · balances direct" }
+            ? { c: theme.ok, t: "✓ verified: balances + reads + simulate via colibri" }
             : rb === "helios"
-              ? { c: theme.warn, t: "⚠ backend=helios but sidecar OFF — simulate NOT verified" }
+              ? { c: theme.warn, t: "⚠ backend=helios but sidecar OFF — reads NOT verified" }
               : rb === "colibri"
-                ? { c: theme.warn, t: "⚠ backend=colibri but sidecar OFF — simulate NOT verified" }
-                : { c: theme.dim, t: "simulate uses raw RPC — not consensus-verified" };
+                ? { c: theme.warn, t: "⚠ backend=colibri but sidecar OFF — reads NOT verified" }
+                : { c: theme.dim, t: "reads use raw RPC — not consensus-verified" };
       return (
         <Line key="verified" color={v.c}>
           {v.t}
