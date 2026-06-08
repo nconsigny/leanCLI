@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Box, Text, useInput, useStdout } from "ink";
+import { Box, Text, useInput, useStdout, measureElement, type DOMElement } from "ink";
 import Spinner from "ink-spinner";
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import type { Readable } from "node:stream";
@@ -69,12 +69,23 @@ type Props = { onDone: () => void };
  *  with a stats bar and the most recent N events. ESC quits and kills the
  *  child process. */
 export default function NetworkMonitor({ onDone }: Props) {
-  // Layout wraps content in KoiFrame, which eats ~34 cols of chrome before our
-  // table: koi art (24) + its marginRight (2) + double border (2) + content
-  // paddingX (4) + Layout paddingX (2). Size the table to the actual CONTENT
-  // width so rows fit instead of overrunning and getting truncated to "…"
-  // (the table never saw that the koi gutter had stolen its width).
-  const cols = Math.max(48, useTerminalColumns() - 34);
+  // MEASURE the actual content box rather than guessing chrome: the monitor
+  // renders full-screen sometimes and in the dashboard's narrow main-slot
+  // (~58% width, beside the side panes) other times, so `stdout.columns` (the
+  // full terminal) overshoots and rows truncate to "…". `measureElement` on
+  // the table box reports the real available width regardless of container.
+  // Fall back to a terminal-minus-koi-chrome estimate until the first measure.
+  const fallbackCols = Math.max(48, useTerminalColumns() - 34);
+  const tableRef = useRef<DOMElement | null>(null);
+  const [measuredCols, setMeasuredCols] = useState<number | null>(null);
+  useEffect(() => {
+    const node = tableRef.current;
+    if (node) {
+      const { width } = measureElement(node);
+      if (width > 0 && width !== measuredCols) setMeasuredCols(width);
+    }
+  });
+  const cols = measuredCols ?? fallbackCols;
   const [logPath, setLogPath] = useState<string | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [events, setEvents] = useState<LogEvent[]>([]);
@@ -228,7 +239,7 @@ export default function NetworkMonitor({ onDone }: Props) {
         />
       )}
       {logPath && (
-        <>
+        <Box ref={tableRef} flexDirection="column">
           <StatsBar stats={stats} paused={paused} cols={cols} />
           <BreakdownPanels stats={stats} cols={cols} />
           <Box flexDirection="column" marginTop={1}>
@@ -242,7 +253,7 @@ export default function NetworkMonitor({ onDone }: Props) {
               <EventRow key={`${e.ts_ms}-${i}`} e={e} cols={cols} />
             ))}
           </Box>
-        </>
+        </Box>
       )}
     </Layout>
   );
