@@ -270,8 +270,12 @@ export default function Dashboard({
         setMainPane(activePane);
         return;
       }
+      // `r` refreshes wallet balances from ANY non-chat dashboard pane (not
+      // just the wallet pane) — a quick "update my balances" from the main
+      // view. It can't fire while chat is focused (the TextInput owns
+      // printable keys there), so Tab off chat first; no other pane binds `r`.
+      if (ch === "r") wallet.refresh();
       if (activePane === "wallet") {
-        if (ch === "r") wallet.refresh();
         if (ch === "s") wallet.syncShielded();
         if (ch === "o") onOpenWallets();
       } else if (activePane === "settings") {
