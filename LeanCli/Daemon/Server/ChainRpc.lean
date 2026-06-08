@@ -118,12 +118,15 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
   | "chain.addressFreshness" =>
       -- Why: the wallets-hub TUI green-marks "0-link" rows so users
       -- can pick an unshield destination without leaking on-chain
-      -- linkage. "0 link" here = nonce 0 (pending tag) AND no ERC-20
-      -- Transfer event in/out within the lookback window. The window
-      -- is bounded (default 5000 blocks ≈ 17 h on mainnet) because
-      -- public RPCs cap eth_getLogs ranges; this is a best-effort
-      -- signal, never used for signing decisions — the TUI degrades
-      -- to "unknown" (no green) when either getLogs call fails.
+      -- linkage. "0 link" here = nonce 0 at `latest` (CONFIRMED — not
+      -- `pending`: a light client can't verify unconfirmed state, and
+      -- pending in-flight txs are irrelevant for vetting a receiver) AND
+      -- no ERC-20 Transfer event in/out within the lookback window. The
+      -- window is bounded (default 5000 blocks ≈ 17 h on mainnet) because
+      -- public RPCs cap eth_getLogs ranges; this is a best-effort signal,
+      -- never used for signing decisions — the TUI degrades to "unknown"
+      -- (no green) when either getLogs call fails. Reading `latest`
+      -- (verifiable) lets the whole probe stay consensus-verified.
       match paramString req.params "address" with
       | .error err => pure (.error err)
       | .ok address =>
@@ -138,8 +141,12 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   -- Verified via the mutex-guarded client (see balance note).
                   let via? ← verifiedReadVia state (ep.chainId.getD cfg.chainId) ep
                   let lookback := paramNatD req.params "lookback" 5000
-                  -- Nonce (pending) — primary "did this account ever send a tx" signal.
-                  let nonceRes ← LeanCli.RPC.Outbound.getTransactionCount cfg.policy ep address "pending" via?
+                  -- Nonce at `latest` (CONFIRMED) — "did this account ever send
+                  -- a confirmed tx". `latest` is verifiable by the light client
+                  -- (unlike `pending`), so this read stays ✓helios/✓colibri
+                  -- instead of failing over to direct. The freshness signal
+                  -- deliberately ignores pending in-flight txs.
+                  let nonceRes ← LeanCli.RPC.Outbound.getTransactionCount cfg.policy ep address "latest" via?
                   match nonceRes with
                   | .error err =>
                       pure <| .error { code := -32020, message := "chain RPC failed", data := some (.str err) }
