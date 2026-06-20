@@ -1094,6 +1094,15 @@ function LlmBox({
         ) : (
           "n/a"
         )}
+        {sys.llamaCpuPct !== null && (
+          <>
+            {" · proc "}
+            {/* >100% = more than one core busy → the model is on CPU. */}
+            <Text color={sys.llamaCpuPct > 100 ? theme.warn : theme.primary}>
+              {sys.llamaCpuPct}%
+            </Text>
+          </>
+        )}
       </Line>
       <Line color={theme.dim}>
         cpu <Text color={theme.primary}>{sys.cpuPct === null ? "…" : `${sys.cpuPct}%`}</Text>
@@ -1102,15 +1111,30 @@ function LlmBox({
         {" · mem "}
         <Text color={theme.primary}>{memLine}</Text>
       </Line>
-      <Line color={theme.dim}>
-        {gpu
-          ? `gpu ${gpu.name}${gpu.utilPct !== undefined ? ` ${gpu.utilPct}%` : ""}${
-              gpu.vramUsedMb !== undefined && gpu.vramTotalMb !== undefined
-                ? ` · vram ${(gpu.vramUsedMb / 1024).toFixed(1)}/${(gpu.vramTotalMb / 1024).toFixed(0)}G`
-                : ""
-            }`
-          : "gpu: none detected"}
-      </Line>
+      {gpu ? (
+        <Line color={theme.dim}>
+          {`gpu ${gpu.name}${gpu.utilPct !== undefined ? ` ${gpu.utilPct}%` : ""}${
+            gpu.vramUsedMb !== undefined && gpu.vramTotalMb !== undefined
+              ? ` · vram ${(gpu.vramUsedMb / 1024).toFixed(1)}/${(gpu.vramTotalMb / 1024).toFixed(0)}G`
+              : ""
+          }`}
+        </Line>
+      ) : sys.gpuError ? (
+        <Line color={theme.err}>{`gpu ⚠ ${sys.gpuError}`}</Line>
+      ) : (
+        <Line color={theme.dim}>gpu: none detected</Line>
+      )}
+      {/* Actionable banner: llama answered but no GPU is in play, so it is
+          running on CPU. Red when a driver error explains why (the user must
+          fix the driver); amber for a genuinely CPU-only host. Ordered before
+          the spawn-args hint so it wins if the pane clips. */}
+      {llama.up === true && sys.gpus.length === 0 && (
+        <Line color={sys.gpuError ? theme.err : theme.warn}>
+          {sys.gpuError
+            ? "↳ llama-server is on CPU — fix the GPU driver (error above)"
+            : "↳ llama-server running on CPU (no GPU detected)"}
+        </Line>
+      )}
       {(llama.slotsAvailable === false || llama.metricsAvailable === false) && (
         <Line color={theme.dim}>hint: LLM_SPAWN_ARGS="--slots --metrics" enables slots+tok/s</Line>
       )}
