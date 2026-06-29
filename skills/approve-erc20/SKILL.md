@@ -20,6 +20,17 @@ notes:
 
 # approve-erc20 — grant an ERC-20 allowance
 
+## Amounts (mandatory)
+
+You never type an allowance magnitude. Call `prepare_erc20_approve`
+with the amount as `amountRef` (the handle from the `amounts` table) —
+the daemon already converted it. The ONLY literal accepted is
+`amount:"max"` for an unlimited approval (a fixed sentinel, not a
+chosen number). A hand-typed concrete amount is rejected when an
+`amounts` table is present. The daemon also re-decodes the encoded
+`approve` amount and refuses any value it did not derive (the unlimited
+sentinel aside), so there is nothing to gain by inventing one.
+
 ## When to use
 
 * `approve <amount> <SYMBOL> for <spender>`

@@ -92,6 +92,12 @@ structure DaemonState where
   /-- ERC-20 metadata cache keyed by `"chainId:address"` (lowercased
   address). Populated on demand by `tx.decodeIntent`. -/
   tokenMeta : List (String × TokenMetaEntry) := []
+  /-- Negative cache of `"chainId:address"` keys known to have no contract
+  code (EOAs, and the misaligned/value junk that `scanCalldataAddresses`
+  speculatively surfaces). Lets `tx.decodeIntent` skip re-probing the same
+  non-contract candidates on every redecode instead of paying two reverting
+  `eth_call`s each time. -/
+  noCodeAddrs : List String := []
   /-- Long-running Colibri stateless client. `none` when colibri is
   disabled (the default). Toggled at runtime via `daemon.colibri.toggle`;
   spawning pays the sync-committee bootstrap once per chainId per
@@ -668,5 +674,28 @@ def buildHeliosVia (state : Shared) (chainId : Nat) (executionRpc : String) :
         finally
           lock.unlock
       pure (some { chainId := chainId, label := "helios", runCall := runCall })
+
+/-- Provider-aware verified-read selector at the shared-state layer — maps the
+    daemon's active read backend onto the right light client for any proofable
+    read:
+      * `helios`  → `buildHeliosVia` (`executionRpc` is the untrusted source),
+                    cascading to colibri if helios is disabled so reads stay
+                    verified rather than dropping to direct;
+      * `colibri` → `buildColibriVia`;
+      * `rpc`     → `none` (direct, unverified).
+    `Server.Endpoints.verifiedReadVia` delegates here so every read site —
+    including `Daemon.TokenMeta`, which cannot import the Server layer — shares
+    one selection rule. Before this, `TokenMeta` was hardwired to
+    `buildColibriVia`, so a `provider=helios` swap routed its decimals/symbol
+    prefetch through colibri while the simulate ran on helios. -/
+def buildVerifiedReadVia (state : Shared) (chainId : Nat) (executionRpc : String) :
+    IO (Option LeanCli.RPC.Outbound.VerifyVia) := do
+  match ← getReadBackend state with
+  | .colibri => buildColibriVia state chainId
+  | .helios  =>
+      match ← buildHeliosVia state chainId executionRpc with
+      | some v => pure (some v)
+      | none   => buildColibriVia state chainId
+  | .rpc     => pure none
 
 end LeanCli.Daemon.State

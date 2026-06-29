@@ -409,6 +409,12 @@ inductive Action where
   | tornadoDeposit
   | tornadoWithdraw
   | approvalsAudit
+  -- Aave test-faucet mint. `faucet <amount> <asset>` mints the Aave
+  -- Sepolia market's own reserve tokens to the user's wallet (testnet
+  -- only; the faucet is non-permissioned). Handled deterministically in
+  -- `chat.draft` (token resolved off the Aave reserve table, never the
+  -- generic swap registry whose USDC/WETH are different contracts).
+  | faucetMint
   -- ENS chat-side actions. `ensRegister` is the second-leg-of-
   -- commit/reveal `register(...)` call; the prior `commit(...)`
   -- transaction is orchestrated by the skill card, not modelled as
@@ -510,6 +516,7 @@ def Action.toString : Action → String
   | .tornadoDeposit    => "shielded.tornado.deposit"
   | .tornadoWithdraw   => "shielded.tornado.withdraw"
   | .approvalsAudit    => "approvals.audit"
+  | .faucetMint        => "faucet.mint"
   | .ensRegister       => "ens.register"
   | .ensRenew          => "ens.renew"
   | .ensSetAddr        => "ens.setAddr"
@@ -539,6 +546,7 @@ example : Action.toString .railgunUnshield   = "shielded.railgun.unshield" := by
 example : Action.toString .tornadoDeposit    = "shielded.tornado.deposit"  := by native_decide
 example : Action.toString .tornadoWithdraw   = "shielded.tornado.withdraw" := by native_decide
 example : Action.toString .approvalsAudit    = "approvals.audit"            := by native_decide
+example : Action.toString .faucetMint        = "faucet.mint"                := by native_decide
 example : Action.toString .ensRegister       = "ens.register"               := by native_decide
 example : Action.toString .ensRenew          = "ens.renew"                  := by native_decide
 example : Action.toString .ensSetAddr        = "ens.setAddr"                := by native_decide

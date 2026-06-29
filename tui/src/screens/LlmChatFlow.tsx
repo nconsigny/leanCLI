@@ -4,7 +4,7 @@ import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import Select, { SelectItem } from "../widgets/Select.js";
 import { KoiFrame } from "../widgets/KoiFrame.js";
-import { call } from "../daemon.js";
+import { call, isCancelled } from "../daemon.js";
 import { theme } from "../theme.js";
 import { formatEth, hexToBigInt } from "../format.js";
 
@@ -50,8 +50,10 @@ type Props = {
     /** Optional pre-selected signing wallet derived from the regex
      *  draft's `from` field. Set when the user wrote
      *  "approve … from leanWallet" (or any phrasing the RuleParser
-     *  recognises). SendRawFlow's picker is skipped when present. */
-    wallet?: { kind: "eoa"; name: string; address: string },
+     *  recognises). SendRawFlow's picker is skipped when present.
+     *  Carries either signer kind — a SPHINCS smart account is a valid
+     *  pre-selected sender (SendRawFlow routes it to the UserOp path). */
+    wallet?: { kind: "eoa" | "sphincs"; name: string; address: string },
   ) => void;
   /** Routes an `address.fresh` directive to the existing wallet-creation
    *  flow. Parent navigates to CreateEoaFlow (kind="eoa") with the label
@@ -125,6 +127,23 @@ export type DraftResponse = {
    *  *Error fields so the failure reason is visible instead of the bubble
    *  silently falling back to the bare "swap" action label. */
   swapError?: string;
+  /** Deterministic Aave prepare/batch error. Surfaced inline so a
+   *  fail-closed batch attempt does not render as a blank assistant turn. */
+  aaveError?: string;
+  /** Which short-circuit produced this draft. `wallet-direct-swap` marks the
+   *  deterministic Uniswap path; the continuation logic keys on it (plus
+   *  `swapNote`) to re-issue the original prompt for leg 2 rather than
+   *  asking the LLM to reconstruct the swap. */
+  backend?: string;
+  /** Present only on the deterministic swap's `.needsApproval` (leg 1 of 2)
+   *  draft. Its presence is the signal that the original swap prompt must be
+   *  re-issued after the approve mines so the daemon drafts the swap leg. */
+  swapNote?: string;
+  /** Aave analogue of `swapNote`: present only on the deterministic Aave
+   *  prepare's `.needsApproval` (leg 1 of 2) draft. Signals that the original
+   *  Aave prompt must be re-issued after the pool approval mines so the daemon
+   *  drafts the supply/repay leg deterministically (no LLM round-trip). */
+  aaveNote?: string;
   modelAsk?: { error: string; question: string };
   // New non-tx-encoded action directives. Returned by chat.draft for
   // the privacy / hygiene / wallet-mgmt Intent variants. The TUI is
@@ -158,17 +177,47 @@ export type DraftResponse = {
 };
 
 /** A row from `daemon.approvals.list`. The shape is the wire spec
- *  documented in the audit-approvals SKILL.md; today the daemon returns
- *  an empty list with implemented=false until the actual scan is wired. */
+ *  documented in the audit-approvals SKILL.md. The daemon walks Approval
+ *  logs, re-reads the current allowance live, and drops zero/revoked
+ *  pairs. `tokenSymbol`/`amountHuman` are best-effort enrichment (empty
+ *  when token metadata couldn't be fetched). */
 export type ApprovalRow = {
   token: string;
   spender: string;
-  amount: string;       // uint256 string-form
+  amount: string;       // uint256 string-form (decimal)
+  amountHuman?: string; // e.g. "unlimited (max uint256)" or "250 USDC"
+  tokenSymbol?: string;
+  spenderLabel?: string; // e.g. "Uniswap Permit2" (best-effort, known spenders)
+  lastSeenBlock: number;
+};
+/** ERC-721/1155 `ApprovalForAll` operator grant — the blanket "manage all
+ *  my NFTs" approval. No amount: it's a boolean operator bit. */
+export type NftApprovalRow = {
+  token: string;
+  operator: string;
+  approved: boolean;
+  tokenSymbol?: string;
+  operatorLabel?: string;
+  standard?: string;
+  lastSeenBlock: number;
+};
+/** Uniswap Permit2 grant — allowance held on the Permit2 contract, with a
+ *  uint48 `expiration` timestamp. */
+export type Permit2ApprovalRow = {
+  token: string;
+  spender: string;
+  amount: string;
+  amountHuman?: string;
+  tokenSymbol?: string;
+  spenderLabel?: string;
+  expiration: number;
   lastSeenBlock: number;
 };
 export type AuditResult = {
   chainId: number;
   approvals: ApprovalRow[];
+  nftApprovals?: NftApprovalRow[];
+  permit2Approvals?: Permit2ApprovalRow[];
   implemented: boolean;
   note?: string;
   wallet?: string;
@@ -189,7 +238,12 @@ export type DispatchState =
 
 export type Turn =
   | { kind: "user"; text: string }
-  | { kind: "assistant"; status: "pending" | "done"; result?: DraftResponse; error?: string; dispatch?: DispatchState }
+  | { kind: "assistant"; status: "pending" | "done"; result?: DraftResponse; error?: string; dispatch?: DispatchState;
+      /** Set once this draft has been signed + broadcast. A signed draft
+       *  is no longer a re-signing target — without this, empty-Enter
+       *  (and the [Review and sign] affordance) would keep re-opening the
+       *  ConfirmGate for a tx that already went out. */
+      signed?: boolean }
   | { kind: "system"; text: string; tone?: "info" | "warn" | "err" | "ok" };
 
 /** A configured per-chain endpoint, as returned by network.show. We
@@ -203,9 +257,13 @@ type ConfiguredChain = {
 };
 
 /** Compact wallet+balance card shown in the chat header so the user
- *  has running context (top 5 wallets) without leaving the screen. */
+ *  has running context (top 5 wallets) without leaving the screen.
+ *  Both signer kinds are carried: a SPHINCS smart account is a valid
+ *  swap/send sender, and the draft's sender hint must be able to
+ *  resolve to one so the confirm flow pre-selects it instead of
+ *  forcing the user onto an EOA. */
 export type WalletBalance = {
-  kind: "eoa";
+  kind: "eoa" | "sphincs";
   name: string;
   address: string;
   wei?: bigint;     // undefined while pending
@@ -251,6 +309,53 @@ export function summariseAssistantTurn(t: Extract<Turn, { kind: "assistant" }>):
   return null;
 }
 
+/** Decide what (if anything) the post-broadcast continuation round should
+ *  send. Returns `null` when there is no legitimate next leg — in which case
+ *  the caller fires NOTHING and the broadcast confirmation already injected
+ *  into the conversation is the final word.
+ *
+ *  A continuation is legitimate ONLY when the tx that just mined was the
+ *  FIRST (approval) leg of a known, deterministic two-leg flow:
+ *    • Uniswap swap — leg-1 (`.needsApproval`) draft carries `swapNote`.
+ *    • Aave supply  — leg-1 (`.needsApproval`) draft carries `aaveNote`.
+ *  In both cases we re-issue the ORIGINAL user prompt (the last `user` turn —
+ *  continuation rounds only append `system`/`assistant` turns). The daemon's
+ *  deterministic `swapEarly` / `aaveEarly` path re-quotes, sees the allowance
+ *  now suffices, and drafts leg-2 with no LLM round-trip.
+ *
+ *  For EVERY other completed action — a plain approve/send the user signed,
+ *  the final leg of a swap/supply, an audit, etc. — we return `null`. We must
+ *  NOT fire the old generic `[continuation hook]` ("propose the next step via
+ *  propose_send"): that prompt is anchored to nothing in the current turn, so
+ *  the agent is free to draw from its sticky server-side session and resurrect
+ *  a SUPERSEDED draft (e.g. an earlier "approve 10 USDC" the user later revised
+ *  to 15), or to spin without ever emitting `propose_send` (the "dispatching,
+ *  no response" hang). Gating it to deterministic legs keeps every proposed tx
+ *  tied to the latest context: a proposal can come only from a fresh user
+ *  message or a deterministic leg-2 re-issue of the current goal. */
+export function planContinuation(
+  turns: Turn[],
+  _receipt: string,
+): { prompt: string; statusText: string } | null {
+  const lastDraft = [...turns].reverse().find(
+    (t): t is Extract<Turn, { kind: "assistant" }> =>
+      t.kind === "assistant" && t.status === "done" && !!t.result,
+  )?.result;
+  const lastUserPrompt = [...turns].reverse().find(
+    (t): t is Extract<Turn, { kind: "user" }> => t.kind === "user",
+  )?.text;
+  if (!lastDraft || lastDraft.intentActionTag !== "erc20Approve" || !lastUserPrompt) {
+    return null;
+  }
+  if (lastDraft.backend === "wallet-direct-swap" && lastDraft.swapNote) {
+    return { prompt: lastUserPrompt, statusText: "↻ approval mined — drafting swap leg…" };
+  }
+  if (lastDraft.backend === "wallet-direct-aave" && lastDraft.aaveNote) {
+    return { prompt: lastUserPrompt, statusText: "↻ approval mined — drafting Aave leg…" };
+  }
+  return null;
+}
+
 /** Map a canonical `intentActionTag` (e.g. `erc20Approve`,
  *  `aaveV3Supply`) to a short, plain-English label for the
  *  Review-and-sign button and chat hint. The tag space lives in
@@ -267,7 +372,11 @@ export function friendlyAction(tag: string | undefined): string {
     case "uniswapV3SwapSingle":  return "Swap via Uniswap V3";
     case "aaveV3Supply":         return "Supply to Aave V3";
     case "aaveV3Withdraw":       return "Withdraw from Aave V3";
+    case "aaveV3Borrow":         return "Borrow from Aave V3";
+    case "aaveV3Repay":          return "Repay Aave V3 debt";
+    case "aaveV3SetCollateral":  return "Update Aave V3 collateral";
     case "rawCall":              return "Contract call";
+    case "faucet.mint":          return "Get test tokens (faucet)";
     case "shielded.deposit":     return "Privacy Pools deposit";
     case "shielded.withdraw":    return "Privacy Pools withdraw";
     case "shielded.railgun.shield":   return "Shield to Railgun";
@@ -361,6 +470,33 @@ export default function LlmChatFlow({
   onOpenHistory,
 }: Props) {
 
+  // In-flight `chat.draft` cancellation. Each draft (and the continuation
+  // round) installs a fresh AbortController here; Esc-to-stop aborts it,
+  // tearing down the daemon socket so the UI stops waiting. The daemon-side
+  // generation keeps running in the background (see daemon.ts onAbort).
+  const draftAbort = useRef<AbortController | null>(null);
+
+  // Stop the in-flight draft: abort the socket, drop `busy`, leave a marker,
+  // and rotate the sessionKey so the next prompt opens a clean agentd
+  // session instead of interleaving with the abandoned one (same rationale
+  // as `/clear`'s rotation). No-op when nothing is in flight.
+  const stopDraft = () => {
+    draftAbort.current?.abort();
+    draftAbort.current = null;
+    setPhase((p) => {
+      if (p.kind !== "chat" || !p.busy) return p;
+      const turns = [...p.turns];
+      const last = turns[turns.length - 1];
+      if (last && last.kind === "assistant" && last.status === "pending") turns.pop();
+      turns.push({
+        kind: "system",
+        tone: "warn",
+        text: "⏹ stopped — generation still finishing in the background",
+      });
+      return { ...p, turns, busy: false, sessionKey: newSessionKey(), pendingContinuation: undefined };
+    });
+  };
+
   // Boot: ensureUp + fetch configured chains from the daemon.
   useEffect(() => {
     if (phase.kind !== "boot") return;
@@ -443,6 +579,12 @@ export default function LlmChatFlow({
       const expanded: WalletBalance[] = [];
       for (const x of a.result.accounts ?? []) {
         if (!x || !x.address) continue;
+        // SPHINCS smart accounts have no BIP-32 sub-accounts; surface the
+        // slot directly so a draft "swap from SPHINCS1" can pre-select it.
+        if (x.type === "sphincs") {
+          expanded.push({ kind: "sphincs", name: x.name, address: x.address });
+          continue;
+        }
         if (x.type !== "eoa") continue;
         const sub = await call<{
           accounts: { index: number; path: string; address: string; label?: string }[];
@@ -509,22 +651,24 @@ export default function LlmChatFlow({
     if (cont.blockNumber !== undefined) receiptParts.push(`block ${cont.blockNumber}`);
     if (cont.status !== undefined) receiptParts.push(`status ${cont.status}`);
     const receipt = receiptParts.join(" · ");
-    // Phrased to give the agent permission to do nothing — if the
-    // original request was a one-shot, a single short confirmation
-    // is the right answer; we don't want to manufacture follow-ups.
-    const prompt =
-      `[continuation hook] The previous transaction was broadcast (${receipt}). ` +
-      `If the user's original request requires additional transactions ` +
-      `(for example, a supply after an approve, or a swap after an approve), ` +
-      `propose the next step now via propose_send. ` +
-      `If the original request is fully satisfied, reply with a single short confirmation — no propose_send needed.`;
+    // planContinuation re-issues the original prompt ONLY for a deterministic
+    // multi-leg approval leg (swap/Aave); it returns null for any other
+    // completed action so we never fire a stale-context "propose the next
+    // step" round (see planContinuation). On null, just disarm the trigger —
+    // the broadcast confirmation is already in the conversation.
+    const plan = planContinuation(phase.turns, receipt);
+    if (!plan) {
+      setPhase({ ...phase, pendingContinuation: undefined });
+      return;
+    }
+    const { prompt, statusText } = plan;
     const history = buildChatHistory(phase.turns);
     // Show a tiny status row so the user knows the chat is doing
     // something rather than appearing to hang. Replaced by the
     // assistant turn when the agent answers.
     const turnsAfter: Turn[] = [
       ...phase.turns,
-      { kind: "system", tone: "info", text: "↻ continuing — looking for the next step…" },
+      { kind: "system", tone: "info", text: statusText },
       { kind: "assistant", status: "pending" },
     ];
     setPhase({
@@ -534,6 +678,8 @@ export default function LlmChatFlow({
       pendingContinuation: undefined,
     });
     let cancelled = false;
+    const ac = new AbortController();
+    draftAbort.current = ac;
     (async () => {
       const r = await call<DraftResponse>(
         "chat.draft",
@@ -543,9 +689,11 @@ export default function LlmChatFlow({
           sessionKey: phase.sessionKey,
           history,
         },
-        { timeoutMs: 300_000 },
+        { timeoutMs: 300_000, signal: ac.signal },
       );
-      if (cancelled) return;
+      if (draftAbort.current === ac) draftAbort.current = null;
+      // Esc-to-stop already finalized the turns; don't clobber the marker.
+      if (cancelled || (!r.ok && isCancelled(r.error))) return;
       const finished: Turn = r.ok
         ? { kind: "assistant", status: "done", result: r.result }
         : { kind: "assistant", status: "done", error: r.error.message };
@@ -561,9 +709,15 @@ export default function LlmChatFlow({
     };
   }, [phase.kind === "chat" ? phase.pendingContinuation?.txHash : null]);
 
-  // Global keys: esc leaves the chat from any phase.
+  // Global keys: esc. While a draft is in flight it means "stop generating"
+  // (abort the request, stay in the chat); otherwise it leaves the chat.
   useInput((_input, key) => {
-    if (key.escape) onDone(false);
+    if (!key.escape) return;
+    if (phase.kind === "chat" && phase.busy) {
+      stopDraft();
+      return;
+    }
+    onDone(false);
   });
 
   if (phase.kind === "boot") {
@@ -833,8 +987,10 @@ export default function LlmChatFlow({
         // JSON, and the agentic tool-call loop multiplies this by up to
         // MAX_TOOL_TURNS round-trips. 60s (the default) chops the
         // sidecar mid-generation and surfaces as "sidecar crash exit 1".
-        // 5 min is generous but still finite — beyond that, the user
-        // wants to bail rather than wait.
+        // 5 min is the hard ceiling; Esc-to-stop (see the global handler)
+        // lets the user bail sooner without waiting it out.
+        const ac = new AbortController();
+        draftAbort.current = ac;
         const r = await call<DraftResponse>(
           "chat.draft",
           {
@@ -847,8 +1003,11 @@ export default function LlmChatFlow({
             sessionKey: phase.sessionKey,
             history,
           },
-          { timeoutMs: 300_000 },
+          { timeoutMs: 300_000, signal: ac.signal },
         );
+        if (draftAbort.current === ac) draftAbort.current = null;
+        // Esc-to-stop already rewrote the turns + dropped busy; bail.
+        if (!r.ok && isCancelled(r.error)) return;
         const finished: Turn = r.ok
           ? { kind: "assistant", status: "done", result: r.result }
           : { kind: "assistant", status: "done", error: r.error.message };
@@ -922,7 +1081,7 @@ function WalletRow({ w }: { w: WalletBalance }) {
   else amount = <Text>{formatEth(w.wei)}</Text>;
   return (
     <Text>
-      <Text color={theme.dim}>{`  ${"[eoa] ".padEnd(7)}`}</Text>
+      <Text color={theme.dim}>{`  ${`[${w.kind}]`.padEnd(9)}`}</Text>
       <Text>{w.name.padEnd(22)}</Text>
       <Text color={theme.dim}>{w.address}{"  "}</Text>
       {amount}
@@ -999,7 +1158,7 @@ function ChatBody({
   // button (when focused) acts on this one.
   const latestSignable = [...turns].reverse().find(
     (t): t is Extract<Turn, { kind: "assistant" }> =>
-      t.kind === "assistant" && t.status === "done" && !!t.result?.encoded,
+      t.kind === "assistant" && t.status === "done" && !!t.result?.encoded && !t.signed,
   );
   // Latest assistant turn carrying a directive (prepare/audit/create)
   // that has NOT been dispatched yet. The [Execute] button acts on it.
@@ -1206,7 +1365,7 @@ function ChatBody({
           </Text>
           {busy ? (
             <Text color={theme.dim}>
-              <Spinner type="dots" /> thinking…
+              <Spinner type="dots" /> thinking… <Text color={theme.dim}>(esc to stop)</Text>
             </Text>
           ) : (
             <TextInput
@@ -1225,7 +1384,7 @@ function ChatBody({
             : "enter — send · "}
           {latestTraceIdx !== null ? "ctrl+t — toggle trace · " : ""}
           /clear — new session · /history — past sessions ·{" "}
-          esc — leave chat
+          {busy ? "esc — stop generating" : "esc — leave chat"}
         </Text>
       </Box>
     </Container>
@@ -1316,12 +1475,13 @@ function TurnRow({
       {/* Compact body. Each block omitted when absent. */}
       {r.regex && <RegexLine regex={r.regex} />}
       {r.modelAsk && <AskLine ask={r.modelAsk} />}
-      {(r.validateError || r.encodeError || r.llmError || r.swapError) && (
+      {(r.validateError || r.encodeError || r.llmError || r.swapError || r.aaveError) && (
         <RejectLine
           validateErr={r.validateError}
           encodeErr={r.encodeError}
           llmErr={r.llmError}
           swapErr={r.swapError}
+          aaveErr={r.aaveError}
         />
       )}
       {r.canonical && <CanonicalLines canonical={r.canonical} />}
@@ -1583,20 +1743,43 @@ function DispatchBlock({ dispatch }: { dispatch?: DispatchState }) {
   }
   if (dispatch.kind === "auditDone") {
     const d = dispatch.data;
+    const nft = d.nftApprovals ?? [];
+    const permit2 = d.permit2Approvals ?? [];
+    const total = d.approvals.length + nft.length + permit2.length;
     return (
       <Box paddingLeft={5} marginTop={1} flexDirection="column">
         <Text color={theme.ok} bold>
-          ✓ audit complete · {d.approvals.length} approval(s){d.wallet ? ` for ${shortAddr(d.wallet)}` : ""}
+          ✓ audit complete · {total} approval(s){d.wallet ? ` for ${shortAddr(d.wallet)}` : ""}
         </Text>
         {!d.implemented && d.note && (
           <Text color={theme.warn}>! {d.note}</Text>
         )}
         {d.approvals.map((row, i) => (
-          <Text key={i} color={theme.dim}>
-            {"  "}#{i + 1} token={shortAddr(row.token)} · spender={shortAddr(row.spender)} ·
-            {" "}amount={row.amount} · lastBlock={row.lastSeenBlock}
+          <Text key={`erc20-${i}`} color={theme.dim}>
+            {"  "}#{i + 1} ERC-20 {row.tokenSymbol ? `${row.tokenSymbol} ` : ""}token={shortAddr(row.token)} ·
+            {" "}spender={row.spenderLabel ? `${row.spenderLabel} (${shortAddr(row.spender)})` : shortAddr(row.spender)} ·
+            {" "}amount={row.amountHuman || row.amount} · lastBlock={row.lastSeenBlock}
           </Text>
         ))}
+        {nft.map((row, i) => (
+          <Text key={`nft-${i}`} color={theme.warn}>
+            {"  "}⚠ ApprovalForAll {row.tokenSymbol ? `${row.tokenSymbol} ` : ""}collection={shortAddr(row.token)} ·
+            {" "}operator={row.operatorLabel ? `${row.operatorLabel} (${shortAddr(row.operator)})` : shortAddr(row.operator)} ·
+            {" "}can move ALL NFTs · lastBlock={row.lastSeenBlock}
+          </Text>
+        ))}
+        {permit2.map((row, i) => (
+          <Text key={`p2-${i}`} color={theme.dim}>
+            {"  "}↪ Permit2 {row.tokenSymbol ? `${row.tokenSymbol} ` : ""}token={shortAddr(row.token)} ·
+            {" "}spender={row.spenderLabel ? `${row.spenderLabel} (${shortAddr(row.spender)})` : shortAddr(row.spender)} ·
+            {" "}amount={row.amountHuman || row.amount}{row.expiration ? ` · exp=${row.expiration}` : ""}
+          </Text>
+        ))}
+        {d.implemented && d.approvals[0] && (
+          <Text color={theme.dim}>
+            {"  "}↳ to revoke one: type e.g. "revoke {d.approvals[0].tokenSymbol || "<token>"} for {shortAddr(d.approvals[0].spender)}"
+          </Text>
+        )}
       </Box>
     );
   }
@@ -1741,10 +1924,13 @@ function OwnershipBadge({ entry }: { entry: OwnershipEntry }) {
 }
 
 function AskLine({ ask }: { ask: { error: string; question: string } }) {
+  const regexClarification = ask.error === "regex-clarification";
   return (
     <Box paddingLeft={5} flexDirection="column">
       <Text color={theme.warn}>
-        model asks (this is fine — not a rejection):
+        {regexClarification
+          ? "validator asks:"
+          : "model asks (this is fine — not a rejection):"}
       </Text>
       <Text color={theme.warn}>  reason: {ask.error}</Text>
       <Text color={theme.warn}>  asks:   {ask.question}</Text>
@@ -1757,15 +1943,18 @@ function RejectLine({
   encodeErr,
   llmErr,
   swapErr,
+  aaveErr,
 }: {
   validateErr?: string;
   encodeErr?: string;
   llmErr?: string;
   swapErr?: string;
+  aaveErr?: string;
 }) {
   return (
     <Box paddingLeft={5} flexDirection="column">
       {swapErr && <Text color={theme.err}>swap: {swapErr}</Text>}
+      {aaveErr && <Text color={theme.err}>aave: {aaveErr}</Text>}
       {llmErr && <Text color={theme.err}>llm: {llmErr}</Text>}
       {validateErr && <Text color={theme.err}>rejected: {validateErr}</Text>}
       {encodeErr && <Text color={theme.err}>encode: {encodeErr}</Text>}

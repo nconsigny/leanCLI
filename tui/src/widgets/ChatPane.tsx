@@ -1,8 +1,8 @@
-import React, { useEffect } from "react";
+import React, { useEffect, useRef } from "react";
 import { Box, Text, useInput } from "ink";
 import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
-import { call } from "../daemon.js";
+import { call, isCancelled } from "../daemon.js";
 import { theme } from "../theme.js";
 import AnimatedKoi from "./AnimatedKoi.js";
 import {
@@ -16,6 +16,7 @@ import {
   buildChatHistory,
   friendlyAction,
   newSessionKey,
+  planContinuation,
 } from "../screens/LlmChatFlow.js";
 
 /**
@@ -45,6 +46,10 @@ type Props = {
   /** Wallet rows (from the dashboard's wallet box) used to pre-select
    *  the signing wallet when a draft carries a sender hint. */
   wallets: WalletBalance[];
+  /** Writable iff the chat pane has been ENTERED for typing (Enter on the
+   *  highlighted chat pane). When false the input is dormant (an
+   *  "(enter to type)" placeholder) so the footer hints and other panes'
+   *  shortcuts keep the keyboard. */
   isFocused: boolean;
   /** Content line budget (pane height minus border/title rows). */
   contentHeight: number;
@@ -57,7 +62,7 @@ type Props = {
   onApprove?: (
     tx: { to: string; value: string; data: string; rationale?: string; canonical?: string },
     chainId: number,
-    wallet?: { kind: "eoa"; name: string; address: string },
+    wallet?: { kind: "eoa" | "sphincs"; name: string; address: string },
   ) => void;
   onCreateWallet?: (kind: "eoa", label: string | undefined) => void;
   onOpenFull?: () => void;
@@ -77,6 +82,34 @@ export default function ChatPane({
   onOpenFull,
   onOpenHistory,
 }: Props) {
+  // In-flight `chat.draft` cancellation. Each draft (and the continuation
+  // round) installs a fresh AbortController here; Esc-to-stop aborts it,
+  // which tears down the daemon socket so the TUI stops waiting. The
+  // daemon-side generation keeps running in the background — we just
+  // reclaim the chat (see daemon.ts onAbort).
+  const draftAbort = useRef<AbortController | null>(null);
+
+  // Stop the in-flight draft: abort the socket, drop `busy`, leave a marker,
+  // and rotate the sessionKey so the next prompt opens a clean agentd
+  // session instead of interleaving with the abandoned one (same rationale
+  // as `/clear`'s rotation). No-op when nothing is in flight.
+  const stopDraft = () => {
+    draftAbort.current?.abort();
+    draftAbort.current = null;
+    setPhase((p) => {
+      if (p.kind !== "chat" || !p.busy) return p;
+      const turns = [...p.turns];
+      // Replace the trailing pending assistant turn (if any) with the marker
+      // so we don't leave a forever-spinning "drafting…" row behind.
+      if (turns.length > 0 && turns[turns.length - 1]?.kind === "assistant"
+          && (turns[turns.length - 1] as Extract<Turn, { kind: "assistant" }>).status === "pending") {
+        turns.pop();
+      }
+      turns.push({ kind: "system", tone: "warn", text: "⏹ stopped — generation still finishing in the background" });
+      return { ...p, turns, busy: false, sessionKey: newSessionKey(), pendingContinuation: undefined };
+    });
+  };
+
   // Boot: resolve the daemon's configured chains and auto-pick the
   // current one. (The dashboard already ran llm.ensureUp once; we don't
   // re-trigger the spawn-side-effecting probe per pane mount.) A stale
@@ -136,27 +169,36 @@ export default function ChatPane({
     const receiptParts: string[] = [`tx ${cont.txHash}`];
     if (cont.blockNumber !== undefined) receiptParts.push(`block ${cont.blockNumber}`);
     if (cont.status !== undefined) receiptParts.push(`status ${cont.status}`);
-    const prompt =
-      `[continuation hook] The previous transaction was broadcast (${receiptParts.join(" · ")}). ` +
-      `If the user's original request requires additional transactions ` +
-      `(for example, a supply after an approve, or a swap after an approve), ` +
-      `propose the next step now via propose_send. ` +
-      `If the original request is fully satisfied, reply with a single short confirmation — no propose_send needed.`;
+    // planContinuation re-issues the original prompt ONLY for a deterministic
+    // multi-leg approval leg (swap/Aave); null for any other completed action
+    // so we never fire a stale-context "propose the next step" round (see
+    // planContinuation). On null, disarm the trigger — the broadcast
+    // confirmation is already in the conversation.
+    const plan = planContinuation(phase.turns, receiptParts.join(" · "));
+    if (!plan) {
+      setPhase({ ...phase, pendingContinuation: undefined });
+      return;
+    }
+    const { prompt, statusText } = plan;
     const history = buildChatHistory(phase.turns);
     const turnsAfter: Turn[] = [
       ...phase.turns,
-      { kind: "system", tone: "info", text: "↻ continuing — looking for the next step…" },
+      { kind: "system", tone: "info", text: statusText },
       { kind: "assistant", status: "pending" },
     ];
     setPhase({ ...phase, turns: turnsAfter, busy: true, pendingContinuation: undefined });
     let cancelled = false;
+    const ac = new AbortController();
+    draftAbort.current = ac;
     (async () => {
       const r = await call<DraftResponse>(
         "chat.draft",
         { prompt, chainId: phase.chainId, sessionKey: phase.sessionKey, history },
-        { timeoutMs: 300_000 },
+        { timeoutMs: 300_000, signal: ac.signal },
       );
-      if (cancelled) return;
+      if (draftAbort.current === ac) draftAbort.current = null;
+      // Esc-to-stop already finalized the turns; don't clobber the marker.
+      if (cancelled || (!r.ok && isCancelled(r.error))) return;
       const finished: Turn = r.ok
         ? { kind: "assistant", status: "done", result: r.result }
         : { kind: "assistant", status: "done", error: r.error.message };
@@ -173,10 +215,13 @@ export default function ChatPane({
   }, [phase.kind === "chat" ? phase.pendingContinuation?.txHash : null]);
 
   // ctrl+o expands to the full chat screen (state is lifted; the
-  // conversation moves with you). Gated on pane focus.
+  // conversation moves with you). Esc while a draft is in flight stops it
+  // (the dashboard yields Esc to us during chat-busy — see Dashboard.tsx).
+  // Both gated on pane focus.
   useInput(
     (ch, key) => {
       if (key.ctrl && ch === "o") onOpenFull?.();
+      if (key.escape && phase.kind === "chat" && phase.busy) stopDraft();
     },
     { isActive: isFocused },
   );
@@ -202,7 +247,7 @@ export default function ChatPane({
   const turns = phase.turns;
   const latestSignable = [...turns].reverse().find(
     (t): t is Extract<Turn, { kind: "assistant" }> =>
-      t.kind === "assistant" && t.status === "done" && !!t.result?.encoded,
+      t.kind === "assistant" && t.status === "done" && !!t.result?.encoded && !t.signed,
   );
   const latestExecutable = [...turns].reverse().find(
     (t): t is Extract<Turn, { kind: "assistant" }> => {
@@ -365,11 +410,16 @@ export default function ChatPane({
       { kind: "assistant", status: "pending" },
     ];
     setPhase({ ...phase, turns: turnsAfterUser, input: "", busy: true });
+    const ac = new AbortController();
+    draftAbort.current = ac;
     const r = await call<DraftResponse>(
       "chat.draft",
       { prompt: text, chainId: phase.chainId, sessionKey: phase.sessionKey, history },
-      { timeoutMs: 300_000 },
+      { timeoutMs: 300_000, signal: ac.signal },
     );
+    if (draftAbort.current === ac) draftAbort.current = null;
+    // Esc-to-stop already rewrote the turns + dropped busy; bail.
+    if (!r.ok && isCancelled(r.error)) return;
     const finished: Turn = r.ok
       ? { kind: "assistant", status: "done", result: r.result }
       : { kind: "assistant", status: "done", error: r.error.message };
@@ -401,7 +451,7 @@ export default function ChatPane({
         {phase.busy ? " · " : ""}
         {phase.busy && (
           <Text color={theme.primary}>
-            <Spinner type="dots" /> thinking…
+            <Spinner type="dots" /> thinking… <Text color={theme.dim}>(esc to stop)</Text>
           </Text>
         )}
       </Text>
@@ -479,7 +529,7 @@ export default function ChatPane({
           />
         ) : (
           <Text wrap="truncate-end" color={theme.dim}>
-            {phase.input.length > 0 ? phase.input : "(tab here to chat)"}
+            {phase.input.length > 0 ? phase.input : "(enter to type)"}
           </Text>
         )}
       </Box>
@@ -594,7 +644,7 @@ function turnToLines(
   if (d && d.kind !== "idle") {
     const text =
       d.kind === "running" ? "⠿ dispatching…"
-      : d.kind === "auditDone" ? `✓ audit: ${d.data.approvals.length} approval(s)`
+      : d.kind === "auditDone" ? `✓ audit: ${d.data.approvals.length + (d.data.nftApprovals?.length ?? 0) + (d.data.permit2Approvals?.length ?? 0)} approval(s)`
       : d.kind === "prepareDone" ? `✓ prepared ${d.txs.length} tx(s) — first queued via ConfirmGate`
       : d.kind === "createHandedOff" ? `↳ handed off to ${d.walletKind} creation flow`
       : `✗ ${d.message}`;

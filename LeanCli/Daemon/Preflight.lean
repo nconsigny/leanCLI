@@ -94,6 +94,37 @@ def topicTransfer : String :=
 def topicApproval : String :=
   "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
 
+/-- `keccak256("ApprovalForAll(address,address,bool)")` — the blanket
+operator approval emitted by both ERC-721 and ERC-1155 ("let this
+operator move *all* my NFTs"). Highest-blast-radius NFT approval; the
+one Revoke.cash surfaces most prominently. -/
+def topicApprovalForAll : String :=
+  "0x17307eab39ab6107e8899845ad3d59bd9653f200f220920489ca2b5937696c31"
+
+/-- Permit2 (`0x0000…78BA3`, same address on every chain) allowance
+events. `Approval` is the direct on-chain `approve`; `Permit` is the
+signature-based grant. Both index `[owner, token, spender]`, so the same
+parser handles either. -/
+def topicPermit2Approval : String :=
+  "0xda9fa7c1b00402c17d0161b249b1ab8bbec047c5a52207b9c112deffd817036b"
+def topicPermit2Permit : String :=
+  "0xc6a377bfc4eb120024a8ac08eef205be16b817020812c73223e81d1bdb9708ec"
+
+/-- `isApprovedForAll(address owner, address operator)` → bool. -/
+def selIsApprovedForAll : String := "0xe985e9c5"
+
+/-- Permit2 `allowance(address owner, address token, address spender)`,
+returning packed `(uint160 amount, uint48 expiration, uint48 nonce)` as
+three ABI words. -/
+def selPermit2Allowance : String := "0x927da105"
+
+/-- Canonical Permit2 deployment address (lowercased for dedup keys). -/
+def permit2Address : String := "0x000000000022d473030f116ddee9f6b43ac78ba3"
+
+/-- `type(uint160).max` — Permit2's "unlimited allowance" sentinel
+(distinct from the `type(uint256).max` sentinel ERC-20 approvals use). -/
+def maxUint160 : Nat := 2 ^ 160 - 1
+
 /-- 2^256 - 1, the canonical "unlimited" allowance sentinel. -/
 def maxUint256 : Nat := LeanCli.Swap.UniV3.maxUint256
 
@@ -179,6 +210,37 @@ private def approveDelta (curr new : Nat) : String :=
   else if new > curr then "increase"
   else "decrease"
 
+/-- Best-effort human label for a known spender / operator address, the
+way Revoke.cash names the contract pulling your tokens. Display-only —
+an unknown address returns `none` and the UI falls back to the raw 0x.
+Addresses are mainnet-canonical (lowercased); testnet deployments differ
+and are intentionally left unlabelled rather than mislabelled. -/
+def spenderLabel (addr : String) : Option String :=
+  let known : List (String × String) := [
+    ("0x000000000022d473030f116ddee9f6b43ac78ba3", "Uniswap Permit2"),
+    ("0xe592427a0aece92de3edee1f18e0157c05861564", "Uniswap V3 SwapRouter"),
+    ("0x68b3465833fb72a70ecdf485e0e4c7bd8665fc45", "Uniswap V3 SwapRouter02"),
+    ("0x3fc91a3afd70395cd496c647d5a6cc9d4b2b7fad", "Uniswap UniversalRouter"),
+    ("0x66a9893cc07d91d95644aedd05d03f95e1dba8af", "Uniswap UniversalRouter V2"),
+    ("0x7a250d5630b4cf539739df2c5dacb4c659f2488d", "Uniswap V2 Router02"),
+    ("0xc36442b4a4522e871399cd717abdd847ab11fe88", "Uniswap V3 NFT Position Manager"),
+    ("0x111111125421ca6dc452d289314280a0f8842a65", "1inch Aggregation Router V6"),
+    ("0x1111111254eeb25477b68fb85ed929f73a960582", "1inch Aggregation Router V5"),
+    ("0xdef1c0ded9bec7f1a1670819833240f027b25eff", "0x Exchange Proxy"),
+    ("0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2", "Aave V3 Pool"),
+    ("0x7d2768de32b0b80b7a3454c06bdac94a69ddc7a9", "Aave V2 LendingPool"),
+    ("0xba12222222228d8ba445958a75a0704d566bf2c8", "Balancer V2 Vault"),
+    ("0xd9e1ce17f2641f24ae83637ab66a2cca9c378b9f", "SushiSwap Router")
+  ]
+  (known.find? (fun p => p.fst == addr.toLower)).map (·.snd)
+
+/-- Attach a `spenderLabel`/`operatorLabel` field iff the address is
+known. Keeps the row builders terse. -/
+private def labelField (key : String) (addr : String) : Array (String × Json) :=
+  match spenderLabel addr with
+  | some l => #[(key, .str l)]
+  | none   => #[]
+
 /-! ## Probes -/
 
 /-- `eth_call(allowance(owner, spender))` on the token contract. -/
@@ -263,6 +325,308 @@ private def countPriorEvents
           | some logs => pure (some (logs.size, fromBlock, head))
           | none => pure none
       | .error _ => pure none
+
+/-! ## Approvals audit (`daemon.approvals.list`)
+
+Standalone read-only scan: "what ERC-20 allowances does this wallet
+currently have outstanding, and to whom?" Backs the chat `audit
+approvals` / `show approvals` flow. Same trust posture as the other
+probes — display-only, policy-gated, never authorises a signature. The
+historical `Approval` log only tells us a spender was *once* approved;
+the **current** `allowance(owner, spender)` is re-read live so a stale
+event amount is never shown and already-revoked pairs drop out. -/
+
+/-- Block window for the approvals scan. Kept at the same bound as the
+preflight lookback because `eth_getLogs` with no contract-address filter
+is the heaviest query we issue and public providers cap the range
+(commonly 10k blocks). This is a recent-history best-effort, not an
+exhaustive audit — the response reports the exact `fromBlock`/`toBlock`
+scanned so the user knows the window. Raise via the RPC's `lookback`
+param against an indexed provider. -/
+def approvalsLookback : Nat := defaultLookback
+
+/-- Parse one `Approval` log into `(token, spender, block)`. Topic layout
+is `[sig, owner, spender]` (owner + spender both indexed), so the spender
+is the 32-byte word at `topics[2]`. Lowercased so dedup keys are stable
+across providers that checksum-case the `address` field. -/
+private def parseApprovalLog (log : Json) : Option (String × String × Nat) := do
+  let token       ← (getField "address" log) >>= asString
+  let ts          ← (getField "topics" log) >>= asArray
+  let spenderWord ← ts[2]? >>= asString
+  let spender     ← decodeAddressFromWord (stripHexPrefix spenderWord)
+  let blk : Nat := (((getField "blockNumber" log) >>= asString) >>= parseHexQuantity).getD 0
+  some (token.toLower, spender.toLower, blk)
+
+/-- Fold a `(token, spender, block)` triple into a deduped assoc list
+keyed by `(token, spender)`, keeping the highest block seen. O(n²) but
+n is the (small) number of distinct approvals. -/
+private def upsertLatest
+    (acc : List ((String × String) × Nat)) (token spender : String) (blk : Nat)
+    : List ((String × String) × Nat) :=
+  let key := (token, spender)
+  if acc.any (fun e => e.fst == key) then
+    acc.map (fun e => if e.fst == key then (e.fst, Nat.max e.snd blk) else e)
+  else
+    (key, blk) :: acc
+
+/-- The "couldn't scan" response shape. `implemented := false` so the TUI
+surfaces the `note` rather than rendering "0 approvals" (which would read
+as "you have none" when the truth is "we couldn't look"). -/
+private def approvalsUnavailable (chainId : Nat) (owner reason : String) : Json :=
+  .obj #[
+    ("chainId",     .num (Int.ofNat chainId)),
+    ("wallet",      .str owner),
+    ("approvals",   .arr #[]),
+    ("implemented", .bool false),
+    ("note",        .str reason)
+  ]
+
+/-- Parse the `i`-th 32-byte word (0-indexed) of an ABI return blob into
+a `Nat`. Returns `none` when the blob is too short. -/
+private def wordAt (retHex : String) (i : Nat) : Option Nat := do
+  let body := stripHexPrefix retHex
+  let w ← takeNibbles body (i * 64) 64
+  parseHexQuantityDigits w.toList 0
+
+/-- Parse one Permit2 `Approval`/`Permit` log into `(token, spender,
+block)`. Topic layout is `[sig, owner, token, spender]` — all three of
+owner/token/spender are indexed — so `token = topics[2]`, `spender =
+topics[3]`. Lowercased for stable dedup keys. -/
+private def parsePermit2Log (log : Json) : Option (String × String × Nat) := do
+  let ts          ← (getField "topics" log) >>= asArray
+  let tokenWord   ← ts[2]? >>= asString
+  let spenderWord ← ts[3]? >>= asString
+  let token       ← decodeAddressFromWord (stripHexPrefix tokenWord)
+  let spender     ← decodeAddressFromWord (stripHexPrefix spenderWord)
+  let blk : Nat := (((getField "blockNumber" log) >>= asString) >>= parseHexQuantity).getD 0
+  some (token.toLower, spender.toLower, blk)
+
+/-- `eth_call(isApprovedForAll(owner, operator))` on an ERC-721/1155
+contract. Returns the live operator-approval bit (`none` if the call
+reverts — e.g. the contract isn't actually an NFT). -/
+private def readIsApprovedForAll
+    (policy : LeanCli.Network.Policy.Policy)
+    (endpoint : LeanCli.RPC.Outbound.Endpoint)
+    (via? : Option LeanCli.RPC.Outbound.VerifyVia)
+    (token owner operator : String) : IO (Option Bool) := do
+  let data := selIsApprovedForAll
+    ++ LeanCli.Swap.UniV3.encodeAddress owner
+    ++ LeanCli.Swap.UniV3.encodeAddress operator
+  match ← LeanCli.RPC.Outbound.ethCall policy endpoint token data "latest" via? with
+  | .ok j =>
+      match asString j with
+      | some s => pure (some ((parseHexQuantity s).getD 0 ≠ 0))
+      | none => pure none
+  | .error _ => pure none
+
+/-- `eth_call(allowance(owner, token, spender))` on the canonical Permit2
+contract. Decodes the packed return into `(amount, expiration)` (the
+trailing nonce word is ignored). `none` on revert / malformed data. -/
+private def readPermit2Allowance
+    (policy : LeanCli.Network.Policy.Policy)
+    (endpoint : LeanCli.RPC.Outbound.Endpoint)
+    (via? : Option LeanCli.RPC.Outbound.VerifyVia)
+    (owner token spender : String) : IO (Option (Nat × Nat)) := do
+  let data := selPermit2Allowance
+    ++ LeanCli.Swap.UniV3.encodeAddress owner
+    ++ LeanCli.Swap.UniV3.encodeAddress token
+    ++ LeanCli.Swap.UniV3.encodeAddress spender
+  match ← LeanCli.RPC.Outbound.ethCall policy endpoint permit2Address data "latest" via? with
+  | .ok j =>
+      match asString j with
+      | some s =>
+          match wordAt s 0, wordAt s 1 with
+          | some amt, some exp => pure (some (amt, exp))
+          | _, _ => pure none
+      | none => pure none
+  | .error _ => pure none
+
+/-- Scan ERC-721/1155 `ApprovalForAll` operator approvals for `owner`
+across all NFT contracts in the window. Mirrors the ERC-20 scan: discover
+via logs, dedupe per `(contract, operator)`, then re-read the live
+`isApprovedForAll` so revoked operators drop out. Best-effort — returns
+`#[]` (not a failure) when the log query is unavailable. -/
+private def scanApprovalForAll
+    (state : LeanCli.Daemon.State.Shared)
+    (policy : LeanCli.Network.Policy.Policy)
+    (endpoint : LeanCli.RPC.Outbound.Endpoint)
+    (via? : Option LeanCli.RPC.Outbound.VerifyVia)
+    (chainId : Nat) (owner : String) (fromBlock head : Nat) : IO (Array Json) := do
+  -- ApprovalForAll shares ERC-20 Approval's topic layout for the first
+  -- two indexed args (owner, operator), so `parseApprovalLog` reads the
+  -- operator out of topics[2] verbatim.
+  let topics : Array Json := #[.str topicApprovalForAll, .str (paddedAddrTopic owner)]
+  match ← LeanCli.RPC.Outbound.getLogsAnyAddress policy endpoint
+      (natQuantityHex fromBlock) (natQuantityHex head) topics with
+  | .error _ => pure #[]
+  | .ok j =>
+      match asArray j with
+      | none => pure #[]
+      | some logs =>
+          let triples := logs.filterMap parseApprovalLog
+          let deduped : List ((String × String) × Nat) :=
+            triples.foldl (fun acc t => upsertLatest acc t.1 t.2.1 t.2.2) []
+          let mut rows : Array Json := #[]
+          for entry in deduped do
+            let token    := entry.fst.fst
+            let operator := entry.fst.snd
+            let blk      := entry.snd
+            match ← readIsApprovedForAll policy endpoint via? token owner operator with
+            | some true =>
+                let meta? ← LeanCli.Daemon.TokenMeta.lookupOrFetch
+                  state policy endpoint chainId token
+                let sym := match meta? with | some m => m.symbol | none => ""
+                rows := rows.push <| .obj (#[
+                  ("token",         .str token),
+                  ("operator",      .str operator),
+                  ("approved",      .bool true),
+                  ("tokenSymbol",   .str sym),
+                  ("standard",      .str "ERC-721/1155 ApprovalForAll"),
+                  ("lastSeenBlock", .num (Int.ofNat blk))
+                ] ++ labelField "operatorLabel" operator)
+            | _ => pure ()  -- false / revoked / not-an-NFT: skip
+          pure rows
+
+/-- Scan Permit2 allowances granted by `owner`. Lighter than the ERC-20
+sweep — the logs are address-filtered to the single Permit2 contract.
+Matches both the `Approval` and `Permit` event topics, dedupes per
+`(token, spender)`, and re-reads the live packed allowance so spent /
+expired-to-zero grants drop out. Best-effort — `#[]` on log failure. -/
+private def scanPermit2
+    (state : LeanCli.Daemon.State.Shared)
+    (policy : LeanCli.Network.Policy.Policy)
+    (endpoint : LeanCli.RPC.Outbound.Endpoint)
+    (via? : Option LeanCli.RPC.Outbound.VerifyVia)
+    (chainId : Nat) (owner : String) (fromBlock head : Nat) : IO (Array Json) := do
+  -- topic0 alternation `[Approval | Permit]`, topic1 = owner.
+  let topics : Array Json := #[
+    .arr #[.str topicPermit2Approval, .str topicPermit2Permit],
+    .str (paddedAddrTopic owner)
+  ]
+  match ← LeanCli.RPC.Outbound.getLogs policy endpoint
+      (natQuantityHex fromBlock) (natQuantityHex head) permit2Address topics via? with
+  | .error _ => pure #[]
+  | .ok j =>
+      match asArray j with
+      | none => pure #[]
+      | some logs =>
+          let triples := logs.filterMap parsePermit2Log
+          let deduped : List ((String × String) × Nat) :=
+            triples.foldl (fun acc t => upsertLatest acc t.1 t.2.1 t.2.2) []
+          let mut rows : Array Json := #[]
+          for entry in deduped do
+            let token   := entry.fst.fst
+            let spender := entry.fst.snd
+            let blk     := entry.snd
+            match ← readPermit2Allowance policy endpoint via? owner token spender with
+            | some (amt, exp) =>
+                if amt > 0 then
+                  let meta? ← LeanCli.Daemon.TokenMeta.lookupOrFetch
+                    state policy endpoint chainId token
+                  let sym := match meta? with | some m => m.symbol | none => ""
+                  let human :=
+                    if amt = maxUint160 then "unlimited (max uint160)"
+                    else renderAmount amt meta?
+                  rows := rows.push <| .obj (#[
+                    ("token",         .str token),
+                    ("spender",       .str spender),
+                    ("amount",        .str (toString amt)),
+                    ("amountHuman",   .str human),
+                    ("tokenSymbol",   .str sym),
+                    ("expiration",    .num (Int.ofNat exp)),
+                    ("via",           .str "Permit2"),
+                    ("lastSeenBlock", .num (Int.ofNat blk))
+                  ] ++ labelField "spenderLabel" spender)
+            | none => pure ()  -- allowance read failed; skip, don't fabricate
+          pure rows
+
+/-- Scan outgoing approvals for `owner` over the last `lookback` blocks
+and return the TUI-shaped audit JSON. Covers the three approval surfaces
+Revoke.cash discovers, each in its own array:
+
+* `approvals` — ERC-20 `allowance(owner, spender)` (token, spender,
+  amount, amountHuman, tokenSymbol, lastSeenBlock, +spenderLabel).
+* `nftApprovals` — ERC-721/1155 `ApprovalForAll` operator grants
+  (token, operator, approved, +operatorLabel).
+* `permit2Approvals` — Uniswap Permit2 `allowance(owner, token, spender)`
+  packed grants (token, spender, amount, expiration, via, +spenderLabel).
+
+Each surface discovers via its event logs across **all** contracts
+(owner-filtered topic1; Permit2 additionally address-filtered to the
+canonical contract), dedupes to the latest event per pair, **re-reads
+the live on-chain state**, and drops zero/revoked/false entries — so a
+stale event amount is never shown. ERC-20 unlimited renders as
+`"unlimited (max uint256)"`, Permit2 as `"unlimited (max uint160)"`.
+NFT and Permit2 scans are additive and best-effort (empty on provider
+failure); only an ERC-20 head/log failure yields the `implemented :=
+false` shape. -/
+def auditApprovals
+    (state : LeanCli.Daemon.State.Shared)
+    (policy : LeanCli.Network.Policy.Policy)
+    (endpoint : LeanCli.RPC.Outbound.Endpoint)
+    (chainId : Nat) (owner : String) (lookback : Nat) : IO Json := do
+  let via? ← LeanCli.Daemon.State.buildColibriVia state chainId
+  match ← readBlockNumber policy endpoint via? with
+  | none =>
+      pure <| approvalsUnavailable chainId owner
+        "eth_blockNumber unavailable on this provider; cannot scan approvals"
+  | some head =>
+      let fromBlock := if head ≤ lookback then 0 else head - lookback
+      -- topic0 = Approval, topic1 = owner (left-padded). topic2 (spender)
+      -- is left unconstrained so every spender is caught.
+      let topics : Array Json := #[.str topicApproval, .str (paddedAddrTopic owner)]
+      match ← LeanCli.RPC.Outbound.getLogsAnyAddress policy endpoint
+          (natQuantityHex fromBlock) (natQuantityHex head) topics with
+      | .error e =>
+          pure <| approvalsUnavailable chainId owner
+            s!"eth_getLogs failed on this provider: {e}"
+      | .ok j =>
+          match asArray j with
+          | none =>
+              pure <| approvalsUnavailable chainId owner
+                "eth_getLogs returned a non-array result"
+          | some logs =>
+              let triples := logs.filterMap parseApprovalLog
+              let deduped : List ((String × String) × Nat) :=
+                triples.foldl (fun acc t => upsertLatest acc t.1 t.2.1 t.2.2) []
+              let mut rows : Array Json := #[]
+              for entry in deduped do
+                let token   := entry.fst.fst
+                let spender := entry.fst.snd
+                let blk     := entry.snd
+                match ← readAllowance policy endpoint via? token owner spender with
+                | some amt =>
+                    -- Drop pairs whose live allowance is 0: already
+                    -- revoked or spent down — nothing actionable to show.
+                    if amt > 0 then
+                      let meta? ← LeanCli.Daemon.TokenMeta.lookupOrFetch
+                        state policy endpoint chainId token
+                      let sym := match meta? with | some m => m.symbol | none => ""
+                      rows := rows.push <| .obj (#[
+                        ("token",         .str token),
+                        ("spender",       .str spender),
+                        ("amount",        .str (toString amt)),
+                        ("amountHuman",   .str (renderApproveAmount amt meta?)),
+                        ("tokenSymbol",   .str sym),
+                        ("lastSeenBlock", .num (Int.ofNat blk))
+                      ] ++ labelField "spenderLabel" spender)
+                | none => pure ()  -- allowance read failed; skip, don't fabricate
+              -- Additive coverage: NFT operator approvals + Permit2 grants.
+              -- Both are best-effort and return #[] on provider failure, so
+              -- the ERC-20 result is never blocked on them.
+              let nftRows ← scanApprovalForAll state policy endpoint via? chainId owner fromBlock head
+              let permit2Rows ← scanPermit2 state policy endpoint via? chainId owner fromBlock head
+              pure <| .obj #[
+                ("chainId",          .num (Int.ofNat chainId)),
+                ("wallet",           .str owner),
+                ("approvals",        .arr rows),
+                ("nftApprovals",     .arr nftRows),
+                ("permit2Approvals", .arr permit2Rows),
+                ("implemented",      .bool true),
+                ("fromBlock",        .num (Int.ofNat fromBlock)),
+                ("toBlock",          .num (Int.ofNat head)),
+                ("note",             .str s!"scanned blocks {fromBlock}–{head}: {rows.size} ERC-20 allowance(s), {nftRows.size} NFT operator approval(s), {permit2Rows.size} Permit2 grant(s); zero/revoked omitted, all amounts re-read live")
+              ]
 
 /-! ## Top-level run
 

@@ -77,7 +77,10 @@ def registry : List Token := [
     decimals := 18, name := "Ethereum Name Service" },
   { symbol := "AAVE",
     addressMainnet := some "0x7fc66500c84a76ad7e9c93437bfc5ac33e2ddae9",
-    addressSepolia := none,
+    -- Aave V3 Sepolia market reserve (BGD aave-address-book). This is the
+    -- testnet faucet AAVE used by the Aave Sepolia market; no other
+    -- issuer-blessed Sepolia AAVE exists.
+    addressSepolia := some "0x88541670e55cc00beefd87eb59edd1b7c511ac9a",
     decimals := 18, name := "Aave Token" },
   { symbol := "UNI",
     addressMainnet := some "0x1f9840a85d5af5bf1d1762f925bdaddc4201f984",
@@ -106,15 +109,17 @@ def registry : List Token := [
     decimals := 18, name := "Curve.Fi USD Stablecoin" },
   { symbol := "DAI",
     addressMainnet := some "0x6b175474e89094c44da98b954eedeac495271d0f",
-    -- Sky/MakerDAO does not publish a canonical Sepolia DAI in the
-    -- on-chain chainlog or current docs. Various third-party "Dai
-    -- Stablecoin" test deployments exist on Sepolia (e.g.
-    -- 0x3e622317…c620c5d6) but none are issuer-blessed — leave `none`.
-    addressSepolia := none,
+    -- Sky/MakerDAO publishes no canonical Sepolia DAI, so we use the Aave
+    -- V3 Sepolia market reserve (BGD aave-address-book) — the de-facto
+    -- Sepolia DAI for this dev network. NOTE: this is the Aave-market faucet
+    -- DAI; it has no Uniswap V3 pool, so swaps against it will not quote.
+    addressSepolia := some "0xff34b3d4aee8ddcd6f9afffb6fe49bd371b8a357",
     decimals := 18, name := "Dai Stablecoin" },
   { symbol := "WBTC",
     addressMainnet := some "0x2260fac5e5542a773aa44fbcfedf7c193bc2c599",
-    addressSepolia := none,
+    -- Aave V3 Sepolia market reserve (BGD aave-address-book); Aave-market
+    -- faucet WBTC, the de-facto Sepolia deployment.
+    addressSepolia := some "0x29f2d40b0605204364af54ec677bd022da425d03",
     decimals := 8, name := "Wrapped BTC" },
   { symbol := "USDC",
     -- Mainnet USDC deliberately omitted at curator request — chat
@@ -124,11 +129,11 @@ def registry : List Token := [
     addressSepolia := some "0x1c7d4b196cb0c7b01d743fbc6116a902379c7238",
     decimals := 6, name := "USD Coin" },
   { symbol := "USDT",
-    -- Mainnet USDT deliberately omitted at curator request. No
-    -- canonical Sepolia USDT exists either, but the entry is kept so
-    -- the symbol can be added later without re-tracing the registry.
+    -- Mainnet USDT deliberately omitted at curator request. Sepolia uses
+    -- the Aave V3 market reserve (BGD aave-address-book) — the de-facto
+    -- Sepolia USDT for this dev network (Aave-market faucet token).
     addressMainnet := none,
-    addressSepolia := none,
+    addressSepolia := some "0xaa8e23fb1079ea71e0a56f48a2aa51851d8433d0",
     decimals := 6, name := "Tether USD" },
   { symbol := "GHO",
     addressMainnet := some "0x40d16fc0246ad3160ccc09b8d0d3a2cd28ae6c2f",

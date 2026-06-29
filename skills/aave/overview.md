@@ -12,6 +12,8 @@ The single mainnet entrypoint for retail flows is `Pool` at
 `0x87870Bca3F3fD6335C3F4ce8392D69350B4fA4E2`. Its address is
 discoverable at runtime via `PoolAddressesProvider.getPool()` —
 prefer that over hard-coding because Aave can re-point the proxy.
+The Lean daemon's `prepare_aave_*` tools own this lookup/encoding path;
+the model should call them instead of hand-assembling Pool calldata.
 
 | Chain | Pool | PoolAddressesProvider |
 |---|---|---|
@@ -30,6 +32,25 @@ prefer that over hard-coding because Aave can re-point the proxy.
 V3 also exposes `liquidationCall`, `flashLoan`, `flashLoanSimple`,
 and an admin surface — these are not retail flows. The wallet should
 refuse to surface them absent explicit user direction.
+
+## Native ETH vs WETH
+
+Aave Pool supplies ERC-20 assets. In this wallet, native ETH supply from
+a SPHINCS/smart account is supported by the daemon as one atomic
+`executeBatch`: wrap ETH with WETH9 `deposit()`, approve the Pool if
+needed, then call `Pool.supply(WETH, amount, onBehalfOf, 0)`. The agent
+should trigger that path by calling `prepare_aave_supply` with
+`asset="ETH"` and `accountKind="sphincsHybrid"`.
+
+Plain EOAs do not get this automatic multi-step composition in the Aave
+tool. For EOAs, wrap to WETH first and then supply `asset="WETH"`.
+
+On Sepolia, Aave's WETH reserve is the market token
+`0xc558dbdd856501fcd9aaf1e62eae57a9f0629a3c`, not the generic
+Sepolia/Uniswap WETH token `0xfff9976782d46cc05630d1f6ebab18b2324d6b14`.
+Use the typed `prepare_aave_*` tools so the daemon resolves the
+Aave-specific reserve and checks `Pool.getReserveData(asset)` before
+signing.
 
 ## Concepts the agent must know
 

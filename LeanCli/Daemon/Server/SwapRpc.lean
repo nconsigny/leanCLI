@@ -3,6 +3,7 @@ import LeanCli.Daemon.Server.Helpers
 import LeanCli.Daemon.Server.Endpoints
 import LeanCli.Daemon.State
 import LeanCli.Ethereum.Address
+import LeanCli.Ethereum.Multicall3
 import LeanCli.Invariants.Swap
 import LeanCli.Keystore.Tpm2Runtime
 import LeanCli.RPC.Outbound
@@ -64,24 +65,25 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
             ("tokens",  .arr entries)
           ]
   | "swap.balances" =>
-      -- Why: fan out ERC-20 `balanceOf` + native `eth_getBalance` across the
+      -- Why: native `eth_getBalance` + every ERC-20 `balanceOf` across the
       -- swap registry filtered by chain. This is the data source for the
       -- TUI swap from-picker (per-token balance column) and the
-      -- `leancli balances` CLI command. Concurrency is load-bearing: a
-      -- sequential loop over ~10 tokens against a public RPC adds ~1s of
-      -- wall time. We spawn one `IO.asTask` per call and join them so the
-      -- whole response is bounded by the slowest single eth_call.
+      -- `leancli balances` CLI command. The ERC-20 reads are batched into a
+      -- single Multicall3 `aggregate3` call so the whole fan-out is one
+      -- round-trip regardless of token count — see below for why that
+      -- matters on the verified path.
       --
       -- Trust model: balance reads are policy-gated by `Outbound.*`; the
-      -- response is render-only data. `via? := none` is intentional —
-      -- balance fan-out goes direct RPC to keep latency predictable and
-      -- avoid serializing through Colibri's UDS for every token.
+      -- response is render-only data and never feeds a signing decision.
+      -- Reads go through the selected provider via `via?` (consensus-
+      -- verified by default), the same as every other chain read.
       --
-      -- Fail-soft: a single token whose `balanceOf` reverts (rare, e.g.
-      -- self-destructed contract) is silently dropped from the response,
-      -- mirroring the trace tokenMeta prefetch policy. Other tokens still
-      -- appear. ETH balance failure causes the whole call to error, since
-      -- a valid address should always have a queryable native balance.
+      -- Fail-soft: a token whose `balanceOf` reverts comes back from
+      -- `aggregate3` as `success = false` (`allowFailure := true`) and is
+      -- dropped from the response, mirroring the trace tokenMeta prefetch
+      -- policy. Other tokens still appear. ETH balance failure causes the
+      -- whole call to error, since a valid address should always have a
+      -- queryable native balance.
       let chainStr := paramStringD req.params "chainId" "mainnet"
       match LeanCli.Swap.Tokens.ChainId.fromString? chainStr with
       | none =>
@@ -102,10 +104,15 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                       pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
                   | .ok ep =>
                       -- Verify ALL token balances through the mutex-guarded
-                      -- verified client (State.verifyLock). Reads are sequential
-                      -- here and the lock serializes against other handlers, so
-                      -- the single shared conn is safe. Hub-only + sequential
-                      -- keeps the cost bounded.
+                      -- verified client (State.verifyLock). Each verified
+                      -- eth_call runs REVM against light-client state and the
+                      -- single shared conn is mutex-serialized, so a serial
+                      -- per-token loop (~5s × N) blew past the daemon timeout.
+                      -- Instead we batch every `balanceOf` into ONE
+                      -- Multicall3 `aggregate3` call: one verified round-trip
+                      -- regardless of N. `allowFailure := true` keeps the
+                      -- fail-soft rule — a reverting token comes back
+                      -- `success = false` and is dropped, not fatal.
                       let via? ← verifiedReadVia state chainId.toNat ep
                       let calldata := erc20BalanceOfData ownerAddr
                       let candidates :
@@ -123,20 +130,34 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                               ("name",     .str "Ether"),
                               ("address",  .null),
                               ("decimals", .num 18),
-                              ("balance",  ethBal)
+                              -- Canonical 0x-hex: helios returns a bare decimal
+                              -- quantity; raw it renders ~2700× too large.
+                              ("balance",  quantityJsonHex ethBal)
                             ]
                           ]
-                          for (t, addr) in candidates do
-                            match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep addr calldata "latest" via? with
-                            | .ok bal =>
-                                entries := entries.push <| .obj #[
-                                  ("symbol",   .str t.symbol),
-                                  ("name",     .str t.name),
-                                  ("address",  .str addr),
-                                  ("decimals", .num (Int.ofNat t.decimals)),
-                                  ("balance",  bal)
-                                ]
-                            | _ => pure ()
+                          -- One batched `aggregate3` round-trip for every
+                          -- ERC-20 `balanceOf`. Decode failures and per-token
+                          -- reverts are soft-dropped (render-only surface);
+                          -- ETH already succeeded above.
+                          let batchData := LeanCli.Ethereum.Multicall3.encodeAggregate3 <|
+                            candidates.map fun (_, addr) =>
+                              { target := addr, allowFailure := true, callData := calldata }
+                          match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep
+                                    LeanCli.Ethereum.Multicall3.address batchData "latest" via? with
+                          | .ok ret =>
+                              match (asString ret).bind LeanCli.Ethereum.Multicall3.decodeAggregate3 with
+                              | some results =>
+                                  for ((t, addr), (ok, bal)) in candidates.zip results do
+                                    if ok then
+                                      entries := entries.push <| .obj #[
+                                        ("symbol",   .str t.symbol),
+                                        ("name",     .str t.name),
+                                        ("address",  .str addr),
+                                        ("decimals", .num (Int.ofNat t.decimals)),
+                                        ("balance",  .str bal)
+                                      ]
+                              | none => pure ()
+                          | _ => pure ()
                           pure <| .ok <| .obj #[
                             ("chain",    .str chainName),
                             ("chainId",  .num (Int.ofNat chainId.toNat)),

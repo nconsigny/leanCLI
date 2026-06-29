@@ -13,6 +13,16 @@
    the `Pool` exists (or, if using the `*WithPermit` variant, that
    the permit signature decodes correctly per ERC-2612 and is for
    the right spender). Prefer exact-amount allowance.
+   Exception: native ETH supply from a SPHINCS/smart account is prepared
+   as one daemon-built batch: `WETH.deposit{value}` + optional
+   `WETH.approve(Pool, max)` + `Pool.supply(WETH, amount, onBehalfOf, 0)`.
+   The batch must target the smart account itself and carry total
+   `value = amount`.
+   On Sepolia, resolve WETH through the Aave prepare tool, not the
+   generic token registry: Aave's WETH reserve is
+   `0xc558dbdd856501fcd9aaf1e62eae57a9f0629a3c`. Supplying generic
+   Sepolia WETH `0xfff9976782d46cc05630d1f6ebab18b2324d6b14` reverts
+   because `Pool.getReserveData(asset)` has a zero aToken address.
 4. For `borrow(interestRateMode = ?)`: refuse any value other than
    `2` (variable). The V3 stable-rate mode is killed and the call
    will revert; the wallet should surface the killed-mode message
@@ -51,6 +61,9 @@ that is an upstream-trust assumption.
 
 * `supply` / `repay` need ERC-20 allowance for the **Pool**, not
   the aToken. The aToken is the receipt; you don't approve it.
+* `asset="ETH"` in `prepare_aave_supply` is only the smart-account
+  native-ETH wrapper path. `asset="WETH"` means the account already
+  has WETH and the daemon should prepare the ordinary ERC-20 supply.
 * `repayWithATokens` skips the ERC-20 allowance dance entirely.
 * `*WithPermit` variants accept a one-shot ERC-2612 signature
   in-place; the wallet must decode the permit (typed-data) and

@@ -127,7 +127,13 @@ export default function RpcSetupGate({ onDone }: { onDone: () => void }) {
         saved.push({ chain: "sepolia", url: st });
       }
       if (saved.length > 0) {
-        setDefaultChain(saved[0]!.chain as "mainnet" | "sepolia");
+        // Sepolia is the dev network — never default a fresh wallet to
+        // mainnet (Config.lean's chainId fallback agrees). Prefer sepolia
+        // whenever it was configured; only fall back to mainnet if that's
+        // the only RPC the user supplied.
+        const def =
+          saved.find((s) => s.chain === "sepolia")?.chain ?? saved[0]!.chain;
+        setDefaultChain(def as "mainnet" | "sepolia");
       }
       setPhase({ kind: "done", saved });
     } catch (e: any) {

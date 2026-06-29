@@ -24,6 +24,17 @@ notes:
 
 # swap-uniswap-v3 — single-pool exact-input swap
 
+## Amounts (mandatory)
+
+You never type `amountIn`. Call `prepare_uniswap_v3_swap` with
+`amountRef` set to the handle from the `amounts` table — the daemon
+already converted the input amount. Do NOT pass a literal `amountIn`;
+it is rejected when an `amounts` table is present. The slippage-derived
+`minOut` is computed by the daemon's quote + `applySlippage`, never by
+you. Feed the returned `to`/`data` straight into `propose_send`; if the
+result is `needs_approval`, the approve leg's amount is likewise
+daemon-derived.
+
 ## When to use
 
 * `swap <amount> <SYMBOL_IN> (for|to|into) <SYMBOL_OUT>`

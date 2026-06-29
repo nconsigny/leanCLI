@@ -49,7 +49,7 @@ type SignerKind = "eoa" | "sphincs";
 
 type Phase =
   | { kind: "loading-wallets" }
-  | { kind: "pick-wallet"; eoas: EoaSlot[] }
+  | { kind: "pick-wallet"; slots: PickSlot[] }
   | { kind: "unlock"; wallet: EoaSlot }
   | { kind: "unlock-error"; message: string }
   | {
@@ -72,6 +72,10 @@ type Phase =
     };
 
 type EoaSlot = { name: string; address: string };
+/** One row in the fallback signing-wallet picker. Carries the signer
+ *  kind so a SPHINCS pick routes to the UserOp path (skipping the EOA
+ *  unlock) exactly like a pre-selected SPHINCS wallet does. */
+type PickSlot = { kind: SignerKind; name: string; address: string };
 
 /** Sign-and-broadcast an arbitrary {to, value, data} payload through an EOA
  *  slot. Reused by LlmDraftFlow when the user accepts a drafted candidate.
@@ -111,16 +115,26 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
         });
       }
       const all = (r.result?.accounts ?? []) as any[];
-      const eoas: EoaSlot[] = all
-        .filter((a) => a.type === "eoa" && typeof a.name === "string" && typeof a.address === "string")
-        .map((a) => ({ name: a.name, address: a.address }));
-      if (eoas.length === 0) {
+      // Offer both signer kinds. A SPHINCS slot is only a valid signing
+      // target once its counterfactual address is computed (account.list
+      // emits address="" before then), so require a non-empty address for
+      // both kinds.
+      const slots: PickSlot[] = all
+        .filter(
+          (a) =>
+            (a.type === "eoa" || a.type === "sphincs") &&
+            typeof a.name === "string" &&
+            typeof a.address === "string" &&
+            a.address.length > 0,
+        )
+        .map((a) => ({ kind: a.type as SignerKind, name: a.name, address: a.address }));
+      if (slots.length === 0) {
         return setPhase({
           kind: "unlock-error",
-          message: "no EOA wallets configured — create one first",
+          message: "no signing wallets configured — create one first",
         });
       }
-      setPhase({ kind: "pick-wallet", eoas });
+      setPhase({ kind: "pick-wallet", slots });
     });
     return () => {
       cancelled = true;
@@ -134,7 +148,7 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
           <Text color={theme.primary}>
             <Spinner type="dots" />
           </Text>{" "}
-          <Text color={theme.dim}>asking the daemon for available EOAs</Text>
+          <Text color={theme.dim}>asking the daemon for available signing wallets</Text>
         </Text>
       </Layout>
     );
@@ -157,13 +171,25 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
         hint="↑/↓ move · enter pick · esc cancel"
       >
         <Select
-          items={phase.eoas.map((e) => ({
-            label: `${e.name.padEnd(16)}  ${shortAddr(e.address)}`,
-            value: e.name,
+          items={phase.slots.map((s) => ({
+            label: `${`[${s.kind}]`.padEnd(9)}${s.name.padEnd(16)}  ${shortAddr(s.address)}`,
+            value: s.name,
           }))}
           onSelect={(it) => {
-            const w = phase.eoas.find((e) => e.name === it.value);
-            if (w) setPhase({ kind: "unlock", wallet: w });
+            const w = phase.slots.find((s) => s.name === it.value);
+            if (!w) return;
+            // EOA → passphrase unlock; SPHINCS → straight to simulate on
+            // the UserOp path (daemon dual-signs; no per-slot passphrase),
+            // mirroring the pre-selected SPHINCS branch in initialPhase.
+            if (w.kind === "sphincs") {
+              setPhase({
+                kind: "simulate",
+                wallet: { name: w.name, address: w.address },
+                signerKind: "sphincs",
+              });
+            } else {
+              setPhase({ kind: "unlock", wallet: { name: w.name, address: w.address } });
+            }
           }}
         />
       </Layout>
@@ -256,7 +282,9 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
           value: hexToBigInt(tx.value).toString(),
           data: tx.data,
         }}
-        renderResult={(r) => <RawResult result={r} />}
+        renderResult={(r) => (
+          <SphincsUserOpResult result={r} name={phase.wallet.name} chainId={chainId} />
+        )}
         onDone={onDone}
       />
     );
@@ -273,7 +301,7 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
         value: hexToBigInt(tx.value),
         data: tx.data,
       }}
-      renderResult={(r) => <RawResult result={r} />}
+      renderResult={(r) => <RawResult result={r} chainId={chainId} />}
       onDone={onDone}
     />
   );
@@ -482,9 +510,33 @@ function ConfirmGate({
                 <Text>{f.formatted}</Text>
               </Text>
             ))}
+            {/* The sidecar matched the descriptor (so we have an intent +
+                function signature) but the calldata failed to decode against
+                that descriptor's ABI — `decoder.mjs` returns `{partial:true,
+                error}` with NO `fields`. Without surfacing it the user sees
+                an intent label and a blank argument list and assumes the
+                decode succeeded. Make the failure loud: the args you're
+                signing were NOT decoded. A descriptor↔calldata ABI mismatch
+                (e.g. SwapRouter01's deadline field vs SwapRouter02's struct)
+                is the usual cause. */}
+            {(decoded.error || decoded.partial) && (
+              <Text color={theme.err}>
+                ⚠ argument decode failed — values NOT shown
+                {decoded.error ? `: ${decoded.error}` : ""}
+              </Text>
+            )}
+            {decoded.warning && (
+              <Text color={theme.warn}>⚠ {decoded.warning}</Text>
+            )}
+            {!decoded.error && !decoded.partial && (decoded.fields ?? []).length === 0 && (
+              <Text color={theme.dim}>(descriptor matched but declared no argument fields)</Text>
+            )}
           </>
         ) : (
-          <Text color={theme.dim}>(no descriptor matched · raw calldata only)</Text>
+          <Text color={theme.dim}>
+            (no descriptor matched · raw calldata only
+            {decoded?.reason ? ` — ${decoded.reason}` : ""})
+          </Text>
         )}
       </ProvenancePanel>
       <PreflightBlock preflight={preflight} />
@@ -659,7 +711,20 @@ function preflightSourceLines(
   return lines;
 }
 
-function RawResult({ result }: { result: any }) {
+/** Block-explorer base for a chain. Defaults to Sepolia — the dev
+ *  network — for unknown/unset chainIds so links stay clickable rather
+ *  than pointing at the wrong network for mainnet sends. */
+function explorerBase(chainId?: number): string {
+  switch (chainId) {
+    case 1:  return "https://etherscan.io";
+    default: return "https://sepolia.etherscan.io";
+  }
+}
+
+/** EOA result: `eoa.send` waits for the receipt daemon-side, so `txHash`
+ *  and `status` are both present here. (SPHINCS UserOps return only a
+ *  `userOpHash` and are rendered by `SphincsUserOpResult`, which polls.) */
+function RawResult({ result, chainId }: { result: any; chainId?: number }) {
   const txHash = result?.txHash ?? "(no hash)";
   const status = result?.status ?? "(unknown)";
   return (
@@ -673,8 +738,138 @@ function RawResult({ result }: { result: any }) {
         <Text color={status === "success" ? theme.ok : theme.err}>{status}</Text>
       </Text>
       <Text color={theme.dim}>
-        https://sepolia.etherscan.io/tx/{txHash}
+        {explorerBase(chainId)}/tx/{txHash}
       </Text>
+    </Box>
+  );
+}
+
+/** Extract the L1 inclusion tx hash from a `sphincs.account.getUserOp`
+ *  result. Mirrors the daemon's own parse (SphincsRpc.lean): the ERC-4337
+ *  receipt nests the L1 receipt under `receipt.receipt`; some bundlers
+ *  (Candide) surface the hash earlier via `eth_getUserOperationByHash`
+ *  (the `info` field). Either source is authoritative for "look it up". */
+function inclusionTxFromUserOp(r: any): string | undefined {
+  return (
+    r?.receipt?.receipt?.transactionHash ??
+    r?.info?.transactionHash ??
+    undefined
+  );
+}
+
+/** SPHINCS UserOp result. `sphincs.account.send` returns immediately with
+ *  the bundler's `userOpHash` (a 4337-level id, NOT an L1 tx hash and not
+ *  lookupable on etherscan). We show it right away so the submission is
+ *  never invisible, then poll `sphincs.account.getUserOp` — the existing
+ *  read-through to `eth_getUserOperationReceipt` — until the bundler
+ *  reports inclusion, at which point we surface the real L1 tx hash +
+ *  on-chain status. The poll RPC also journals the inclusion as a side
+ *  effect, so the HistoryPanel later shows the L1 hash. */
+function SphincsUserOpResult({
+  result,
+  name,
+  chainId,
+}: {
+  result: any;
+  name: string;
+  chainId?: number;
+}) {
+  const userOpHash: string | undefined = result?.userOpHash;
+  type Poll =
+    | { kind: "pending"; elapsedSec: number }
+    | { kind: "included"; txHash?: string; success?: boolean }
+    | { kind: "timeout" };
+  const [poll, setPoll] = useState<Poll>({ kind: "pending", elapsedSec: 0 });
+
+  useEffect(() => {
+    if (!userOpHash) return;
+    let cancelled = false;
+    const start = Date.now();
+    // Poll budget: ~5 min. Candide on Sepolia usually includes within a
+    // minute, but congested periods run longer; we keep the userOpHash
+    // visible the whole time so the user can look it up out-of-band.
+    const DEADLINE_MS = 300_000;
+    const INTERVAL_MS = 4_000;
+
+    const tick = async () => {
+      if (cancelled) return;
+      const r = await call<any>("sphincs.account.getUserOp", {
+        userOpHash,
+        name,
+      });
+      if (cancelled) return;
+      if (r.ok && r.result?.included) {
+        const txHash = inclusionTxFromUserOp(r.result);
+        // `included` can flip true (userOp in the bundler's view) before
+        // the L1 tx hash is populated; only treat it as terminal once we
+        // actually have a hash to show.
+        if (txHash) {
+          const success =
+            typeof r.result?.receipt?.success === "boolean"
+              ? r.result.receipt.success
+              : undefined;
+          setPoll({ kind: "included", txHash, success });
+          return;
+        }
+      }
+      const elapsed = Date.now() - start;
+      if (elapsed >= DEADLINE_MS) {
+        setPoll({ kind: "timeout" });
+        return;
+      }
+      setPoll({ kind: "pending", elapsedSec: Math.round(elapsed / 1000) });
+      setTimeout(tick, INTERVAL_MS);
+    };
+    void tick();
+    return () => {
+      cancelled = true;
+    };
+  }, [userOpHash, name]);
+
+  return (
+    <Box flexDirection="column">
+      <Text>
+        <Text color={theme.dim}>userOpHash: </Text>
+        {userOpHash ?? "(no hash returned)"}
+      </Text>
+      {poll.kind === "pending" && (
+        <Text>
+          <Text color={theme.primary}>
+            <Spinner type="dots" />
+          </Text>{" "}
+          <Text color={theme.dim}>
+            waiting for bundler inclusion… ({poll.elapsedSec}s)
+          </Text>
+        </Text>
+      )}
+      {poll.kind === "included" && (
+        <>
+          <Text>
+            <Text color={theme.dim}>tx:        </Text>
+            {poll.txHash}
+          </Text>
+          <Text>
+            <Text color={theme.dim}>status:    </Text>{" "}
+            {poll.success === undefined ? (
+              <Text color={theme.dim}>included (receipt pending)</Text>
+            ) : (
+              <Text color={poll.success ? theme.ok : theme.err}>
+                {poll.success ? "success" : "revert"}
+              </Text>
+            )}
+          </Text>
+          <Text color={theme.dim}>
+            {explorerBase(chainId)}/tx/{poll.txHash}
+          </Text>
+        </>
+      )}
+      {poll.kind === "timeout" && (
+        <Text color={theme.warn}>
+          not yet included after 5min — still in the bundler queue. Look it
+          up later from the account's history; the userOpHash above is the
+          identifier.
+        </Text>
+      )}
     </Box>
   );
 }

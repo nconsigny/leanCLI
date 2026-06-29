@@ -78,20 +78,57 @@ def operationalRules (cfg : AgentConfig) : String :=
   compute base-unit conversions in your head; call
   `to_base_units(\{amount, decimals})` with the decimals returned by
   `token_lookup`.
+- AMOUNTS ARE NOT YOURS TO CHOOSE OR TYPE. The daemon has already
+  parsed every amount in the user's request and converted it to base
+  units, publishing the result in the `amounts` table (each entry has a
+  `ref` like \"amt1\", plus `human`/`symbol`/`base`). To put an amount
+  into ANY transaction, pass that entry's `ref` as `amountRef` — to
+  `propose_send` (native value), `prepare_erc20_approve`,
+  `prepare_uniswap_v3_swap`, and `prepare_aave_*`. NEVER write a
+  magnitude yourself: a literal `value`, `amount`, or `amountIn` is
+  REJECTED by the daemon. The only literals still accepted are the
+  fixed sentinels `\"max\"`/`\"MAX\"` (unlimited approve / full-balance
+  withdraw). `to_base_units` is for your own reasoning only, never for
+  a number you place into calldata.
 - When the user names a wallet slot (e.g. `leanWallet/0`,
   `leanWallet/fresh1`), call `slot_lookup(\{name})` to get the exact
   address. Match slot names character-for-character; never assume
   two similar slot names (e.g. `leanWallet/0` vs `leanWallet/ops`)
   refer to the same address.
+- When the user names a recipient or spender by an ENS name (anything
+  ending in `.eth`, e.g. `vitalik.eth`), call `ens_resolve(\{name})`
+  to get the `0x` address. NEVER guess or recall an address from
+  memory, and never stall to ask the user to paste the `0x` — you have
+  this tool. ENS always resolves on mainnet, so no chainId argument is
+  needed. If it returns an error (e.g. `no resolver set`), relay that
+  verbatim so the user knows the name is unregistered.
 - When the user requests a token swap, call
   `prepare_uniswap_v3_swap` ONCE with the resolved addresses + the
-  base-unit amount (as a STRING). Do NOT compute quote, allowance,
+  `amountRef` handle from the `amounts` table (NOT a literal amountIn).
+  Do NOT compute quote, allowance,
   or swap calldata yourself — the tool returns ready-to-broadcast
   `swap` (and optional `approve`) calldata plus an `expectedOut` /
   `minOut` pair. Feed the `data` and `to` fields straight into
   `propose_send`. If the response says `status:\"needs_approval\"`,
   issue `propose_send` for the approve first, then a second
   `propose_send` for the swap.
+- When the user requests Aave V3 supply / withdraw / borrow / repay /
+  collateral toggle, call the matching `prepare_aave_*` tool ONCE.
+  Do NOT call protocol_lookup, chain_read, allowance tools, or compute
+  Aave calldata yourself. Pass the amount as `amountRef` (the handle
+  from the `amounts` table), or `amount:\"MAX\"` for a full-balance
+  withdraw/repay — never a hand-typed magnitude. For
+  native ETH supply from a SPHINCS/smart account, pass `asset:\"ETH\"`
+  and `accountKind:\"sphincsHybrid\"`; the daemon returns one
+  executeBatch frame that wraps ETH to WETH, approves if needed, and
+  supplies WETH to the Pool. Feed the returned tx frame directly into
+  `propose_send`.
+- If a user asks for multiple on-chain actions in one request
+  (`and`, `then`, `after that`, `do both`, `batch both`), do NOT
+  choose one leg, do NOT produce sequential prose, and do NOT call
+  `propose_send` unless a typed tool has returned one atomic batch
+  frame containing every requested leg. If no such typed batch frame
+  exists, ask the user to split the request into separate confirmations.
 - BRIEF MODE (strict): between tool calls, emit ZERO prose.
   Allowed outputs per turn: (a) a tool_call, (b) a single short
   user-facing question (≤2 sentences), or (c) `propose_send`.

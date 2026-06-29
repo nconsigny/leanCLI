@@ -215,6 +215,60 @@ private def unlockPpSecretSmart (state : LeanCli.Daemon.State.Shared)
                       | .error _ => pure ())
             pure (.ok phrase)
 
+/-- Ensure a Privacy Pools secret exists on disk and return its mnemonic.
+
+    First-time path: no record on disk ⇒ generate a fresh 12-word mnemonic,
+    persist it (under the caller-supplied passphrase, or a one-time random
+    throwaway), and best-effort enrol it into the wallet master KEK so the
+    durable unlock path goes through the master rather than the throwaway.
+    Otherwise, decrypt and return the stored secret via `unlockPpSecretSmart`.
+
+    Shared by the gated prepare entry (`shielded.prepareDeposit`) and the
+    one-shot composite (`shielded.deposit`) so first-time users get the same
+    setup behaviour regardless of which surface they enter through. Creating
+    a PP keypair is setup, not a signing action — it precedes (and is
+    independent of) the user's per-tx confirmation of the deposit calldata. -/
+private def ensurePpSecretMnemonic (state : LeanCli.Daemon.State.Shared)
+    (passphrase? : Option String) : IO (Except RpcError String) := do
+  if (← LeanCli.Wallet.PpSecretStore.existsOnDisk) then
+    IO.eprintln "[shield] decrypting stored PP secret"
+    unlockPpSecretSmart state passphrase?
+  else
+    IO.eprintln "[shield] no PP secret on disk; generating fresh 12-word mnemonic"
+    try
+      let m ← LeanCli.Wallet.Entropy.generateMnemonic 12
+      let phrase := LeanCli.Wallet.Mnemonic.phrase m
+      let pass ← match passphrase? with
+        | some p => pure p
+        | none =>
+            -- 32-byte random hex. Never returned to the user; the
+            -- master-wrap attachment immediately after `save` is the only
+            -- durable unlock path.
+            let r ← LeanCli.Crypto.Random.getRandomBytes 32
+            pure (LeanCli.Crypto.Hex.encode r)
+      match ← LeanCli.Wallet.PpSecretStore.save pass phrase with
+      | .error err =>
+          pure (.error
+            ({ code := -32022,
+               message := "failed to persist generated PP secret",
+               data := some (.str err) } : RpcError))
+      | .ok _ =>
+          -- Best-effort enrol into the wallet master so the throwaway
+          -- passphrase (if used) is not the only key in play.
+          (do
+            match ← LeanCli.Daemon.State.getMasterKek? state with
+            | none => pure ()
+            | some s =>
+                let _ ← LeanCli.Wallet.PpSecretStore.attachMasterWrap s.kek phrase
+                pure ())
+          IO.eprintln "[shield] PP secret generated and persisted"
+          pure (.ok phrase)
+    catch e =>
+      pure (.error
+        ({ code := -32022,
+           message := "failed to generate PP secret",
+           data := some (.str e.toString) } : RpcError))
+
 /-- JSON-RPC error code for a missing Railgun secret on disk. Separate
     from `ppSecretMissing` so the CLI surfaces the right "no railgun
     secret" hint and so the lazy-init path can detect the specific
@@ -557,6 +611,11 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               shieldedBridgeCall cfg "shielded.railgun.prepareShield" bridgeParams none req
                 (rgSeedHex? := some seedHex)
   | "shielded.railgun.shield" =>
+      -- ⚠ UNGATED one-shot (see `shielded.deposit`): prepare + EOA-sign +
+      -- broadcast in one RPC, no daemon-side decode/simulate/ConfirmGate.
+      -- Retained for the headless CLI only. Interactive surfaces use
+      -- `shielded.railgun.prepareShield` + the standard per-leg pre-sign gate.
+      --
       -- Composed: prepare + EOA-sign + broadcast. Mirrors shielded.deposit
       -- but uses the EOA's BIP-39 seed as the Railgun keystore root.
       -- Railgun derives at its own BIP-32 paths (disjoint from
@@ -787,16 +846,28 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
             ]) none req
       | _, _, _ => pure (.error invalidParams)
   | "shielded.prepareDeposit" =>
+      -- Gated shield entry: returns UNSIGNED deposit txns for the TUI to
+      -- route through decode → simulate → ConfirmGate → eoa.send (one leg
+      -- at a time). `ensurePpSecretMnemonic` mirrors the composite
+      -- `shielded.deposit` first-run setup so a first-time user entering via
+      -- the gated path still gets a generated + master-enrolled PP secret.
       match paramString req.params "amountEth" with
       | .error err => pure (.error err)
       | .ok amountEth =>
           let passphrase? : Option String := getField "passphrase" req.params >>= asString
-          match ← unlockPpSecretSmart state passphrase? with
+          match ← ensurePpSecretMnemonic state passphrase? with
           | .error err => pure (.error err)
           | .ok mnemonic =>
               shieldedBridgeCall cfg "shielded.prepareDeposit"
                 (.obj #[("amountEth", .str amountEth)]) (some mnemonic) req
   | "shielded.deposit" =>
+      -- ⚠ UNGATED one-shot: prepares + EOA-signs + broadcasts in a single
+      -- RPC, WITHOUT the daemon running decode → simulate → ConfirmGate.
+      -- Retained ONLY for the headless CLI forwarder (`leancli shield`),
+      -- which has no interactive confirm surface; the caller is responsible
+      -- for confirming intent. Interactive surfaces (TUI ShieldFlow, chat)
+      -- MUST NOT call this — they use `shielded.prepareDeposit` and route
+      -- each unsigned leg through the standard pre-sign gate instead.
       match paramName req.params, paramString req.params "amountEth" with
       | .ok name, .ok amountEth =>
           let passphrase? : Option String := getField "passphrase" req.params >>= asString
@@ -809,54 +880,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               | .error err =>
                   pure <| .error { invalidParams with data := some (.str err) }
               | .ok privateKey =>
-                  let mnemonicE ← do
-                    if !(← LeanCli.Wallet.PpSecretStore.existsOnDisk) then
-                      -- First-time PP setup. Per kohaku SDK convention the
-                      -- mnemonic is freshly generated locally. Save path
-                      -- still wants a passphrase for the per-PP record; if
-                      -- the user didn't supply one, fall back to a
-                      -- one-time random throwaway and rely on `attachMasterWrap`
-                      -- (called below) so unlock UX still routes through
-                      -- the master KEK.
-                      IO.eprintln "[shield] no PP secret on disk; generating fresh 12-word mnemonic"
-                      try
-                        let m ← LeanCli.Wallet.Entropy.generateMnemonic 12
-                        let phrase := LeanCli.Wallet.Mnemonic.phrase m
-                        let pass ← match passphrase? with
-                          | some p => pure p
-                          | none =>
-                              -- 32-byte random hex. Never returned to the
-                              -- user; the master-wrap attachment immediately
-                              -- after `save` is the only durable unlock path.
-                              let r ← LeanCli.Crypto.Random.getRandomBytes 32
-                              pure (LeanCli.Crypto.Hex.encode r)
-                        match ← LeanCli.Wallet.PpSecretStore.save pass phrase with
-                        | .error err =>
-                            pure (.error
-                              ({ code := -32022,
-                                 message := "failed to persist generated PP secret",
-                                 data := some (.str err) } : RpcError))
-                        | .ok _ =>
-                            -- Best-effort enrol into the wallet master so
-                            -- the throwaway passphrase (if used) is not
-                            -- the only key in play.
-                            (do
-                              match ← LeanCli.Daemon.State.getMasterKek? state with
-                              | none => pure ()
-                              | some s =>
-                                  let _ ← LeanCli.Wallet.PpSecretStore.attachMasterWrap s.kek phrase
-                                  pure ())
-                            IO.eprintln "[shield] PP secret generated and persisted"
-                            pure (.ok phrase)
-                      catch e =>
-                        pure (.error
-                          ({ code := -32022,
-                             message := "failed to generate PP secret",
-                             data := some (.str e.toString) } : RpcError))
-                    else
-                      IO.eprintln "[shield] decrypting stored PP secret"
-                      unlockPpSecretSmart state passphrase?
-                  match mnemonicE with
+                  match ← ensurePpSecretMnemonic state passphrase? with
                   | .error err => pure (.error err)
                   | .ok mnemonic =>
                       IO.eprintln "[shield] calling bridge shielded.prepareDeposit (this loads the SDK and syncs PP state from chain; may take 30-60s on first run)"

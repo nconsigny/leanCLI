@@ -106,10 +106,10 @@ def fetchAndCache
     (policy : LeanCli.Network.Policy.Policy)
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
     (chainId : Nat) (address : String) : IO (Option TokenMeta) := do
-  -- Route through Colibri when the persistent client is up so token
-  -- metadata reads are committee-verified, same as balances/calls. Uses
-  -- the shared respawn-on-transport-crash policy via `buildColibriVia`.
-  let via? ← LeanCli.Daemon.State.buildColibriVia state chainId
+  -- Route through the daemon's *selected* read backend (helios/colibri/rpc)
+  -- so metadata reads are verified by the same provider as the simulate —
+  -- not hardwired to colibri. `endpoint.url` is the helios executionRpc.
+  let via? ← LeanCli.Daemon.State.buildVerifiedReadVia state chainId endpoint.url
   let decRes ← LeanCli.RPC.Outbound.ethCall policy endpoint address decimalsSelector "latest" via?
   let symRes ← LeanCli.RPC.Outbound.ethCall policy endpoint address symbolSelector "latest" via?
   match decRes, symRes with
@@ -123,6 +123,54 @@ def fetchAndCache
           pure (some m)
       | _, _ => pure none
   | _, _ => pure none
+
+/-- Negative-cache lookup: has `address` already been observed to have no
+    contract code on `chainId`? -/
+def isKnownNoCode (state : LeanCli.Daemon.State.Shared) (chainId : Nat)
+    (address : String) : IO Bool := do
+  let key := metaKey chainId address
+  pure <| (← state.get).noCodeAddrs.contains key
+
+/-- Record that `address` has no contract code, so future decodes skip it. -/
+def markNoCode (state : LeanCli.Daemon.State.Shared) (chainId : Nat)
+    (address : String) : IO Unit := do
+  let key := metaKey chainId address
+  state.modify (fun s =>
+    if s.noCodeAddrs.contains key then s
+    else { s with noCodeAddrs := key :: s.noCodeAddrs })
+
+/-- Cache-or-fetch for *speculative* candidates (addresses scanned out of
+    calldata by `scanCalldataAddresses`, many of which are misaligned junk or
+    EOAs). Gates the two-call decimals/symbol fetch behind a single
+    `eth_getCode`: addresses with no contract code are recorded in the
+    negative cache and skipped — both this decode and every later one — so a
+    swap no longer pays a fan-out of reverting reads on the fee word, the wei
+    value, the recipient EOA, and overlapping window fragments. A positive
+    metadata-cache hit short-circuits before any RPC. -/
+def lookupOrFetchIfContract
+    (state : LeanCli.Daemon.State.Shared)
+    (policy : LeanCli.Network.Policy.Policy)
+    (endpoint : LeanCli.RPC.Outbound.Endpoint)
+    (chainId : Nat) (address : String) : IO (Option TokenMeta) := do
+  match ← lookup state chainId address with
+  | some m => pure (some m)
+  | none =>
+      if ← isKnownNoCode state chainId address then pure none
+      else
+        let via? ← LeanCli.Daemon.State.buildVerifiedReadVia state chainId endpoint.url
+        match ← LeanCli.RPC.Outbound.getCode policy endpoint address "latest" via? with
+        | .ok codeJson =>
+            let code := (LeanCli.Encoding.Json.asString codeJson).getD "0x"
+            -- "0x" / "" → no code. Anything longer is deployed bytecode.
+            if code == "0x" || code == "0x0" || code.isEmpty then
+              markNoCode state chainId address
+              pure none
+            else
+              fetchAndCache state policy endpoint chainId address
+        | .error _ =>
+            -- Read failed (policy denial / transport); don't poison the
+            -- negative cache — just skip this candidate for now.
+            pure none
 
 /-- Cache-or-fetch. Always returns the cached value when present; misses
     are filled via `fetchAndCache`. Idempotent. -/

@@ -118,20 +118,39 @@ private def extractCommon (name : String) (args : Json) :
     | .error (errResult "bad_request" s!"{name}: 'asset' must be a string")
   pure { chainId := chainId, sender := sender, asset := asset }
 
-private def extractAmount (name : String) (args : Json) (allowMax : Bool) :
-    Except ToolResult Nat := do
-  let some amountJ := getField "amount" args
-    | .error (errResult "bad_request" s!"{name}: missing 'amount'")
-  let some amountStr := asString amountJ
-    | .error (errResult "bad_request"
-        s!"{name}: 'amount' must be a decimal STRING (e.g. \"1000000\") to avoid JSON number truncation")
-  let parsed := if allowMax then parseAmountOrMax amountStr else parseDecimalNat amountStr
-  match parsed with
-  | some n => .ok n
+private def extractAmount (cfg : AgentConfig) (name : String) (args : Json)
+    (allowMax : Bool) : Except ToolResult Nat := do
+  -- Magnitude authority is Lean's. Prefer the `amountRef` handle the
+  -- daemon published; "MAX" (full-balance sentinel on allowMax actions)
+  -- is a fixed marker, not a model-chosen number, so it stays a literal.
+  -- Any other concrete literal is rejected when a table is present so
+  -- the model cannot type a magnitude. No table (one-shot CLI) keeps the
+  -- legacy literal path.
+  match getField "amountRef" args >>= asString with
+  | some ref =>
+      match LeanCli.Agent.findAmount cfg.amountTable ref with
+      | some e => .ok e.base
+      | none =>
+          .error (errResult "bad_amount"
+            s!"{name}: unknown amountRef '{ref}'; reference one from `amounts`")
   | none =>
-      let suffix := if allowMax then " or 'MAX'" else ""
-      .error (errResult "bad_amount"
-        s!"{name}: 'amount' is not a non-negative decimal integer{suffix}: {amountStr}")
+      let some amountStr := getField "amount" args >>= asString
+        | .error (errResult "bad_request"
+            s!"{name}: provide `amountRef` (a handle from `amounts`){if allowMax then " or amount:\"MAX\"" else ""}")
+      if allowMax && amountStr.toLower == "max" then
+        match parseAmountOrMax amountStr with
+        | some n => .ok n
+        | none   => .error (errResult "bad_amount" s!"{name}: malformed MAX sentinel")
+      else if cfg.amountTable.isEmpty then
+        match (if allowMax then parseAmountOrMax amountStr else parseDecimalNat amountStr) with
+        | some n => .ok n
+        | none =>
+            let suffix := if allowMax then " or 'MAX'" else ""
+            .error (errResult "bad_amount"
+              s!"{name}: 'amount' is not a non-negative decimal integer{suffix}: {amountStr}")
+      else
+        .error (errResult "bad_amount"
+          s!"{name}: pass the amount via `amountRef` (a handle from `amounts`); do not type a magnitude")
 
 private def optString (args : Json) (k : String) : Option String :=
   getField k args >>= asString
@@ -173,7 +192,7 @@ private def senderProp : Json := .obj #[
 ]
 private def assetProp : Json := .obj #[
   ("type", .str "string"),
-  ("description", .str "Asset address (0x-prefixed) or registered symbol (USDC, WETH, DAI, ...) on the requested chain")
+  ("description", .str "Asset address (0x-prefixed) or registered symbol (USDC, WETH, DAI, ...) on the requested chain. For Aave Pool actions, user-facing \"ETH\" is normalized to the market's WETH reserve where appropriate; on Sepolia this is Aave's WETH reserve, not generic testnet WETH. For native ETH Aave supply from a SPHINCS/smart account, pass \"ETH\"; the daemon batches WETH.deposit + optional approve + Pool.supply.")
 ]
 private def onBehalfOfProp : Json := .obj #[
   ("type", .str "string"),
@@ -183,12 +202,15 @@ private def recipientProp : Json := .obj #[
   ("type", .str "string"),
   ("description", .str "0x-prefixed recipient of withdrawn tokens; defaults to sender")
 ]
+private def amountRefProp : Json := .obj #[
+  ("type", .str "string"),
+  ("description", .str "PREFERRED amount input: a handle from the `amounts` table (e.g. \"amt1\"). The daemon already converted the user's amount to base units; reference it here rather than typing a magnitude.")
+]
 private def amountStringProp (allowMax : Bool) : Json :=
   let base : String :=
-    "Base-units integer as a decimal string (e.g. \"1000000\" for 1 USDC). "
-      ++ "Use to_base_units to compute."
+    "Legacy literal amount. PREFER `amountRef`. A non-sentinel magnitude here is REJECTED when an `amounts` table is present. "
   let maxNote : String :=
-    if allowMax then " Pass \"MAX\" for the Pool's full-balance sentinel." else ""
+    if allowMax then " Pass \"MAX\" for the Pool's full-balance sentinel (always allowed)." else ""
   .obj #[
     ("type", .str "string"),
     ("description", .str (base ++ maxNote))
@@ -226,17 +248,20 @@ def prepareAaveSupply : ToolDecl := {
   description :=
     "Build an Aave V3 supply transaction end-to-end. Resolves the Pool \
      address, reads the ERC-20 allowance against the Pool, encodes the \
-     supply (and an unlimited approve if needed). Returns ready-to-broadcast \
-     TxFrames. The model must NOT compute calldata by hand — call this \
-     tool once with resolved address + base-unit amount and feed the \
-     result to propose_send.",
+     supply (and an unlimited approve if needed). If asset=\"ETH\" and \
+     sender is a SPHINCS/smart account, wraps native ETH to WETH and \
+     atomically batches wrap + approve + supply as one executeBatch frame. \
+     Returns ready-to-broadcast TxFrames. The model must NOT compute \
+     calldata by hand — call this tool once with resolved sender + \
+     base-unit amount and feed the result to propose_send.",
   paramSchema := .obj #[
     ("type", .str "object"),
-    ("required", .arr #[.str "chainId", .str "sender", .str "asset", .str "amount"]),
+    ("required", .arr #[.str "chainId", .str "sender", .str "asset"]),
     ("properties", .obj #[
       ("chainId",     chainIdProp),
       ("sender",      senderProp),
       ("asset",       assetProp),
+      ("amountRef",   amountRefProp),
       ("amount",      amountStringProp false),
       ("onBehalfOf",  onBehalfOfProp),
       ("accountKind", accountKindProp)
@@ -247,7 +272,7 @@ def prepareAaveSupply : ToolDecl := {
     match extractCommon "prepare_aave_supply" args with
     | .error e => pure e
     | .ok c =>
-      match extractAmount "prepare_aave_supply" args false with
+      match extractAmount cfg "prepare_aave_supply" args false with
       | .error e => pure e
       | .ok amount =>
           let extras : Array (String × Json) :=
@@ -263,15 +288,18 @@ def prepareAaveWithdraw : ToolDecl := {
   name := "prepare_aave_withdraw",
   description :=
     "Build an Aave V3 withdraw transaction. No approval needed — the Pool \
-     operates on the user's aToken balance. Pass amount=\"MAX\" to withdraw \
-     the full balance (the Pool's documented 2^256-1 sentinel).",
+     operates on the user's aToken balance. User-facing asset=\"ETH\" is \
+     prepared against Aave's WETH reserve and returns WETH from the Pool. \
+     Pass amount=\"MAX\" to withdraw the full balance (the Pool's documented \
+     2^256-1 sentinel).",
   paramSchema := .obj #[
     ("type", .str "object"),
-    ("required", .arr #[.str "chainId", .str "sender", .str "asset", .str "amount"]),
+    ("required", .arr #[.str "chainId", .str "sender", .str "asset"]),
     ("properties", .obj #[
       ("chainId",     chainIdProp),
       ("sender",      senderProp),
       ("asset",       assetProp),
+      ("amountRef",   amountRefProp),
       ("amount",      amountStringProp true),
       ("recipient",   recipientProp),
       ("accountKind", accountKindProp)
@@ -282,7 +310,7 @@ def prepareAaveWithdraw : ToolDecl := {
     match extractCommon "prepare_aave_withdraw" args with
     | .error e => pure e
     | .ok c =>
-      match extractAmount "prepare_aave_withdraw" args true with
+      match extractAmount cfg "prepare_aave_withdraw" args true with
       | .error e => pure e
       | .ok amount =>
           let extras : Array (String × Json) :=
@@ -303,11 +331,12 @@ def prepareAaveBorrow : ToolDecl := {
      surface a revert otherwise. rateMode defaults to 'variable'.",
   paramSchema := .obj #[
     ("type", .str "object"),
-    ("required", .arr #[.str "chainId", .str "sender", .str "asset", .str "amount"]),
+    ("required", .arr #[.str "chainId", .str "sender", .str "asset"]),
     ("properties", .obj #[
       ("chainId",     chainIdProp),
       ("sender",      senderProp),
       ("asset",       assetProp),
+      ("amountRef",   amountRefProp),
       ("amount",      amountStringProp false),
       ("rateMode",    rateModeProp),
       ("onBehalfOf",  onBehalfOfProp),
@@ -319,7 +348,7 @@ def prepareAaveBorrow : ToolDecl := {
     match extractCommon "prepare_aave_borrow" args with
     | .error e => pure e
     | .ok c =>
-      match extractAmount "prepare_aave_borrow" args false with
+      match extractAmount cfg "prepare_aave_borrow" args false with
       | .error e => pure e
       | .ok amount =>
           let extras : Array (String × Json) :=
@@ -343,11 +372,12 @@ def prepareAaveRepay : ToolDecl := {
      must match the debt being repaid ('variable' or 'stable').",
   paramSchema := .obj #[
     ("type", .str "object"),
-    ("required", .arr #[.str "chainId", .str "sender", .str "asset", .str "amount"]),
+    ("required", .arr #[.str "chainId", .str "sender", .str "asset"]),
     ("properties", .obj #[
       ("chainId",     chainIdProp),
       ("sender",      senderProp),
       ("asset",       assetProp),
+      ("amountRef",   amountRefProp),
       ("amount",      amountStringProp true),
       ("rateMode",    rateModeProp),
       ("onBehalfOf",  onBehalfOfProp),
@@ -359,7 +389,7 @@ def prepareAaveRepay : ToolDecl := {
     match extractCommon "prepare_aave_repay" args with
     | .error e => pure e
     | .ok c =>
-      match extractAmount "prepare_aave_repay" args true with
+      match extractAmount cfg "prepare_aave_repay" args true with
       | .error e => pure e
       | .ok amount =>
           let extras : Array (String × Json) :=

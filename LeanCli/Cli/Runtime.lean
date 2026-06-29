@@ -535,12 +535,15 @@ def daemonRestartHandler (build : Bool) : IO UInt32 := do
   if build then
     IO.println "Rebuilding leanCLI from the current checkout (lake build via leanclispawn) …"
     -- Pure build + relink: skip the onboarding wizard, shell-rc edits, and
-    -- completion install. The TUI bundle / node sidecars have their own
-    -- update paths — `daemon restart` is about the daemon binary. We do NOT
-    -- pass `--restart` here: leanclispawn only restarts already-active
-    -- units, so we keep a single restart path below that also covers
-    -- autospawn mode.
-    let code ← runLeanclispawn #["--no-init", "--no-completion", "--no-modify-path", "--no-tui"]
+    -- completion install. We DO let the TUI bundle rebuild (no `--no-tui`):
+    -- leanclispawn's `build_tui` is mtime-gated (`auto` mode), so it's a
+    -- no-op when `tui/dist` is already current and a fast esbuild when the
+    -- source changed. Without this, `daemon restart` relinked the daemon
+    -- but left a stale TUI bundle — the trap where a TUI change needed a
+    -- separate `npm run build` / `LEANCLI_TUI_BIN`. We do NOT pass
+    -- `--restart` here: leanclispawn only restarts already-active units, so
+    -- we keep a single restart path below that also covers autospawn mode.
+    let code ← runLeanclispawn #["--no-init", "--no-completion", "--no-modify-path"]
     if code ≠ 0 then
       IO.eprintln "rebuild/reinstall failed (see output above); daemon NOT restarted."
       return code
@@ -2837,12 +2840,20 @@ def run (args : List String) : IO UInt32 := do
           IO.eprintln s!"unknown shell: {shell} (supported: bash, zsh, fish)"
           return 2
   | .tui =>
-      -- Locate the bundled TUI in this priority order:
-      --   1. $LEANCLI_TUI_BIN                          — explicit override
-      --   2. <appDir>/../share/leancli/tui/index.mjs   — installed layout
-      --   3. <appDir>/../../../tui/dist/index.mjs         — repo dev layout
-      --        (appDir is .lake/build/bin/; repo root is three levels up)
-      --   4. ./tui/dist/index.mjs (cwd)                   — last-ditch fallback
+      -- Locate the bundled TUI. `$LEANCLI_TUI_BIN` is an explicit override
+      -- and always wins. Otherwise we consider all known layouts:
+      --   • <appDir>/../share/leancli/tui/index.mjs   — installed layout
+      --   • <appDir>/../../../tui/dist/index.mjs       — repo dev layout
+      --        (appDir is .lake/build/bin/; repo root is three levels up.
+      --         IO.appDir resolves /proc/self/exe, so a ~/.leancli/bin
+      --         symlink into the checkout lands here, not on the symlink.)
+      --   • ./tui/dist/index.mjs (cwd)                 — last-ditch fallback
+      -- and pick the one with the NEWEST mtime among those that exist.
+      -- Rationale: picking the first that merely *exists* let a stale
+      -- installed bundle permanently shadow a freshly rebuilt dev bundle —
+      -- the "rebuilt the TUI but `leancli tui` still shows old code" trap.
+      -- Newest-wins means a rebuild is always picked up, regardless of which
+      -- layouts are present.
       let appDir ← IO.appDir
       let installedBundle :=
         appDir / ".." / "share" / "leancli" / "tui" / "index.mjs"
@@ -2850,16 +2861,29 @@ def run (args : List String) : IO UInt32 := do
         appDir / ".." / ".." / ".." / "tui" / "dist" / "index.mjs"
       let cwdBundle : System.FilePath := "tui/dist/index.mjs"
       let envBundle? ← IO.getEnv "LEANCLI_TUI_BIN"
+      -- mtime in ms-since-epoch; `none` when the path is absent/unreadable.
+      let mtimeMs? : System.FilePath → IO (Option Int) := fun p => do
+        if !(← p.pathExists) then return none
+        try
+          let m ← p.metadata
+          return some (m.modified.sec * 1000 + Int.ofNat (m.modified.nsec.toNat / 1000000))
+        catch _ => return none
       let bundle? : Option System.FilePath ← do
         match envBundle? with
         | some p =>
             let fp : System.FilePath := p
             if ← fp.pathExists then pure (some fp) else pure none
         | none =>
-            if ← installedBundle.pathExists then pure (some installedBundle)
-            else if ← devBundle.pathExists then pure (some devBundle)
-            else if ← cwdBundle.pathExists then pure (some cwdBundle)
-            else pure none
+            -- Choose the freshest existing candidate by mtime.
+            let mut best : Option (System.FilePath × Int) := none
+            for cand in [installedBundle, devBundle, cwdBundle] do
+              match ← mtimeMs? cand with
+              | some t =>
+                  match best with
+                  | some (_, bt) => if t > bt then best := some (cand, t)
+                  | none => best := some (cand, t)
+              | none => pure ()
+            pure (best.map Prod.fst)
       match bundle? with
       | none =>
           IO.eprintln "leancli-tui bundle not found."

@@ -554,6 +554,52 @@ further accepted op.
 
 ---
 
+## Category 15 — Atomic batched sends (ERC-4337 `executeBatch`)
+
+Smart (ERC-4337) accounts — today `AccountKind.smart .sphincs`, with
+`.frame` reserved — can execute several actions in one UserOperation via
+`executeBatch((address,uint256,bytes)[])`. The abstract model
+(`LeanCli/Invariants/Batch.lean`) folds the verified single-send
+`apply` (Category 1.2) over the legs in the `Option` monad: `applyBatch`.
+
+### 15.1 Batch atomicity (all-or-nothing)
+A successful batch decomposes into successful prefixes; the effect of only
+*some* legs is never persisted. The `Option`-monad short-circuit on the
+first unaffordable leg is the atomicity.
+
+**Prop:** `applyBatch σ (ss₁ ++ ss₂) = some σ' →
+           ∃ σ'', applyBatch σ ss₁ = some σ'' ∧ applyBatch σ'' ss₂ = some σ'`
+**Status:** ✅ proved — `LeanCli/Invariants/Batch.lean::applyBatch_atomic`
+
+### 15.2 No silent underflow across legs
+The batch analogue of 1.1/1.2: a successful batch's leading leg was
+affordable in the starting state (no `Nat.sub` clamping). With 15.1 this
+lifts to every leg at the point it is applied.
+
+**Prop:** `applyBatch σ (s :: ss) = some σ' → s.affordable σ`
+**Status:** ✅ proved — `LeanCli/Invariants/Batch.lean::applyBatch_head_affordable`
+
+### 15.3 Bystander conservation
+An account that is neither sender nor recipient in ANY leg keeps its
+balance across the batch — batching moves no value to or from a bystander.
+
+**Prop:** `applyBatch σ ss = some σ' →
+           (∀ s ∈ ss, a ≠ s.sender ∧ s.creditedTo a = 0) →
+             σ'.balance a = σ.balance a`
+**Status:** ✅ proved — `LeanCli/Invariants/Batch.lean::applyBatch_uninvolved`
+
+### 15.4 Nonce atomicity (one batch = one nonce)
+A batch is a *single* UserOperation, so it consumes exactly one nonce
+regardless of leg count, and no individual leg can be replayed alone.
+Already discharged at the operational layer by 12.2 — recorded here as a
+cross-reference, not a separate theorem.
+
+**Status:** ✅ proved — see 12.2
+(`LeanCli/Invariants/SphincsAccount.lean::applySomeIncrementsNonce`,
+`applySomeConsumesCurrentNonce`)
+
+---
+
 ## Category 11 — Swap (Uniswap V3)
 
 ### 11.1 Slippage zero is identity
@@ -602,6 +648,38 @@ boundary (HMAC-SHA512 → secp256k1 → Keccak-256 → EIP-55 in
 `LeanCli.Wallet.HDKey` + `LeanCli.Wallet.Address`); see 13.1 /
 13.4. What this category proves is purely structural, against the
 resolver code shape — not the underlying crypto.
+
+### 14.2 Chat-drafted amount integrity
+
+When a chat request reaches the LLM, the model never chooses the numeric
+magnitude that lands in calldata. The daemon parses the human amount out
+of the user's message, converts it to base units in Lean, and publishes
+it as an `AmountEntry` table on the per-turn `AgentConfig`. The model
+references an amount by a `ref` handle; the amount-bearing tools
+(`propose_send` value, `prepare_erc20_approve`, `prepare_uniswap_v3_swap`,
+`prepare_aave_*`) resolve it via `findAmount` and reject a hand-typed
+literal when the table is non-empty (prevent-at-input). Independently,
+the daemon re-decodes the magnitude back out of the built draft —
+across both the `propose_send` and prose-`IntentParser` paths — and
+refuses any value it did not derive (`AmountGuard.revalidate`,
+fail-closed on a non-zero native value; verify-at-output). The
+unlimited-approval / full-balance sentinels are the only admitted
+literals.
+
+**Props:**
+- `findAmount table ref = some e → e ∈ table ∧ e.ref = ref` (a resolved handle only ever names a daemon-derived entry)
+- `amountInTable table decoded = true ↔ ∃ e ∈ table, e.base = decoded` (the re-check decides exactly set-membership)
+- `revalidate value data allowed = .ok () → value ≠ 0 → value ∈ allowed` (an admitted non-zero native value is Lean-derived)
+
+**Status:** ✅ proved — `LeanCli/Invariants/ChatAmount.lean::findAmount_mem`, `::amountInTable_iff`, `::revalidate_value_sound` (input prevention: `LeanCli/Agent/State.lean::findAmount`; output re-check: `LeanCli/LlmAgent/AmountGuard.lean::revalidate`, wired in `LeanCli/Daemon/Server/ChatRpc.lean`)
+
+Scope note: literal single-amount prompts are covered; balance-relative
+amounts ("half", "all") and multi-amount prompts remain a Lean-side
+follow-up — they must also be daemon-derived into the table, never
+modelled. Calldata decoding in `revalidate` covers the ERC-20
+transfer/approve/transferFrom and Aave supply/withdraw selectors; opaque
+calldata passes the calldata check (the `prepare_*` builders are
+Lean-encoded) but never bypasses the always-checked native value.
 
 ---
 

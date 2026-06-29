@@ -17,6 +17,7 @@ import LeanCli.Util.Units
 
 import LeanCli.Aave.V3Pool
 import LeanCli.Aave.Prepare
+import LeanCli.Aave.Read
 
 import LeanCli.Ethereum.Abi
 import LeanCli.Ethereum.Address
@@ -26,6 +27,7 @@ import LeanCli.Ethereum.Ens
 import LeanCli.Ethereum.Erc20
 import LeanCli.Ethereum.Intent
 import LeanCli.Ethereum.IntentCanonical
+import LeanCli.Ethereum.Multicall3
 import LeanCli.Ethereum.IntentEncode
 import LeanCli.Ethereum.IntentJson
 import LeanCli.Ethereum.Ownership
@@ -102,7 +104,9 @@ import LeanCli.Invariants.Swap
 import LeanCli.Invariants.Account
 import LeanCli.Invariants.AddressOwnership
 import LeanCli.Invariants.Amount
+import LeanCli.Invariants.Batch
 import LeanCli.Invariants.Bridge
+import LeanCli.Invariants.ChatAmount
 import LeanCli.Invariants.Core
 import LeanCli.Invariants.Encoding
 import LeanCli.Invariants.Ens

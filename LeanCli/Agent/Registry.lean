@@ -6,11 +6,13 @@ import LeanCli.Agent.ToolDefs.Propose
 import LeanCli.Agent.ToolDefs.Protocols
 import LeanCli.Agent.ToolDefs.TrustedRegistry
 import LeanCli.Agent.ToolDefs.SlotLookup
+import LeanCli.Agent.ToolDefs.Ens
 import LeanCli.Agent.ToolDefs.Tokens
 import LeanCli.Agent.ToolDefs.UniV3Swap
 import LeanCli.Agent.ToolDefs.Aave
 import LeanCli.Agent.ToolDefs.Numeric
 import LeanCli.Agent.ToolDefs.Shielded
+import LeanCli.Agent.ToolDefs.Approvals
 
 /-!
 # Default tool registry
@@ -51,12 +53,29 @@ def default : ToolRegistry := [
   Propose.proposeSend,
   TrustedRegistry.trustedRegistryList,
   SlotLookup.slotLookup,
+  -- ENS forward resolution (vitalik.eth → 0x…). Forwards to daemon RPC
+  -- `chain.resolveName` so the agent resolves names itself instead of
+  -- stalling to ask the user. Read-only, mainnet-canonical, no chainId
+  -- arg (so it never trips the chain-whitelist pin).
+  Ens.ensResolve,
   -- Token-registry trio: addresses + decimals + unit conversions from
   -- a compiled-in, hand-audited list so the LLM never invents them
   -- from training data. Read-only, no daemon RPC, no signing path.
   Tokens.tokenLookup,
   Tokens.toBaseUnitsTool,
   Tokens.humanUnitsTool,
+  -- Approval-audit pair. `audit_approvals` forwards to the daemon's
+  -- cross-dApp `Approval`-log scan (`daemon.approvals.list`) so the LLM
+  -- discovers allowances instead of guessing a spender list;
+  -- `check_allowance` reads one owner→spender pair via `chain.ethCall`
+  -- with correctly-encoded calldata. Both read-only, never sign.
+  Approvals.auditApprovals,
+  Approvals.checkAllowance,
+  -- Typed ERC-20 approve builder: the daemon-side encoder lays out the
+  -- calldata so the model never hand-writes the spender/amount words (a
+  -- transposed nibble there silently approves the wrong spender). Pairs
+  -- with the sign-time address-integrity gate (Daemon/Server/AddrGuard).
+  Approvals.prepareErc20Approve,
   -- One-shot Uniswap V3 swap builder (commit 2 of the swap-snappiness
   -- plan): forwards to daemon RPC `swap.prepareUniswapV3` so the LLM
   -- never recomputes a quote, allowance, or swap calldata by hand.

@@ -574,32 +574,38 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       let b ← LeanCli.Daemon.State.getReadBackend state
       pure <| .ok <| .obj #[("backend", .str b.asString)]
   | "daemon.approvals.list" =>
-      -- Read-only listing of outgoing ERC-20 allowances for a wallet
-      -- on a chain. Spec (per D3 / audit-approvals SKILL.md): walk
-      -- `chain.scanTransfers` for `Approval` events from `wallet`
-      -- over a configurable block window and return unique
-      -- `[{token, spender, amount, lastSeenBlock}]` records, cached
-      -- daemon-side, refresh on demand.
-      --
-      -- This is a wire-level stub: the response shape is real so the
-      -- TUI's audit screen can integrate against it; the actual scan
-      -- + cache logic lands in a follow-up. Today it returns an empty
-      -- list with `implemented: false`, which the TUI surfaces as "no
-      -- approvals scanned yet (scan not implemented)".
+      -- Read-only listing of outgoing ERC-20 allowances for a wallet on a
+      -- chain. Walks `Approval(owner=<wallet>, spender=*)` logs across all
+      -- token contracts over a bounded recent window, dedupes per
+      -- (token, spender), re-reads the current allowance live, and returns
+      -- `[{token, spender, amount, amountHuman, tokenSymbol, lastSeenBlock}]`.
+      -- Display-only — revoking goes through the standard
+      -- decodeIntent → simulate → ConfirmGate → send pipeline like any
+      -- other approve. See `LeanCli/Daemon/Preflight.lean:auditApprovals`.
       let walletStr? : Option String :=
         getField "wallet" req.params >>= asString
       let chainIdParam : Nat :=
         ((getField "chainId" req.params) >>= asNat).getD cfg.chainId
-      let walletEntry : Array (String × Json) :=
-        match walletStr? with
-        | some w => #[("wallet", .str w)]
-        | none   => #[]
-      pure <| .ok <| .obj <| #[
-        ("chainId",     .num (Int.ofNat chainIdParam)),
-        ("approvals",   .arr #[]),
-        ("implemented", .bool false),
-        ("note",        .str "approval scan not yet wired; see daemon.approvals.list TODO")
-      ] ++ walletEntry
+      let lookback : Nat :=
+        ((getField "lookback" req.params) >>= asNat).getD
+          LeanCli.Daemon.Preflight.approvalsLookback
+      let chain? := getField "chain" req.params >>= asString
+      match walletStr? with
+      | none =>
+          pure <| .ok <| .obj #[
+            ("chainId",     .num (Int.ofNat chainIdParam)),
+            ("approvals",   .arr #[]),
+            ("implemented", .bool false),
+            ("note",        .str "no wallet to audit — name one (\"show approvals for <wallet>\") or set a default wallet")
+          ]
+      | some wallet =>
+          match endpointForChain cfg chain? with
+          | .error err =>
+              pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
+          | .ok endpoint =>
+              let result ← LeanCli.Daemon.Preflight.auditApprovals
+                state cfg.policy endpoint chainIdParam wallet lookback
+              pure (.ok result)
   | "tx.decodeIntent" =>
       -- Why: forwards { chainId, to, value, data, from? } to the clearsign
       -- sidecar. Before forwarding, prefetch ERC-20 metadata for `to` AND
@@ -625,9 +631,13 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               LeanCli.Daemon.TokenMeta.toJson m)
         | none => pure ()
       -- Walk calldata for embedded address-shaped words (12 zero bytes +
-      -- 20 nonzero bytes) and prefetch metadata for each. False positives
-      -- (small uint256 values that fit in 160 bits) are harmless: the
-      -- eth_call reverts and the cache absorbs the miss.
+      -- 20 nonzero bytes) and prefetch metadata for each. The scanner slides
+      -- a 32-byte window every 4 bytes to catch multicall-inner params, so it
+      -- surfaces a lot of junk (misaligned fragments, EOAs, small uint256
+      -- values). `lookupOrFetchIfContract` gates each candidate behind one
+      -- `eth_getCode` and negative-caches non-contracts, so we don't pay a
+      -- fan-out of reverting decimals/symbol reads here (the old behaviour
+      -- pushed `tx.decodeIntent` to ~18s on a single-hop swap).
       let embeddedAddrs := scanCalldataAddresses dataParam
       for addr in embeddedAddrs do
         let lower := addr.toLower
@@ -635,7 +645,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
         if alreadyHave then
           pure ()
         else
-          match ← LeanCli.Daemon.TokenMeta.lookupOrFetch
+          match ← LeanCli.Daemon.TokenMeta.lookupOrFetchIfContract
               state cfg.policy ep chainIdParam addr with
           | some m =>
               tokenMetaPairs := tokenMetaPairs.push (lower,

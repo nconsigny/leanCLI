@@ -17,6 +17,17 @@ import { spawn } from "node:child_process";
  */
 
 export type RpcError = { code: number; message: string };
+
+/** Sentinel error returned when a call is cancelled via its AbortSignal
+ *  (the chat's Esc-to-stop). Code -32001 is outside the JSON-RPC reserved
+ *  range and never collides with a daemon error, so callers can special-case
+ *  "the user stopped this" vs. a real transport/daemon failure. */
+export const CANCELLED_ERROR: RpcError = { code: -32001, message: "request cancelled" };
+
+/** True iff an RpcError is the cancellation sentinel (see CANCELLED_ERROR). */
+export function isCancelled(err: RpcError): boolean {
+  return err.code === CANCELLED_ERROR.code;
+}
 export type RpcResult<T = unknown> =
   | { ok: true; result: T }
   | { ok: false; error: RpcError };
@@ -184,10 +195,15 @@ async function ensureDaemon(
 function callOnce<T = unknown>(
   method: string,
   params: unknown = [],
-  opts: { onNotification?: NotificationHandler; timeoutMs?: number } = {},
+  opts: { onNotification?: NotificationHandler; timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<RpcResult<T>> {
-  const { onNotification, timeoutMs = 60_000 } = opts;
+  const { onNotification, timeoutMs = 60_000, signal } = opts;
   return new Promise((resolve) => {
+    // Caller already cancelled before we even opened the socket.
+    if (signal?.aborted) {
+      resolve({ ok: false, error: CANCELLED_ERROR });
+      return;
+    }
     const sock = net.createConnection(socketPath());
     let buffer = "";
     let settled = false;
@@ -195,11 +211,23 @@ function callOnce<T = unknown>(
     const settle = (r: RpcResult<T>) => {
       if (settled) return;
       settled = true;
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", onAbort);
+      // destroy() (not end()) so an abort tears the connection down
+      // immediately — the daemon sees the client disconnect rather than a
+      // graceful half-close it might keep buffering a long reply into.
       try {
-        sock.end();
+        sock.destroy();
       } catch {}
       resolve(r);
     };
+
+    // Esc-to-stop: the caller aborts its AbortController, we drop the socket
+    // and settle with a cancelled marker. Note the daemon-side work (LLM
+    // generation, tool loop) is NOT interrupted by this — it runs to
+    // completion in the background; we just stop waiting and free the UI.
+    const onAbort = () => settle({ ok: false, error: CANCELLED_ERROR });
+    if (signal) signal.addEventListener("abort", onAbort, { once: true });
 
     const timer = setTimeout(() => {
       settle({
@@ -299,13 +327,14 @@ function isSocketMissingError(err: RpcError): boolean {
 export async function call<T = unknown>(
   method: string,
   params: unknown = [],
-  opts: { onNotification?: NotificationHandler; timeoutMs?: number } = {},
+  opts: { onNotification?: NotificationHandler; timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<RpcResult<T>> {
   const first = await callOnce<T>(method, params, opts);
   if (first.ok) return first;
   if (
     noAutoSpawnMethod(method) ||
     autoSpawnDisabled() ||
+    isCancelled(first.error) || // user stopped — don't resurrect the daemon
     !isSocketMissingError(first.error)
   ) {
     return first;

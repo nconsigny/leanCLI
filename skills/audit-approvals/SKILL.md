@@ -5,15 +5,15 @@ category: hygiene
 risk: none
 requires:
   daemonRpcs:
-    - chain.scanTransfers
-    - chain.ethCall
+    - daemon.approvals.list
   wallets:
     - eoa
-    - r1
+    - sphincs
 notes:
   - "This skill does NOT produce a transaction. It produces a structured report the user reads."
-  - "Old allowances are findable via Approval event logs (ERC-20 emits `Approval(owner, spender, amount)`). The daemon's scanTransfers is the right entry point."
-  - "There is no on-chain registry of all allowances. The audit is best-effort: it surfaces allowances we have evidence for."
+  - "Three approval surfaces are scanned via their event logs and each re-read live so stale/revoked entries drop out: ERC-20 `allowance` (in `approvals`), ERC-721/1155 `ApprovalForAll` operator grants (in `nftApprovals`), and Uniswap Permit2 grants (in `permit2Approvals`)."
+  - "Known spenders/operators are labelled (`spenderLabel`/`operatorLabel`) — e.g. `Uniswap Permit2`, `Aave V3 Pool`. Unknown addresses are left unlabelled (mainnet-canonical list; testnet deployments are not labelled)."
+  - "There is no on-chain registry of all allowances, and `eth_getLogs` windows are bounded by the provider. The audit is best-effort over a recent block window: it surfaces allowances we have evidence for, and reports the `fromBlock`/`toBlock` it scanned."
 ---
 
 # audit-approvals — list outgoing ERC-20 allowances
@@ -26,8 +26,19 @@ notes:
 * `am I exposed to any dApps?`
 
 This is read-only and produces no Intent JSON. Instead, the model
-should ask the daemon to do the scan and present the results as
-structured prose to the user.
+should call the **`audit_approvals`** tool (which runs the daemon's
+cross-dApp `Approval`-log scan) and present the results as structured
+prose. NEVER guess a spender list and check `allowance()` against it by
+hand — that misses every dApp you didn't think of and is exactly what
+`audit_approvals` exists to replace. For a single known owner→spender
+pair, use **`check_allowance`** instead.
+
+If the user names a token but not a spender, still use `audit_approvals`
+for the owner wallet and filter/report rows for that token. Do not pick
+the default wallet, `mainEOA/0`, or any other local wallet as an implied
+spender. A phrase like `check allowances for SPHINCS1 USDC sepolia`
+means “discover outgoing USDC allowances owned by SPHINCS1”, not
+“check SPHINCS1 allowance to mainEOA/0”.
 
 ## Required user inputs
 
@@ -41,8 +52,9 @@ structured prose to the user.
 
 This skill emits a read-only `approvals.audit` intent. The chat.draft
 handler recognizes the action tag and routes to the daemon-side scan
-(`chain.scanTransfers` for `Approval` events over a configurable block
-window), bypassing `tx.encodeIntent` entirely. No signing path.
+(`daemon.approvals.list` — `Approval` event logs over a configurable
+block window, then a live `allowance()` re-read per spender), bypassing
+`tx.encodeIntent` entirely. No signing path.
 
 ```json
 {
@@ -52,15 +64,20 @@ window), bypassing `tx.encodeIntent` entirely. No signing path.
 }
 ```
 
-`wallet` is OPTIONAL — when omitted, the daemon scopes to the user's
-default wallet. The response shape is a list of records:
+`wallet` is OPTIONAL — when omitted, chat.draft fills it with the active
+default wallet's address. The response shape is a list of records:
 
 ```json
 [
-  {"token": "0x...", "spender": "0x...", "amount": "<uint256 string>", "lastSeenBlock": <int>},
+  {"token": "0x...", "spender": "0x...", "amount": "<uint256 string>",
+   "amountHuman": "unlimited (max uint256)", "tokenSymbol": "USDC", "lastSeenBlock": <int>},
   ...
 ]
 ```
+
+`amountHuman`/`tokenSymbol` are best-effort enrichment (empty when token
+metadata couldn't be fetched). Pairs whose current allowance is 0 are
+omitted — they are not actionable.
 
 The model presents the results as a structured list (one row per
 allowance) and offers to chain into `revoke-approval` per row.
@@ -70,7 +87,7 @@ allowance) and offers to chain into `revoke-approval` per row.
 The natural follow-up to an audit is a sequence of `revoke-approval`
 calls. The model should:
 
-1. Run the audit (when implemented).
+1. Run the audit.
 2. Surface each allowance as a row: token / spender / amount / how old.
 3. Offer to revoke them one at a time. Each revoke is a separate Intent;
    each goes through ConfirmGate independently. No batching that hides

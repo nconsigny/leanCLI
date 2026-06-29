@@ -54,15 +54,20 @@ the system prompt — do not guess.
 }
 ```
 
-**Amount conversion — DO NOT compute this yourself.** The daemon has
-already done it for you. Look at `seed.fields` for an entry with key
-`amountBase` — that's the integer wei amount you should copy verbatim
-into `amountWei`. The daemon ran a deterministic `parseUnits` against
-the token's decimals before this prompt reached you.
+**Amounts — Lean's authority, never yours.** The daemon already parsed
+and converted the amount; you may not choose or type a magnitude.
 
-If `amountBase` is missing from the seed, that means the daemon couldn't
-determine the decimals (unknown asset). Do not guess; return
-`{error: "amountBase not provided by daemon — asset may be unknown", ask: "..."}`.
+- Preferred (tool path): call `propose_send` with `amountRef` set to the
+  handle from the `amounts` table (e.g. `"amt1"`) for the native value.
+  Do NOT pass a literal `value` — the daemon rejects a hand-typed one.
+- If you instead emit the Intent JSON, copy `seed.fields.amountBase`
+  verbatim into `amountWei`. The daemon re-decodes the encoded value and
+  refuses it if it does not equal the amount it derived, so a guessed or
+  edited number fails closed — there is no benefit to inventing one.
+
+If neither an `amounts` entry nor `amountBase` is present, the daemon
+could not determine decimals (unknown asset). Do not guess; return
+`{error: "amount not provided by daemon — asset may be unknown", ask: "..."}`.
 
 ## Tools available
 

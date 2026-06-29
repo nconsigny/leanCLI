@@ -6,6 +6,7 @@ import Select from "../widgets/Select.js";
 import Form, { Field } from "../widgets/Form.js";
 import RpcRunner from "../widgets/RpcRunner.js";
 import SendRawFlow from "./SendRawFlow.js";
+import SendBatchFlow, { BatchLeg } from "./SendBatchFlow.js";
 import SwapFlow from "./SwapFlow.js";
 import { call } from "../daemon.js";
 import { theme } from "../theme.js";
@@ -121,6 +122,15 @@ type State =
   // replaced because they duplicated SwapFlow's UX with a less polished
   // text-input form and no recipient field.
   | { kind: "swap-flow"; row: Account }
+  // Batch builder: accumulate ≥1 actions, then sign them as ONE
+  // `executeBatch` UserOp via SendBatchFlow (one nonce, atomic on-chain).
+  // `batch-add-leg` collects a single {to, value, data}; `batch-menu`
+  // shows the accumulated legs + add/sign/cancel; `batch-confirm` hands
+  // the legs to SendBatchFlow (decode each + simulate the aggregate →
+  // ConfirmGate → sphincs.account.sendBatch).
+  | { kind: "batch-add-leg"; row: Account; legs: BatchLeg[] }
+  | { kind: "batch-menu"; row: Account; legs: BatchLeg[] }
+  | { kind: "batch-confirm"; row: Account; legs: BatchLeg[] }
   | { kind: "err"; message: string };
 
 type Props = {
@@ -714,6 +724,110 @@ export default function SphincsAccountsHub({
     );
   }
 
+  if (state.kind === "batch-add-leg") {
+    // Collect one leg. To keep the builder's state machine flat, the
+    // batch path requires a literal 0x address per leg (no ENS interstitial
+    // — use the single-action Send for ENS targets). Value is per-leg ETH
+    // sent with that sub-call; data is the inner calldata.
+    const legNo = state.legs.length + 1;
+    const fields: Field[] = [
+      { name: "to", label: "Target address (0x…)",
+        validate: (v) => ADDR_RE.test(v.trim()) ? null : "expected a 0x address (ENS not supported in batch builder)" },
+      { name: "valueEth", label: "Value in ETH (decimal, e.g. 0.001)",
+        initial: "0",
+        validate: (v) => parseEthToWei(v.trim()) !== null ? null : "decimal number expected (e.g. 0 or 0.001)" },
+      { name: "data", label: "Calldata hex (optional, blank = pure ETH transfer)",
+        validate: (v) => v.length === 0 || HEX_RE.test(v) ? null : "expected hex" },
+    ];
+    return (
+      <Layout
+        title={`Batch · ${state.row.name} · add action #${legNo}`}
+        subtitle="All actions run atomically in one UserOp (one nonce). Simulated together before signing."
+      >
+        <Form
+          fields={fields}
+          onCancel={() =>
+            state.legs.length > 0
+              ? setState({ kind: "batch-menu", row: state.row, legs: state.legs })
+              : setState({ kind: "detail", row: state.row })
+          }
+          onSubmit={(v) => {
+            const weiOrNull = parseEthToWei((v.valueEth ?? "0").trim());
+            if (weiOrNull === null) {
+              setState({ kind: "err", message: `bad ETH amount: ${v.valueEth}` });
+              return;
+            }
+            const dataIn = (v.data ?? "").trim();
+            const data = dataIn.length === 0
+              ? "0x"
+              : (dataIn.startsWith("0x") ? dataIn : "0x" + dataIn);
+            const leg: BatchLeg = {
+              to: (v.to ?? "").trim(),
+              value: bigIntToHex(weiOrNull),
+              data,
+            };
+            setState({ kind: "batch-menu", row: state.row, legs: [...state.legs, leg] });
+          }}
+        />
+      </Layout>
+    );
+  }
+
+  if (state.kind === "batch-menu") {
+    type BAction = "add" | "sign" | "cancel";
+    const actions: { label: string; value: BAction }[] = [
+      { label: "Add another action", value: "add" },
+      { label: `Review & sign — ${state.legs.length} action${state.legs.length === 1 ? "" : "s"} in one UserOp`, value: "sign" },
+      { label: "← Cancel batch", value: "cancel" },
+    ];
+    return (
+      <Layout
+        title={`Batch · ${state.row.name} · ${state.legs.length} action${state.legs.length === 1 ? "" : "s"}`}
+        subtitle="Atomic executeBatch — one nonce, all-or-nothing on-chain."
+        hint="↑/↓ move · enter select · esc cancel"
+      >
+        <Box flexDirection="column" marginBottom={1}>
+          {state.legs.map((leg, i) => (
+            <Text key={i} color={theme.dim}>
+              {`#${i + 1}`} to {shortAddr(leg.to)} · value {formatEth(hexToBigInt(leg.value))} ETH ·{" "}
+              {leg.data === "0x" ? "native transfer" : `data ${leg.data.slice(0, 10)}…`}
+            </Text>
+          ))}
+        </Box>
+        <Select
+          items={actions}
+          arrowNav
+          onBack={() => setState({ kind: "detail", row: state.row })}
+          onSelect={(it) => {
+            if (it.value === "add") setState({ kind: "batch-add-leg", row: state.row, legs: state.legs });
+            else if (it.value === "sign") setState({ kind: "batch-confirm", row: state.row, legs: state.legs });
+            else setState({ kind: "detail", row: state.row });
+          }}
+        />
+      </Layout>
+    );
+  }
+
+  if (state.kind === "batch-confirm") {
+    const r = state.row;
+    return (
+      <SendBatchFlow
+        chainId={r.chainId}
+        wallet={{
+          kind: "sphincs",
+          name: r.name,
+          address: r.smartAccountAddress ?? r.ownerAddress,
+        }}
+        legs={state.legs}
+        rationale={`SPHINCS- batch (${state.legs.length} actions) from ${r.name}`}
+        onDone={() => {
+          if (deeplinkMode) onBack();
+          else setState({ kind: "detail", row: r });
+        }}
+      />
+    );
+  }
+
   if (state.kind === "factory-deploy-pick-eoa") {
     if (state.eoas.length === 0) {
       return (
@@ -889,7 +1003,7 @@ export default function SphincsAccountsHub({
       r.ecdsaAttachment.kind === "existing"
         ? `existing ${r.ecdsaAttachment.walletName} (#${r.ecdsaAttachment.accountIndex})`
         : `derived ${r.ecdsaAttachment.walletName} (${r.ecdsaAttachment.path})`;
-    type Action = "compute" | "deploy" | "send" | "swap" | "rotate-owner" | "factory-deploy" | "back";
+    type Action = "compute" | "deploy" | "send" | "batch" | "swap" | "rotate-owner" | "factory-deploy" | "back";
     const status = deployStatus[r.name];
     const isDeployed = status === true;
     const probePending = status === null;
@@ -909,6 +1023,7 @@ export default function SphincsAccountsHub({
       });
     }
     actions.push({ label: "Send UserOperation via configured bundler", value: "send" });
+    actions.push({ label: "Batch actions into one UserOp (executeBatch)", value: "batch" });
     actions.push({ label: "Swap via Uniswap V3 (token + recipient picker)", value: "swap" });
     actions.push({ label: "Rotate on-chain ECDSA owner (rotateOwner UserOp)", value: "rotate-owner" });
     actions.push({ label: "Deploy the SPHINCS- factory (one-time, Sepolia)", value: "factory-deploy" });
@@ -966,6 +1081,7 @@ export default function SphincsAccountsHub({
                       eoas: er.ok && Array.isArray(er.result) ? er.result : [],
                     });
                   } else if (it.value === "send") setState({ kind: "send-form", row: r });
+                  else if (it.value === "batch") setState({ kind: "batch-add-leg", row: r, legs: [] });
                   else if (it.value === "swap") setState({ kind: "swap-flow", row: r });
                   else if (it.value === "rotate-owner") setState({ kind: "rotate-owner-form", row: r });
                   else {

@@ -154,13 +154,13 @@ def synth (draft : RegexDraft) (chainId : Nat) (senderAddr? : Option String := n
       pure (.erc20Approve chainId tok spender amount)
   | .aaveSupply =>
       -- Aave supply: asset is the token to deposit, onBehalfOf is the
-      -- sender's address. We refuse ETH as asset — Aave V3 mainnet uses
-      -- the WrappedTokenGatewayV3 helper for native ETH, which is a
-      -- different contract (not in the Lean registry yet). The user
-      -- should `wrap` first, then supply WETH.
+      -- sender's address. We refuse native ETH here because it needs
+      -- a multi-leg prepare path (`prepare_aave_supply` can batch
+      -- WETH.deposit + approve + supply for SPHINCS/smart accounts).
+      -- DirectSynth only emits leaf Intent calldata.
       let sym ← fieldOrErr draft "asset"
       if sym.toLower = "eth" then
-        .error "DirectSynth: Aave V3 supply of native ETH needs the WrappedTokenGatewayV3 — wrap to WETH first, then supply WETH"
+        .error "DirectSynth: Aave V3 supply of native ETH needs prepare_aave_supply (smart account batch) or a prior WETH wrap"
       else
         let senderStr ←
           match senderAddr? with
@@ -246,12 +246,14 @@ def synth (draft : RegexDraft) (chainId : Nat) (senderAddr? : Option String := n
         let _ := chain
         pure (.railgunUnshield chainId amount recipient)
   | .approvalsAudit =>
-      -- Read-only. The optional `wallet` field is a 0x address by the
-      -- time the chat.draft wallet-resolver has run; if it's absent,
-      -- the daemon scopes to the default wallet.
+      -- Read-only. Prefer an explicit `wallet` field (a 0x address by the
+      -- time chat.draft's wallet-resolver has run). With no explicit
+      -- wallet, scope to the default wallet (`senderAddr?`) so a bare
+      -- "show approvals" audits the active wallet without the user having
+      -- to name it. Only when neither is available is the wallet left
+      -- `none` (the daemon then reports "specify a wallet").
       let wallet ←
         match draft.field? "wallet" with
-        | none => pure (none : Option Address)
         | some s =>
             if s.startsWith "0x" || s.startsWith "0X" then
               match parseAddr "wallet" s with
@@ -262,6 +264,13 @@ def synth (draft : RegexDraft) (chainId : Nat) (senderAddr? : Option String := n
               -- resolver should have substituted, but if it didn't we
               -- defer to the LLM rather than silently dropping the hint.
               .error s!"DirectSynth: approvals.audit wallet '{s}' not resolved to 0x"
+        | none =>
+            match senderAddr? with
+            | some s =>
+                match parseAddr "wallet" s with
+                | .ok a    => pure (some a)
+                | .error _ => pure (none : Option Address)
+            | none => pure (none : Option Address)
       let _ := chain
       pure (.approvalsAudit chainId wallet)
   | .freshAddress =>

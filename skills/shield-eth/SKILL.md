@@ -19,6 +19,16 @@ notes:
 
 # shield-eth — Privacy Pools deposit
 
+## Amounts (mandatory)
+
+You never type the deposit magnitude. The daemon converted the user's
+amount and published it in the `amounts` table; reference it by
+`amountRef` (never a literal). Privacy Pools denomination constraints
+are validated by `shielded.prepareDeposit` daemon-side. Shielded
+calldata is still calldata: the deposit value flows through
+decode → simulate → ConfirmGate like any other, and the daemon refuses
+a deposit value it did not derive.
+
 ## When to use
 
 * `shield <amount> ETH`

@@ -20,6 +20,16 @@ notes:
 
 # send-erc20 — transfer an ERC-20 token
 
+## Amounts (mandatory)
+
+You never choose or type a magnitude. The daemon already converted the
+user's amount and published it in the `amounts` table. Preferred path:
+call `propose_send` with the token `transfer` calldata whose amount is
+the `amounts` handle (`amountRef`). If you emit Intent JSON instead,
+copy `seed.fields.amountBase` verbatim into `amount`; the daemon
+re-decodes the encoded transfer amount and refuses any value it did not
+derive (fail-closed), so guessing only gets you rejected.
+
 ## When to use
 
 * `send <amount> <SYMBOL> to <recipient>` where SYMBOL is a real token (not ETH).

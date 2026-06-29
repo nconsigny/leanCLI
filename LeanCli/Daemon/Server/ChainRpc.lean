@@ -70,13 +70,31 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   -- concurrent daemon handlers serialize on the shared conn
                   -- instead of corrupting it (the earlier 60s hang). Outbound
                   -- falls back to direct HTTP if the light client is down.
-                  let via? ← verifiedReadVia state (ep.chainId.getD cfg.chainId) ep
+                  --
+                  -- Per-call `backend:"rpc"` override (mirrors tx.simulate):
+                  -- a verified light-client balance read costs ~30s of proof
+                  -- generation here, which is unusable on the dashboard's
+                  -- balance poll. Balances are display-only — the trust anchor
+                  -- is the verified `tx.simulate` + ConfirmGate at signing, not
+                  -- this readout — so the TUI dashboard requests the fast direct
+                  -- path while the daemon-wide verified default still governs
+                  -- the pre-sign pipeline. Absent/other values keep the
+                  -- verified default.
+                  let via? ←
+                    match (getField "backend" req.params >>= asString)
+                          >>= LeanCli.Daemon.State.ReadBackend.parse? with
+                    | some .rpc => pure none
+                    | _ => verifiedReadVia state (ep.chainId.getD cfg.chainId) ep
                   match ← LeanCli.RPC.Outbound.getBalance cfg.policy ep address block via? with
                   | .ok balance =>
+                      -- Normalize to canonical 0x-hex: helios returns the
+                      -- balance as a bare decimal, and forwarding that verbatim
+                      -- makes the TUI's hex parser read the digits as hex
+                      -- (0.49 ETH → ~1357 ETH). See `quantityJsonHex`.
                       pure <| .ok <| .obj #[
                         ("address", .str address),
                         ("block", .str block),
-                        ("balance", balance),
+                        ("balance", quantityJsonHex balance),
                         ("chain", .str (chain?.getD (
                           if cfg.chainId = 1 then "mainnet"
                           else if cfg.chainId = 11155111 then "sepolia"
@@ -108,10 +126,12 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               let via? ← verifiedReadVia state cfgEff.chainId cfgEff.rpcEndpoint
               match ← LeanCli.RPC.Outbound.getTransactionCount cfgEff.policy cfgEff.rpcEndpoint address block via? with
               | .ok nonce =>
+                  -- Canonical 0x-hex (helios returns a bare decimal; see
+                  -- `quantityJsonHex` / the chain.balance note).
                   pure <| .ok <| .obj #[
                     ("address", .str address),
                     ("block", .str block),
-                    ("nonce", nonce)
+                    ("nonce", quantityJsonHex nonce)
                   ]
               | .error err =>
                   pure <| .error { code := -32020, message := "chain RPC failed", data := some (.str err) }
@@ -184,8 +204,8 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                           -- contract matches; that's the heavier query, hence "best-effort".
                           let outTopics : Array Json := #[.str transferEventTopic, .str paddedSelf, .null]
                           let inTopics  : Array Json := #[.str transferEventTopic, .null, .str paddedSelf]
-                          let outRes ← LeanCli.RPC.Outbound.getLogsAnyAddress cfg.policy ep fromHex toHex outTopics via?
-                          let inRes  ← LeanCli.RPC.Outbound.getLogsAnyAddress cfg.policy ep fromHex toHex inTopics  via?
+                          let outRes ← LeanCli.RPC.Outbound.getLogsAnyAddress cfg.policy ep fromHex toHex outTopics
+                          let inRes  ← LeanCli.RPC.Outbound.getLogsAnyAddress cfg.policy ep fromHex toHex inTopics
                           let countOpt? : Json → Option Nat := fun j =>
                             (asArray j).map (fun a => a.size)
                           match outRes, inRes with

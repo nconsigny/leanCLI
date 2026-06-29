@@ -293,6 +293,31 @@ private def activeChainIdOf (params : Json) : Option Nat :=
     |>.orElse (fun _ => getField "chainId" ctx >>= asNat)
     |>.orElse (fun _ => getField "chainId" params >>= asNat)
 
+/-- Parse the daemon-published `amounts` table into `AmountEntry`s. Each
+    entry's `base` arrives as a decimal string (JSON numbers truncate
+    past 2^53) and is converted back to a `Nat` here; an entry with a
+    missing `ref`/`base` or an unparseable `base` is dropped rather than
+    coerced, so a malformed table can only ever *shrink* the set of
+    amounts the model may reference — never invent one. -/
+private def parseAmountTable (params : Json) : List AmountEntry :=
+  match getField "amounts" params with
+  | some (.arr arr) =>
+      arr.toList.filterMap (fun j =>
+        match getField "ref" j >>= asString, getField "base" j >>= asString with
+        | some ref, some baseStr =>
+            match baseStr.toNat? with
+            | some baseNat =>
+                some {
+                  ref      := ref,
+                  human    := (getField "human" j >>= asString).getD "",
+                  symbol   := (getField "symbol" j >>= asString).getD "",
+                  base     := baseNat,
+                  decimals := (getField "decimals" j >>= asNat).getD 0
+                }
+            | none => none
+        | _, _ => none)
+  | _ => []
+
 private def buildCfg (llmUrl model walletSocket : String) (timeoutMs : Nat)
     (regRef : ToolDefs.Protocols.RegistryRef) (params : Json) : AgentConfig :=
   let defaultAllow : List String := (Registry.defaultWithSkills regRef).map (·.name)
@@ -316,6 +341,7 @@ private def buildCfg (llmUrl model walletSocket : String) (timeoutMs : Nat)
     daemonSocket := walletSocket,
     toolAllowlist := allowlist,
     chainWhitelist := whitelist,
+    amountTable := parseAmountTable params,
     timeoutMs := timeoutMs
   }
 
@@ -336,6 +362,23 @@ private def collectMatchContext (msgs : Array AgentMessage) : String :=
     | some m => m.content.getD ""
     | none => ""
   String.intercalate " " (lastUser :: toolBlobs)
+
+/-- Canonical trusted-registry fetch shared by the create-session prime
+    and the per-turn refresh, so the two never disagree on how wide the
+    BIP-44 window is.
+
+    We ask for a SINGLE canonical address per unlocked seed — external-
+    chain index 0 (`m/44'/60'/0'/0/0`), the same address the TUI wallet
+    pane and the regex resolver re-derive. Enumerating the full BIP-44
+    window (both chains × N indices) surfaced up to ~10 speculative,
+    never-realized addresses for a single unlocked seed; the model then
+    reported them as e.g. "11 unlocked EOA slots" even though the wallet
+    pane shows one. Realized/labelled sub-accounts still surface via the
+    daemon's stored-accounts walk, independent of these params — so the
+    LLM sees exactly the accounts the user actually has, no more. -/
+private def primeRegistryFetch (socketPath : String) :
+    IO (Except String ToolDefs.TrustedRegistry.Snapshot) :=
+  ToolDefs.TrustedRegistry.fetchSnapshot socketPath ["m/44'/60'/0'/0"] 1 true
 
 /-- Refresh the cached trusted-registry snapshot if the seed fingerprint
     has changed since the last fetch. Idempotent and graceful: when the
@@ -363,10 +406,11 @@ private def maybeRefreshRegistry
       if probe.seedFingerprint == cachedFp && cached.isSome then
         pure cached
       else
-        -- Rotation or first-time fill: pull a real snapshot with the
-        -- daemon's default count cap.
-        match ← ToolDefs.TrustedRegistry.fetchSnapshot socketPath
-                 ToolDefs.TrustedRegistry.defaultPaths 5 true with
+        -- Rotation or first-time fill: pull a real snapshot via the
+        -- canonical narrow fetch (see `primeRegistryFetch`). One entry
+        -- per slot also avoids the `slotDisplayName` collision where the
+        -- full BIP-44 window collapsed onto an identical `slot/0` handle.
+        match ← primeRegistryFetch socketPath with
         | .error _ => pure cached
         | .ok fresh =>
             if cachedFp != "" && cachedFp != fresh.seedFingerprint then
@@ -582,8 +626,7 @@ private def opCreateSession (st : DaemonState) (params : Json) : IO Json := do
     -- collapse to "no registry yet" without breaking session creation.
     try
       let walletSocket ← resolveWalletSocket
-      match ← ToolDefs.TrustedRegistry.fetchSnapshot walletSocket
-               ToolDefs.TrustedRegistry.defaultPaths 5 true with
+      match ← primeRegistryFetch walletSocket with
       | .ok snap => st.registryRef.set (some snap)
       | .error _ => st.registryRef.set none
     catch _ => st.registryRef.set none

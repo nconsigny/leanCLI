@@ -30,6 +30,35 @@ type TokensCell =
   | { state: "ok"; tokens: Token[] }
   | { state: "err"; message: string };
 
+/** One protocol's entry from `defi.positions`. Aave V3 is queried on-chain
+ *  (getUserAccountData); Morpho/Curve arrive as `available:false` "coming
+ *  soon" until an index path exists. Base amounts are canonical 0x-hex
+ *  strings (they exceed 2^53), parsed to bigint here for display. */
+type DefiProtocol = {
+  protocol: string;
+  available: boolean;
+  note?: string;
+  hasPosition?: boolean;
+  /** Decimals of the market base currency (USD ⇒ 8). */
+  baseCurrencyDecimals?: number;
+  totalCollateralBase?: string;
+  totalDebtBase?: string;
+  availableBorrowsBase?: string;
+  /** 1e18-scaled; uint256-max sentinel when there's no debt. */
+  healthFactor?: string;
+  reserves?: Array<{
+    symbol?: string;
+    decimals?: number;
+    supplied?: string;
+    borrowed?: string;
+  }>;
+};
+
+type DefiCell =
+  | { state: "loading" }
+  | { state: "ok"; protocols: DefiProtocol[] }
+  | { state: "err"; message: string };
+
 /** Sub-account row from `eoa.account.list`. */
 type SubAccount = {
   index: number;
@@ -119,6 +148,7 @@ export default function ManageWalletScreen({
   onDone,
 }: Props) {
   const [tokens, setTokens] = useState<TokensCell>({ state: "loading" });
+  const [defi, setDefi] = useState<DefiCell>({ state: "loading" });
   const [subs, setSubs] = useState<SubAcctsCell>({ state: "loading" });
   const [eth, setEth] = useState<EthCell>({ state: "loading" });
   const [privacy, setPrivacy] = useState<PrivacyCell>({ state: "loading" });
@@ -339,6 +369,30 @@ export default function ManageWalletScreen({
     };
   }, [chain, wallet.address]);
 
+  // DeFi-holdings fan-out via `defi.positions`. Read-only: the daemon
+  // eth_calls Aave V3's getUserAccountData (policy-gated, like
+  // swap.balances) and decodes it in Lean; Morpho/Curve come back as
+  // available:false "coming soon". Runs in parallel with the token
+  // fan-out so a slow protocol read never blocks the token list.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const r = await call<{ protocols: DefiProtocol[] }>("defi.positions", {
+        chainId: chain,
+        address: wallet.address,
+      });
+      if (cancelled) return;
+      if (!r.ok) {
+        setDefi({ state: "err", message: r.error.message });
+        return;
+      }
+      setDefi({ state: "ok", protocols: r.result?.protocols ?? [] });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [chain, wallet.address]);
+
   useInput((input, key) => {
     if (key.escape || input === "q") onDone();
     // Single-char shortcuts to the most common ops. Mirrors the original
@@ -418,6 +472,12 @@ export default function ManageWalletScreen({
                 }}
               />
             )}
+          </Box>
+          <Box marginTop={1} flexDirection="column">
+            <Text color={theme.primary} bold>
+              DeFi positions
+            </Text>
+            <DefiSection defi={defi} />
           </Box>
         </Box>
         <Box
@@ -649,6 +709,145 @@ function PrivacyRow({ privacy }: { privacy: PrivacyCell }) {
       <Text color={theme.dim}> · {privacy.reason}</Text>
     </Text>
   );
+}
+
+/** DeFi-holdings block. One row per protocol: Aave V3 prefers token
+ *  supplied/borrowed rows plus health factor; Morpho/Curve render
+ *  their "coming soon" note. Read-only — selecting a row does nothing
+ *  (positions are managed through the chat/agent flow, not here). */
+function DefiSection({ defi }: { defi: DefiCell }) {
+  if (defi.state === "loading") {
+    return (
+      <Text>
+        <Text color={theme.primary}>
+          <Spinner type="dots" />
+        </Text>{" "}
+        <Text color={theme.dim}>querying Aave position…</Text>
+      </Text>
+    );
+  }
+  if (defi.state === "err") {
+    return <Banner kind="err" text={`defi.positions failed: ${defi.message}`} />;
+  }
+  if (defi.protocols.length === 0) {
+    return <Text color={theme.dim}>no DeFi protocols reported.</Text>;
+  }
+  return (
+    <Box flexDirection="column">
+      {defi.protocols.map((p) => (
+        <DefiProtocolRow key={p.protocol} p={p} />
+      ))}
+    </Box>
+  );
+}
+
+/** Human label for a protocol id from the daemon (`aave-v3` → `Aave V3`). */
+function labelForProtocol(id: string): string {
+  switch (id) {
+    case "aave-v3":
+      return "Aave V3";
+    case "morpho":
+      return "Morpho";
+    case "curve":
+      return "Curve";
+    default:
+      return id;
+  }
+}
+
+function DefiProtocolRow({ p }: { p: DefiProtocol }) {
+  const name = labelForProtocol(p.protocol).padEnd(9);
+  // Unavailable (undeployed chain, read error, or "coming soon") → dim note.
+  if (!p.available) {
+    return (
+      <Text>
+        <Text color={theme.dim}>{name} </Text>
+        <Text color={theme.dim}>{p.note ?? "unavailable"}</Text>
+      </Text>
+    );
+  }
+  // Available but fresh/empty → no position rather than HF ∞.
+  if (!p.hasPosition) {
+    return (
+      <Text>
+        <Text>{name} </Text>
+        <Text color={theme.dim}>no open position</Text>
+      </Text>
+    );
+  }
+  const dec = p.baseCurrencyDecimals ?? 8;
+  const collateral = formatUsdBase(p.totalCollateralBase, dec);
+  const debt = formatUsdBase(p.totalDebtBase, dec);
+  const suppliedTokens = formatAaveReserveSide(p.reserves, "supplied");
+  const borrowedTokens = formatAaveReserveSide(p.reserves, "borrowed");
+  const hf = formatHealthFactor(p.healthFactor, p.totalDebtBase);
+  return (
+    <Text>
+      <Text>{name} </Text>
+      <Text color={theme.dim}>supplied </Text>
+      <Text>{suppliedTokens ?? collateral}</Text>
+      <Text color={theme.dim}> · borrowed </Text>
+      <Text>{borrowedTokens ?? debt}</Text>
+      <Text color={theme.dim}> · HF </Text>
+      <Text color={healthFactorColor(hf)} bold>
+        {hf}
+      </Text>
+    </Text>
+  );
+}
+
+function formatAaveReserveSide(
+  reserves: DefiProtocol["reserves"] | undefined,
+  side: "supplied" | "borrowed",
+): string | null {
+  const parts = (reserves ?? [])
+    .map((r) => {
+      const raw = side === "supplied" ? r.supplied : r.borrowed;
+      if (!raw) return null;
+      const amount = hexToBigInt(raw);
+      if (amount === 0n) return null;
+      return `${formatTokenAmount(amount, r.decimals ?? 18)} ${r.symbol ?? "token"}`;
+    })
+    .filter((x): x is string => !!x);
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+/** Format a base-currency `uint256` (0x-hex) as a `$` amount with 2
+ *  fractional digits. Aave's base ccy is USD with 8 decimals. */
+function formatUsdBase(hex: string | undefined, decimals: number): string {
+  if (!hex) return "$0.00";
+  const v = hexToBigInt(hex);
+  const base = 10n ** BigInt(decimals);
+  const whole = v / base;
+  const cents = ((v % base) * 100n) / base;
+  return `$${whole.toString()}.${cents.toString().padStart(2, "0")}`;
+}
+
+/** Format the 1e18-scaled health factor to 2 dp. With zero debt the Pool
+ *  returns uint256-max, so we short-circuit to ∞ off the debt field rather
+ *  than rendering an astronomically large number. */
+function formatHealthFactor(
+  hfHex: string | undefined,
+  debtHex: string | undefined,
+): string {
+  if (!debtHex || hexToBigInt(debtHex) === 0n) return "∞";
+  if (!hfHex) return "?";
+  const hf = hexToBigInt(hfHex);
+  const base = 10n ** 18n;
+  const whole = hf / base;
+  const frac = ((hf % base) * 100n) / base;
+  return `${whole.toString()}.${frac.toString().padStart(2, "0")}`;
+}
+
+/** Health-factor risk colour: ∞ / comfortable → ok, thin → warn, near
+ *  liquidation (< 1.1) → err. */
+function healthFactorColor(hf: string): string {
+  if (hf === "∞") return theme.ok;
+  const n = Number(hf);
+  if (!Number.isFinite(n)) return theme.dim;
+  if (n < 1.1) return theme.err;
+  if (n < 1.5) return theme.warn;
+  return theme.ok;
 }
 
 function buildTokenItems(tokens: TokensCell): Array<{

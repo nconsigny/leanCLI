@@ -28,6 +28,25 @@ import { usePoll } from "./poll.js";
  */
 
 export type TokenBalance = { symbol: string; decimals: number; balance: bigint };
+export type AaveReserveBalance = {
+  symbol: string;
+  decimals: number;
+  supplied: bigint;
+  borrowed: bigint;
+};
+
+/** Compact Aave V3 position for the dashboard row, derived from
+ *  `defi.positions`. `null` once fetched but the wallet holds no Aave
+ *  position (or the read was unavailable); `undefined` until first load. */
+export type AaveSummary = {
+  /** base-currency (USD, `baseDecimals`) collateral / debt as raw uint256. */
+  collateralBase: bigint;
+  debtBase: bigint;
+  /** 1e18-scaled health factor (uint256-max sentinel when debt = 0). */
+  healthFactor: bigint;
+  baseDecimals: number;
+  reserves: AaveReserveBalance[];
+};
 
 export type WalletRow = {
   kind: "eoa" | "sphincs";
@@ -39,6 +58,8 @@ export type WalletRow = {
   wei?: bigint;
   balErr?: string;
   tokens?: TokenBalance[];
+  /** Aave V3 position summary; null = none/unavailable, undefined = pending. */
+  defiAave?: AaveSummary | null;
 };
 
 export type ShieldedState =
@@ -124,6 +145,13 @@ export function useWalletData(
   // the interval on every balance landing).
   const rowsRef = useRef<WalletRow[]>([]);
   rowsRef.current = rows;
+  // Stable identity of the row SET (chain+address only — NOT balances) so the
+  // balance poll re-fires when enumeration adds/changes rows, but is NOT
+  // restarted when a `wei` value lands (which would relaunch the interval on
+  // every balance). Without this, the first enumeration after mount populates
+  // `rows` AFTER the balance poll already ran against an empty snapshot, so
+  // balances stayed blank until the next 60s tick or a manual `r`.
+  const rowsKey = rows.map((r) => `${r.chain}:${r.address}`).join("|");
   // Per-(chain,address) balance cache so rotating chains shows the last-known
   // value for that chain INSTANTLY (then refreshes), instead of clearing to a
   // spinner every switch. Keyed "chain:address"; survives re-enumeration.
@@ -194,6 +222,7 @@ export function useWalletData(
               (a.address ? balCacheRef.current.get(`${chain}:${a.address}`) : undefined) ??
               (old?.chain === chain ? old.wei : undefined),
             tokens: old?.chain === chain ? old.tokens : undefined,
+            defiAave: old?.chain === chain ? old.defiAave : undefined,
           };
         });
       });
@@ -216,42 +245,123 @@ export function useWalletData(
       // now serialized through the verifier), so it runs only on the
       // wallet-hub screen (ManageWalletScreen) on demand, not continuously.
       // Slowed to 60s (was 20s) to keep the verified-read + privacy cost low.
-      for (let i = 0; i < snapshot.length; i++) {
-        if (isCancelled()) return;
-        const row = snapshot[i];
-        if (!row) continue;
-        // Skip rows with no address yet (uncomputed SPHINCS counterfactual).
-        if (!row.address) continue;
-        const b = await call<{ balance: string }>("chain.balance", {
-          address: row.address,
-          chain: row.chain,
-        });
-        if (isCancelled()) return;
-        if (b.ok) {
-          const wei = hexToBigInt(b.result?.balance);
-          // Cache per (chain,address) so a later switch back to this chain is
-          // instant.
-          balCacheRef.current.set(`${row.chain}:${row.address}`, wei);
-          setRows((prev) =>
-            prev.map((p) =>
-              p.address === row.address && p.chain === row.chain
-                ? { ...p, wei, balErr: undefined }
-                : p,
-            ),
-          );
-        } else {
-          setRows((prev) =>
-            prev.map((p) =>
-              p.address === row.address && p.chain === row.chain
-                ? { ...p, balErr: b.error.message }
-                : p,
-            ),
-          );
-        }
-      }
+      //
+      // Fired CONCURRENTLY, not sequentially: rows can sit on different
+      // chains (EOAs follow the active chain, SPHINCS is sepolia-only), and a
+      // single helios cold consensus sync on one chain can take tens of
+      // seconds. A sequential loop made every later row wait behind that one
+      // slow read — e.g. the sepolia SPHINCS balance stuck behind a cold
+      // mainnet EOA sync. Each read now lands independently and updates its
+      // own row. (Verified reads are still serialized daemon-side; this only
+      // removes the TUI-side head-of-line block so fast chains paint first.)
+      await Promise.all(
+        snapshot.map(async (row) => {
+          // Skip rows with no address yet (uncomputed SPHINCS counterfactual).
+          if (!row || !row.address) return;
+          // Balances read through the active verified provider (helios on
+          // mainnet and Sepolia-via-Nimbus, or colibri, per LEANCLI_PROVIDER),
+          // so the dashboard shows consensus-verified values consistent with
+          // the "provider" setting — no bypass to direct RPC. The generous
+          // timeout covers helios's one-time cold consensus sync on the first
+          // read after a daemon restart (~10-30s); steady-state verified reads
+          // are ~1-2s. (The daemon's chain.balance still accepts a per-call
+          // backend:"rpc" override — mirroring tx.simulate — if a fast display
+          // path is ever wanted again; the dashboard just no longer forces it.)
+          const b = await call<{ balance: string }>("chain.balance", {
+            address: row.address,
+            chain: row.chain,
+          }, { timeoutMs: 180_000 });
+          if (isCancelled()) return;
+          if (b.ok) {
+            const wei = hexToBigInt(b.result?.balance);
+            // Cache per (chain,address) so a later switch back to this chain is
+            // instant.
+            balCacheRef.current.set(`${row.chain}:${row.address}`, wei);
+            setRows((prev) =>
+              prev.map((p) =>
+                p.address === row.address && p.chain === row.chain
+                  ? { ...p, wei, balErr: undefined }
+                  : p,
+              ),
+            );
+          } else {
+            setRows((prev) =>
+              prev.map((p) =>
+                p.address === row.address && p.chain === row.chain
+                  ? { ...p, balErr: b.error.message }
+                  : p,
+              ),
+            );
+          }
+        }),
+      );
     },
     60_000,
-    [activeChain, refreshKey, enabled],
+    [activeChain, refreshKey, enabled, rowsKey],
+  );
+
+  // DeFi positions: one light `defi.positions` per row (a single
+  // getUserAccountData eth_call for Aave; Morpho/Curve are "coming soon"
+  // markers, no read). Its own slow tier (180s) so it never rides the
+  // 60s balance loop, and fail-soft: a per-row error leaves `defiAave`
+  // as-is rather than blanking the row. Paused with `enabled` like the
+  // balance poll.
+  usePoll(
+    async (isCancelled) => {
+      if (!enabled) return;
+      const snapshot = rowsRef.current;
+      await Promise.all(
+        snapshot.map(async (row) => {
+          if (!row || !row.address) return;
+          const r = await call<{
+            protocols: Array<{
+              protocol: string;
+              available?: boolean;
+              hasPosition?: boolean;
+              baseCurrencyDecimals?: number;
+              totalCollateralBase?: string;
+              totalDebtBase?: string;
+              healthFactor?: string;
+              reserves?: Array<{
+                symbol?: string;
+                decimals?: number;
+                supplied?: string;
+                borrowed?: string;
+              }>;
+            }>;
+          }>("defi.positions", { chainId: row.chain, address: row.address }, { timeoutMs: 180_000 });
+          if (isCancelled()) return;
+          if (!r.ok) return; // fail-soft: keep last-known
+          const aave = (r.result?.protocols ?? []).find((p) => p.protocol === "aave-v3");
+          const summary: AaveSummary | null =
+            aave && aave.available === true && aave.hasPosition === true
+              ? {
+                  collateralBase: hexToBigInt(aave.totalCollateralBase),
+                  debtBase: hexToBigInt(aave.totalDebtBase),
+                  healthFactor: hexToBigInt(aave.healthFactor),
+                  baseDecimals: aave.baseCurrencyDecimals ?? 8,
+                  reserves: (aave.reserves ?? [])
+                    .map((x) => ({
+                      symbol: x.symbol ?? "?",
+                      decimals: x.decimals ?? 18,
+                      supplied: hexToBigInt(x.supplied),
+                      borrowed: hexToBigInt(x.borrowed),
+                    }))
+                    .filter((x) => x.supplied > 0n || x.borrowed > 0n),
+                }
+              : null;
+          setRows((prev) =>
+            prev.map((p) =>
+              p.address === row.address && p.chain === row.chain
+                ? { ...p, defiAave: summary }
+                : p,
+            ),
+          );
+        }),
+      );
+    },
+    180_000,
+    [activeChain, refreshKey, enabled, rowsKey],
   );
 
   const syncShielded = () => {

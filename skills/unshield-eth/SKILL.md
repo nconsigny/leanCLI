@@ -19,6 +19,15 @@ notes:
 
 # unshield-eth — Privacy Pools withdraw
 
+## Amounts (mandatory)
+
+You never type the withdrawal magnitude. The daemon converted the
+user's amount and published it in the `amounts` table; reference it by
+`amountRef` (never a literal). The amount must be ≤ the shielded
+balance — that check stays daemon-side via `shielded.prepareWithdraw`.
+The withdrawn value flows through decode → simulate → ConfirmGate, and
+the daemon refuses a value it did not derive.
+
 ## When to use
 
 * `unshield <amount> ETH to <recipient>`

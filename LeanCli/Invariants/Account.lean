@@ -14,7 +14,8 @@ theorem acceptedSupportedChainOnly (p : AccountPolicy) :
   intro h
   cases p with
   | mk kind source chainId path localOnly =>
-    cases kind <;> cases source <;> cases path <;> cases localOnly <;>
+    cases kind <;> (try cases ‹SmartAccountKind›) <;>
+      cases source <;> cases path <;> cases localOnly <;>
       simp [accepted, compatible] at h ⊢ <;>
       first | exact h | exact h.left
 
@@ -23,7 +24,8 @@ theorem acceptedLocalOnly (p : AccountPolicy) :
   intro h
   cases p with
   | mk kind source chainId path localOnly =>
-    cases kind <;> cases source <;> cases path <;> cases localOnly <;>
+    cases kind <;> (try cases ‹SmartAccountKind›) <;>
+      cases source <;> cases path <;> cases localOnly <;>
       simp [accepted, compatible] at h ⊢
 
 theorem defaultEoaK1Accepted :
@@ -42,7 +44,8 @@ theorem eoaK1UsesBip39WhenAccepted (p : AccountPolicy) :
   intro h kindEq
   cases p with
   | mk kind source chainId path localOnly =>
-    cases kind <;> cases source <;> cases path <;> cases localOnly <;>
+    cases kind <;> (try cases ‹SmartAccountKind›) <;>
+      cases source <;> cases path <;> cases localOnly <;>
       simp [accepted, compatible] at h kindEq ⊢
 
 end LeanCli.Invariants.Account

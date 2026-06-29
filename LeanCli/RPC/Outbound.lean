@@ -157,12 +157,41 @@ private def appendNetLog (line : String) : IO Unit := do
         h.flush
       catch _ => pure ()
 
-private def logEvent (kind method : String) (extra : Array (String × Json)) : IO Unit := do
+/-- Extract compact display fields (`to`, `sel`) from a JSON-RPC params
+    array so the network monitor can show the inner action of an
+    `eth_call` (target contract + 4-byte selector) on EVERY event, not
+    just request rows — responses log `result`, never `params`. The
+    selector→name mapping is the display layer's job; here we emit only
+    raw facts. Returns `#[]` for shapes that carry no useful target. -/
+private def callDetailFields (params : Json) : Array (String × Json) :=
+  let field? : Json → String → Option Json := fun j k =>
+    match j with
+    | .obj fs => (fs.find? (fun p => p.1 == k)).map Prod.snd
+    | _ => none
+  let asStr? : Json → Option String := fun
+    | .str s => some s
+    | _ => none
+  match params with
+  | .arr elems =>
+    match elems[0]? with
+    | some first =>
+        match (field? first "to" >>= asStr?), (field? first "data" >>= asStr?) with
+        | some to, some data =>
+            #[("to", .str to), ("sel", .str (String.ofList (data.toList.take 10)))]
+        | _, _ =>
+            match asStr? first with
+            | some addr => #[("to", .str addr)]
+            | none      => #[]
+    | none => #[]
+  | _ => #[]
+
+private def logEvent (kind method : String) (params : Json)
+    (extra : Array (String × Json)) : IO Unit := do
   let ts ← IO.monoMsNow
   let fields : Array (String × Json) :=
     #[("ts_ms", .num (Int.ofNat ts)),
       ("kind", .str kind),
-      ("method", .str method)] ++ extra
+      ("method", .str method)] ++ extra ++ callDetailFields params
   appendNetLog (compact (.obj fields))
 
 /-- Outcome of one verified-read attempt. Distinguishes a real JSON-RPC
@@ -224,7 +253,7 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
         if v ≥ 1 then
           let paramsRender := if v ≥ 2 then compact params else "..."
           IO.eprintln s!"[rpc→{via.label}] {method.asString} chainId={chainId} params={paramsRender}"
-        logEvent "request" method.asString
+        logEvent "request" method.asString params
           #[("backend", .str via.label),
             ("host", .str s!"{via.label}.uds"),
             ("transport", .str "loopback"),
@@ -241,7 +270,7 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
             if v ≥ 1 then
               let resRender := if v ≥ 2 then s!" result={compact j}" else ""
               IO.eprintln s!"[rpc←{via.label}] {method.asString} {dt}ms ok{resRender}"
-            logEvent "response" method.asString
+            logEvent "response" method.asString params
               #[("backend", .str via.label),
                 ("host", .str s!"{via.label}.uds"),
                 ("transport", .str "loopback"),
@@ -257,7 +286,7 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
             -- hard-failing or skipping a verifier. "direct is bad" → only ever
             -- after helios AND colibri couldn't serve it.
             if v ≥ 1 then IO.eprintln s!"[rpc✗{via.label}] {method.asString} {dt}ms {e} → direct"
-            logEvent "rpc-error" method.asString
+            logEvent "rpc-error" method.asString params
               #[("backend", .str via.label),
                 ("host", .str s!"{via.label}.uds"),
                 ("transport", .str "loopback"),
@@ -275,7 +304,7 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
             -- its own rpc-error / respawn / disabled events.
             if v ≥ 1 then
               IO.eprintln s!"[rpc✗{via.label}] {method.asString} {dt}ms transport-dead: {reason}"
-            logEvent s!"{via.label}-disabled" method.asString
+            logEvent s!"{via.label}-disabled" method.asString params
               #[("backend", .str via.label),
                 ("host", .str s!"{via.label}.uds"),
                 ("transport", .str "loopback"),
@@ -292,7 +321,7 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
     let chainTag : String := match endpoint.chainId with
       | none => "unknown"
       | some n => toString n
-    logEvent "denied" method.asString
+    logEvent "denied" method.asString params
       #[("url", .str endpoint.url),
         ("host", .str host),
         ("backend", .str endpoint.backend.asString),
@@ -304,7 +333,7 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
   if v ≥ 1 then
     let paramsRender := if v ≥ 2 then compact params else "..."
     IO.eprintln s!"[rpc→] {method.asString} url={endpoint.url} params={paramsRender}"
-  logEvent "request" method.asString
+  logEvent "request" method.asString params
     #[("url", .str endpoint.url),
       ("host", .str host),
       ("backend", .str endpoint.backend.asString),
@@ -329,7 +358,7 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
     match parse raw.body.trimAscii.toString with
     | .error err =>
         if v ≥ 1 then IO.eprintln s!"[rpc✗] {method.asString} {dt}ms parse-error"
-        logEvent "parse-error" method.asString
+        logEvent "parse-error" method.asString params
           (#[("ms", .num (Int.ofNat dt)), ("error", .str err)] ++ txExtra)
         pure (.error s!"invalid JSON-RPC response: {err}")
     | .ok json =>
@@ -338,23 +367,23 @@ def call (policy : Policy) (endpoint : Endpoint) (method : RpcMethod)
             if v ≥ 1 then
               let resRender := if v ≥ 2 then s!" result={compact result}" else ""
               IO.eprintln s!"[rpc←] {method.asString} {dt}ms ok{resRender}"
-            logEvent "response" method.asString
+            logEvent "response" method.asString params
               (#[("ms", .num (Int.ofNat dt)), ("result", result)] ++ txExtra)
             pure (.ok result)
         | _, some err =>
             if v ≥ 1 then IO.eprintln s!"[rpc✗] {method.asString} {dt}ms error={compact err}"
-            logEvent "rpc-error" method.asString
+            logEvent "rpc-error" method.asString params
               (#[("ms", .num (Int.ofNat dt)), ("error", err)] ++ txExtra)
             pure (.error s!"Ethereum JSON-RPC error: {compact err}")
         | _, _ =>
             if v ≥ 1 then IO.eprintln s!"[rpc✗] {method.asString} {dt}ms malformed"
-            logEvent "malformed" method.asString
+            logEvent "malformed" method.asString params
               (#[("ms", .num (Int.ofNat dt))] ++ txExtra)
             pure (.error "malformed Ethereum JSON-RPC response")
   catch e =>
     let dt := (← IO.monoMsNow) - t0
     if v ≥ 1 then IO.eprintln s!"[rpc✗] {method.asString} {dt}ms exception={e.toString}"
-    logEvent "exception" method.asString
+    logEvent "exception" method.asString params
       #[("ms", .num (Int.ofNat dt)),
         ("host", .str host),
         ("error", .str e.toString)]
@@ -392,6 +421,14 @@ def ethCall (policy : Policy) (endpoint : Endpoint)
       .str block
     ]) via?
 
+/-- `eth_getCode(address, block)`. Returns the deployed bytecode as a hex
+string; `"0x"` (or empty) means no contract code at the address. Used to
+filter out non-contract candidates before speculative metadata reads. -/
+def getCode (policy : Policy) (endpoint : Endpoint)
+    (address : String) (block : String := "latest")
+    (via? : Option VerifyVia := none) : IO (Except String Json) :=
+  call policy endpoint .getCode (.arr #[.str address, .str block]) via?
+
 def sendRawTransaction (policy : Policy) (endpoint : Endpoint)
     (rawTx : String) : IO (Except String Json) :=
   -- Writes never proofable; never accepts via?.
@@ -425,10 +462,24 @@ contract-address filter. Used by address-freshness scans where we want
 "any ERC-20 contract emitted a Transfer involving this address" across
 the whole chain in the window. Note: public providers may rate-limit
 or cap this heavier query — callers must treat failures as "unknown",
-not "0 link". -/
+not "0 link".
+
+This deliberately takes **no** `VerifyVia`: it always dials the configured
+RPC directly, never the light-client verifier. An *address-filtered*
+`getLogs` (single contract) is cheap for a light client to verify, but an
+*unfiltered* sweep asks the verifier to fetch and consensus-verify every
+matching log across ALL contracts over thousands of blocks. Helios will
+still treat such a range as "in-window" when it is under its ~8191-block
+verification horizon and attempt the verified path — which stalls for
+minutes on the unfiltered case (observed on the approvals audit). Every
+caller here is a display-only signal (freshness, approvals audit, transfer
+history) that never gates a signature, so serving it unverified is
+consistent with the trust posture — the same posture helios itself takes
+when it bypasses out-of-window ranges. DIVERGENCE from the bridge's
+"verify recent history" intent, scoped narrowly to the unfiltered sweep. -/
 def getLogsAnyAddress (policy : Policy) (endpoint : Endpoint)
-    (fromBlockHex toBlockHex : String) (topics : Array Json)
-    (via? : Option VerifyVia := none) : IO (Except String Json) :=
+    (fromBlockHex toBlockHex : String) (topics : Array Json) :
+    IO (Except String Json) :=
   call policy endpoint .getLogs
     (.arr #[
       .obj #[
@@ -436,6 +487,6 @@ def getLogsAnyAddress (policy : Policy) (endpoint : Endpoint)
         ("toBlock", .str toBlockHex),
         ("topics", .arr topics)
       ]
-    ]) via?
+    ]) none
 
 end LeanCli.RPC.Outbound

@@ -6,6 +6,7 @@ import LeanCli.Daemon.SkillsStore
 import LeanCli.Daemon.State
 import LeanCli.Encoding.Json
 import LeanCli.Ethereum.Address
+import LeanCli.Ethereum.Erc20
 import LeanCli.Ethereum.Ens
 import LeanCli.Ethereum.Intent
 import LeanCli.Ethereum.IntentCanonical
@@ -14,6 +15,9 @@ import LeanCli.Ethereum.IntentJson
 import LeanCli.Ethereum.Ownership
 import LeanCli.Keystore.Tpm2Runtime
 import LeanCli.Wallet.EoaStore
+import LeanCli.Wallet.SphincsHybridStore
+import LeanCli.Aave.Prepare
+import LeanCli.LlmAgent.AmountGuard
 import LeanCli.LlmAgent.Bridge
 import LeanCli.LlmAgent.DirectSynth
 import LeanCli.LlmAgent.IntentParser
@@ -142,6 +146,8 @@ private def selectorToActionTag (data : String) : Option String :=
     -- ERC-20 standard surface (Erc20.encodeTransfer / encodeApprove).
     | "0xa9059cbb" => some "erc20Transfer"
     | "0x095ea7b3" => some "erc20Approve"
+    -- Aave Sepolia test faucet mint(address,address,uint256).
+    | "0xc6c3bbe6" => some "faucet.mint"
     -- Uniswap V3 SwapRouter02 — token→token exact-input single-pool.
     | "0x414bf389" => some "uniswapV3SwapSingle"
     -- Aave V3 Pool surface (see LeanCli/Aave/V3Pool.lean).
@@ -160,6 +166,112 @@ private def selectorToActionTag (data : String) : Option String :=
     -- ConfirmGate prompt.
     | "0x34fcd5be" => some "executeBatch"
     | _ => none
+
+/-- Parser-driven skill selection (primary). Map the deterministic
+    `RuleParser` action tag to the single most-specific skill directory.
+    With a small context window (≈32k on the local Qwen3.6 setup), the
+    value is precision: inject exactly the verb's skill, not a pile of
+    protocol docs. Exhaustive over the action tags that HAVE a dedicated
+    skill; tags with no skill yet (`wrap`/`unwrap`, `bridge`,
+    `faucet.mint`, `stake`/`unstake`, `protocol.*`) return `none` and
+    fall through to the phrase scan + the agent daemon's keyword trigger
+    matcher. Keep this in sync with the `skills/` tree. -/
+private def skillForActionTag (tag : String) (sawRevoke : Bool) : Option String :=
+  match tag with
+  | "nativeTransfer"            => some "send-native"
+  | "erc20Transfer"             => some "send-erc20"
+  | "erc20Approve"              => some (if sawRevoke then "revoke-approval" else "approve-erc20")
+  | "swap"                      => some "swap-uniswap-v3"
+  | "aaveSupply"                => some "aave"
+  | "aaveWithdraw"              => some "aave"
+  | "aaveBorrow"                => some "aave"
+  | "aaveRepay"                 => some "aave"
+  | "shielded.deposit"          => some "shield-eth"
+  | "shielded.withdraw"         => some "unshield-eth"
+  | "shielded.railgun.shield"   => some "railgun"
+  | "shielded.railgun.unshield" => some "railgun"
+  | "shielded.tornado.deposit"  => some "tornado-cash"
+  | "shielded.tornado.withdraw" => some "tornado-cash"
+  | "approvals.audit"           => some "audit-approvals"
+  | "address.fresh"             => some "fresh-address"
+  | "liquity.openTrove"         => some "bold-liquity"
+  | "liquity.closeTrove"        => some "bold-liquity"
+  | "ens.register"              => some "register-ens-name"
+  | "ens.renew"                 => some "ens"
+  | "ens.setAddr"               => some "ens"
+  | "ens.setName"               => some "ens"
+  | _                           => none
+
+/-- Phrase-scan fallback (secondary). Fires only when the action tag
+    yielded no skill — i.e. `RuleParser` returned `unknown`/`rejected` or
+    an unmapped action. Best-effort context only: `IntentParser` still
+    validates the actual emitted intent and `ConfirmGate` is the trust
+    anchor, so a loose match costs nothing but a slightly-off skill body.
+    Order tightest-first: privacy/audit/fresh before the generic
+    send/approve/swap verbs (which the templates usually catch anyway),
+    and `send` last as the catch-all. -/
+private def skillForPhrases (promptLower : String) : String :=
+  let containsAny (needles : List String) : Bool :=
+    needles.any (fun n => (promptLower.splitOn n).length > 1)
+  if containsAny ["unshield", "withdraw from privacy",
+                  "exit privacy pool", "exit the privacy pool"] then
+    "unshield-eth"
+  else if containsAny ["shield ", "privacy pool", "privacy-pool",
+                       "make this private", "make it private",
+                       "make this anonymous", "deposit privately"] then
+    "shield-eth"
+  else if containsAny ["audit approvals", "list approvals",
+                       "show approvals", "show my approvals",
+                       "check approvals", "check allowances",
+                       "check my approvals", "check my allowances",
+                       "what have i approved", "list allowances",
+                       "current allowances", "outgoing approvals"] then
+    "audit-approvals"
+  else if containsAny ["fresh address", "fresh wallet",
+                       "rotate identity", "rotate to a new",
+                       "new identity", "generate a new wallet",
+                       "generate a fresh"] then
+    "fresh-address"
+  else if containsAny ["revoke", "cancel approval", "remove allowance",
+                       "remove approval"] then
+    "revoke-approval"
+  else if containsAny ["approve ", "allowance", "grant approval"] then
+    "approve-erc20"
+  else if containsAny ["swap ", "trade ", "exchange ", " into ",
+                       "convert "] then
+    "swap-uniswap-v3"
+  else if containsAny ["supply ", "borrow ", "repay ", "lend "] then
+    "aave"
+  else if containsAny ["send ", "transfer ", "pay "] then
+    "send-native"
+  else ""
+
+/-- Uniform output re-check for a built `chat.draft` response. If the
+    response carries an `encoded` leaf, re-decode its native `value` and
+    calldata `data` and assert every magnitude equals a Lean-derived
+    `allowed` amount (`AmountGuard.revalidate`). This makes the
+    verify-at-output guarantee uniform across BOTH the `propose_send`
+    tool path and the prose-JSON `IntentParser` path — the latter lets
+    the model write an amount straight into the Intent, so it needs the
+    same backstop. Responses with no `encoded` leaf (prepare / audit /
+    create directives, asks) pass through: their calldata, when it
+    exists, is Lean-encoded by the downstream `prepare_*` RPC. -/
+private def guardEncodedAmounts (resp : Json) (allowed : List Nat) :
+    Except String Json :=
+  match getField "encoded" resp with
+  | some enc =>
+      let value : Nat :=
+        match getField "value" enc with
+        | some (.str s) =>
+            let body := if s.startsWith "0x" then (s.drop 2).toString else s
+            (LeanCli.LlmAgent.AmountGuard.hexToNat? body).getD 0
+        | some j => (asNat j).getD 0
+        | none => 0
+      let data := (getField "data" enc >>= asString).getD "0x"
+      match LeanCli.LlmAgent.AmountGuard.revalidate value data allowed with
+      | .ok ()  => .ok resp
+      | .error m => .error m
+  | none => .ok resp
 
 /-- Build the `chat.draft` response JSON for a parsed/synthesized Intent.
 
@@ -360,6 +472,19 @@ private def swapFrameEncoded (f : LeanCli.Swap.Prepare.TxFrame) (chainId : Nat) 
     ("chainId", .num (Int.ofNat chainId))
   ]
 
+/-- Encode an Aave prepared frame as the `encoded` object the TUI feeds
+    into `tx.simulate` + ConfirmGate. Includes `sender` so chat can skip
+    the wallet picker when the prompt named a slot. -/
+private def aaveFrameEncoded
+    (f : LeanCli.Aave.Prepare.TxFrame) (chainId : Nat) (sender : String) : Json :=
+  .obj #[
+    ("to",      .str f.to),
+    ("value",   .str (natQuantityHex f.value)),
+    ("data",    .str f.data),
+    ("chainId", .num (Int.ofNat chainId)),
+    ("sender",  .str sender)
+  ]
+
 /-- Map a deterministic `prepareUniswapV3Swap` result into a `chat.draft`
     response. `.ready` drafts the swap leg directly; `.needsApproval`
     drafts the ERC-20 approve leg FIRST — re-issuing the same swap prompt
@@ -395,6 +520,135 @@ private def swapResultToDraftJson
         ("canonical",       .str s!"Swap not prepared ({kind})"),
         ("swapError",       .str msg)
       ]
+
+/-- Map an Aave prepare result into a `chat.draft` response. For a
+    SPHINCS native-ETH supply this is normally a single `ready`
+    executeBatch frame. Plain EOA ERC-20 supply can still surface the
+    approval leg first. -/
+private def aaveResultToDraftJson
+    (result : LeanCli.Aave.Prepare.PrepareResult)
+    (baseFields : Array (String × Json)) (chainId : Nat) (sender : String)
+    (actionTag : String) (noun : String) : Json :=
+  let common := baseFields ++ #[("backend", .str "wallet-direct-aave")]
+  match result with
+  | .ready action summary =>
+      .obj <| common ++ #[
+        ("intentActionTag", .str actionTag),
+        ("canonical",       .str summary),
+        ("encoded",         aaveFrameEncoded action chainId sender)
+      ]
+  | .needsApproval approve _action _current _required summary =>
+      .obj <| common ++ #[
+        ("intentActionTag", .str "erc20Approve"),
+        ("canonical",       .str s!"Approve Aave Pool (leg 1 of 2) — then {summary}"),
+        ("aaveNote",        .str s!"pool approval first; re-issue the Aave {noun} to broadcast leg 2"),
+        ("encoded",         aaveFrameEncoded approve chainId sender)
+      ]
+  | .err kind msg =>
+      .obj <| common ++ #[
+        ("intentActionTag", .str actionTag),
+        ("canonical",       .str s!"Aave {noun} not prepared ({kind})"),
+        ("aaveError",       .str msg)
+      ]
+
+private structure AaveBatchLeg where
+  verb : String
+  amount : String
+  asset : String
+  deriving Repr
+
+private def stripCashtagLocal (s : String) : String :=
+  if s.startsWith "$" then (s.drop 1).toString else s
+
+private def isAaveRetailVerb : String → Bool
+  | "supply" | "deposit" | "withdraw" | "borrow" | "repay" => true
+  | _ => false
+
+private def canonicalAaveVerb : String → String
+  | "deposit" => "supply"
+  | v => v
+
+private def firstConjunctionIndex (toks : List String) : Option Nat :=
+  (List.range toks.length).find? fun i =>
+    match toks[i]? with
+    | some "and" | some "then" => true
+    | _ => false
+
+private def splitAtConjunction (toks : List String) :
+    Option (List String × List String) := do
+  let i ← firstConjunctionIndex toks
+  some (toks.take i, toks.drop (i + 1))
+
+private def parseAaveBatchLeg (toks : List String) : Option AaveBatchLeg := do
+  let verbIdx ← (List.range toks.length).find? fun i =>
+    match toks[i]? with
+    | some v => isAaveRetailVerb v
+    | none => false
+  let verb ← toks[verbIdx]?
+  let amountRaw ← toks[verbIdx + 1]?
+  let amount ← LeanCli.LlmAgent.RuleParser.normalizeAmount amountRaw
+  let assetRaw ← toks[verbIdx + 2]?
+  let asset := stripCashtagLocal assetRaw
+  some {
+    verb := canonicalAaveVerb verb
+    amount := amount
+    asset := asset
+  }
+
+private def parseTwoAaveBatchLegs (prompt : String) :
+    Option (AaveBatchLeg × AaveBatchLeg) := do
+  let toks := LeanCli.LlmAgent.RuleParser.tokenize prompt
+  if !(toks.any (fun t => t = "aave" || t = "aavev3")) then none
+  let (left, right) ← splitAtConjunction toks
+  let a ← parseAaveBatchLeg left
+  let b ← parseAaveBatchLeg right
+  some (a, b)
+
+private def aaveDecimalsForAsset (chainId : Nat) (asset : String) : Option Nat := do
+  let chain ← LeanCli.Aave.Prepare.chainIdToEnum? chainId
+  let (tok?, _) ← LeanCli.Aave.Prepare.resolveAsset
+    (LeanCli.Aave.Prepare.poolAssetInput asset) chain
+  match tok? with
+  | some t => some t.decimals
+  | none => some 18
+
+private def prepareAaveBatchLeg
+    (chainId : Nat) (sender : String) (shim : LeanCli.Aave.Prepare.ChainEthCallShim)
+    (leg : AaveBatchLeg) : IO LeanCli.Aave.Prepare.PrepareResult := do
+  let some decimals := aaveDecimalsForAsset chainId leg.asset
+    | pure (.err "unknown_asset" s!"asset {leg.asset} is not known to the Aave market on chainId {chainId}")
+  let some amountBase := LeanCli.Util.Units.parseUnits leg.amount decimals
+    | pure (.err "bad_amount" s!"could not parseUnits {leg.amount} with decimals {decimals}")
+  match leg.verb with
+  | "supply" =>
+      if LeanCli.Aave.Prepare.isNativeEthInput leg.asset then
+        LeanCli.Aave.Prepare.prepareNativeEthSupplySmart
+          chainId sender sender amountBase shim
+      else
+        LeanCli.Aave.Prepare.prepareSupply
+          chainId sender sender leg.asset amountBase shim
+  | "withdraw" =>
+      LeanCli.Aave.Prepare.prepareWithdraw
+        chainId sender sender leg.asset amountBase shim
+  | "borrow" =>
+      LeanCli.Aave.Prepare.prepareBorrow
+        chainId sender sender leg.asset amountBase
+        LeanCli.Aave.V3Pool.InterestRateMode.variable shim
+  | "repay" =>
+      LeanCli.Aave.Prepare.prepareRepay
+        chainId sender sender leg.asset amountBase
+        LeanCli.Aave.V3Pool.InterestRateMode.variable shim
+  | _ =>
+      pure (.err "unsupported_batch_leg" s!"Aave batch leg is not supported yet: {leg.verb}")
+
+private def readyFrameOrError
+    (result : LeanCli.Aave.Prepare.PrepareResult) :
+    Except (String × String) (LeanCli.Aave.Prepare.TxFrame × String) :=
+  match result with
+  | .ready frame summary => .ok (frame, summary)
+  | .needsApproval _ _ _ _ summary =>
+      .error ("approval_required", s!"Aave batch leg needs an approval first: {summary}")
+  | .err kind msg => .error (kind, msg)
 
 /-- Handle every `chat.*` JSON-RPC method. -/
 def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
@@ -474,6 +728,15 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   walletEntries := walletEntries ++
                     [(subKey, acct.address, some (rec.name, acct.path))]
             | .error _ => pure ()
+          let sphincsNames ← LeanCli.Wallet.SphincsHybridStore.listSlotNames
+          for name in sphincsNames do
+            match ← LeanCli.Wallet.SphincsHybridStore.readRecord name with
+            | .ok rec =>
+                match rec.smartAccountAddress with
+                | some addr =>
+                    walletEntries := walletEntries ++ [(rec.name, addr, none)]
+                | none => pure ()
+            | .error _ => pure ()
           let bookEntries ← LeanCli.Daemon.AddressBook.loadIO
           let book := match bookEntries with
             | .ok xs => xs
@@ -523,8 +786,9 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
           let (regex3, w_to) ← resolveLocal "to" regex2
           let (regex4, w_spender) ← resolveLocal "spender" regex3
           let (regex5, w_from) ← resolveLocal "from" regex4
+          let (regex6, w_wallet) ← resolveLocal "wallet" regex5
           let ownerships : List LeanCli.Ethereum.Ownership.Witness :=
-            [w_to, w_spender, w_from].filterMap id
+            [w_to, w_spender, w_from, w_wallet].filterMap id
           -- 1a-ter. Deterministic amount conversion. Models are
           -- documented unreliable at unit conversion (we caught gpt-oss
           -- emit `1e15` for "0.01 ETH" instead of `1e16`). The daemon
@@ -541,17 +805,39 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
             else match LeanCli.Swap.Tokens.findBySymbol asset with
                  | some t => some t.decimals
                  | none => none
-          let regex := match regex5.field? "amount", regex5.field? "asset" with
+          let regex := match regex6.field? "amount", regex6.field? "asset" with
             | some amt, some asset =>
                 match decimalsForAsset asset with
-                | none => regex5
+                | none => regex6
                 | some d =>
                     match LeanCli.Util.Units.parseUnits amt d with
                     | some n =>
-                        (regex5.setField "amountBase" (toString n)).note
+                        (regex6.setField "amountBase" (toString n)).note
                           s!"parseUnits {amt} {d} = {n} ({asset})"
-                    | none => regex5.note s!"could not parseUnits {amt} with decimals {d}"
-            | _, _ => regex5
+                    | none => regex6.note s!"could not parseUnits {amt} with decimals {d}"
+            | _, _ => regex6
+          -- 1a-quater. Publish the Lean-converted amount as a referenceable
+          -- table entry. The model addresses an amount by its `ref`
+          -- ("amt1") and is forbidden — by the `amountRef`-only tool
+          -- schemas and the `revalidateAmounts` output check — from ever
+          -- typing a magnitude. `base` crosses the wire as a decimal
+          -- string (JSON numbers truncate past 2^53). Today we publish at
+          -- most one entry (the single amount the templates extract);
+          -- multi-amount prompts ("swap A for B at most C") and
+          -- balance-relative amounts ("half", "all") are a Lean-side
+          -- follow-up — they must also be daemon-derived, never modelled.
+          let amountsJson : Json :=
+            match regex.field? "amount", regex.field? "asset",
+                  regex.field? "amountBase" with
+            | some amt, some asset, some baseStr =>
+                .arr #[ .obj #[
+                  ("ref",      .str "amt1"),
+                  ("human",    .str amt),
+                  ("symbol",   .str asset.toUpper),
+                  ("base",     .str baseStr),
+                  ("decimals", .num (Int.ofNat ((decimalsForAsset asset).getD 0)))
+                ]]
+            | _, _, _ => .arr #[]
           let _ := chainEnumOpt0  -- chainEnumOpt rebuilt below; this binding keeps the helper alive while we widen the scope of the chain enum after the upcoming chainContext step
           -- Encode each ownership witness as a self-describing object.
           -- The TUI parses `status` to pick a badge color; `derivationPath`
@@ -582,6 +868,18 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               ("confidence", .str (LeanCli.Ethereum.Intent.Confidence.toString regex.confidence)),
               ("ownerships", .arr (ownerships.map ownershipJson |>.toArray))
             ]
+          -- Lean-derived base-units amounts this turn authorizes. The
+          -- output re-check (`AmountGuard.revalidate`) admits a drafted
+          -- magnitude only if it appears here — the same value the
+          -- daemon published to the model as the `amt1` handle. Empty
+          -- when the prompt carried no parseable amount, in which case a
+          -- non-zero drafted value/amount is refused (fail-closed).
+          let allowedBases : List Nat :=
+            match regex.field? "amountBase" with
+            | some s => match s.toNat? with
+                        | some n => [n]
+                        | none   => []
+            | none => []
           -- 1b. Skill picker. For erc20Approve, we pick between the
           -- two sibling skills based on what the regex saw: a revoke
           -- verb or amount=0 → revoke-approval; otherwise the general
@@ -609,58 +907,10 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               || (regex.field? "verb" = some "cancel")
               || (regex.field? "verb" = some "remove")
           let promptLower := prompt.toLower
-          let containsAny (needles : List String) : Bool :=
-            needles.any (fun n => (promptLower.splitOn n).length > 1)
+          -- Parser-driven first (precise), phrase-scan fallback second.
           let skillName : String :=
-            match actionTag with
-            | "nativeTransfer"    => "send-native"
-            | "erc20Transfer"     => "send-erc20"
-            | "erc20Approve"      =>
-                if regexSawRevoke then "revoke-approval" else "approve-erc20"
-            -- New explicit action tags from matchShielded /
-            -- matchAuditApprovals / matchFreshAddress. The phrase-
-            -- fallback below remains as a safety net for aliased
-            -- forms the templates don't cover (e.g. "make this
-            -- anonymous").
-            | "shielded.deposit"  => "shield-eth"
-            | "shielded.withdraw" => "unshield-eth"
-            -- Railgun chat shortcut (PR 1). Both shield/unshield share
-            -- the `railgun` skill so the model sees the SDK-specific
-            -- guidance (paymaster, POI delay, viewing keys) when it
-            -- needs to clarify post-DirectSynth.
-            | "shielded.railgun.shield"   => "railgun"
-            | "shielded.railgun.unshield" => "railgun"
-            -- Tornado Cash chat shortcut (PR 2). Same skill for both
-            -- legs; the skill body covers the fixed-denomination
-            -- constraint + the note-handling caveats.
-            | "shielded.tornado.deposit"  => "tornado-cash"
-            | "shielded.tornado.withdraw" => "tornado-cash"
-            | "approvals.audit"   => "audit-approvals"
-            | "address.fresh"     => "fresh-address"
-            | "swap"              => "swap-uniswap-v3"
-            | _                   =>
-                -- Order tightest-first: "unshield" before "shield " to
-                -- keep the prefix collision off; rotate/fresh phrases
-                -- are kept specific so generic "send to a new address"
-                -- doesn't get hijacked into fresh-address.
-                if containsAny ["unshield", "withdraw from privacy",
-                                "exit privacy pool", "exit the privacy pool"] then
-                  "unshield-eth"
-                else if containsAny ["shield ", "privacy pool", "privacy-pool",
-                                     "make this private", "make it private",
-                                     "make this anonymous", "deposit privately"] then
-                  "shield-eth"
-                else if containsAny ["audit approvals", "list approvals",
-                                     "show approvals", "show my approvals",
-                                     "what have i approved", "list allowances",
-                                     "current allowances", "outgoing approvals"] then
-                  "audit-approvals"
-                else if containsAny ["fresh address", "fresh wallet",
-                                     "rotate identity", "rotate to a new",
-                                     "new identity", "generate a new wallet",
-                                     "generate a fresh"] then
-                  "fresh-address"
-                else ""
+            (skillForActionTag actionTag regexSawRevoke).getD
+              (skillForPhrases promptLower)
           let skillBody? : Option String ←
             if skillName.isEmpty then pure none
             else LeanCli.Daemon.SkillsStore.readBody skillName
@@ -785,23 +1035,171 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
           -- the daemon already has the answer for.
           let isResolvedAddr (s : String) : Bool :=
             (s.startsWith "0x" || s.startsWith "0X") && s.length = 42
+          let resolveWalletName? (s : String) : Option String :=
+            let lower := s.toLower
+            (walletEntries.find? (fun kv => kv.fst.toLower = lower)).map (fun e => e.snd.fst)
           let effectiveSenderAddr? : Option String :=
             match regex.field? "from" with
-            | some s => if isResolvedAddr s then some s else defaultSenderAddr?
+            | some s =>
+                if isResolvedAddr s then some s
+                else (resolveWalletName? s).orElse (fun _ => defaultSenderAddr?)
             | none   => defaultSenderAddr?
+          let isAavePrepareAction : Bool :=
+            (regex.action == LeanCli.Ethereum.Intent.Action.aaveSupply
+              || regex.action == LeanCli.Ethereum.Intent.Action.aaveWithdraw
+              || regex.action == LeanCli.Ethereum.Intent.Action.aaveBorrow
+              || regex.action == LeanCli.Ethereum.Intent.Action.aaveRepay)
+              && (regex.confidence != LeanCli.Ethereum.Intent.Confidence.rejected)
           let earlyReturn : Option Json :=
-            match LeanCli.LlmAgent.DirectSynth.synth regex chainId effectiveSenderAddr? with
-            | .error _ => none
-            | .ok intent =>
-                some <| chatDraftIntentResponse
-                  intent
-                  #[("regex", regexJson)]
-                  (some "wallet-direct")
-                  chainId
+            if isAavePrepareAction then none
+            else
+              match LeanCli.LlmAgent.DirectSynth.synth regex chainId effectiveSenderAddr? with
+              | .error _ => none
+              | .ok intent =>
+                  some <| chatDraftIntentResponse
+                    intent
+                    #[("regex", regexJson)]
+                    (some "wallet-direct")
+                    chainId
           match earlyReturn with
           | some j => return .ok j
           | none   => pure ()
-          -- 1f. Chain-aware swap short-circuit (no LLM). The regex already
+          -- 1e-bis. Faucet mint short-circuit (no LLM; Sepolia only). The
+          -- Aave test faucet mints its OWN reserve tokens, so the asset is
+          -- resolved off the Aave reserve table (`resolveAsset`) — NOT the
+          -- generic swap registry, whose Sepolia USDC/WETH are different
+          -- contracts (Circle / WETH9) the faucet cannot mint. The amount
+          -- uses the Aave token's own decimals. Mint recipient = signing
+          -- wallet (honors `from <slot>`). Result is the standard `encoded`
+          -- shape, so it flows through tx.simulate (which surfaces the
+          -- per-tx mint cap as a revert) → ConfirmGate like any other tx.
+          let faucetEarly : Option Json ←
+            if regex.action != LeanCli.Ethereum.Intent.Action.faucetMint then pure none
+            else if chainId != 11155111 then pure none  -- faucet is Sepolia-only
+            else
+              match regex.field? "asset", effectiveSenderAddr? with
+              | some asset, some sender =>
+                  match LeanCli.Aave.Prepare.resolveAsset asset .sepolia with
+                  | some (some tok, tokenAddr) =>
+                      match (regex.field? "amount").bind
+                              (fun a => LeanCli.Util.Units.parseUnits a tok.decimals) with
+                      | some amount =>
+                          let data := LeanCli.Ethereum.Erc20.encodeFaucetMint tokenAddr sender amount
+                          let human := LeanCli.Util.Units.formatUnits amount tok.decimals
+                          pure <| some <| .obj #[
+                            ("regex",           regexJson),
+                            ("backend",         .str "wallet-direct-faucet"),
+                            ("intentActionTag", .str "faucet.mint"),
+                            ("canonical",
+                              .str s!"Aave Sepolia faucet: mint {human} {tok.symbol} to {sender}"),
+                            ("encoded", .obj #[
+                              ("to",      .str "0xc959483dba39aa9e78757139af0e9a2edeb3f42d"),
+                              ("value",   .str (natQuantityHex 0)),
+                              ("data",    .str data),
+                              ("chainId", .num (Int.ofNat chainId)),
+                              ("sender",  .str sender)
+                            ])
+                          ]
+                      | none => pure none
+                  | _ => pure none
+              | _, _ => pure none
+          match faucetEarly with
+          | some j => return .ok j
+          | none   => pure ()
+          -- 1f. Aave retail-action short-circuit (no LLM). The daemon's
+          -- typed Aave prepare path resolves market reserves, checks the
+          -- Pool support surface, performs allowance reads where needed,
+          -- and preserves special cases such as native-ETH smart-account
+          -- supply. Keeping withdraw/borrow/repay on this path avoids the
+          -- generic leaf encoder producing a signable tx without those
+          -- protocol checks or verb-specific user-facing labels.
+          let aaveEarly : Option Json ← do
+            let verb? : Option (String × String × String) :=
+              if regex.action == LeanCli.Ethereum.Intent.Action.aaveSupply then
+                some ("supply", "aaveV3Supply", "supply")
+              else if regex.action == LeanCli.Ethereum.Intent.Action.aaveWithdraw then
+                some ("withdraw", "aaveV3Withdraw", "withdraw")
+              else if regex.action == LeanCli.Ethereum.Intent.Action.aaveBorrow then
+                some ("borrow", "aaveV3Borrow", "borrow")
+              else if regex.action == LeanCli.Ethereum.Intent.Action.aaveRepay then
+                some ("repay", "aaveV3Repay", "repay")
+              else if ((regex.field? "verb" == some "supply" || regex.field? "verb" == some "deposit")
+                    && ((regex.field? "protocol").map (fun p => p.toLower.startsWith "aave")).getD false) then
+                some ("supply", "aaveV3Supply", "supply")
+              else none
+            if !isAavePrepareAction && verb?.isNone then pure none
+            else
+              match verb?, effectiveSenderAddr?, regex.field? "asset", regex.field? "amountBase" with
+              | some (verb, actionTag, noun), some sender, some asset, some amountBaseStr =>
+                  match amountBaseStr.toNat? with
+                  | none => pure none
+                  | some amountBase =>
+                    let chainName : Option String :=
+                      if chainId = 1 then some "mainnet"
+                      else if chainId = 11155111 then some "sepolia" else none
+                    match endpointForChain cfg chainName with
+                    | .error _ => pure none
+                    | .ok ep =>
+                      let shim : LeanCli.Aave.Prepare.ChainEthCallShim :=
+                        fun to data cid => do
+                          let via? ← verifiedReadVia state cid ep
+                          match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep to data "latest" via? with
+                          | .ok ret =>
+                              match asString ret with
+                              | some hex => pure (.ok hex)
+                              | none     => pure (.error "non-string return from eth_call")
+                          | .error e => pure (.error e)
+                      let accountKind ← discoverAccountKind sender
+                      let result ←
+                        match verb with
+                        | "supply" =>
+                            if LeanCli.Aave.Prepare.isNativeEthInput asset then
+                              if accountKind.isSmartWallet then
+                                LeanCli.Aave.Prepare.prepareNativeEthSupplySmart
+                                  chainId sender sender amountBase shim
+                              else
+                                pure (.err "native_eth_requires_wrap"
+                                  "Aave V3 Pool accepts ERC-20 WETH, not native ETH. For an EOA, wrap ETH to WETH first, then supply WETH.")
+                            else
+                              LeanCli.Aave.Prepare.prepareSupply
+                                chainId sender sender asset amountBase shim
+                        | "withdraw" =>
+                            LeanCli.Aave.Prepare.prepareWithdraw
+                              chainId sender sender asset amountBase shim
+                        | "borrow" =>
+                            LeanCli.Aave.Prepare.prepareBorrow
+                              chainId sender sender asset amountBase
+                              LeanCli.Aave.V3Pool.InterestRateMode.variable shim
+                        | "repay" =>
+                            LeanCli.Aave.Prepare.prepareRepay
+                              chainId sender sender asset amountBase
+                              LeanCli.Aave.V3Pool.InterestRateMode.variable shim
+                        | _ => pure (.err "unknown_action" s!"unknown Aave action: {verb}")
+                      let finalResult :=
+                        LeanCli.Aave.Prepare.maybeBatch sender chainId accountKind result
+                      pure (some (aaveResultToDraftJson finalResult #[("regex", regexJson)] chainId sender actionTag noun))
+              | _, _, _, _ => pure none
+          match aaveEarly with
+          | some j => return .ok j
+          | none   =>
+              let looksLikeAaveSupply :=
+                ((regex.action == LeanCli.Ethereum.Intent.Action.aaveSupply)
+                  || ((regex.field? "verb" == some "supply" || regex.field? "verb" == some "deposit")
+                      && ((regex.field? "protocol").map (fun p => p.toLower.startsWith "aave")).getD false))
+                  && (regex.confidence != LeanCli.Ethereum.Intent.Confidence.rejected)
+              if looksLikeAaveSupply
+                  && ((regex.field? "asset").map LeanCli.Aave.Prepare.isNativeEthInput).getD false
+                  && (regex.field? "amountBase").isSome
+                  && effectiveSenderAddr?.isNone then
+                return .ok <| .obj #[
+                  ("regex",   regexJson),
+                  ("backend", .str "wallet-direct-aave"),
+                  ("intentActionTag", .str "aaveV3Supply"),
+                  ("canonical", .str "Aave supply not prepared (sender unresolved)"),
+                  ("aaveError", .str "Could not resolve the wallet in the prompt to a local EOA or SPHINCS smart-account address. Check the slot name in `account.list`.")
+                ]
+              else pure ()
+          -- 1g. Chain-aware swap short-circuit (no LLM). The regex already
           -- recognizes `swap <a> <X> to <Y>` (and the `with <name>` signing
           -- hint); here we COMPLETE the missing fields deterministically
           -- rather than hand the prompt to the agent — which free-plans and
@@ -861,32 +1259,123 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
           match swapEarly with
           | some j => return .ok j
           | none   => pure ()
+          -- 1h. Atomic two-leg Aave batch for SPHINCS/smart accounts.
+          -- This is intentionally deterministic and narrow: exactly two
+          -- retail Aave legs joined by `and` / `then`, both prepared by the
+          -- existing Aave prepare layer, then wrapped into one
+          -- executeBatch frame. If any leg needs a separate approval or the
+          -- sender is not a smart account, fall through to the hard
+          -- clarification below instead of proposing a partial sequence.
+          let aaveBatchEarly : Option Json ← do
+            match parseTwoAaveBatchLegs prompt with
+            | none => pure none
+            | some (legA, legB) =>
+                let toks := LeanCli.LlmAgent.RuleParser.tokenize prompt
+                let senderFromPrompt? : Option String :=
+                  walletEntries.findSome? fun entry =>
+                    let name := entry.fst.toLower
+                    if toks.any (fun t => t = name) then
+                      some entry.snd.fst
+                    else none
+                let sender? := senderFromPrompt? <|> effectiveSenderAddr?
+                match sender? with
+                | none => pure none
+                | some sender =>
+                    let accountKind ← discoverAccountKind sender
+                    if !accountKind.isSmartWallet then
+                      pure none
+                    else
+                      let chainName : Option String :=
+                        if chainId = 1 then some "mainnet"
+                        else if chainId = 11155111 then some "sepolia" else none
+                      match endpointForChain cfg chainName with
+                      | .error _ => pure none
+                      | .ok ep =>
+                          let shim : LeanCli.Aave.Prepare.ChainEthCallShim :=
+                            fun to data cid => do
+                              let via? ← verifiedReadVia state cid ep
+                              match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep to data "latest" via? with
+                              | .ok ret =>
+                                  match asString ret with
+                                  | some hex => pure (.ok hex)
+                                  | none     => pure (.error "non-string return from eth_call")
+                              | .error e => pure (.error e)
+                          let resultA ← prepareAaveBatchLeg chainId sender shim legA
+                          let resultB ← prepareAaveBatchLeg chainId sender shim legB
+                          match readyFrameOrError resultA, readyFrameOrError resultB with
+                          | .ok (frameA, summaryA), .ok (frameB, summaryB) =>
+                              let batched :=
+                                LeanCli.Aave.Prepare.batchTxFrames
+                                  sender chainId [frameA, frameB]
+                              let summary :=
+                                s!"Aave V3 atomic batch via SPHINCS executeBatch: 1) {summaryA}; 2) {summaryB}"
+                              pure <| some <| .obj #[
+                                ("regex",          regexJson),
+                                ("backend",        .str "wallet-direct-aave-batch"),
+                                ("intentActionTag", .str "executeBatch"),
+                                ("canonical",       .str summary),
+                                ("encoded",         aaveFrameEncoded batched chainId sender)
+                              ]
+                          | .error (kind, msg), _ =>
+                              pure <| some <| .obj #[
+                                ("regex",          regexJson),
+                                ("backend",        .str "wallet-direct-aave-batch"),
+                                ("intentActionTag", .str "executeBatch"),
+                                ("canonical",       .str s!"Aave batch not prepared ({kind})"),
+                                ("aaveError",       .str msg)
+                              ]
+                          | _, .error (kind, msg) =>
+                              pure <| some <| .obj #[
+                                ("regex",          regexJson),
+                                ("backend",        .str "wallet-direct-aave-batch"),
+                                ("intentActionTag", .str "executeBatch"),
+                                ("canonical",       .str s!"Aave batch not prepared ({kind})"),
+                                ("aaveError",       .str msg)
+                              ]
+          match aaveBatchEarly with
+          | some j => return .ok j
+          | none => pure ()
           -- 1f. Regex-clarification short-circuit. When the regex has
-          -- already emitted a deliberate `.rejected` draft with a
-          -- complete user-facing clarification in `unresolved` (e.g.
-          -- `shield X with railgun` → "coming soon — use Privacy
-          -- menu"), the LLM has nothing to add. Calling it anyway
-          -- burns 30s of tool chains and ends in `http timeout`,
-          -- which the user sees as a confusing red error line under
-          -- the perfectly good regex answer.
+          -- already emitted a deliberate clarification in `unresolved`,
+          -- the LLM has nothing to add. Calling it anyway can turn a
+          -- safety note into an unsafe proposal.
           --
           -- This trips ONLY when:
-          --   * action == .unknown          (regex chose to reject)
-          --   * confidence == .rejected     (intentional, not a fallthrough)
+          --   * action == .unknown
+          --   * confidence == .rejected OR a `conjunction` field exists
           --   * unresolved is non-empty     (there IS a clarification to show)
+          --
+          -- The `conjunction` case is deliberately hard-gated even
+          -- though RuleParser marks it `.medium`: multi-leg prompts like
+          -- "withdraw X and borrow Y" must not be reduced to the first
+          -- leg, nor reinterpreted by the model as two unordered drafts.
+          -- Until a typed batch composer exists, the safe answer is to
+          -- ask the user to split the request or use an explicit batch UI.
           --
           -- The response shape mirrors the wallet-direct path: just
           -- the regex draft, no `llmRaw`/`encoded`/`modelAsk`. The
           -- TUI's `llm:` line disappears; the `!` lines from
           -- `regex.unresolved` are the user-facing answer.
+          let regexIsConjunctionClarification : Bool :=
+            (regex.action == LeanCli.Ethereum.Intent.Action.unknown)
+              && (regex.field? "conjunction").isSome
+              && (regex.unresolved.length > 0)
           let regexIsClarification : Bool :=
             (regex.action == LeanCli.Ethereum.Intent.Action.unknown)
-              && (regex.confidence == LeanCli.Ethereum.Intent.Confidence.rejected)
+              && ((regex.confidence == LeanCli.Ethereum.Intent.Confidence.rejected)
+                  || regexIsConjunctionClarification)
               && (regex.unresolved.length > 0)
           if regexIsClarification then
+            let clarificationText :=
+              String.intercalate " " regex.unresolved
             return .ok <| .obj #[
               ("regex",   regexJson),
-              ("backend", .str "regex-clarification")
+              ("backend", .str "regex-clarification"),
+              ("llmRaw",  .str clarificationText),
+              ("modelAsk", .obj #[
+                ("error",    .str "regex-clarification"),
+                ("question", .str clarificationText)
+              ])
             ]
           -- 2. Call LLM sidecar with the regex as a seed + the matching
           -- skill body + the chain's token registry. Forward the
@@ -916,7 +1405,8 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               ("activeChainId", .num (Int.ofNat chainId)),
               ("sessionKey",    .str sessionKey),
               ("chainContext",  chainContextJson),
-              ("walletContext", walletContextJson)
+              ("walletContext", walletContextJson),
+              ("amounts",       amountsJson)
             ] ++ historyField ++ (match skillBody? with
                   | some body => #[("skillContext", .obj #[
                       ("name", .str skillName),
@@ -960,11 +1450,18 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               -- source of intent. Without this, the TUI surfaces
               -- the prose as a non-JSON ask and there's no way to
               -- confirm a tool-call-driven draft.
-              let proposeFromTrace : Option Json :=
+              -- `none` → no propose_send in trace (fall to IntentParser);
+              -- `some (.error m)` → a propose_send whose magnitude the
+              -- model chose rather than referenced (fail-closed reject);
+              -- `some (.ok resp)` → a clean draft ready for the TUI.
+              let proposeFromTrace : Option (Except String Json) :=
                 match getField "trace" llmResult with
                 | some t =>
                     match extractProposeSendFromTrace t with
                     | some ps =>
+                      match LeanCli.LlmAgent.AmountGuard.revalidate ps.value ps.data allowedBases with
+                      | .error m => some (.error m)
+                      | .ok () =>
                         let senderEntry : Array (String × Json) :=
                           match ps.sender with
                           | some s => #[("sender", .str s)]
@@ -979,7 +1476,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                         -- "unknown · regex=rejected".
                         let actionTag : String :=
                           (selectorToActionTag ps.data).getD "agent.rawCall"
-                        some <| .obj <| #[
+                        some <| .ok <| .obj <| #[
                           ("regex",          regexJson),
                           ("llmRaw",         .str rawStr),
                           ("backend",        .str "agent-propose-send"),
@@ -997,7 +1494,15 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                     | none => none
                 | none => none
               match proposeFromTrace with
-              | some resp => pure (.ok resp)
+              | some (.ok resp) => pure (.ok resp)
+              | some (.error m) =>
+                  -- Magnitude the model chose, not referenced. Refuse the
+                  -- draft outright rather than fall through to a re-draft.
+                  pure <| .ok <| .obj <| #[
+                    ("regex",         regexJson),
+                    ("llmRaw",        .str rawStr),
+                    ("validateError", .str m)
+                  ] ++ traceField
               | none =>
               if rawStr.isEmpty then
                 pure <| .ok <| .obj <| #[
@@ -1045,7 +1550,17 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                       | _, #[] => baseResp
                       | .obj fields, _ => .obj (fields ++ traceField)
                       | _, _ => baseResp
-                    pure <| .ok withTrace
+                    -- Same fail-closed amount re-check as the
+                    -- propose_send path: the prose-JSON Intent could
+                    -- carry a model-chosen amountWei.
+                    match guardEncodedAmounts withTrace allowedBases with
+                    | .ok okResp => pure (.ok okResp)
+                    | .error m =>
+                        pure <| .ok <| .obj <| #[
+                          ("regex",         regexJson),
+                          ("llmRaw",        .str rawStr),
+                          ("validateError", .str m)
+                        ] ++ traceField
       | .error msg, _ =>
           pure (.error msg)
       | _, none =>

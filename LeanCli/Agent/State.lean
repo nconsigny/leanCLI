@@ -49,6 +49,50 @@ structure AgentMessage where
   reasoning  : Option String := none
   deriving Repr, Inhabited
 
+/-- One Lean-derived spendable amount for the current turn.
+
+    The daemon parses the human amount out of the user's message and
+    converts it to base units **in Lean** (`Swap.Tokens` decimals +
+    `Util.Units.parseUnits`), then publishes the result here. The agent
+    references an amount by its `ref` handle (e.g. `"amt1"`) and is
+    **never** permitted to type a magnitude into a tool call: the model
+    is documented-unreliable at unit conversion, and the magnitude is a
+    signing-relevant quantity, so it must originate from the verified
+    core. See `INVARIANTS.md` (chat-drafted amount integrity) and the
+    proofs in `LeanCli/Invariants/ChatAmount.lean`.
+
+    `base` is the canonical base-units value (wei for native, token
+    base units otherwise). It crosses the daemon↔agent JSON boundary as
+    a decimal string to dodge JSON-number truncation for values > 2^53,
+    but is held here as a `Nat` so the invariant proofs are total. -/
+structure AmountEntry where
+  /-- Handle the model uses to reference this amount (e.g. `"amt1"`). -/
+  ref      : String
+  /-- Human-entered text as it appeared in the prompt (e.g. `"0.5"`). -/
+  human    : String
+  /-- Asset symbol the amount was denominated in (e.g. `"ETH"`). -/
+  symbol   : String
+  /-- Canonical base-units value, Lean-converted. -/
+  base     : Nat
+  /-- Decimals used for the conversion. -/
+  decimals : Nat
+  deriving Repr, Inhabited, DecidableEq
+
+/-- Resolve a model-supplied amount handle against the per-turn table.
+    Returns `none` for an unknown handle so the calling tool errors and
+    the model self-corrects — the model can NEVER inject a magnitude
+    through this path, it can only pick an entry the daemon already
+    derived. -/
+def findAmount (table : List AmountEntry) (ref : String) : Option AmountEntry :=
+  table.find? (fun e => e.ref == ref)
+
+/-- True iff some table entry's Lean-derived base-units value equals the
+    `decoded` magnitude. The daemon's output re-check
+    (`revalidateAmounts`) admits a drafted tx iff this holds for every
+    decoded amount field. -/
+def amountInTable (table : List AmountEntry) (decoded : Nat) : Bool :=
+  table.any (fun e => e.base == decoded)
+
 /-- Static configuration for a single agent invocation. Most fields are
     bounded so a runaway model cannot hold the loop open indefinitely. -/
 structure AgentConfig where
@@ -84,6 +128,13 @@ structure AgentConfig where
   /-- Allowed chain ids for any tool that takes one. Phase 0 ships
       mainnet (1) + Sepolia (11155111) only — no L2 strings anywhere. -/
   chainWhitelist : List Nat := [1, 11155111]
+  /-- Per-turn table of Lean-derived spendable amounts. Tools that carry
+      a magnitude (`propose_send` value, the `prepare_*` builders) take
+      an `amountRef` handle and resolve it here via `findAmount`; they
+      reject a literal magnitude when this table is non-empty. Empty for
+      non-chat invocations (the one-shot CLI agent), which leaves the
+      legacy literal path intact. -/
+  amountTable    : List AmountEntry := []
   /-- Path to the daemon UDS socket the agent uses for tool dispatch. -/
   daemonSocket   : String
   /-- Tool names the operator allowed for this invocation. Anything

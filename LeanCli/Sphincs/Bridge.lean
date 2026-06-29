@@ -238,6 +238,32 @@ def ParamSet.expectedSigBytes : ParamSet → Nat
   | .slhDsaSha2_128_24   => 3856
   | .c13                 => 3688
 
+/-- On-chain gas the bundler's `eth_estimateUserOperationGas` **fails to
+    account for** and which the daemon must add back onto the returned
+    `verificationGasLimit`.
+
+    `SphincsAccount._validateSignature` checks ECDSA recovery first and
+    `return SIG_VALIDATION_FAILED` *before* the SPHINCS+ verifier
+    `staticcall` (see `vendor/sphincs-minus/src/SphincsAccount.sol`). We
+    estimate gas with a **dummy all-zero ECDSA signature** (a real
+    signature isn't available until after the hash — which depends on the
+    gas fields — is known), so estimation recovers a non-owner address,
+    short-circuits, and never measures the verifier staticcall. At real
+    submit the genuine ECDSA passes, the verifier runs, and the
+    verification phase overshoots the estimate → bundler `AA26 over
+    verificationGasLimit`.
+
+    These are the standalone on-chain verify costs (per
+    `vendor/sphincs-minus/CLAUDE.md`) rounded up with comfortable margin
+    to cover the staticcall's 63/64 gas forwarding, the `abi.decode` of
+    the multi-KB signature into memory, and the hardened verifier's
+    canonical-key (`N_MASK`) checks: C13 ≈ 188 K measured, SLH-DSA-SHA2
+    ≈ 226 K measured. Over-budgeting here is cheap (unused gas is
+    refunded by the EntryPoint) and far safer than re-tripping AA26. -/
+def ParamSet.verifyGasFloor : ParamSet → Nat
+  | .slhDsaSha2_128_24   => 350000
+  | .c13                 => 300000
+
 /-- C13: 64 bytes = 2 × 32-byte words. `pkSeed` and `pkRoot` are
     ABI-shaped as `bytes32` for the on-chain
     `SphincsC13Asm.verify(bytes32 pkSeed, bytes32 pkRoot, …)`, with the

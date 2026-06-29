@@ -118,7 +118,8 @@ def methodHandler (cfg : Config) (state : LeanCli.Daemon.State.Shared)
   if req.method.startsWith "swap." then
     return ← SwapRpc.dispatch cfg state notify req
   if req.method.startsWith "llm." || req.method.startsWith "skills."
-      || req.method.startsWith "clearsign." || req.method.startsWith "aave." then
+      || req.method.startsWith "clearsign." || req.method.startsWith "aave."
+      || req.method.startsWith "defi." then
     return ← MiscRpc.dispatch cfg state notify req
   if req.method.startsWith "account." then
     return ← AccountRpc.dispatch cfg state notify req

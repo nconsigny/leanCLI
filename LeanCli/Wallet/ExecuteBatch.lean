@@ -56,7 +56,14 @@ structure Call where
   deriving Repr
 
 /-- Hint passed from the caller about the wallet's account kind. Drives
-    the batched-vs-sequential decision in `maybeBatchTxs`. -/
+    the batched-vs-sequential decision in `maybeBatchTxs`.
+
+    This is the RPC/transport-facing mirror of
+    `LeanCli.Wallet.Account.AccountKind` (where `.sphincsHybrid` here
+    corresponds to `.smart .sphincs` there, i.e. `AccountKind.isSmart`).
+    It is kept as a flat enum with stable JSON tags (`"eoa"` /
+    `"sphincsHybrid"`) so the wire format does not change as new
+    smart-account subtypes are added to the storage type. -/
 inductive AccountKindHint where
   /-- Plain EOA (BIP-39/k1). Multi-tx flows are emitted as a sequential
       list; the LLM proposes them one-by-one through `propose_send`. -/

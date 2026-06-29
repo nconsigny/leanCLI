@@ -494,26 +494,37 @@ def resolve : IO LeanCli.Daemon.Server.Config := do
               | none => none
           | _ => none
     | _ => #[]
-  -- Why: probe the configured RPC for its actual chainId and refuse to
-  -- start if it disagrees with `cfg.chainId`. Catches the silent
-  -- "rpc_url is sepolia but chain_id is 1" misconfiguration that
-  -- otherwise lets the daemon happily quote mainnet semantics for
-  -- testnet endpoints (or vice-versa). Skips silently when the probe
-  -- itself can't run (RPC unreachable, malformed response) — a flaky
-  -- RPC at boot should not soft-brick the wallet daemon.
+  -- Why: optionally probe the configured RPC for its actual chainId and
+  -- refuse to start if it disagrees with `cfg.chainId`. Catches the silent
+  -- "rpc_url is sepolia but chain_id is 1" misconfiguration that otherwise
+  -- lets the daemon happily quote mainnet semantics for testnet endpoints
+  -- (or vice-versa). Skips silently when the probe itself can't run (RPC
+  -- unreachable, malformed response) — a flaky RPC at boot should not
+  -- soft-brick the wallet daemon.
   --
-  -- Disable with `LEANCLI_NO_CHAINID_PROBE=1` (escape hatch for
-  -- offline development / a node that doesn't yet expose eth_chainId).
-  let skipProbe : Bool ← do
-    match ← IO.getEnv "LEANCLI_NO_CHAINID_PROBE" with
+  -- OFF by default. It's the one read that intentionally bypasses the
+  -- light-client provider and `cfg.policy` (it must hit the raw configured
+  -- endpoint directly to validate IT), so it leaks a boot-time request to
+  -- the configured RPC and surfaces as `·direct` traffic. For the common
+  -- fixed sepolia/mainnet setup the chainId is already known from config,
+  -- so the probe only guards against a mis-pointed `rpc_url` — not worth
+  -- the un-gated leak by default.
+  --
+  -- Opt in with `LEANCLI_CHAINID_PROBE=1`. `LEANCLI_NO_CHAINID_PROBE=1`
+  -- still force-disables it and wins over the opt-in (back-compat for any
+  -- config already setting it).
+  let envFlag (key : String) : IO Bool := do
+    match ← IO.getEnv key with
     | some v =>
         let t := v.trimAscii.toString
         pure (t ≠ "" && t ≠ "0")
     | none => pure false
-  -- Skip the probe when no rpc_url is configured. With the empty-URL
-  -- sentinel the probe would just emit a confusing "eth_chainId probe
-  -- failed" line on every fresh-install daemon start.
-  if !skipProbe && !rpcUrl.isEmpty then
+  let probeEnabled ← envFlag "LEANCLI_CHAINID_PROBE"
+  let probeForceOff ← envFlag "LEANCLI_NO_CHAINID_PROBE"
+  -- Run only when explicitly enabled, never force-disabled, and an rpc_url
+  -- actually exists (the empty-URL sentinel would just emit a confusing
+  -- "eth_chainId probe failed" line on a fresh-install daemon start).
+  if probeEnabled && !probeForceOff && !rpcUrl.isEmpty then
     -- Why: the probe is config validation, not arbitrary outbound traffic.
     -- We're asking the user's own explicitly-configured `rpc_url` what
     -- chain it's on, with one call, at startup. Routing through

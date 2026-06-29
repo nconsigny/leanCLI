@@ -102,19 +102,11 @@ def heliosVia (state : LeanCli.Daemon.State.Shared) (chainId : Nat)
     `tx.simulate` went through helios. -/
 def verifiedReadVia (state : LeanCli.Daemon.State.Shared) (chainId : Nat)
     (endpoint : LeanCli.RPC.Outbound.Endpoint) :
-    IO (Option LeanCli.RPC.Outbound.VerifyVia) := do
-  match ← LeanCli.Daemon.State.getReadBackend state with
-  | .colibri => colibriVia state chainId
-  | .helios  =>
-      -- Degradation order helios → colibri → direct: prefer the helios via
-      -- (its runCall respawns + cascades internally); once helios is disabled
-      -- (heliosVia returns none), route straight to colibri so reads stay
-      -- verified instead of dropping to direct. Outbound only hits direct
-      -- HTTP when BOTH are unavailable.
-      match ← heliosVia state chainId endpoint.url with
-      | some v => pure (some v)
-      | none   => colibriVia state chainId
-  | .rpc     => pure none
+    IO (Option LeanCli.RPC.Outbound.VerifyVia) :=
+  -- Delegate to the shared-state selector so the lower `Daemon.TokenMeta`
+  -- layer (which cannot import the Server layer) shares one selection rule.
+  -- Degradation order helios → colibri → direct lives in `buildVerifiedReadVia`.
+  LeanCli.Daemon.State.buildVerifiedReadVia state chainId endpoint.url
 
 /-- Helios's verified `eth_getLogs` window (one sync-committee period). A
     query spanning more blocks than this cannot be verified by helios, so

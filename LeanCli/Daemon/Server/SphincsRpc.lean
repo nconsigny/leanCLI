@@ -2,6 +2,7 @@ import LeanCli.Daemon.Server.Core
 import LeanCli.Daemon.Server.Helpers
 import LeanCli.Daemon.Server.Endpoints
 import LeanCli.Daemon.Server.Journal
+import LeanCli.Daemon.Server.AddrGuard
 import LeanCli.Crypto.Hex
 import LeanCli.Daemon.State
 import LeanCli.Encoding.Json
@@ -18,16 +19,17 @@ import LeanCli.Util.Units
 import LeanCli.Wallet.EOA
 import LeanCli.Wallet.EoaStore
 import LeanCli.Wallet.SphincsHybridStore
+import LeanCli.Wallet.ExecuteBatch
 
 /-!
 # Daemon server: `sphincs.*` RPC family
 
 Post-quantum hybrid ERC-4337 (SPHINCS+ + ECDSA) account flow.
-Fifteen arms covering the full lifecycle of a hybrid smart-account:
+Covering the full lifecycle of a hybrid smart-account:
 
   sphincs.account.create / list / show / computeAddress / deploy /
-  sphincs.account.send / rotateOwner / encodeRotateOwner /
-                          commitRotation / resyncOwner /
+  sphincs.account.send / sendBatch / encodeBatch / rotateOwner /
+                          encodeRotateOwner / commitRotation / resyncOwner /
                           deployStatus / getUserOp
   sphincs.bundler.show / sphincs.bundler.check
   sphincs.factory.deploy
@@ -49,6 +51,26 @@ private def chainNameGuess (cid : Nat) : String :=
   if cid = 11155111 then "sepolia"
   else if cid = 1 then "mainnet"
   else ""
+
+/-- Conservative base-fee fallback for ERC-4337 UserOps when
+    `eth_gasPrice` times out. A zero gas-price read used to produce a
+    `maxFeePerGas` below Candide's current base-fee floor after the
+    multi-second SPHINCS signing step. The cap is not the effective fee;
+    it only needs to be high enough for bundler admission. -/
+private def minUserOpFeeBaseWei : Nat := 5_000_000_000
+
+/-- SPHINCS `executeBatch` flows can contain protocol calls whose nested
+    execution is badly under-estimated by the bundler when the estimate uses
+    dummy signatures. Keep single sends lean, but never let a batch go out
+    with the 200k single-call fallback that starves Aave supply minting. -/
+private def minExecuteBatchCallGas : Nat := 1_100_000
+
+private def isExecuteBatchCallData (callData : ByteArray) : Bool :=
+  if callData.size ≥ 4 then
+    callData[0]! == 0x34 && callData[1]! == 0xfc &&
+    callData[2]! == 0xd5 && callData[3]! == 0xbe
+  else
+    false
 
 /-- Best-effort: query the configured factory's `getAddress(...)` view and
     return the resulting smart-account address. Swallows every error so
@@ -97,19 +119,26 @@ private def tryComputeSmartAccountAddress (cfg : Config)
     `rotateOwner`/`rotateKeys` RPC).
 
     `params` carries optional `passphrase` + `chain` overrides; only
-    those two fields are consulted. -/
--- `innerTo` / `innerValue` / `innerData` describe what `execute(...)`
--- will dispatch to. Used both to build the UserOp's callData
--- (`buildExecuteCalldata`) and to populate the journal entry with the
--- user-meaningful to/value/data instead of the ABI-encoded envelope.
+    those two fields are consulted.
+
+    `journalMethod` labels the local journal entry (`"sphincs.userOp"`
+    for single `execute(...)` sends, `"sphincs.userOp.batch"` for
+    `executeBatch(...)` sends). -/
+-- `innerTo` / `innerValue` / `innerData` describe what the userOp
+-- dispatches to, ONLY for the journal entry — the user-meaningful
+-- to/value/data instead of the ABI-encoded envelope. For a single send
+-- they are the inner target; for a batch they describe the self-call
+-- `executeBatch(...)` (to = the account, data = the batch envelope).
+-- The actual `userOp.callData` is the explicit `callData` argument.
 private partial def executeSphincsUserOp
     (cfg : Config) (state : LeanCli.Daemon.State.Shared)
     (notify : LeanCli.Keystore.Tpm2Runtime.Notifier)
     (rec : LeanCli.Wallet.SphincsHybridStore.Record)
+    (callData : ByteArray)
     (innerTo : String) (innerValue : Nat) (innerData : ByteArray)
-    (params : Json) :
+    (params : Json)
+    (journalMethod : String := "sphincs.userOp") :
     IO (Except RpcError Json) := do
-  let callData := Sphincs.Send.buildExecuteCalldata innerTo innerValue innerData
   match rec.smartAccountAddress with
   | none =>
       pure <| .error
@@ -200,22 +229,17 @@ private partial def executeSphincsUserOp
                                 | .ok jj => (parseHexQuantity ((asString jj).getD "0x0")).getD 0
                                 | .error _ => 0
                               let gasPriceN := parseHexJ gp
+                              let feeBase := Nat.max gasPriceN minUserOpFeeBaseWei
                               let priorityFee := Nat.max (parseHexJ pp) minPriorityFeeWei
                               -- Bundlers (Candide, Pimlico, …) reject userOps
                               -- whose `maxFeePerGas` < their estimate of the
-                              -- next block's base fee. Our `gasPrice` read can
-                              -- be a few seconds stale (especially when
-                              -- Colibri-verified reads are in the path), so
-                              -- the naive `gasPrice + priorityFee` lands
-                              -- slightly below the bundler's floor on a
-                              -- rising-fee block. Pad to `2*gasPrice +
-                              -- priorityFee` — typical "fast-tx" multiplier
-                              -- shared by viem / ethers — which clears any
-                              -- realistic base-fee bump between read and
-                              -- submit. Sphincs- userOps are gas-heavy
-                              -- enough that paying ~2× base fee is rounding
-                              -- error against the 1.2 M total gas budget.
-                              let maxFee := 2 * gasPriceN + priorityFee
+                              -- next block's base fee. `eth_gasPrice` can
+                              -- also fail transiently; parsing that as zero
+                              -- must not leak into a signed UserOp. Use a
+                              -- small floor and pad to `3*base +
+                              -- priorityFee` so the cap survives the
+                              -- multi-second SPHINCS signature window.
+                              let maxFee := 3 * feeBase + priorityFee
                               let initCodeBytes ← do
                                 match ← LeanCli.RPC.Outbound.call cfg.policy ep
                                     .getCode (.arr #[.str sender, .str "latest"]) none with
@@ -234,6 +258,8 @@ private partial def executeSphincsUserOp
                               -- 4) Skeleton + estimate gas.
                               let senderAddrBs : ByteArray :=
                                 (LeanCli.Crypto.Hex.decode sender).getD ByteArray.empty
+                              let callGasFloor :=
+                                if isExecuteBatchCallData callData then minExecuteBatchCallGas else 200000
                               -- Initial heuristic gas params for the
                               -- estimate-request skeleton. Must fit under
                               -- the bundler's total-gas cap (Candide:
@@ -251,6 +277,17 @@ private partial def executeSphincsUserOp
                               -- where the EntryPoint also has to CREATE2
                               -- the SphincsAccount contract before
                               -- calling _validateSignature.
+                              --
+                              -- NOTE: this skeleton value only shapes the
+                              -- ESTIMATE request — the real send uses the
+                              -- bundler's returned vgl PLUS
+                              -- `paramSet.verifyGasFloor` (below). The
+                              -- estimate runs with a dummy ECDSA sig, which
+                              -- short-circuits `_validateSignature` before
+                              -- the ~188 K verifier staticcall, so the
+                              -- estimate alone under-reports vgl and the
+                              -- real send trips AA26 unless we add the
+                              -- verifier cost back.
                               -- preVerificationGas covers the EntryPoint's
                               -- per-byte calldata cost. A SPHINCS-C13 signature
                               -- alone is ~3688 bytes, and the abi.encode of
@@ -268,7 +305,7 @@ private partial def executeSphincsUserOp
                                   ((LeanCli.Crypto.Hex.decode (Sphincs.Send.natToEvenHex nonceN)).getD ByteArray.empty),
                                 initCode           := initCodeBytes,
                                 callData           := callData,
-                                accountGasLimits   := Sphincs.Send.packTwoHalves 800000 200000,
+                                accountGasLimits   := Sphincs.Send.packTwoHalves 800000 callGasFloor,
                                 preVerificationGas := Sphincs.Send.natToWord32 200000,
                                 gasFees            := Sphincs.Send.packTwoHalves priorityFee maxFee,
                                 paymasterAndData   := ByteArray.empty
@@ -291,11 +328,18 @@ private partial def executeSphincsUserOp
                                     let vgl0 := getNat "verificationGasLimit"
                                     let cgl0 := getNat "callGasLimit"
                                     let pvg0 := getNat "preVerificationGas"
+                                    -- The estimate's ECDSA short-circuit
+                                    -- hides the SPHINCS verifier staticcall;
+                                    -- add it back so the real send doesn't
+                                    -- trip AA26 over verificationGasLimit.
                                     pure
-                                      (if vgl0 = 0 then 800000 else vgl0,
-                                       if cgl0 = 0 then 200000 else cgl0,
+                                      ((if vgl0 = 0 then 800000 else vgl0)
+                                          + rec.paramSet.verifyGasFloor,
+                                       Nat.max (if cgl0 = 0 then 200000 else cgl0) callGasFloor,
                                        if pvg0 = 0 then 200000 else pvg0)
-                                | .error _ => pure (800000, 200000, 200000)
+                                | .error _ =>
+                                    pure (800000 + rec.paramSet.verifyGasFloor,
+                                          callGasFloor, 200000)
                               let userOp : LeanCli.Sphincs.UserOp.PackedUserOperation :=
                                 { opSkeleton with
                                     accountGasLimits   := Sphincs.Send.packTwoHalves vgl cgl,
@@ -404,7 +448,7 @@ private partial def executeSphincsUserOp
                                                     -- `Hex.encode` already prepends `0x`; don't double it.
                                                     let innerDataHex := LeanCli.Crypto.Hex.encode innerData
                                                     journalRecord rec.name sender innerTo userOpHash innerDataHex
-                                                      "sphincs.userOp" innerValue 0 rec.chainId none
+                                                      journalMethod innerValue 0 rec.chainId none
                                                       none none none
                                                       (signMs? := some signMs)
                                                       (paramSet? := some paramSetStr)
@@ -418,6 +462,31 @@ private partial def executeSphincsUserOp
                                                       ("backend", .str backendStr)
                                                     ]
 
+
+/-- Parse a `legs` array param (`[{to, value|valueEth, data}, …]`) into a
+    list of `ExecuteBatch.Call`. `data` stays a 0x-hex string (the encoder
+    strips the prefix); `value` prefers human `valueEth`, falling back to
+    wei `value`. Returns `none` if `legs` is absent/empty or any leg lacks
+    a string `to`. Shared by `sphincs.account.encodeBatch` (sim/preview)
+    and `sphincs.account.sendBatch` (broadcast) so both agree byte-for-byte
+    on the encoded batch. -/
+private def parseBatchLegs (params : Json) :
+    Option (List LeanCli.Wallet.ExecuteBatch.Call) := do
+  let legsJson ← getField "legs" params >>= asArray
+  if legsJson.isEmpty then none
+  else
+    let parseLeg (j : Json) : Option LeanCli.Wallet.ExecuteBatch.Call := do
+      let to ← getField "to" j >>= asString
+      let value : Nat :=
+        match getField "valueEth" j >>= asString with
+        | some ethStr => (LeanCli.Util.Units.parseUnits ethStr 18).getD 0
+        | none =>
+            match getField "value" j >>= asString with
+            | some vs => (vs.toNat?).getD ((parseHexQuantity vs).getD 0)
+            | none => (getField "value" j >>= asNat).getD 0
+      let data := (getField "data" j >>= asString).getD "0x"
+      some { target := to, value := value, data := data }
+    legsJson.toList.mapM parseLeg
 
 /-- Handle every `sphincs.*` JSON-RPC method. -/
 def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
@@ -846,10 +915,51 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
           let dataHex := paramStringD req.params "data" "0x"
           let userData : ByteArray :=
             (LeanCli.Crypto.Hex.decode dataHex).getD ByteArray.empty
+          -- Pre-sign guard: refuse a zero-value, empty-calldata userOp.
+          -- `execute(to, 0, 0x)` carries no intent — it reverts on-chain
+          -- and burns gas (the failure this guard exists to prevent). The
+          -- self-batch path below always has non-empty executeBatch
+          -- calldata, so it never trips this.
+          if isNoOpCall valueWei userData then
+            pure <| .error (noOpCallError toStr)
+          else
+          -- Pre-sign address-integrity gate (same as eoa.send): refuse to
+          -- sign when `to` or an address embedded in the calldata is a
+          -- near-miss to one of the daemon's own addresses. `dataHex`
+          -- here is the raw user calldata (or the executeBatch envelope
+          -- for the self-batch path), so the inner address words are
+          -- scanned either way.
+          match ← LeanCli.Daemon.Server.AddrGuard.enforce req.params toStr dataHex with
+          | .error e => pure (.error e)
+          | .ok () =>
           match ← LeanCli.Wallet.SphincsHybridStore.readRecord name with
           | .error e => pure <| .error { code := -32010, message := "sphincs slot not found", data := some (.str e) }
           | .ok rec =>
-              match ← executeSphincsUserOp cfg state notify rec toStr valueWei userData req.params with
+              -- Self-directed `executeBatch(...)` detection: when `to` is
+              -- the smart account itself AND the calldata's selector is
+              -- `executeBatch((address,uint256,bytes)[])` (0x34fcd5be —
+              -- e.g. the batched frame from `Aave.Prepare.maybeBatch`), the
+              -- executeBatch calldata MUST be the UserOp callData directly:
+              -- the EntryPoint calls `executeBatch`, so `msg.sender ==
+              -- entryPoint` and the account's `_requireForExecute` gate
+              -- passes. Wrapping it in `execute(self, 0, …)` would self-call
+              -- `executeBatch` with `msg.sender == address(this)`, which the
+              -- contract rejects. Any other call keeps the standard
+              -- `execute(to,value,data)` wrap. (New surfaces should prefer
+              -- `sphincs.account.sendBatch` with raw legs; this keeps the
+              -- legacy single-frame batch path — used by the agent's Aave
+              -- auto-batch — broadcasting correctly.)
+              let isSelfBatch :=
+                (match rec.smartAccountAddress with
+                 | some sa => sa.toLower == toStr.toLower
+                 | none     => false)
+                && dataHex.toLower.startsWith ("0x" ++ LeanCli.Wallet.ExecuteBatch.selExecuteBatch)
+              let callData :=
+                if isSelfBatch then userData
+                else Sphincs.Send.buildExecuteCalldata toStr valueWei userData
+              let jm := if isSelfBatch then "sphincs.userOp.batch" else "sphincs.userOp"
+              match ← executeSphincsUserOp cfg state notify rec callData toStr valueWei userData
+                  req.params (journalMethod := jm) with
               | .error e => pure (.error e)
               | .ok j =>
                   -- Echo the slot name on top of the helper's result.
@@ -858,6 +968,97 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                     | _ => j
                   pure (.ok withName)
       | _, _ => pure (.error invalidParams)
+  | "sphincs.account.sendBatch" =>
+      -- Submit ONE UserOperation that executes a list of calls atomically
+      -- via `SphincsAccount.executeBatch((address,uint256,bytes)[])`. The
+      -- UserOp's callData IS the executeBatch envelope directly (NOT
+      -- wrapped in `execute(...)`): the EntryPoint calls `executeBatch`, so
+      -- `msg.sender == entryPoint` and the contract's `_requireForExecute`
+      -- gate passes. Wrapping in `execute(self, 0, …)` would make the
+      -- account self-call executeBatch with `msg.sender == address(this)`,
+      -- which that gate rejects (the single-call `execute` path is fine
+      -- self-called; `executeBatch` is entryPoint-only).
+      --
+      -- `legs` is `[{to, value|valueEth, data}, …]`. Each leg's intent is
+      -- decoded + simulated by the caller (TUI batch flow) before this RPC
+      -- is reached; the signature still terminates at ConfirmGate.
+      match paramName req.params, parseBatchLegs req.params with
+      | .ok name, some calls =>
+          match ← LeanCli.Wallet.SphincsHybridStore.readRecord name with
+          | .error e => pure <| .error { code := -32010, message := "sphincs slot not found", data := some (.str e) }
+          | .ok rec =>
+              match rec.smartAccountAddress with
+              | none =>
+                  pure <| .error
+                    { code := -32033,
+                      message := "smartAccountAddress unset — run sphincs.account.computeAddress (or .deploy) first",
+                      data := none }
+              | some sender =>
+                  -- callData = executeBatch(Call[]) directly = the UserOp callData.
+                  let batchHex := LeanCli.Wallet.ExecuteBatch.encodeExecuteBatch calls
+                  let callData := (LeanCli.Crypto.Hex.decode batchHex).getD ByteArray.empty
+                  let totalValue := calls.foldl (fun acc c => acc + c.value) 0
+                  -- Same pre-sign address-integrity gate as the single
+                  -- send path. `batchHex` is an executeBatch envelope, so
+                  -- the guard scans address-shaped words at any byte offset
+                  -- to catch inner call data embedded in dynamic bytes.
+                  match ← LeanCli.Daemon.Server.AddrGuard.enforce req.params sender batchHex with
+                  | .error e => pure (.error e)
+                  | .ok () =>
+                      -- Journal the self-directed batch: to = the account,
+                      -- data = the executeBatch envelope, value = Σ leg values.
+                      match ← executeSphincsUserOp cfg state notify rec callData
+                          sender totalValue callData req.params
+                          (journalMethod := "sphincs.userOp.batch") with
+                      | .error e => pure (.error e)
+                      | .ok j =>
+                          let withMeta : Json := match j with
+                            | .obj fields =>
+                                .obj ((fields.push ("name", .str name)).push
+                                  ("legs", .num (Int.ofNat calls.length)))
+                            | _ => j
+                          pure (.ok withMeta)
+      | _, _ =>
+          pure <| .error
+            { code := -32602,
+              message := "sendBatch: requires `name` and a non-empty `legs` array (each leg needs a string `to`)",
+              data := none }
+  | "sphincs.account.encodeBatch" =>
+      -- Pure preview/sim helper: encode `legs` into the
+      -- `executeBatch((address,uint256,bytes)[])` calldata that
+      -- `sendBatch` would submit as the UserOp callData, WITHOUT signing
+      -- or broadcasting. Returns `{ to, data, totalValue, legs }` where
+      -- `to` is the smart account itself (the EntryPoint calls
+      -- `executeBatch` on it). The TUI batch flow simulates this
+      -- `{to, data}` with `from = entryPoint` to show an aggregate outcome
+      -- in ConfirmGate. Keeping the ABI encoding in verified Lean means
+      -- the TUI never re-implements (and never diverges from) the encoder.
+      match paramName req.params, parseBatchLegs req.params with
+      | .ok name, some calls =>
+          match ← LeanCli.Wallet.SphincsHybridStore.readRecord name with
+          | .error e => pure <| .error { code := -32010, message := "sphincs slot not found", data := some (.str e) }
+          | .ok rec =>
+              match rec.smartAccountAddress with
+              | none =>
+                  pure <| .error
+                    { code := -32033,
+                      message := "smartAccountAddress unset — run sphincs.account.computeAddress (or .deploy) first",
+                      data := none }
+              | some sender =>
+                  let batchHex := LeanCli.Wallet.ExecuteBatch.encodeExecuteBatch calls
+                  let totalValue := calls.foldl (fun acc c => acc + c.value) 0
+                  pure <| .ok <| .obj #[
+                    ("to", .str sender),
+                    ("data", .str batchHex),
+                    ("totalValue", .str (toString totalValue)),
+                    ("entryPoint", .str Sphincs.Send.entryPointV09Address),
+                    ("legs", .num (Int.ofNat calls.length))
+                  ]
+      | _, _ =>
+          pure <| .error
+            { code := -32602,
+              message := "encodeBatch: requires `name` and a non-empty `legs` array (each leg needs a string `to`)",
+              data := none }
   | "sphincs.account.rotateOwner" =>
       -- Submit a UserOp that calls `SphincsAccount.rotateOwner(newOwner)`.
       -- The on-chain contract gates this on the EntryPoint OR self-call;
@@ -878,7 +1079,9 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   match ← Sphincs.Send.buildRotateOwnerCalldata newOwner with
                   | .error e => pure <| .error { code := -32035, message := "rotateOwner calldata build failed", data := some (.str e) }
                   | .ok rotateData =>
-                      match ← executeSphincsUserOp cfg state notify rec sender 0 rotateData req.params with
+                      -- rotateOwner is a self-call: execute(self, 0, rotateData).
+                      let callData := Sphincs.Send.buildExecuteCalldata sender 0 rotateData
+                      match ← executeSphincsUserOp cfg state notify rec callData sender 0 rotateData req.params with
                       | .error e => pure (.error e)
                       | .ok j =>
                           let withFields : Json := match j with

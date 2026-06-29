@@ -57,15 +57,19 @@ const PROTOCOL_VERSION = "0.0.1";
 //    do NOT pass one (a freshly-finalized root can sit mid-period and
 //    force the first update to skip, which itself triggers InvalidPeriod).
 //
-//  - sepolia: OSS does not host Sepolia, but publicnode's Sepolia beacon
-//    does serve a working light-client API. Helios's baked-in Sepolia
-//    checkpoint (0x4065...) has been pruned by every public beacon we
-//    tried (HTTP 404 "Sync committee branch ... not found"), so we MUST
-//    pass a fresh checkpoint. autoCheckpoint=true triggers a finalized-
-//    header lookup via the supplied consensusRpc before client init.
+//  - sepolia: OSS does not host Sepolia. publicnode's Sepolia beacon is
+//    reachable but serves light_client/updates helios 0.11.1 CANNOT parse
+//    (`.sync_data.update: Invalid selector for union` → "invalid sync
+//    committee period"). The working public Sepolia light-client beacon is
+//    Nimbus's, per a16z/helios#555 (maintainer's own recommendation,
+//    verified end-to-end: eth_getBalance returned the correct verified wei).
+//    NOTE http:// — its TLS cert does not match the hostname, so https
+//    fails the handshake. Helios's baked-in Sepolia checkpoint has been
+//    pruned by public beacons, so autoCheckpoint=true fetches a fresh
+//    finalized root from this consensusRpc before client init.
 const CHAIN_TO_NET = new Map([
-  [1,        { network: "mainnet", kind: "ethereum", defaultConsensusRpc: "https://ethereum.operationsolarstorm.org",            autoCheckpoint: false }],
-  [11155111, { network: "sepolia", kind: "ethereum", defaultConsensusRpc: "https://ethereum-sepolia-beacon-api.publicnode.com", autoCheckpoint: true  }],
+  [1,        { network: "mainnet", kind: "ethereum", defaultConsensusRpc: "https://ethereum.operationsolarstorm.org",        autoCheckpoint: false }],
+  [11155111, { network: "sepolia", kind: "ethereum", defaultConsensusRpc: "http://unstable.sepolia.beacon-api.nimbus.team", autoCheckpoint: true  }],
 ]);
 
 function jsonReplacer(_k, v) {

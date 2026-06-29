@@ -46,10 +46,24 @@ private def validateArgs (cfg : AgentConfig) (args : Json) :
   if !is0x40 toStr then
     .error s!"propose_send: 'to' is not a 20-byte address: {toStr}"
   else
-  let valueNat : Nat :=
-    match getField "value" args with
-    | some j => (asNat j).getD 0
-    | none => 0
+  -- Native value is a signing-relevant magnitude, so it is Lean's
+  -- authority, never the model's. When the daemon published an
+  -- `amounts` table the model MUST select a value by `amountRef` (a
+  -- handle the daemon derived from the user's message); a literal
+  -- non-zero `value` is rejected so a magnitude can't be smuggled in.
+  -- With no table (the one-shot CLI agent) the legacy literal path
+  -- stands. value-0 contract calls are always fine.
+  let valueNat ← (
+    match getField "amountRef" args >>= asString with
+    | some ref =>
+        match findAmount cfg.amountTable ref with
+        | some e => (.ok e.base : Except String Nat)
+        | none   => .error s!"propose_send: unknown amountRef '{ref}'; reference one published in `amounts`"
+    | none =>
+        let lit : Nat := (getField "value" args >>= asNat).getD 0
+        if !cfg.amountTable.isEmpty && lit != 0 then
+          .error "propose_send: pass native value via `amountRef` (a handle from `amounts`), never a literal `value`"
+        else .ok lit)
   let dataStr : String :=
     match getField "data" args with
     | some (.str s) => s
@@ -86,7 +100,10 @@ def proposeSend : ToolDecl := {
     "Final-answer tool for a transaction. Returns the draft \
      {to, value, data, chainId} payload for the caller to send \
      through the standard decode → simulate → ConfirmGate → sign \
-     pipeline. NEVER signs, NEVER broadcasts.",
+     pipeline. NEVER signs, NEVER broadcasts. To send native value, \
+     pass `amountRef` (a handle from the `amounts` table) — NEVER a \
+     literal `value`; the daemon already converted the user's amount \
+     and a hand-typed magnitude is rejected.",
   paramSchema := .obj #[
     ("type", .str "object"),
     ("required", .arr #[.str "chainId", .str "to"]),
@@ -94,8 +111,10 @@ def proposeSend : ToolDecl := {
       ("chainId", .obj #[("type", .str "integer")]),
       ("to",      .obj #[("type", .str "string"),
                          ("description", .str "20-byte 0x-prefixed address")]),
+      ("amountRef", .obj #[("type", .str "string"),
+                         ("description", .str "Handle of a Lean-converted native amount from the `amounts` table (e.g. \"amt1\"). Use this for any non-zero ETH value. Resolves to the daemon's base-units value.")]),
       ("value",   .obj #[("type", .str "integer"),
-                         ("description", .str "Wei. Defaults to 0.")]),
+                         ("description", .str "Wei. Defaults to 0. DO NOT set a non-zero literal when an `amounts` table is present — use `amountRef`. Rejected otherwise.")]),
       ("data",    .obj #[("type", .str "string"),
                          ("description", .str "0x-hex calldata. Defaults to 0x.")]),
       ("sender",  .obj #[("type", .str "string"),

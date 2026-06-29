@@ -4,11 +4,15 @@ import LeanCli.Daemon.Server.Endpoints
 import LeanCli.Daemon.State
 import LeanCli.Aave.Prepare
 import LeanCli.Aave.V3Pool
+import LeanCli.Aave.Read
+import LeanCli.Swap.Tokens
 import LeanCli.Clearsign.Bridge
 import LeanCli.Daemon.LlmServer
 import LeanCli.Daemon.SkillsStore
+import LeanCli.Daemon.TokenMeta
 import LeanCli.Encoding.Json
 import LeanCli.Ethereum.Address
+import LeanCli.Ethereum.Multicall3
 import LeanCli.Keystore.Tpm2Runtime
 import LeanCli.LlmAgent.Bridge
 import LeanCli.Privacy.Bridge
@@ -27,6 +31,7 @@ Bundle of seven methods that don't warrant their own dispatch module:
   llm.parseIntent     — transparent proxy to LLM sidecar
   skills.list / skills.get  — read the skills/ directory
   aave.prepare        — Aave V3 Pool prepare-* router (supply/withdraw/borrow/repay/setCollateral)
+  defi.positions      — read-only DeFi holdings (Aave V3 on-chain; Morpho/Curve "coming soon")
 
 Validates the "many small prefixes → one module" router pattern. Each
 prefix gets its own `if startsWith` line in `Server.methodHandler`,
@@ -97,8 +102,16 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                     let onBehalfOf := paramStringD req.params "onBehalfOf" sender
                     match getField "amount" req.params >>= asNat with
                     | some amount =>
-                        LeanCli.Aave.Prepare.prepareSupply
-                          chainIdParam sender onBehalfOf asset amount shim
+                        if LeanCli.Aave.Prepare.isNativeEthInput asset then
+                          if accountKind.isSmartWallet then
+                            LeanCli.Aave.Prepare.prepareNativeEthSupplySmart
+                              chainIdParam sender onBehalfOf amount shim
+                          else
+                            pure (.err "native_eth_requires_wrap"
+                              "Aave V3 Pool accepts ERC-20 WETH, not native ETH. For an EOA, wrap ETH to WETH first, then call aave.prepare supply with asset='WETH'.")
+                        else
+                          LeanCli.Aave.Prepare.prepareSupply
+                            chainIdParam sender onBehalfOf asset amount shim
                     | none =>
                         pure (.err "bad_request" "aave.prepare supply: missing or non-numeric 'amount'")
                 | "withdraw" =>
@@ -149,6 +162,176 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                 LeanCli.Aave.Prepare.maybeBatch sender chainIdParam accountKind result
               pure <| .ok (LeanCli.Aave.Prepare.PrepareResult.toJson finalResult)
       | _, _, _ => pure (.error invalidParams)
+  | "defi.positions" =>
+      -- Why: read-only aggregate of DeFi holdings for the Manage Wallet
+      -- panel. Aave V3 is queried on-chain through the Pool's
+      -- `getUserAccountData(address)` view — one fixed-layout call,
+      -- policy-gated via `Outbound.ethCall` exactly like `swap.balances`.
+      -- Morpho Blue and Curve have no address-only position-enumeration
+      -- primitive on-chain (positions are keyed per market / per pool with
+      -- no "which markets is this address in?" view), so they surface as
+      -- `available:false` "coming soon" entries until an index path exists.
+      -- The whole response is render-only: nothing signs or builds calldata,
+      -- so it does not touch decodeIntent → simulate → ConfirmGate.
+      --
+      -- Fail-soft per protocol: a read error or an undeployed-on-chain Pool
+      -- becomes an `available:false` entry with a note, never a failure of
+      -- the whole panel — one dead protocol shouldn't blank the others.
+      let chainStr := paramStringD req.params "chainId" "mainnet"
+      match LeanCli.Swap.Tokens.ChainId.fromString? chainStr with
+      | none =>
+          pure <| .error { code := -32602, message := "unknown chainId for defi.positions", data := some (.str chainStr) }
+      | some chainId =>
+          match paramString req.params "address" with
+          | .error err => pure (.error err)
+          | .ok address =>
+              match LeanCli.Ethereum.Address.fromHex address with
+              | none => pure (.error invalidParams)
+              | some _ =>
+                  let chainName : String :=
+                    match chainId with | .mainnet => "mainnet" | .sepolia => "sepolia"
+                  match endpointForChain cfg (some chainName) with
+                  | .error err =>
+                      pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
+                  | .ok ep =>
+                      let aaveEntry : Json ← (do
+                        match LeanCli.Aave.V3Pool.poolForChainId chainId.toNat with
+                        | none =>
+                            pure <| .obj #[
+                              ("protocol",  .str "aave-v3"),
+                              ("available", .bool false),
+                              ("note",      .str "Aave V3 Pool not deployed on this chain")]
+                        | some pool =>
+                            let via? ← verifiedReadVia state chainId.toNat ep
+                            let calldata := LeanCli.Aave.Read.encodeGetUserAccountData address
+                            match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep pool calldata "latest" via? with
+                            | .error e =>
+                                pure <| .obj #[
+                                  ("protocol",  .str "aave-v3"),
+                                  ("available", .bool false),
+                                  ("note",      .str s!"chain read failed: {e}")]
+                            | .ok ret =>
+                                match asString ret >>= LeanCli.Aave.Read.decodeUserAccountData with
+                                | none =>
+                                    pure <| .obj #[
+                                      ("protocol",  .str "aave-v3"),
+                                      ("available", .bool false),
+                                      ("note",      .str "could not decode getUserAccountData return")]
+                                | some u =>
+                                    -- Enumerate the Pool's ACTUAL reserve list
+                                    -- (getReservesList) so every supplied/borrowed
+                                    -- asset surfaces — not just curated tokens.
+                                    -- Symbol/decimals for each HELD reserve come from
+                                    -- the cached TokenMeta lookup, gated behind a
+                                    -- nonzero balance so we only pay it for assets
+                                    -- actually held.
+                                    let reserveAssets : List String ← (do
+                                      match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep pool
+                                          LeanCli.Aave.Read.encodeGetReservesList "latest" via? with
+                                      | .error _ => pure []
+                                      | .ok listRet =>
+                                          pure <| (asString listRet >>= LeanCli.Aave.Read.decodeAddressArray).getD [])
+                                    -- Round 1: ONE Multicall3 `aggregate3` over
+                                    -- `getReserveData(asset)` for every reserve.
+                                    -- A per-reserve serial loop here fired ~3
+                                    -- verified eth_calls × ~19 reserves, all
+                                    -- serialized on the shared verify lock —
+                                    -- minutes of lock time that starved every
+                                    -- other request (the swap-balance timeout).
+                                    -- Batching collapses the whole panel to ~4
+                                    -- verified round-trips.
+                                    let reserveBatch :=
+                                      LeanCli.Ethereum.Multicall3.encodeAggregate3 <|
+                                        reserveAssets.map fun asset =>
+                                          ({ target := pool, allowFailure := true,
+                                             callData := LeanCli.Aave.Read.encodeGetReserveData asset }
+                                           : LeanCli.Ethereum.Multicall3.Call3)
+                                    let decoded :
+                                        List (String × LeanCli.Aave.Read.ReserveTokenAddresses) ← (do
+                                      match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep
+                                          LeanCli.Ethereum.Multicall3.address reserveBatch "latest" via? with
+                                      | .ok ret =>
+                                          match (asString ret).bind LeanCli.Ethereum.Multicall3.decodeAggregate3 with
+                                          | some results =>
+                                              pure <| (reserveAssets.zip results).filterMap fun (asset, ok, data) =>
+                                                if ok then
+                                                  (LeanCli.Aave.Read.decodeReserveTokenAddresses data).map
+                                                    (fun a => (asset, a))
+                                                else none
+                                          | none => pure []
+                                      | _ => pure [])
+                                    -- Round 2: ONE `aggregate3` over `balanceOf`
+                                    -- of each held reserve's aToken + variable
+                                    -- debt token (two per reserve, in order).
+                                    let balCalls : List LeanCli.Ethereum.Multicall3.Call3 :=
+                                      decoded.flatMap fun (_, a) =>
+                                        [ { target := a.aTokenAddress, allowFailure := true,
+                                            callData := LeanCli.Aave.Read.encodeBalanceOf address },
+                                          { target := a.variableDebtTokenAddress, allowFailure := true,
+                                            callData := LeanCli.Aave.Read.encodeBalanceOf address } ]
+                                    let balResults : List (Option Nat) ← (do
+                                      if balCalls.isEmpty then pure []
+                                      else
+                                        match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep
+                                            LeanCli.Ethereum.Multicall3.address
+                                            (LeanCli.Ethereum.Multicall3.encodeAggregate3 balCalls) "latest" via? with
+                                        | .ok ret =>
+                                            match (asString ret).bind LeanCli.Ethereum.Multicall3.decodeAggregate3 with
+                                            | some results =>
+                                                pure <| results.map fun (ok, data) =>
+                                                  if ok then LeanCli.Swap.UniV3.decodeWordAt data 0 else none
+                                            | none => pure (List.replicate balCalls.length none)
+                                        | _ => pure (List.replicate balCalls.length none))
+                                    let mut reserveRows : Array Json := #[]
+                                    let mut idx := 0
+                                    for (asset, _) in decoded do
+                                      let supplied? := (balResults[2 * idx]?).join
+                                      let borrowed? := (balResults[2 * idx + 1]?).join
+                                      idx := idx + 1
+                                      match supplied?, borrowed? with
+                                      | some supplied, some borrowed =>
+                                          if supplied == 0 && borrowed == 0 then
+                                            pure ()
+                                          else do
+                                            let meta? ← LeanCli.Daemon.TokenMeta.lookupOrFetch
+                                              state cfg.policy ep chainId.toNat asset
+                                            let (sym, dec) :=
+                                              match meta? with
+                                              | some m => (m.symbol, m.decimals)
+                                              | none    => (asset, 18)
+                                            reserveRows := reserveRows.push <| .obj #[
+                                              ("symbol",   .str sym),
+                                              ("asset",    .str asset),
+                                              ("decimals", .num (Int.ofNat dec)),
+                                              ("supplied", .str (natQuantityHex supplied)),
+                                              ("borrowed", .str (natQuantityHex borrowed))]
+                                      | _, _ => pure ()
+                                    -- Base amounts (USD, 1e8) and the 1e18 health
+                                    -- factor exceed 2^53, so they cross the wire as
+                                    -- canonical 0x-hex strings, never JSON numbers.
+                                    pure <| .obj #[
+                                      ("protocol",                    .str "aave-v3"),
+                                      ("available",                   .bool true),
+                                      ("pool",                        .str pool),
+                                      ("hasPosition",                 .bool u.hasPosition),
+                                      ("baseCurrencyDecimals",        .num (Int.ofNat LeanCli.Aave.Read.baseCurrencyDecimals)),
+                                      ("totalCollateralBase",         .str (natQuantityHex u.totalCollateralBase)),
+                                      ("totalDebtBase",               .str (natQuantityHex u.totalDebtBase)),
+                                      ("availableBorrowsBase",        .str (natQuantityHex u.availableBorrowsBase)),
+                                      ("currentLiquidationThreshold", .str (natQuantityHex u.currentLiquidationThreshold)),
+                                      ("ltv",                         .str (natQuantityHex u.ltv)),
+                                      ("healthFactor",                .str (natQuantityHex u.healthFactor)),
+                                      ("reserves",                    .arr reserveRows)])
+                      let comingSoon : String → Json := fun name =>
+                        .obj #[
+                          ("protocol",  .str name),
+                          ("available", .bool false),
+                          ("note",      .str "coming soon")]
+                      pure <| .ok <| .obj #[
+                        ("chain",     .str chainName),
+                        ("chainId",   .num (Int.ofNat chainId.toNat)),
+                        ("address",   .str address),
+                        ("protocols", .arr #[aaveEntry, comingSoon "morpho", comingSoon "curve"])]
   | "clearsign.ping" =>
       let resp ← LeanCli.Clearsign.Bridge.call
         { method := "ping", params := .obj #[], id := 0 }

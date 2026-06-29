@@ -132,7 +132,7 @@ def prepareUniswapV3Swap : ToolDecl := {
     ("type", .str "object"),
     ("required", .arr #[
       .str "chainId", .str "sender", .str "recipient",
-      .str "tokenIn", .str "tokenOut", .str "amountIn"
+      .str "tokenIn", .str "tokenOut"
     ]),
     ("properties", .obj #[
       ("chainId", .obj #[
@@ -155,10 +155,15 @@ def prepareUniswapV3Swap : ToolDecl := {
         ("type", .str "string"),
         ("description", .str "0x-prefixed token-out address (resolve via token_lookup first)")
       ]),
+      ("amountRef", .obj #[
+        ("type", .str "string"),
+        ("description",
+          .str "PREFERRED: a handle from the `amounts` table (e.g. \"amt1\"). The daemon already converted the user's amount to base units — reference it here, never type a magnitude.")
+      ]),
       ("amountIn", .obj #[
         ("type", .str "string"),
         ("description",
-          .str "Base-units integer as a decimal string (e.g. \"1000000\" for 1 USDC); use to_base_units to compute")
+          .str "Legacy literal base-units string. PREFER `amountRef`; a literal here is REJECTED when an `amounts` table is present.")
       ]),
       ("fee", .obj #[
         ("type", .str "integer"),
@@ -198,29 +203,43 @@ def prepareUniswapV3Swap : ToolDecl := {
       | pure (errResult "bad_request" "prepare_uniswap_v3_swap: missing 'tokenOut'")
     let some tokenOut := asString tokenOutJ
       | pure (errResult "bad_request" "prepare_uniswap_v3_swap: 'tokenOut' must be a string")
-    let some amountInJ := getField "amountIn" args
-      | pure (errResult "bad_request" "prepare_uniswap_v3_swap: missing 'amountIn'")
-    let some amountInStr := asString amountInJ
-      | pure (errResult "bad_request"
-          "prepare_uniswap_v3_swap: 'amountIn' must be a decimal STRING (e.g. \"1000000\") to avoid JSON number truncation")
-    let some amountIn := parseDecimalNat amountInStr
-      | pure (errResult "bad_amount"
-          s!"prepare_uniswap_v3_swap: 'amountIn' is not a non-negative decimal integer: {amountInStr}")
-    -- Optional fields: only forwarded when present, so the daemon's
-    -- own defaults (and `slippageWasDefault` metadata) stay correct.
-    let fee := getField "fee" args >>= asNat
-    let slippageBps := getField "slippageBps" args >>= asNat
-    let deadlineSeconds := getField "deadlineSeconds" args >>= asNat
-    let params := buildParams chainId sender recipient tokenIn tokenOut amountIn
-                    fee slippageBps deadlineSeconds
-    match ← DaemonClient.call cfg.daemonSocket "swap.prepareUniswapV3" params with
-    | .error e =>
-        let msg := match e with
-          | .transport m => s!"daemon transport (swap.prepareUniswapV3): {m}"
-          | .protocol  m => s!"daemon protocol (swap.prepareUniswapV3): {m}"
-          | .appError code m _ => s!"daemon swap.prepareUniswapV3 error {code}: {m}"
-        pure (errResult "daemon_error" msg)
-    | .ok j => pure (envelopeFromDaemon j)
+    -- `amountIn` is a signing-relevant magnitude → Lean's authority.
+    -- Prefer the `amountRef` handle the daemon published; a literal
+    -- `amountIn` is rejected when a table is present so the model can't
+    -- type a magnitude. No table (one-shot CLI) keeps the legacy path.
+    let amountInRes : Except String Nat :=
+      match getField "amountRef" args >>= asString with
+      | some ref =>
+          match findAmount cfg.amountTable ref with
+          | some e => .ok e.base
+          | none   => .error s!"prepare_uniswap_v3_swap: unknown amountRef '{ref}'; reference one from `amounts`"
+      | none =>
+          match getField "amountIn" args >>= asString with
+          | some s =>
+              if cfg.amountTable.isEmpty then
+                match parseDecimalNat s with
+                | some n => .ok n
+                | none   => .error s!"prepare_uniswap_v3_swap: 'amountIn' is not a non-negative decimal integer: {s}"
+              else .error "prepare_uniswap_v3_swap: pass amountIn via `amountRef` (a handle from `amounts`); do not type a magnitude"
+          | none => .error "prepare_uniswap_v3_swap: provide `amountRef` (a handle from `amounts`)"
+    match amountInRes with
+    | .error e => pure (errResult "bad_amount" e)
+    | .ok amountIn =>
+      -- Optional fields: only forwarded when present, so the daemon's
+      -- own defaults (and `slippageWasDefault` metadata) stay correct.
+      let fee := getField "fee" args >>= asNat
+      let slippageBps := getField "slippageBps" args >>= asNat
+      let deadlineSeconds := getField "deadlineSeconds" args >>= asNat
+      let params := buildParams chainId sender recipient tokenIn tokenOut amountIn
+                      fee slippageBps deadlineSeconds
+      match ← DaemonClient.call cfg.daemonSocket "swap.prepareUniswapV3" params with
+      | .error e =>
+          let msg := match e with
+            | .transport m => s!"daemon transport (swap.prepareUniswapV3): {m}"
+            | .protocol  m => s!"daemon protocol (swap.prepareUniswapV3): {m}"
+            | .appError code m _ => s!"daemon swap.prepareUniswapV3 error {code}: {m}"
+          pure (errResult "daemon_error" msg)
+      | .ok j => pure (envelopeFromDaemon j)
 }
 
 end LeanCli.Agent.ToolDefs.UniV3Swap

@@ -133,10 +133,11 @@ type Screen =
       kind: "send-raw";
       tx: { to: string; value: string; data: string; rationale?: string; canonical?: string };
       chainId: number;
-      /** Pre-selected signing wallet. Currently set by LlmChatFlow when the
-       *  user's prompt carried a `from <name>` hint that the regex
-       *  resolved to one of their EOAs — skips the picker. */
-      wallet?: { kind: "eoa"; name: string; address: string };
+      /** Pre-selected signing wallet. Set by the chat when the draft's
+       *  sender hint resolved to one of the user's accounts — skips the
+       *  picker. Either signer kind: a SPHINCS smart account routes to
+       *  the UserOp send path inside SendRawFlow. */
+      wallet?: { kind: "eoa" | "sphincs"; name: string; address: string };
     };
 
 /** Turn the raw RPC result from a sign+broadcast into a single in-chat
@@ -158,6 +159,7 @@ function broadcastResultToTurn(
   const r =
     result && typeof result === "object" ? (result as Record<string, unknown>) : {};
   const txHash = typeof r.txHash === "string" ? r.txHash : undefined;
+  const userOpHash = typeof r.userOpHash === "string" ? r.userOpHash : undefined;
   const status = typeof r.status === "string" ? r.status : undefined;
   const blockNumber =
     typeof r.blockNumber === "number"
@@ -165,10 +167,22 @@ function broadcastResultToTurn(
       : typeof r.blockNumber === "string"
         ? r.blockNumber
         : undefined;
+  if (!txHash && userOpHash) {
+    // SPHINCS smart-account sends (`sphincs.account.send`) return the
+    // bundler's `userOpHash` — a 4337-level id, NOT an L1 tx hash — and
+    // do not block on inclusion. Surface the userOpHash so the submission
+    // is visible; the L1 tx hash backfills into the account history once
+    // the bundler includes the UserOp (sphincs.account.getUserOp).
+    return {
+      kind: "system",
+      tone: "ok",
+      text: `✓ UserOp submitted ${userOpHash} · awaiting bundler inclusion`,
+    };
+  }
   if (!txHash) {
-    // Some surfaces (sphincs UserOps in particular) return a different
-    // shape; we still want SOME confirmation rendered rather than a
-    // silent no-op, so fall through to a generic ok marker.
+    // Some surfaces return a different shape; we still want SOME
+    // confirmation rendered rather than a silent no-op, so fall through
+    // to a generic ok marker.
     return {
       kind: "system",
       tone: "ok",
@@ -518,17 +532,43 @@ export default function App() {
     const cont = success ? extractBroadcastReceipt(result) : null;
     setChatPhase((p) => {
       if (p.kind !== "chat") return p;
-      const turns = turn ? [...p.turns, turn] : p.turns;
+      let turns = p.turns;
+      // On a successful broadcast, retire the draft that was just signed
+      // so it stops being a re-signing target (empty-Enter / the [Review
+      // and sign] affordance). The signed draft is the most recent
+      // encoded, not-yet-signed assistant turn. Without this the chat
+      // re-opens the ConfirmGate for an already-broadcast tx.
+      if (success) {
+        const idx = turns.reduceRight(
+          (acc, t, i) =>
+            acc === -1 && t.kind === "assistant" && t.result?.encoded && !t.signed ? i : acc,
+          -1,
+        );
+        if (idx >= 0) {
+          turns = [...turns];
+          turns[idx] = { ...(turns[idx] as Extract<typeof turns[number], { kind: "assistant" }>), signed: true };
+        }
+      }
+      if (turn) turns = turns === p.turns ? [...turns, turn] : [...turns, turn];
       return { ...p, turns, pendingContinuation: cont ?? undefined };
     });
   };
 
   // Dashboard-pane SEND/SWAP/SHIELD/UNSHIELD/MANAGE: render the flow in
   // the dashboard's main pane (sub-stack) rather than full-screen, so the
-  // user stays in the dashboard. SPHINCS hybrids keep the full-screen
-  // accounts hub (a multi-screen surface of its own).
+  // user stays in the dashboard. SPHINCS hybrids route the accounts hub
+  // through the SAME sub-stack — it renders in-pane (koi-less via the
+  // dashboard's EmbeddedContext) instead of taking over the whole screen.
+  // SEND/SWAP deep-link past the admin menu; everything else lands on the
+  // hub root.
   const dashWalletAction = (a: WalletsAction, w: Wallet, chain: string) => {
-    if (w.kind === "sphincs") return handleHubPick(a, w, chain);
+    if (w.kind === "sphincs") {
+      return pushSub(
+        a === "send" || a === "swap"
+          ? { kind: "sphincs-accounts", initialAction: a, initialName: w.name }
+          : { kind: "sphincs-accounts" },
+      );
+    }
     pushSub(
       a === "send" ? { kind: "send", wallet: w, chain }
       : a === "swap" ? { kind: "swap", wallet: w }

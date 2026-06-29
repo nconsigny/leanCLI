@@ -1,7 +1,8 @@
-import React from "react";
+import React, { useContext } from "react";
 import { Box } from "ink";
 import AnimatedKoi from "./AnimatedKoi.js";
 import { theme } from "../theme.js";
+import { EmbeddedContext } from "../embedded.js";
 
 /** [koi | red-bordered box] — the canonical "you are inside the wallet"
  *  framing. Used by Layout (default) and RpcRunner so every interactive
@@ -17,6 +18,26 @@ const KOI_W = 24;
 const KOI_H = 12;
 
 export function KoiFrame({ children }: { children: React.ReactNode }) {
+  const embedded = useContext(EmbeddedContext);
+  // In the dashboard's narrow main pane the 24-col koi would force the
+  // content to wrap or spill, so drop it and keep just the red-bordered
+  // box (still the "inside the wallet" identity cue, minus the fish).
+  // Tighter horizontal padding too — every column counts in-pane.
+  const content = (
+    <Box
+      flexDirection="column"
+      borderStyle="double"
+      borderColor={theme.koiRed}
+      paddingX={embedded ? 1 : 2}
+      paddingY={0}
+      flexGrow={1}
+      flexShrink={1}
+      minWidth={0}
+    >
+      {children}
+    </Box>
+  );
+  if (embedded) return content;
   return (
     <Box flexDirection="row">
       <Box
@@ -28,18 +49,7 @@ export function KoiFrame({ children }: { children: React.ReactNode }) {
       >
         <AnimatedKoi size="tiny" />
       </Box>
-      <Box
-        flexDirection="column"
-        borderStyle="double"
-        borderColor={theme.koiRed}
-        paddingX={2}
-        paddingY={0}
-        flexGrow={1}
-        flexShrink={1}
-        minWidth={0}
-      >
-        {children}
-      </Box>
+      {content}
     </Box>
   );
 }

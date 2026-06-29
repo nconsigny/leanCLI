@@ -13,13 +13,14 @@ import type { CreateKind } from "./CreateWalletPicker.js";
 import { newSessionKey, type Phase, type WalletBalance } from "./LlmChatFlow.js";
 import { useTerminalSize } from "../dashboard/useTerminalSize.js";
 import { useRpcConfig } from "../dashboard/rpcstatus.js";
-import { useNetFeed, useStatusSnapshot } from "../dashboard/netfeed.js";
+import { useNetFeed, useStatusSnapshot, type NetLogEvent } from "../dashboard/netfeed.js";
 import { useLlamaStatus } from "../dashboard/llamamon.js";
 import { useLlmModels } from "../dashboard/llmcontrol.js";
 import { usePrivacyStatus } from "../dashboard/settingsdata.js";
 import { useSystemStats } from "../dashboard/sysmon.js";
 import { useWalletData, type WalletRow } from "../dashboard/walletdata.js";
 import Select from "../widgets/Select.js";
+import { EmbeddedContext } from "../embedded.js";
 
 /**
  * Multiplexed dashboard — the tmux-style home screen. Five always-visible
@@ -53,12 +54,15 @@ import Select from "../widgets/Select.js";
 const PANES = ["chat", "wallet", "network", "llm", "settings"] as const;
 type PaneId = (typeof PANES)[number];
 
+// Hints for the highlighted pane in the navigation footer (nothing entered).
+// Enter activates the highlighted pane; while it's merely highlighted its
+// shortcuts are live (chat included — chat is entered for typing via Enter).
 const PANE_HINTS: Record<PaneId, string> = {
-  chat: "enter send · empty-enter act on draft · ctrl+o full chat · /clear reset",
-  wallet: "enter open hub here · o full-screen hub · r refresh · s sync shielded",
-  network: "enter open Status here · live RPC / light-client / egress status",
+  chat: "enter to type · ctrl+o full chat",
+  wallet: "enter open hub · o full-screen hub · r refresh · s sync shielded",
+  network: "enter open Status · r refresh · live RPC / light-client / egress",
   llm: "enter open model manager · m launch model · read-only probes",
-  settings: "enter open settings · p provider (rpc/helios/colibri) · o oram · x more commands",
+  settings: "enter open settings · p provider (rpc/helios/colibri) · o oram · x more",
 };
 
 type Props = {
@@ -126,6 +130,12 @@ export default function Dashboard({
   // that owns all keys; the dashboard's global + pane-scoped handlers
   // stand down so r/enter/esc don't collide, and esc inside swaps back.
   const [mainPane, setMainPane] = useState<PaneId>("chat");
+  // Whether the chat pane has been ENTERED for typing. Chat behaves like
+  // every other pane: highlighting it (Tab) only selects it — the footer
+  // hints and pane shortcuts stay live — and Enter enters typing mode. Esc
+  // leaves. It persists across Tab the same way a non-chat pane stays in the
+  // main slot, so Tab'ing off chat and back resumes typing without re-Enter.
+  const [chatTyping, setChatTyping] = useState<boolean>(false);
   // A chat-approved draft, captured locally so the decode→simulate→
   // ConfirmGate→sign flow renders IN the main pane instead of taking
   // over the whole screen. Only ever set while the chat pane is the
@@ -139,10 +149,17 @@ export default function Dashboard({
   } | null>(null);
   const sendActive = pendingSend !== null;
   const overlayActive = mainOverlay != null;
+  // The highlighted pane "owns" the keyboard (it's been entered/activated).
+  // Uniform across panes: the highlight must be on the main-slot pane, AND
+  // either it's a non-chat pane (in the slot = entered) or it's chat that
+  // has been entered for typing (`chatTyping`). Tab'ing the highlight off it
+  // drops this to false → the dashboard's nav + footer hints take back over.
+  const modalFocused =
+    activePane === mainPane && (mainPane !== "chat" || chatTyping);
   // Modal = main slot owns all keys; the dashboard's global + pane-scoped
-  // handlers stand down. A swapped-in pane, an in-pane send, OR an
+  // handlers stand down. A focused expanded pane, an in-pane send, OR an
   // App-injected sub-flow overlay all count.
-  const modalActive = mainPane !== "chat" || sendActive || overlayActive;
+  const modalActive = modalFocused || sendActive || overlayActive;
 
   // One-time llm.ensureUp: gets {baseUrl, model} and lazily spawns
   // llama-server if configured. Deliberately NOT polled — the RPC has a
@@ -185,8 +202,14 @@ export default function Dashboard({
   // hints can pre-select a signing wallet (and the full chat screen
   // opens with the same context).
   useEffect(() => {
+    // Mirror BOTH signer kinds (eoa + sphincs) so a draft whose sender
+    // hint is a SPHINCS smart account resolves and the confirm flow
+    // pre-selects it. Skip address-less rows (an uncomputed SPHINCS
+    // counterfactual) — they can't be a signing target yet and would
+    // produce an un-pickable pre-select.
     const derived: WalletBalance[] = wallet.rows
-      .filter((r): r is WalletRow & { kind: "eoa" } => r.kind === "eoa")
+      .filter((r): r is WalletRow & { kind: "eoa" | "sphincs" } =>
+        (r.kind === "eoa" || r.kind === "sphincs") && !!r.address)
       .slice(0, 5)
       .map((r) => ({ kind: r.kind, name: r.name, address: r.address, wei: r.wei }));
     setChatWallets(derived);
@@ -218,18 +241,45 @@ export default function Dashboard({
   };
 
   const nextPane = (cur: PaneId, shift: boolean): PaneId => {
-    const idx = PANES.indexOf(cur);
-    const step = shift ? PANES.length - 1 : 1;
-    return PANES[(idx + step) % PANES.length] ?? "chat";
+    // Tab order follows the visual layout: the main pane first, then the
+    // side rail top-to-bottom (same order renderSummary lays them out).
+    // Keeping the main pane at the head — instead of its fixed PANES slot —
+    // means tabbing past the last rail pane returns straight to the main
+    // pane, so no pane is visited twice in a cycle.
+    const order: PaneId[] = [mainPane, ...PANES.filter((p) => p !== mainPane)];
+    const idx = order.indexOf(cur);
+    const step = shift ? order.length - 1 : 1;
+    return order[(idx + step) % order.length] ?? mainPane;
   };
 
   useInput(
     (ch, key) => {
       if (key.escape) {
-        // While a pane is expanded in the main slot, esc belongs to that
-        // pane's own handler (it collapses back to chat). Only the
-        // multiplexed view's esc backs out to the main menu.
-        if (mainPane !== "chat") return;
+        // While a chat draft is in flight, Esc means "stop generating" —
+        // ChatPane owns that (it aborts the request and keeps you in the
+        // chat). Yield the key to it: don't also drop out of typing mode.
+        if (
+          chatTyping &&
+          activePane === "chat" &&
+          chatPhase.kind === "chat" &&
+          chatPhase.busy
+        ) {
+          return;
+        }
+        // Leaving chat typing comes first: esc stops typing → back to nav.
+        if (chatTyping) {
+          setChatTyping(false);
+          return;
+        }
+        if (mainPane !== "chat") {
+          // A pane is expanded. If the highlight is still ON it, esc belongs
+          // to that pane's own handler (it collapses back to chat). If the
+          // highlight has Tab'd off it, the modal isn't listening, so we
+          // collapse the view here.
+          if (activePane !== mainPane) setMainPane("chat");
+          return;
+        }
+        // Navigation on chat: esc backs out to the main menu.
         onBack();
         return;
       }
@@ -240,16 +290,12 @@ export default function Dashboard({
         return;
       }
       if (key.tab) {
-        if (mainPane !== "chat") {
-          // A pane is expanded: tab moves the EXPANDED pane to the next
-          // one (so you can tab between full panes without first esc'ing
-          // back to chat). activePane follows so the highlight is in sync.
-          const next = nextPane(mainPane, key.shift);
-          setMainPane(next);
-          setActivePane(next);
-        } else {
-          setActivePane((p) => nextPane(p, key.shift));
-        }
+        // One rule everywhere: Tab navigates, Enter activates. Tab only
+        // moves the selection highlight — in BOTH the multiplexed view and
+        // while a pane is expanded. It never swaps the main slot by itself;
+        // the pane-scoped Enter handler below does that. Tab'ing off an
+        // expanded pane hands keys back to the dashboard (modalFocused → false).
+        setActivePane((p) => nextPane(p, key.shift));
       }
     },
     // Active in the multiplexed view AND while a pane is swapped in (so
@@ -258,22 +304,33 @@ export default function Dashboard({
     { isActive: !overlayActive && !sendActive },
   );
 
-  // Pane-scoped shortcuts + "swap into the main slot". Never active while
-  // the chat pane holds focus (its TextInput owns printable keys there;
-  // chat uses Ctrl+O to expand, handled inside ChatPane) or while a pane
-  // is already modal in the main slot.
+  // Pane navigation commit + pane-scoped shortcuts. Active in the
+  // multiplexed view and in an expanded view after Tab'ing the highlight
+  // off the focused modal; stands down only while a pane is the focused
+  // modal (it owns its keys) or a send/overlay is up.
   useInput(
     (ch, key) => {
-      // Enter swaps the focused pane into the big main slot as a modal
-      // (wallet→hub, network→Status, llm→model manager, settings→toggles).
+      // Enter ACTIVATES the highlighted pane. Chat → bring it to the main
+      // slot and enter typing mode. Any other pane → bring it into the main
+      // slot (wallet→hub, network→Status, llm→model manager, settings→toggles).
+      // Tab never changes the main slot; only this does.
       if (key.return) {
-        setMainPane(activePane);
+        if (activePane === "chat") {
+          setMainPane("chat");
+          setChatTyping(true);
+        } else if (activePane !== mainPane) {
+          setMainPane(activePane);
+          setChatTyping(false);
+        }
         return;
       }
-      // `r` refreshes wallet balances from ANY non-chat dashboard pane (not
-      // just the wallet pane) — a quick "update my balances" from the main
-      // view. It can't fire while chat is focused (the TextInput owns
-      // printable keys there), so Tab off chat first; no other pane binds `r`.
+      // Printable per-pane shortcuts. Skipped only while CHAT is the
+      // highlighted pane (Enter there opens typing; we don't want letters
+      // doing pane actions while chat is selected). With the highlight on any
+      // other pane, r/s/o/p/m act on it — works in the multiplexed view too.
+      if (activePane === "chat") return;
+      // `r` refreshes wallet balances from ANY non-chat pane — a quick
+      // "update my balances"; no other pane binds `r`.
       if (ch === "r") wallet.refresh();
       if (activePane === "wallet") {
         if (ch === "s") wallet.syncShielded();
@@ -289,7 +346,7 @@ export default function Dashboard({
         if (ch === "m") setMainPane("llm");
       }
     },
-    { isActive: activePane !== "chat" && !modalActive },
+    { isActive: !modalActive },
   );
 
   if (columns < 96 || rows < 32) {
@@ -317,11 +374,16 @@ export default function Dashboard({
   const chatW = Math.max(50, Math.floor(columns * 0.58));
   const rightW = columns - chatW;
 
-  // Right-column height budget. network/llm/settings get fixed compact
-  // heights; the flexible pane(s) — wallet and/or chat, whichever sit in
-  // the side column — share the remainder, with wallet favoured (it's the
-  // most-used side pane → "more space by default").
-  const FIXED: Partial<Record<PaneId, number>> = { network: 9, llm: 9, settings: 6 };
+  // Right-column height budget. llm/settings get fixed compact heights;
+  // network SCALES with the viewport. It's the best at-a-glance pane
+  // (chain · provider · light-client · verified · egress · live request
+  // tail), so it stays compact on a small terminal (≈11 rows — wallet was
+  // getting starved otherwise) but grows toward 20 in full screen, where
+  // the extra rows surface more of the request tail instead of whitespace.
+  // The flexible pane(s) — wallet and/or chat — take the remainder, so a
+  // taller network trims the top pane by the same amount.
+  const networkH = Math.max(11, Math.min(20, Math.floor(H * 0.34)));
+  const FIXED: Partial<Record<PaneId, number>> = { network: networkH, llm: 9, settings: 6 };
   const sidePanes = PANES.filter((p) => p !== mainPane);
   const fixedTotal = sidePanes.reduce((a, p) => a + (FIXED[p] ?? 0), 0);
   const flexCount = sidePanes.filter((p) => FIXED[p] === undefined).length;
@@ -343,7 +405,11 @@ export default function Dashboard({
         phase={chatPhase}
         setPhase={setChatPhase}
         wallets={chatWallets}
-        isFocused={activePane === "chat" && !modalActive}
+        // Chat is writable only once ENTERED (Enter on the highlighted chat
+        // pane → `chatTyping`) and while the highlight is on it. Merely
+        // highlighting chat selects it without grabbing keys, so the footer
+        // hints and other panes' shortcuts stay live; Esc leaves typing.
+        isFocused={chatTyping && activePane === "chat"}
         contentHeight={h - 3}
         showKoi={isMain}
         modelName={llmInfo.model}
@@ -395,15 +461,17 @@ export default function Dashboard({
     if (pendingSend) {
       return (
         <Box width={chatW} height={H} flexDirection="column" overflow="hidden">
-          <SendRawFlow
-            tx={pendingSend.tx}
-            chainId={pendingSend.chainId}
-            wallet={pendingSend.wallet}
-            onDone={(success, result) => {
-              onChatBroadcastResult(success, result);
-              setPendingSend(null);
-            }}
-          />
+          <EmbeddedContext.Provider value={true}>
+            <SendRawFlow
+              tx={pendingSend.tx}
+              chainId={pendingSend.chainId}
+              wallet={pendingSend.wallet}
+              onDone={(success, result) => {
+                onChatBroadcastResult(success, result);
+                setPendingSend(null);
+              }}
+            />
+          </EmbeddedContext.Provider>
         </Box>
       );
     }
@@ -414,7 +482,14 @@ export default function Dashboard({
     if (mainOverlay) {
       return (
         <Box width={chatW} height={H} flexDirection="column" overflow="hidden">
-          {mainOverlay}
+          {/* Injected sub-flows (wallet hub action, SPHINCS hub, CREATE,
+              More commands, …) render "embedded": KoiFrame (→ Layout /
+              RpcRunner) drops the 24-col koi so the squeezed-in flow fits
+              the ~58%-width slot. The static panes (wallet hub, Status)
+              keep their koi — they have room. */}
+          <EmbeddedContext.Provider value={true}>
+            {mainOverlay}
+          </EmbeddedContext.Provider>
         </Box>
       );
     }
@@ -422,10 +497,19 @@ export default function Dashboard({
       case "chat":
         return renderChat(chatW, H, true);
       case "wallet":
+        // WalletsHub paints its own "Wallets" title via Layout, so we add a
+        // focus-coloured border (no extra title line) to match the blue
+        // focus cue every other main pane shows.
         return (
-          <Box width={chatW} height={H} flexDirection="column">
+          <Box
+            width={chatW}
+            height={H}
+            flexDirection="column"
+            borderStyle={modalFocused ? "double" : "single"}
+            borderColor={modalFocused ? theme.highlight : theme.dim}
+          >
             <WalletsHub
-              isActive
+              isActive={modalFocused}
               onPick={(a, wal, chain) => onWalletAction(a, wal, chain)}
               onCreate={onWalletCreate}
               onBack={() => setMainPane("chat")}
@@ -433,10 +517,18 @@ export default function Dashboard({
           </Box>
         );
       case "network":
+        // StatusFlow paints its own title via Layout; add the matching
+        // focus-coloured border (no extra title line) for a consistent cue.
         return (
-          <Box width={chatW} height={H} flexDirection="column">
+          <Box
+            width={chatW}
+            height={H}
+            flexDirection="column"
+            borderStyle={modalFocused ? "double" : "single"}
+            borderColor={modalFocused ? theme.highlight : theme.dim}
+          >
             <StatusFlow
-              isActive
+              isActive={modalFocused}
               onLiveMonitor={onOpenNetworkMonitor}
               onTrustedRegistry={onOpenTrustedRegistry}
               onBack={() => setMainPane("chat")}
@@ -445,8 +537,9 @@ export default function Dashboard({
         );
       case "llm":
         return (
-          <PaneFrame title="llama.cpp / model manager" focused width={chatW} height={H}>
+          <PaneFrame title="llama.cpp / model manager" focused={modalFocused} width={chatW} height={H}>
             <LlmManager
+              isActive={modalFocused}
               control={llmModels}
               llama={llama}
               sys={sys}
@@ -458,8 +551,9 @@ export default function Dashboard({
         );
       case "settings":
         return (
-          <PaneFrame title="settings" focused width={chatW} height={H}>
+          <PaneFrame title="settings" focused={modalFocused} width={chatW} height={H}>
             <SettingsManager
+              isActive={modalFocused}
               cfg={cfg}
               actions={actions}
               privacy={privacy}
@@ -471,17 +565,21 @@ export default function Dashboard({
     }
   };
 
+  // Footer shown while a pane is ENTERED (owns the keyboard) — one per pane,
+  // plus the in-pane send/overlay flows.
   const modalFooter = overlayActive
-    ? "in-pane flow · ← / esc back · dashboard stays open"
+    ? "in-pane flow · ←/esc back · dashboard stays open"
     : sendActive
     ? "review & sign in pane · enter confirm · esc cancel"
-    : mainPane === "wallet"
-      ? "←/→ action · ↑/↓ wallet · enter run · tab pane · esc back to chat"
-      : mainPane === "network"
-        ? "r refresh · m live monitor · t trusted registry · tab pane · esc back"
-        : mainPane === "llm"
-          ? "↑/↓ model · enter launch · tab pane · esc back to chat"
-          : "↑/↓ move · enter select · tab pane · esc back to chat";
+    : mainPane === "chat"
+      ? "type your message · enter send · empty-enter act on draft · ctrl+o full chat · /clear reset · esc stop typing"
+      : mainPane === "wallet"
+        ? "←/→ action · ↑/↓ wallet · enter run · n chain · r refresh · a archive · tab pane · esc back to chat"
+        : mainPane === "network"
+          ? "r refresh · m live monitor · t trusted registry · tab pane · esc back to chat"
+          : mainPane === "llm"
+            ? "↑/↓ model · enter launch · tab pane · esc back to chat"
+            : "↑/↓ move · enter select · tab pane · esc back to chat";
 
   return (
     <Box flexDirection="column" width={columns}>
@@ -499,7 +597,7 @@ export default function Dashboard({
         </Text>
       ) : (
         <Text wrap="truncate-end" color={theme.dim}>
-          {" tab/shift-tab panes · esc menu · ctrl+n chain · "}
+          {" tab panes · esc menu · ctrl+n chain · "}
           <Text color={theme.highlight}>{activePane}</Text>
           {" ▸ "}
           {PANE_HINTS[activePane]}
@@ -565,6 +663,43 @@ function formatUnits(b: bigint, decimals: number): string {
   return centi === 0n ? `${whole}` : `${whole}.${centi.toString().padStart(2, "0")}`;
 }
 
+function formatTokenUnits(b: bigint, decimals: number, maxFrac = 6): string {
+  const base = 10n ** BigInt(decimals);
+  const whole = b / base;
+  const frac = b % base;
+  if (frac === 0n || maxFrac <= 0) return whole.toString();
+  const scale = 10n ** BigInt(Math.min(decimals, maxFrac));
+  const shown = (frac * scale) / base;
+  if (shown === 0n) return `${whole}.<${"0".repeat(Math.min(decimals, maxFrac) - 1)}1`;
+  const trimmed = shown.toString().padStart(Math.min(decimals, maxFrac), "0").replace(/0+$/, "");
+  return `${whole}.${trimmed}`;
+}
+
+function joinAaveTokens(
+  reserves: NonNullable<ReturnType<typeof useWalletData>["rows"][number]["defiAave"]>["reserves"],
+  side: "supplied" | "borrowed",
+): string {
+  const parts = reserves
+    .map((r) => {
+      const amount = side === "supplied" ? r.supplied : r.borrowed;
+      return amount > 0n ? `${formatTokenUnits(amount, r.decimals)} ${r.symbol}` : null;
+    })
+    .filter((x): x is string => !!x);
+  return parts.length > 0 ? parts.join(" · ") : "0";
+}
+
+/** `$` amount from a base-currency uint256 (Aave base ccy = USD, 8 dp). */
+function formatUsdBase(b: bigint, decimals: number): string {
+  return `$${formatUnits(b, decimals)}`;
+}
+
+/** Health factor: 1e18-scaled to 2 dp, or ∞ when there's no debt (the
+ *  Pool returns uint256-max). */
+function formatHf(hf: bigint, debt: bigint): string {
+  if (debt === 0n) return "∞";
+  return formatUnits(hf, 18);
+}
+
 function WalletBox({
   data,
   snap,
@@ -613,6 +748,24 @@ function WalletBox({
           {"  "}
           {r.tokens.slice(0, 4).map((t) => `${t.symbol} ${formatUnits(t.balance, t.decimals)}`).join(" · ")}
           {r.tokens.length > 4 ? ` +${r.tokens.length - 4}` : ""}
+        </Line>,
+      );
+    }
+    // DeFi: only render when there's an open Aave position, to keep the
+    // pane uncluttered for wallets without one. Morpho/Curve are
+    // "coming soon" and intentionally not shown on the dashboard.
+    if (r.defiAave) {
+      const d = r.defiAave;
+      const supplied = d.reserves.length > 0
+        ? joinAaveTokens(d.reserves, "supplied")
+        : formatUsdBase(d.collateralBase, d.baseDecimals);
+      const borrowed = d.reserves.length > 0
+        ? joinAaveTokens(d.reserves, "borrowed")
+        : formatUsdBase(d.debtBase, d.baseDecimals);
+      lines.push(
+        <Line key={`${r.kind}:${r.name}:defi`} color={theme.koiCream}>
+          {"  ⚓ Aave "}
+          supplied {supplied} · borrowed {borrowed} · HF {formatHf(d.healthFactor, d.debtBase)}
         </Line>,
       );
     }
@@ -772,8 +925,10 @@ function RpcBox({
 /* ---------- network / status box (merged rpc + net summary) ---------- */
 
 /** Compact merge of the rpc/light-client summary (RpcBox) with a one-line
- *  egress/traffic readout. Full detail (sidecars, chains, restart actions)
- *  lives in the embedded Status screen — Enter on this pane. */
+ *  egress/totals readout AND a live request tail (the last few events from
+ *  the same JSONL feed the standalone Network monitor tails). Full detail
+ *  (sidecars, chains, restart actions, the full scrolling log) lives in the
+ *  embedded Status / monitor screens — Enter on this pane. */
 function NetworkBox({
   cfg,
   pending,
@@ -788,9 +943,18 @@ function NetworkBox({
   budget: number;
 }) {
   const s = feed.stats;
+  // Vertical budget split: the rpc/light-client summary keeps priority (it's
+  // the "am I verified" headline), one line for egress + totals, then the
+  // live request tail. The tail grows with the pane — 0 rows when cramped,
+  // up to 5 in full screen — so a tall network pane shows real traffic
+  // instead of whitespace, and a short one degrades to just the summary.
+  const egressLines = 1;
+  const tailRows = Math.max(0, Math.min(5, budget - 5 - egressLines - 1)); // -1: tail header
+  const rpcBudget = Math.max(3, budget - egressLines - (tailRows > 0 ? tailRows + 1 : 0));
+  const tail = tailRows > 0 ? feed.recent.slice(-tailRows) : [];
   return (
     <Box flexDirection="column">
-      <RpcBox cfg={cfg} pending={pending} budget={Math.max(3, budget - 1)} />
+      <RpcBox cfg={cfg} pending={pending} budget={rpcBudget} />
       <Line color={theme.dim}>
         egress <Text color={theme.koiCream}>{snap?.network.rpc.egressSrc || "…"}</Text>
         {" · req "}<Text color={theme.primary}>{s.requests}</Text>
@@ -798,7 +962,42 @@ function NetworkBox({
         {" · err "}<Text color={theme.err}>{s.errors}</Text>
         {" · denied "}<Text color={theme.warn}>{s.denied}</Text>
       </Line>
+      {tailRows > 0 && (
+        <>
+          <Line color={theme.dim}>recent ▾ last {tailRows}{feed.error ? ` · ${feed.error}` : ""}</Line>
+          {tail.length === 0 ? (
+            <Line color={theme.dim}>{"  · no traffic yet"}</Line>
+          ) : (
+            tail.map((e, i) => <NetEventLine key={`${e.ts_ms}-${i}`} e={e} />)
+          )}
+        </>
+      )}
     </Box>
+  );
+}
+
+/** One truncated line per network event in the dashboard's request tail —
+ *  a condensed cousin of NetworkMonitor's EventRow (glyph · method · host/
+ *  backend · ms). Errors/denials show the error text in place of the host. */
+function NetEventLine({ e }: { e: NetLogEvent }) {
+  const isErr = e.kind === "rpc-error" || e.kind === "exception" || e.kind === "parse-error" || e.kind === "malformed";
+  const glyph = e.kind === "request" ? "→" : e.kind === "response" ? "←" : isErr ? "✗" : e.kind === "denied" ? "⊘" : "·";
+  const color = e.kind === "response" ? theme.ok : isErr ? theme.err : e.kind === "denied" ? theme.warn : theme.dim;
+  const detail =
+    isErr || e.kind === "denied"
+      ? typeof e.error === "string"
+        ? e.error
+        : e.error
+          ? JSON.stringify(e.error)
+          : e.kind
+      : e.host ?? e.backend ?? "";
+  const ms = e.ms !== undefined ? ` ${e.ms}ms` : "";
+  return (
+    <Line>
+      <Text color={color}>{glyph} </Text>
+      <Text color={theme.primary}>{e.method || "?"}</Text>
+      <Text color={theme.dim}>{detail ? ` ${detail}` : ""}{ms}</Text>
+    </Line>
   );
 }
 
@@ -858,22 +1057,28 @@ function onOffText(s: { running: boolean } | null, pendingThis: boolean): string
  *  clients live (those RPCs exist) or open More commands. The privacy
  *  allow-list stays a display-only footer (boot-time LEANCLI_PRIVACY). */
 function SettingsManager({
+  isActive,
   cfg,
   actions,
   privacy,
   onOpenMore,
   onBack,
 }: {
+  isActive: boolean;
   cfg: ReturnType<typeof useRpcConfig>["cfg"];
   actions: ReturnType<typeof useRpcConfig>["actions"];
   privacy: ReturnType<typeof usePrivacyStatus>;
   onOpenMore: () => void;
   onBack: () => void;
 }) {
-  // Esc backs out; ←/→/↑/↓ + enter are owned by the Select below.
-  useInput((_ch, key) => {
-    if (key.escape) onBack();
-  });
+  // Esc backs out; ←/→/↑/↓ + enter are owned by the Select below. Stands
+  // down entirely when the dashboard highlight has Tab'd off this pane.
+  useInput(
+    (_ch, key) => {
+      if (key.escape) onBack();
+    },
+    { isActive },
+  );
   const items = [
     {
       label: `Provider — ${actions.pending === "provider" ? "…" : (cfg.readBackend ?? "?")}  (enter cycles rpc → helios → colibri)`,
@@ -902,7 +1107,7 @@ function SettingsManager({
       <Box marginTop={1} flexDirection="column">
         <Select
           items={items}
-          isFocused
+          isFocused={isActive}
           onSelect={(it) => run((it as { value: string }).value)}
         />
       </Box>
@@ -937,18 +1142,21 @@ function SettingsManager({
  * the live pane poll then shows the new model loading → up.
  */
 function LlmLaunchPicker({
+  isActive,
   control,
   onClose,
 }: {
+  isActive: boolean;
   control: ReturnType<typeof useLlmModels>;
   onClose: () => void;
 }) {
-  // Esc closes whenever we're not mid-launch (don't strand a spawn).
+  // Esc closes whenever we're not mid-launch (don't strand a spawn). Stands
+  // down when the dashboard highlight has Tab'd off the llm pane.
   useInput(
     (_ch, key) => {
       if (key.escape && control.pending === null) onClose();
     },
-    { isActive: true },
+    { isActive },
   );
 
   const items = control.models.map((m) => ({
@@ -986,7 +1194,7 @@ function LlmLaunchPicker({
         ) : (
           <Select
             items={items}
-            isFocused={true}
+            isFocused={isActive}
             onSelect={(it) => void control.launch(it.value)}
           />
         )}
@@ -1148,6 +1356,7 @@ function LlmBox({
  *  launch picker (LlmLaunchPicker) inline. Esc (when not mid-launch)
  *  returns to chat-main. */
 function LlmManager({
+  isActive,
   control,
   llama,
   sys,
@@ -1155,6 +1364,7 @@ function LlmManager({
   outcome,
   onBack,
 }: {
+  isActive: boolean;
   control: ReturnType<typeof useLlmModels>;
   llama: ReturnType<typeof useLlamaStatus>;
   sys: ReturnType<typeof useSystemStats>;
@@ -1166,7 +1376,7 @@ function LlmManager({
     <Box flexDirection="column">
       <LlmBox llama={llama} sys={sys} chatPhase={chatPhase} outcome={outcome} />
       <Box marginTop={1} flexDirection="column">
-        <LlmLaunchPicker control={control} onClose={onBack} />
+        <LlmLaunchPicker isActive={isActive} control={control} onClose={onBack} />
       </Box>
     </Box>
   );

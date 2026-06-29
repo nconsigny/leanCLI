@@ -6,32 +6,59 @@ import LeanCli.Ethereum.Chain
 The CLI supports two Ethereum account families:
 
 * `eoaK1`: regular BIP-39/BIP-32 Ethereum EOA account, signing with k1.
-* `sphincsHybrid`: ERC-4337 smart account whose `_validateSignature`
-  gates every UserOp on BOTH a stored ECDSA owner AND a stateless
-  SPHINCS- post-quantum verifier. The ECDSA half lives in one of the
-  wallet's existing eoaK1 accounts (or a freshly derived sub-path of
-  the wallet's BIP-39 seed); the SPHINCS half is generated locally by
-  the shim sidecar at one of the supported parameter sets (see
-  `LeanCli.Sphincs.ParamSet`).
+* `smart …`: an ERC-4337 smart (contract) account. Today the only
+  subtype is `.sphincs` — a hybrid ECDSA + SPHINCS- account whose
+  `_validateSignature` gates every UserOp on BOTH a stored ECDSA owner
+  AND a stateless SPHINCS- post-quantum verifier. The ECDSA half lives
+  in one of the wallet's existing eoaK1 accounts (or a freshly derived
+  sub-path of the wallet's BIP-39 seed); the SPHINCS half is generated
+  locally by the shim sidecar at one of the supported parameter sets
+  (see `LeanCli.Sphincs.ParamSet`). A `.frame` subtype is reserved for
+  a future smart-account kind and not yet implemented.
 
-Both are local-only. Mainnet is the production default, and Sepolia
-is an explicit dev/testnet target. No account kind implies remote
-custody or online keystore access.
+Smart accounts are the wallets that support atomic multi-call
+(`executeBatch`) execution from a single UserOperation; see
+`LeanCli.Wallet.ExecuteBatch`.
+
+Both families are local-only. Mainnet is the production default, and
+Sepolia is an explicit dev/testnet target. No account kind implies
+remote custody or online keystore access.
 -/
 
 namespace LeanCli.Wallet.Account
 
 open LeanCli.Ethereum.Chain
 
+/-- The subtype of a smart (ERC-4337 contract) account. Modeled as its
+    own inductive so the account kind reads as "smart account, sphincs
+    subtype" and so a future `frame` kind is an additive change here
+    rather than a new flat sibling of `eoaK1`. -/
+inductive SmartAccountKind where
+  /-- Hybrid ECDSA + SPHINCS- account. The ECDSA half is one of the
+      wallet's eoaK1 accounts (existing or derived for this hybrid);
+      the SPHINCS- half is generated locally by the shim and keyed by
+      `(pkSeed, pkRoot)`. The deployed verifier address is selected per
+      `(chain, paramSet)` via `cfg.sphincsVerifiers`. -/
+  | sphincs
+  -- | frame   -- reserved for a future smart-account kind; not yet implemented
+  deriving DecidableEq, Repr
+
 inductive AccountKind where
   | eoaK1
-  /-- Hybrid ECDSA + SPHINCS- ERC-4337 smart account. The ECDSA half is
-      one of the wallet's eoaK1 accounts (existing or derived for this
-      hybrid); the SPHINCS- half is generated locally by the shim and
-      keyed by `(pkSeed, pkRoot)`. The deployed verifier address is
-      selected per `(chain, paramSet)` via `cfg.sphincsVerifiers`. -/
-  | sphincsHybrid
+  /-- An ERC-4337 smart (contract) account; `k` selects the subtype. -/
+  | smart (k : SmartAccountKind)
   deriving DecidableEq, Repr
+
+/-- Whether this account is a smart (ERC-4337 contract) account — the
+    accounts that support batched `executeBatch` execution. -/
+def AccountKind.isSmart : AccountKind → Bool
+  | .smart _ => true
+  | .eoaK1   => false
+
+/-- The smart-account subtype, if this is a smart account. -/
+def AccountKind.smartKind? : AccountKind → Option SmartAccountKind
+  | .smart k => some k
+  | .eoaK1   => none
 
 inductive KeySource where
   | bip39Mnemonic
@@ -79,7 +106,7 @@ def compatible : AccountKind → KeySource → Bool
   -- Why: hybrid accounts derive every secret (ECDSA + SPHINCS- seed) from
   -- the wallet's BIP-39 mnemonic at distinct paths so a single mnemonic
   -- backup recovers both halves.
-  | .sphincsHybrid, .bip39Mnemonic => true
+  | .smart .sphincs, .bip39Mnemonic => true
   | _, _ => false
 
 def accepted (p : AccountPolicy) : Bool :=
@@ -91,8 +118,8 @@ def accepted (p : AccountPolicy) : Bool :=
     -- Hybrid carries an optional derivation path: present when the ECDSA
     -- half is freshly derived for this hybrid; absent when it reuses an
     -- existing eoaK1 (the path then lives on the referenced account).
-    | .sphincsHybrid, some path => path.coinType = 60
-    | .sphincsHybrid, none => true
+    | .smart .sphincs, some path => path.coinType = 60
+    | .smart .sphincs, none => true
     | _, _ => false
 
 def defaultEoaK1 : AccountPolicy :=
@@ -111,7 +138,7 @@ def sepoliaEoaK1 : AccountPolicy :=
     lives on the per-account record in
     `LeanCli.Wallet.SphincsHybridStore`. -/
 def sepoliaSphincsHybrid : AccountPolicy :=
-  { kind := .sphincsHybrid,
+  { kind := .smart .sphincs,
     source := .bip39Mnemonic,
     chainId := sepoliaChainId,
     path := none,

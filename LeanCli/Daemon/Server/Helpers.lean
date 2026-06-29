@@ -162,6 +162,28 @@ def parseHexQuantity (s : String) : Option Nat :=
   else
     parseHexQuantityDigits raw.toList 0
 
+/-- Normalize a backend-returned JSON-RPC "quantity" into a `Nat`. Direct RPC
+    endpoints return a `0x`-hex string, but verified light clients (helios)
+    return a bare decimal `Json.num` (and some backends a decimal string). All
+    three are accepted so the daemon can re-emit one canonical form. -/
+def quantityJsonToNat? (json : Json) : Option Nat :=
+  match json with
+  | .str s =>
+      let t := s.trimAscii.toString
+      if t.startsWith "0x" || t.startsWith "0X" then parseHexQuantity t
+      else t.toNat?
+  | _ => asNat json
+
+/-- Re-encode a backend "quantity" result as a canonical `0x`-hex JSON string.
+    Critical for correctness: forwarding helios's decimal quantity verbatim
+    makes hex-parsing clients (the TUI's `hexToBigInt`) read the decimal digits
+    AS hex — e.g. a 0.49 ETH balance renders as ~1357 ETH. Non-quantity JSON is
+    returned unchanged. -/
+def quantityJsonHex (json : Json) : Json :=
+  match quantityJsonToNat? json with
+  | some n => .str (natQuantityHex n)
+  | none   => json
+
 /-- Extract a hex-quantity `Nat` from a JSON string, failing with `invalidParams`. -/
 def jsonHexNat (json : Json) : Except RpcError Nat :=
   match asString json with
@@ -240,6 +262,35 @@ def paramNatOrHexStr (params : Json) (key : String) : Except RpcError Nat :=
         | some n => .ok n
         | none   => .error invalidParams
   | _ => .error invalidParams
+
+/-- A call with **no value and no calldata** carries no decodable intent:
+    to a contract it almost always reverts (there is no function selector
+    to dispatch and most contracts have no zero-value empty-data fallback)
+    and to an EOA it does nothing — either way it only burns gas. In an
+    intent-based wallet (decode → simulate → confirm) there is nothing to
+    confirm, so the send handlers refuse to sign it.
+
+    A native value transfer (`value > 0`, empty data) is NOT flagged, and
+    funding a contract (`value > 0`, empty data) is NOT flagged — only the
+    `value == 0 ∧ data == ∅` shape, which is the signature of inner
+    calldata dropped upstream (e.g. a 4337 `execute(token, 0, 0x)` that
+    reverted on-chain after burning gas). -/
+def isNoOpCall (valueWei : Nat) (data : ByteArray) : Bool :=
+  valueWei == 0 && data.isEmpty
+
+/-- Error returned when a send is refused by `isNoOpCall`. Names the
+    target and explains both legitimate intents so the caller can recover
+    (send ETH ⇒ pass a non-zero value; contract call ⇒ the calldata was
+    dropped upstream, re-issue the action). -/
+def noOpCallError (to : String) : RpcError :=
+  { code    := -32602
+    message := s!"refusing to sign a no-op call: zero value and empty calldata to {to}. Such a call carries no intent — to a contract it reverts and only burns gas. If you meant to send ETH, pass a non-zero value; if you meant a contract call, its calldata was dropped before reaching the daemon — re-issue the action."
+    data    := none }
+
+-- `isNoOpCall` shape anchors (proofs are the tests).
+example : isNoOpCall 0 ByteArray.empty = true  := by native_decide
+example : isNoOpCall 1 ByteArray.empty = false := by native_decide  -- native ETH send
+example : isNoOpCall 0 (ByteArray.mk #[0x09]) = false := by native_decide  -- has calldata
 
 /-- Canonical `{ text, exitCode }` JSON envelope returned by RPCs whose
     result is a human-readable text blob (script wrappers, status reports). -/

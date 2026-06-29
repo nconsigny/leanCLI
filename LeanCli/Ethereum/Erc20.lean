@@ -36,6 +36,21 @@ def encodeTransfer (recipient : String) (amount : Nat) : String :=
 def encodeApprove (spender : String) (amount : Nat) : String :=
   LeanCli.Swap.UniV3.encodeApprove spender amount
 
+/-- Aave-style test-faucet `mint(address token, address to, uint256 amount)`
+(selector `0xc6c3bbe6`, verified with `cast sig`). Not part of ERC-20
+proper, but the Aave Sepolia faucet's mint sits on the same ABI-encoding
+surface, so it is colocated with the token encoders. The faucet is
+non-permissioned on Sepolia and caps the per-tx amount (an over-cap mint
+reverts with "Mint limit transaction exceeded", which `tx.simulate`
+surfaces before signing). -/
+def selFaucetMint : String := "c6c3bbe6"
+
+def encodeFaucetMint (token to : String) (amount : Nat) : String :=
+  "0x" ++ selFaucetMint
+    ++ LeanCli.Swap.UniV3.encodeAddress token
+    ++ LeanCli.Swap.UniV3.encodeAddress to
+    ++ LeanCli.Swap.UniV3.encodeUint256 amount
+
 /-- The `2^256 - 1` allowance sentinel used by the `approve unlimited`
 UX. Re-exported here so the trusted-path Intent → encoder dispatch
 doesn't need to import `Swap.UniV3` directly. -/

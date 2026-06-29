@@ -462,7 +462,8 @@ patterns (see matchProtocolAction), but those parsers run after this
 one in the dispatch order so there's no ambiguity for the supported
 templates. -/
 def extractFromHint (toks : List String) : List (String × String) :=
-  -- Accept "from <name>", "using <name>", and "with <name>" — each lets
+  -- Accept "from <name>", "form <name>" (common typo), "using <name>",
+  -- and "with <name>" — each lets
   -- the user pin the signing wallet inline ("approve 42 USDC for
   -- vitalik.eth from leanWallet", "swap 1 USDC to ETH with mainEOA").
   -- `with` is ALSO the swap slippage keyword ("with 0.5% slippage"), so a
@@ -473,13 +474,20 @@ def extractFromHint (toks : List String) : List (String × String) :=
       match at? toks (i + 1) with
       | some t => if t.endsWith "%" then none else some i
       | none   => none)
-  let firstIndex : Option Nat :=
-    [indexOfKeyword toks "from", indexOfKeyword toks "using", withIdx?].foldl
+  let explicitIndex : Option Nat :=
+    [indexOfKeyword toks "form", indexOfKeyword toks "using", withIdx?].foldl
       (fun acc o => match acc, o with
         | some a, some b => some (Nat.min a b)
         | some a, none   => some a
         | none,   b      => b)
       none
+  -- Prefer explicit signer hints that do not collide with protocol grammar
+  -- (`with <wallet>`, `using <wallet>`, typo `form <wallet>`). Plain
+  -- `from <wallet>` remains supported, but in phrases like
+  -- `withdraw 0.1 ETH from Aave with SPHINCS1`, the first `from` belongs
+  -- to the protocol clause, not the signer.
+  let firstIndex : Option Nat :=
+    explicitIndex <|> indexOfKeyword toks "from"
   match firstIndex with
   | none => []
   | some idx =>
@@ -527,11 +535,16 @@ def matchSendOrTransfer (toks : List String) : Option RegexDraft := do
     confidence := confidence
   }
 
-/-- `approve <unlimited|<amount>> <asset> for <spender>`. -/
+/-- `approve <unlimited|<amount>> <asset> (for|to) <spender> [as spender]`.
+
+The spender is introduced by the canonical `for <spender>` or by
+`to <spender>` (`"approve 256 BOLD to vitalik.eth as spender"`). `from` /
+`using` / `with` stay the signing-wallet hints (`extractFromHint`), so `to`
+is unambiguously the spender here; a trailing `as spender` is ignored. -/
 def matchApprove (toks : List String) : Option RegexDraft := do
   let verb ← toks.head?
   if verb ≠ "approve" then none
-  let forIdx ← indexOfKeyword toks "for"
+  let forIdx ← (indexOfKeyword toks "for") <|> (indexOfKeyword toks "to")
   -- Token 1 is the amount-or-"unlimited".
   let amountTok ← at? toks 1
   let isUnlimited := amountTok == "unlimited" || amountTok == "infinite" || amountTok == "max"
@@ -560,6 +573,19 @@ def matchApprove (toks : List String) : Option RegexDraft := do
     unresolved := unresolved
     confidence := confidence
   }
+
+-- Canonical `for <spender>` resolves the spender.
+example :
+    (matchApprove (tokenize "approve 256 bold for vitalik.eth")).bind
+      (fun d => d.field? "spender") = some "vitalik.eth" := by native_decide
+-- `to <spender> as spender` resolves the same spender, and `from <name>`
+-- is captured as the signing-wallet hint, not the spender.
+example :
+    (matchApprove (tokenize "approve 256 bold from sphincs1 to vitalik.eth as spender")).bind
+      (fun d => d.field? "spender") = some "vitalik.eth" := by native_decide
+example :
+    (matchApprove (tokenize "approve 256 bold from sphincs1 to vitalik.eth as spender")).bind
+      (fun d => d.field? "from") = some "sphincs1" := by native_decide
 
 /-- `revoke|cancel|remove [<AMOUNT>] <ASSET> approval[s] for <spender>` —
 revoke means "set allowance to 0" by definition; any number the user
@@ -723,6 +749,13 @@ def matchSwap (toks : List String) : Option RegexDraft := do
 example :
     (matchSwap (tokenize "swap 1 usdc to eth with maineoa wallet")).bind
       (fun d => d.field? "from") = some "maineoa" := by native_decide
+-- Common typo: "form <wallet>" is treated as "from <wallet>".
+example :
+    extractFromHint (tokenize "supply 1 eth in aave sepolia form sphincs1")
+      = [("from", "sphincs1")] := by native_decide
+example :
+    extractFromHint (tokenize "withdraw 0.003 eth from aave v3 sepolia with sphincs1")
+      = [("from", "sphincs1")] := by native_decide
 -- The slippage form `with <N>%` is NOT mistaken for a sender hint.
 example :
     (matchSwap (tokenize "swap 1 usdc to eth with 0.5% slippage")).bind
@@ -822,16 +855,26 @@ rather than a new matcher here.
 `supply/deposit <amount> <asset>` without a protocol clause falls
 through to `matchProtocolActionByAssetDefault`. -/
 def matchSupply (toks : List String) : Option RegexDraft :=
-  -- Prepositions: `to` / `on` are the canonical English forms; `into`
-  -- is included because users commonly write "supply X into aave V3"
-  -- (treats the protocol as a container). All three resolve the
+  -- Prepositions: `to` / `on` are the canonical English forms; `in` /
+  -- `into` are included because users commonly write "supply X in/into
+  -- aave V3" (treats the protocol as a container). All resolve the
   -- protocol qualifier identically via `extractProtocolName`.
   (matchProtocolAction toks "supply"  "to")
     <|> (matchProtocolAction toks "supply"  "on")
+    <|> (matchProtocolAction toks "supply"  "in")
     <|> (matchProtocolAction toks "supply"  "into")
     <|> (matchProtocolAction toks "deposit" "to")
     <|> (matchProtocolAction toks "deposit" "on")
+    <|> (matchProtocolAction toks "deposit" "in")
     <|> (matchProtocolAction toks "deposit" "into")
+
+example :
+    (matchSupply (tokenize "supply 0.0123 eth in aave sepolia form sphincs1")).bind
+      (fun d => d.field? "protocol") = some "aave" := by native_decide
+
+example :
+    (matchSupply (tokenize "supply 0.0123 eth in aave sepolia form sphincs1")).bind
+      (fun d => d.field? "from") = some "sphincs1" := by native_decide
 
 /-- `withdraw / borrow / repay <amount> <asset> from <protocol>`. -/
 def matchWithdrawBorrowRepay (toks : List String) : Option RegexDraft :=
@@ -1048,16 +1091,28 @@ or `for <0x...>` — chat.draft's wallet-name resolution substitutes a
 def matchAuditApprovals (toks : List String) : Option RegexDraft := do
   let verb ← toks.head?
   let isAudit := verb = "audit"
-  -- "show approvals" / "list approvals" / "what approvals do i have"
-  -- are common enough alternative entry points to recognize them by
-  -- the second token instead of forcing the user to start with "audit".
+  -- "show / list / check / what approvals|allowances" are common enough
+  -- alternative entry points to recognize them by the approvals/allowances
+  -- noun instead of forcing the user to start with "audit". The noun is
+  -- required for these verbs so plain "check balance" doesn't trip it.
+  -- Accept singular forms too ("check USDC approval from X"): users
+  -- phrase the same audit either way, and revoke/approve verbs are
+  -- matched earlier so a bare "approval" noun here is always a listing.
   let isShowList :=
-    (verb = "show" ∨ verb = "list" ∨ verb = "what")
-      ∧ toks.any (fun t => t = "approvals" ∨ t = "allowances")
+    (verb = "show" ∨ verb = "list" ∨ verb = "check" ∨ verb = "what")
+      ∧ toks.any (fun t =>
+          t = "approvals" ∨ t = "allowances" ∨ t = "approval" ∨ t = "allowance")
   if ¬ (isAudit ∨ isShowList) then none
-  -- Optional explicit wallet via `for <name>` (`indexOfKeyword "for"`).
+  -- Owner wallet: prefer `from <name>` (the natural "approvals from
+  -- SPHINCS1" phrasing), then fall back to `for <name>`. Skip a captured
+  -- token symbol so "for USDC from SPHINCS1" resolves the owner to
+  -- SPHINCS1 — not the token sitting after `for`.
+  let pickWallet (kw : String) : Option String := do
+    let i ← indexOfKeyword toks kw
+    let w ← at? toks (i + 1)
+    if isKnownSymbol w then none else some w
   let walletHint? : Option String :=
-    (indexOfKeyword toks "for").bind (fun i => at? toks (i + 1))
+    pickWallet "from" <|> pickWallet "for"
   let fields : List (String × String) :=
     [("verb", "audit")] ++
     (match walletHint? with
@@ -1070,6 +1125,34 @@ def matchAuditApprovals (toks : List String) : Option RegexDraft := do
     -- Read-only — high confidence even without explicit wallet (daemon
     -- defaults to the user's default wallet).
     confidence := .high
+  }
+
+/-- `faucet <amount> <asset>` / `claim|get|mint|drip <amount> <asset> from
+[the] faucet` — mint Aave Sepolia test tokens. Fires only when the prompt
+is unambiguously about a faucet: the verb is `faucet`, or the verb is
+`claim`/`get`/`mint`/`drip` AND the word `faucet` appears (so those verbs
+keep their normal meaning otherwise). The mint recipient is the signing
+wallet, selectable with the usual `from <slot>` hint
+(`faucet 1000 DAI from SPHINCS1`). Asset resolution + the testnet-only
+guard happen daemon-side; the faucet only mints its own reserves. -/
+def matchFaucet (toks : List String) : Option RegexDraft := do
+  let verb ← toks.head?
+  let mentionsFaucet := toks.any (fun t => t = "faucet" ∨ t = "faucets")
+  let aliasVerb := verb = "claim" ∨ verb = "get" ∨ verb = "mint" ∨ verb = "drip"
+  if ¬ (verb = "faucet" ∨ (aliasVerb ∧ mentionsFaucet)) then none
+  let amountRaw ← at? toks 1
+  if ¬ (isAmountLike amountRaw) then none
+  let amount := (normalizeAmount amountRaw).getD amountRaw
+  let assetRaw ← at? toks 2
+  let asset := stripCashtag assetRaw
+  let assetOk := isKnownSymbol asset ∨ isAddress asset
+  some {
+    action     := .faucetMint
+    fields     := [("verb", "faucet"), ("amount", amount), ("asset", asset)]
+                  ++ extractFromHint toks
+    unresolved := if assetOk then [] else
+      [s!"asset '{asset}' not in known-tokens registry (faucet mints Aave Sepolia reserves)"]
+    confidence := if assetOk then .high else .medium
   }
 
 /-- `give me a fresh address [called <label>]`, `new EOA`,
@@ -1461,8 +1544,10 @@ Trigger words: bare ` and ` between two number-asset clauses, or
 already split into separate tokens by the tokenizer, so we look for
 explicit conjunctions.
 
-Caller note: this runs LAST in the dispatch chain. If a single-leg
-matcher already matched, we never get here. -/
+Caller note: this must run before broad single-leg transaction matchers
+such as Aave withdraw/borrow. Otherwise a prompt like "withdraw X and
+borrow Y" gets reduced to the first leg before the LLM or a future batch
+composer can see the second leg. -/
 def matchConjunction (toks : List String) : Option RegexDraft := do
   -- Heuristic: must contain at least 2 amount-like tokens AND at
   -- least one conjunction.
@@ -1517,6 +1602,10 @@ def parse (input : String) : RegexDraft :=
         -- on a privacy-hint check, so non-privacy Aave deposits/
         -- withdraws fall through to the Aave matchers unchanged.
         matchShielded toks
+        -- Faucet: strict trigger (verb `faucet`, or alias verb + the word
+        -- `faucet`), so it precedes matchClaim/matchMint/matchSendOrTransfer
+        -- without stealing their non-faucet prompts.
+        , matchFaucet toks
         -- audit / fresh / ens have unique enough trigger sets
         -- ("approvals", "fresh", ".eth", "register", "renew") that they
         -- don't collide with any other template; order among themselves
@@ -1542,6 +1631,10 @@ def parse (input : String) : RegexDraft :=
         , matchStake toks
         , matchMint toks
         , matchRedeem toks
+        -- Catch multi-leg asks before broad single-leg matchers. This
+        -- prevents "withdraw X from Aave and borrow Y" from silently
+        -- becoming only the withdraw leg.
+        , matchConjunction toks
         , matchSendOrTransfer toks
         , matchApprove toks
         , matchRevoke toks
@@ -1554,9 +1647,6 @@ def parse (input : String) : RegexDraft :=
         -- protocol choice always wins.
         , matchAssetDefault toks
         , matchWrap toks
-        -- Multi-leg conjunctions land LAST. If any single-leg matcher
-        -- consumed the prompt we never get here.
-        , matchConjunction toks
       ]
       match candidates.filterMap id with
       | d :: _ => d

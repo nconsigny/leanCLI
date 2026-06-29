@@ -2,6 +2,7 @@ import LeanCli.Daemon.Server.Core
 import LeanCli.Daemon.Server.Helpers
 import LeanCli.Daemon.Server.Endpoints
 import LeanCli.Daemon.Server.Journal
+import LeanCli.Daemon.Server.AddrGuard
 import LeanCli.Crypto.Hex
 import LeanCli.Daemon.State
 import LeanCli.Encoding.Json
@@ -351,6 +352,23 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                       match txBytesFieldD req.params "data" with
                       | .error err => pure (.error err)
                       | .ok data =>
+                          -- Pre-sign guard: refuse a zero-value, empty-
+                          -- calldata tx. It carries no intent — to a
+                          -- contract it reverts and only burns gas; the
+                          -- calldata was dropped upstream. Native ETH sends
+                          -- (value > 0) and contract funding are unaffected.
+                          if isNoOpCall value data then
+                            pure <| .error (noOpCallError to)
+                          else
+                          -- Pre-sign address-integrity gate: refuse to sign
+                          -- when `to` or any address embedded in the calldata
+                          -- is a near-miss to one of the daemon's own
+                          -- addresses (the LLM-typo'd-spender footgun). The
+                          -- caller overrides with acknowledgeAddressWarnings.
+                          match ← LeanCli.Daemon.Server.AddrGuard.enforce req.params to
+                              (LeanCli.Crypto.Hex.encode data) with
+                          | .error e => pure (.error e)
+                          | .ok () =>
                           match ← resolveSigningTarget name slot req.params with
                           | .error err => pure (.error err)
                           | .ok (path, fromAddr) =>

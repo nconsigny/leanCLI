@@ -38,11 +38,11 @@ is the caller's responsibility.
 
 ## ETH (vs WETH) supply
 
-Aave V3 mainnet routes ETH supply through the `WrappedTokenGatewayV3`
-contract, not the Pool directly. That helper is a separate deployment
-and is not yet in the registry. For ETH the user must explicitly wrap
-to WETH first and then supply WETH; this encoder works against any
-ERC-20 asset (including WETH).
+Aave V3 Pool accepts ERC-20 assets, so native ETH must become WETH
+before supply. `LeanCli.Aave.Prepare.prepareNativeEthSupplySmart`
+handles the SPHINCS/smart-account case by batching WETH9 `deposit()`
+with optional approval and `Pool.supply(WETH, ...)`. This low-level
+module still only encodes Pool calldata for ERC-20 assets.
 -/
 
 namespace LeanCli.Aave.V3Pool

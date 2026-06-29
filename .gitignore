@@ -32,6 +32,9 @@ code_*
 # Local scratch planning docs.
 /simplification.md
 
+# Runtime diagnostic dumps (daemon.log / agentd.log captured for debugging).
+/_diag/
+
 # Sphincs C13 (Rust) + Vulkan slhvk build artifacts — source stays tracked.
 /sidecars/sphincs/vendor-c13/target/
 /sidecars/sphincs/vendor-slhvk-sha2-128-24/lib/

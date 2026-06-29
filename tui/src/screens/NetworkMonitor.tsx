@@ -6,6 +6,7 @@ import type { Readable } from "node:stream";
 import { Layout, Banner } from "../widgets/Layout.js";
 import { call } from "../daemon.js";
 import { theme } from "../theme.js";
+import { useTerminalSize } from "../dashboard/useTerminalSize.js";
 
 /** Hook into Ink's stdout to recompute layout on terminal resize. We pin
  *  per-column proportions to the visible width so panels/rows never spill
@@ -43,6 +44,10 @@ type LogEvent = {
   params?: unknown;
   result?: unknown;
   chainId?: number;
+  /** Daemon-derived inner-action facts (present on every event kind):
+   *  `to` is the call target, `sel` the 4-byte selector for eth_call. */
+  to?: string;
+  sel?: string;
 };
 
 type Stats = {
@@ -76,16 +81,34 @@ export default function NetworkMonitor({ onDone }: Props) {
   // the table box reports the real available width regardless of container.
   // Fall back to a terminal-minus-koi-chrome estimate until the first measure.
   const fallbackCols = Math.max(48, useTerminalColumns() - 34);
+  const { rows: termRows } = useTerminalSize();
   const tableRef = useRef<DOMElement | null>(null);
+  const chromeRef = useRef<DOMElement | null>(null);
   const [measuredCols, setMeasuredCols] = useState<number | null>(null);
+  const [chromeRows, setChromeRows] = useState<number | null>(null);
   useEffect(() => {
     const node = tableRef.current;
     if (node) {
       const { width } = measureElement(node);
       if (width > 0 && width !== measuredCols) setMeasuredCols(width);
     }
+    const chrome = chromeRef.current;
+    if (chrome) {
+      const { height } = measureElement(chrome);
+      if (height > 0 && height !== chromeRows) setChromeRows(height);
+    }
   });
   const cols = measuredCols ?? fallbackCols;
+  // Fill the viewport vertically: total terminal rows minus the MEASURED
+  // chrome (stats bar + breakdown panels + header — its height varies with
+  // how many methods/hosts are active) minus the Layout frame + hint. We
+  // previously hardcoded the last 30 events and wasted the rest of the
+  // screen. Conservative fallback until the first measure lands.
+  const LAYOUT_CHROME = 6;
+  const visibleCount = Math.max(
+    8,
+    Math.min(MAX_ROWS, termRows - (chromeRows ?? 22) - LAYOUT_CHROME),
+  );
   const [logPath, setLogPath] = useState<string | null | undefined>(undefined);
   const [error, setError] = useState<string | null>(null);
   const [events, setEvents] = useState<LogEvent[]>([]);
@@ -209,7 +232,10 @@ export default function NetworkMonitor({ onDone }: Props) {
     }
   });
 
-  const recent = useMemo(() => events.slice(-30), [events]);
+  const recent = useMemo(
+    () => events.slice(-visibleCount),
+    [events, visibleCount],
+  );
 
   return (
     <Layout
@@ -240,10 +266,14 @@ export default function NetworkMonitor({ onDone }: Props) {
       )}
       {logPath && (
         <Box ref={tableRef} flexDirection="column">
-          <StatsBar stats={stats} paused={paused} cols={cols} />
-          <BreakdownPanels stats={stats} cols={cols} />
-          <Box flexDirection="column" marginTop={1}>
-            <HeaderRow cols={cols} />
+          <Box ref={chromeRef} flexDirection="column">
+            <StatsBar stats={stats} paused={paused} cols={cols} />
+            <BreakdownPanels stats={stats} cols={cols} />
+            <Box marginTop={1}>
+              <HeaderRow cols={cols} />
+            </Box>
+          </Box>
+          <Box flexDirection="column">
             {recent.length === 0 && (
               <Text color={theme.dim}>
                 waiting for traffic on {logPath}…
@@ -472,8 +502,69 @@ function rowLayout(cols: number) {
   return { wMethod, wHost, wDetail };
 }
 
+/** Multicall3's canonical address (lowercased) — recognised so a batched
+ *  read renders as "aggregate3 ×N" instead of an opaque eth_call. */
+const MULTICALL3 = "0xca11bde05977b3631167028862be2a173976ca11";
+
+/** 4-byte selector → human name for the calls this wallet makes. Keyed
+ *  lowercase; unknown selectors fall back to the raw 0x prefix. */
+const SELECTORS: Record<string, string> = {
+  "0x82ad56cb": "aggregate3",
+  "0x70a08231": "balanceOf",
+  "0x35ea6a75": "getReserveData",
+  "0xd1946dbc": "getReservesList",
+  "0xbf92857c": "getUserAccountData",
+  "0xdd62ed3e": "allowance",
+  "0x095ea7b3": "approve",
+  "0xa9059cbb": "transfer",
+  "0x313ce567": "decimals",
+  "0x95d89b41": "symbol",
+  "0x06fdde03": "name",
+  "0x8da5cb5b": "owner",
+};
+
+function shortAddr(a: string): string {
+  if (!a || a.length < 12) return a ?? "";
+  return `${a.slice(0, 6)}…${a.slice(-4)}`;
+}
+
+/** For Multicall3 `aggregate3` calldata, the sub-call count is the array
+ *  length word right after the selector + the head offset word. Read it
+ *  from `params` when present so the row can show "aggregate3 ×11". */
+function aggregateCount(e: LogEvent): number | null {
+  const p = e.params;
+  const data =
+    Array.isArray(p) && p[0] && typeof p[0] === "object"
+      ? String((p[0] as { data?: unknown }).data ?? "")
+      : "";
+  const body = data.startsWith("0x") ? data.slice(2) : data;
+  const lenHex = body.slice(8 + 64, 8 + 64 + 64);
+  if (lenHex.length < 64) return null;
+  const n = parseInt(lenHex, 16);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Decode the inner action of an event from the daemon-stamped `to`/`sel`
+ *  fields (present on request AND response rows), so a line reads
+ *  "aggregate3 ×11 @0xcA11…CA11" or "balanceOf @0x2959…3cd8" instead of
+ *  the bare JSON-RPC method. Returns "" when there's nothing to show. */
+function describeInner(e: LogEvent): string {
+  const to = e.to ?? "";
+  const sel = (e.sel ?? "").toLowerCase();
+  if (!to) return "";
+  if (to.toLowerCase() === MULTICALL3) {
+    const n = aggregateCount(e);
+    return n != null
+      ? `aggregate3 ×${n} @${shortAddr(to)}`
+      : `aggregate3 @${shortAddr(to)}`;
+  }
+  if (!sel) return shortAddr(to);
+  const name = SELECTORS[sel] ?? sel;
+  return `${name} @${shortAddr(to)}`;
+}
+
 function HeaderRow({ cols }: { cols: number }) {
-  const { wMethod, wHost } = rowLayout(cols);
+  const { wMethod, wHost, wDetail } = rowLayout(cols);
   const cell = (s: string, n: number) =>
     s.length >= n ? s.slice(0, n) : s + " ".repeat(n - s.length);
   return (
@@ -481,12 +572,13 @@ function HeaderRow({ cols }: { cols: number }) {
       {"  "}
       {cell("vfy", 9)} {cell("t", 7)} {cell("kind", 12)} {cell("method", wMethod)}{" "}
       {cell("host", wHost)} {cell("status", 8)} {cell("ms", 6)}
+      {wDetail > 0 ? ` ${cell("inner action", wDetail)}` : ""}
     </Text>
   );
 }
 
 function EventRow({ e, cols }: { e: LogEvent; cols: number }) {
-  const { wMethod, wHost } = rowLayout(cols);
+  const { wMethod, wHost, wDetail } = rowLayout(cols);
   const kindColor = colorForKind(e.kind);
   const glyph = glyphForKind(e.kind);
   const t = formatRelTime(e.ts_ms);
@@ -514,6 +606,7 @@ function EventRow({ e, cols }: { e: LogEvent; cols: number }) {
       : (e.transport ?? "").padStart(7);
   const statusPadded = cell(status, 8);
   const ms = e.ms !== undefined ? String(e.ms).padStart(4) : "    ";
+  const detail = describeInner(e);
   const statusColor =
     e.httpStatus !== undefined
       ? e.httpStatus >= 200 && e.httpStatus < 300
@@ -535,6 +628,9 @@ function EventRow({ e, cols }: { e: LogEvent; cols: number }) {
       <Text color={theme.accent}>{host} </Text>
       <Text color={statusColor}>{statusPadded} </Text>
       <Text color={theme.dim}>{ms}ms</Text>
+      {wDetail > 0 && detail !== "" && (
+        <Text color={theme.primary}> {cell(detail, wDetail)}</Text>
+      )}
     </Text>
   );
 }
