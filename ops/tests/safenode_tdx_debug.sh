@@ -4,6 +4,10 @@
 # Diagnostic for "TDX verify failed: TDX quote verifier failed" — the Rust
 # verifier is exiting non-zero with empty stderr+stdout. This script runs
 # each piece in isolation so we see what's actually going wrong.
+#
+# PHALA MODE ONLY. The GCP Confidential Space deployment
+# (rpc-gcp.safe-node.com) does not expose /attestation and needs no Rust
+# verifier -- debug that path with ops/tests/safenode_gcp_attest.sh instead.
 
 set -u
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { Box, Text } from "ink";
+import { Box, Text, useInput } from "ink";
 import Spinner from "ink-spinner";
 import { call } from "../daemon.js";
 import { Layout, Banner } from "../widgets/Layout.js";
@@ -8,10 +8,33 @@ import Select from "../widgets/Select.js";
 import RpcRunner from "../widgets/RpcRunner.js";
 import { theme } from "../theme.js";
 import { Wallet } from "../types.js";
+import { formatEth, hexToBigInt } from "../format.js";
 import UnlockEoaStep from "./UnlockEoaStep.js";
 
 type Protocol = "pp" | "railgun";
 type RecipientSource = "derive" | "book" | "paste";
+
+/** Privacy Pools v1 immutable 7702 delegate contract (Railgun's paymaster
+ *  only sponsors UserOps that delegate to this IMPL). Shown in the Railgun
+ *  unshield confirm so the user sees what their EOA is delegating to. */
+const RAILGUN_7702_IMPL = "0x304a6c5fB6F09f5B79b4F38913dB35d2F40b4b4c";
+
+/** Relayer quote returned by `shielded.quoteUnshield`. Every wei field is a
+ *  0x-hex string (the bridge's jsonReplacer); feeBPS/gasPrice are plain
+ *  decimal strings from the relayer. */
+export type UnshieldQuote = {
+  recipient: string;
+  requestedWei: string;
+  chunkWei: string;
+  multiRelay: boolean;
+  approvedTotalWei: string;
+  feeBPS?: string | null;
+  baseFeeBPS?: string | null;
+  gasPriceWei?: string | null;
+  relayTxCostWei?: string | null;
+  relayFeeBps?: string | null;
+  relayerId?: string | null;
+};
 
 type BookEntry = {
   label: string;
@@ -52,6 +75,26 @@ type Phase =
       source: RecipientSource;
       amountEth: string;
     }
+  /* PP: fetch a relayer fee quote (no broadcast) before the confirm gate */
+  | {
+      kind: "quote";
+      protocol: "pp";
+      recipient: string;
+      source: RecipientSource;
+      amountEth: string;
+      passphrase: string;
+    }
+  /* pre-broadcast confirm gate (recipient / amount / fee / disclosures) */
+  | {
+      kind: "confirm";
+      protocol: Protocol;
+      recipient: string;
+      source: RecipientSource;
+      amountEth: string;
+      passphrase?: string;
+      quote?: UnshieldQuote;
+    }
+  | { kind: "quote-error"; protocol: Protocol; message: string }
   /* dispatch */
   | {
       kind: "running";
@@ -434,8 +477,10 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
                 amountEth,
               });
             } else {
+              // PP: fetch a relayer fee quote, then gate on it. The actual
+              // relay (shielded.unshieldDrain) only fires after confirm.
               setPhase({
-                kind: "running",
+                kind: "quote",
                 protocol: "pp",
                 recipient: phase.recipient,
                 source: phase.source,
@@ -455,12 +500,72 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
       <UnlockEoaStep
         wallet={wallet}
         onUnlocked={() =>
+          // Railgun has no daemon-local fee quote (the WASM signer builds +
+          // signs the UserOp internally), so we go straight to a disclosure
+          // confirm gate rather than a fee-bearing one.
           setPhase({
-            kind: "running",
+            kind: "confirm",
             protocol: "railgun",
             recipient: phase.recipient,
             source: phase.source,
             amountEth: phase.amountEth,
+          })
+        }
+        onCancel={() => onDone(false)}
+      />
+    );
+  }
+
+  /* ─── PP quote (no broadcast) ─── */
+  if (phase.kind === "quote") {
+    return (
+      <QuoteUnshieldStep
+        recipient={phase.recipient}
+        amountEth={phase.amountEth}
+        passphrase={phase.passphrase}
+        onReady={(quote) =>
+          setPhase({
+            kind: "confirm",
+            protocol: "pp",
+            recipient: phase.recipient,
+            source: phase.source,
+            amountEth: phase.amountEth,
+            passphrase: phase.passphrase,
+            quote,
+          })
+        }
+        onError={(message) =>
+          setPhase({ kind: "quote-error", protocol: "pp", message })
+        }
+      />
+    );
+  }
+
+  if (phase.kind === "quote-error") {
+    return (
+      <Layout title="Unshield — could not quote" hint="enter / esc — back">
+        <Banner kind="err" text={phase.message} />
+        <BackOnInput onDone={() => onDone(false)} />
+      </Layout>
+    );
+  }
+
+  /* ─── confirm gate (the pre-broadcast trust anchor) ─── */
+  if (phase.kind === "confirm") {
+    return (
+      <UnshieldConfirmGate
+        protocol={phase.protocol}
+        recipient={phase.recipient}
+        amountEth={phase.amountEth}
+        quote={phase.quote}
+        onConfirm={() =>
+          setPhase({
+            kind: "running",
+            protocol: phase.protocol,
+            recipient: phase.recipient,
+            source: phase.source,
+            amountEth: phase.amountEth,
+            passphrase: phase.passphrase,
           })
         }
         onCancel={() => onDone(false)}
@@ -553,4 +658,169 @@ function DeriveAndAdvance({
       </Text>
     </Layout>
   );
+}
+
+/** Fetch a relayer fee quote for a PP unshield WITHOUT broadcasting. The
+ *  daemon's `shielded.quoteUnshield` builds the proof, reads the relayer's
+ *  quote, and discards it — nothing is relayed until the confirm gate. */
+export function QuoteUnshieldStep({
+  recipient,
+  amountEth,
+  passphrase,
+  onReady,
+  onError,
+}: {
+  recipient: string;
+  amountEth: string;
+  passphrase: string;
+  onReady: (quote: UnshieldQuote) => void;
+  onError: (message: string) => void;
+}) {
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const resp = await call<UnshieldQuote>(
+        "shielded.quoteUnshield",
+        { recipient, amountEth, passphrase },
+        // Proof generation + relayer round-trip; first run also syncs pool
+        // state. Same generous budget as the broadcast path.
+        { timeoutMs: 20 * 60 * 1000 },
+      );
+      if (cancelled) return;
+      if (!resp.ok) {
+        onError(`quote failed: ${resp.error.message}`);
+        return;
+      }
+      onReady(resp.result);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return (
+    <Layout title="Unshield — quoting relayer fee" subtitle="Privacy Pools v1 · Sepolia">
+      <Text>
+        <Text color={theme.primary}>
+          <Spinner type="dots" />
+        </Text>{" "}
+        <Text color={theme.dim}>
+          building withdrawal proof + fetching relayer quote (no broadcast
+          yet; first run syncs pool state)…
+        </Text>
+      </Text>
+    </Layout>
+  );
+}
+
+/** wei (0x-hex) → "0.01 ETH"; tolerant of null/garbage. */
+function ethStr(weiHex?: string | null): string {
+  if (!weiHex) return "—";
+  try {
+    return `${formatEth(hexToBigInt(weiHex))} ETH`;
+  } catch {
+    return "—";
+  }
+}
+
+/** Pre-broadcast confirm gate for an unshield. This IS the trust anchor:
+ *  for PP there is no EOA signature (the relayer submits the proof), so the
+ *  user confirming the recipient/amount/fee here is what authorises the
+ *  relay. For Railgun the broadcast is signed inside the sidecar (the WASM
+ *  signer cannot expose an unsigned UserOp — see the disclosure), so this
+ *  gate is the strongest in-repo check before that signature happens. */
+export function UnshieldConfirmGate({
+  protocol,
+  recipient,
+  amountEth,
+  quote,
+  onConfirm,
+  onCancel,
+}: {
+  protocol: Protocol;
+  recipient: string;
+  amountEth: string;
+  quote?: UnshieldQuote;
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  useInput((_, key) => {
+    if (key.return) onConfirm();
+    if (key.escape) onCancel();
+  });
+  const isRailgun = protocol === "railgun";
+  const feePct =
+    quote?.feeBPS != null && quote.feeBPS !== ""
+      ? `${(Number(quote.feeBPS) / 100).toFixed(2)}%`
+      : "—";
+  return (
+    <Layout
+      title={`Confirm unshield — ${isRailgun ? "Railgun" : "Privacy Pools v1"} · Sepolia`}
+      subtitle={`recipient ${recipient}`}
+      hint="enter — broadcast · esc — cancel"
+    >
+      <Box flexDirection="column" marginBottom={1}>
+        <Text>
+          <Text color={theme.dim}>{"amount".padEnd(18)}</Text> {amountEth} ETH
+        </Text>
+        <Text>
+          <Text color={theme.dim}>{"recipient".padEnd(18)}</Text> {recipient}
+        </Text>
+      </Box>
+
+      {!isRailgun && quote && (
+        <Box flexDirection="column" marginBottom={1}>
+          <Text>
+            <Text color={theme.dim}>{"relayer fee".padEnd(18)}</Text> {feePct}
+            {quote.relayTxCostWei ? ` + ~${ethStr(quote.relayTxCostWei)} gas` : ""}
+          </Text>
+          {quote.relayerId && (
+            <Text>
+              <Text color={theme.dim}>{"relayer".padEnd(18)}</Text> {quote.relayerId}
+            </Text>
+          )}
+          <Text>
+            <Text color={theme.dim}>{"approved balance".padEnd(18)}</Text>{" "}
+            {ethStr(quote.approvedTotalWei)}
+          </Text>
+          {quote.multiRelay && (
+            <Text color={theme.warn}>
+              ⚠ amount spans multiple notes — it will be drained over several
+              relays, each charged its own fee. First relay ≈ {ethStr(quote.chunkWei)}.
+            </Text>
+          )}
+        </Box>
+      )}
+
+      {isRailgun ? (
+        <Box flexDirection="column">
+          <Text color={theme.dim}>
+            Railgun broadcasts a 4337 UserOp via EIP-7702; fees are sponsored
+            by the Railgun paymaster (no relayer fee from your balance).
+          </Text>
+          <Text color={theme.dim}>
+            7702 delegate (IMPL): {RAILGUN_7702_IMPL}
+          </Text>
+          <Text color={theme.warn}>
+            ⚠ The delegating EOA private key is passed to the Railgun sidecar
+            to sign the UserOp — the WASM signer cannot expose an unsigned
+            UserOp for daemon-local signing (upstream SDK limitation). This
+            confirm is the strongest in-repo gate before that signature.
+          </Text>
+        </Box>
+      ) : (
+        <Text color={theme.dim}>
+          A Privacy Pools withdrawal reveals the recipient + amount to the
+          relayer, which submits the proof on-chain (no signature from your
+          EOA). Confirming here authorises the relay.
+        </Text>
+      )}
+    </Layout>
+  );
+}
+
+function BackOnInput({ onDone }: { onDone: () => void }) {
+  useInput((_, key) => {
+    if (key.return || key.escape) onDone();
+  });
+  return null;
 }

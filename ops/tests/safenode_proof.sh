@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # tests/safenode_proof.sh
 #
-# End-to-end eth_getProof smoke test against rpc.safe-node.com.
+# End-to-end eth_getProof smoke test against the safe-node deployment
+# (default: the GCP Confidential Space instance at rpc-gcp.safe-node.com).
 #
 # The server returns -32001 "Failed due to data non availability" on a cache
 # miss and queues a backfill; per upstream docs the recommended pattern is to
@@ -15,15 +16,19 @@
 
 set -u
 
-PIN="${ATTESTED_TLS_PIN:-sha256//3VHy52Tn0kQ7io763wwEiKewgH8f4LjA+HHT0bmzOxg=}"
-KEY="${LEANCLI_SAFE_NODE_API_KEY:-olabs-api-bf83325bdef58f70006bf6ee1245cb4bbd475b4d0083b257144cb6889240d35b}"
-ADMIN="${SAFENODE_ADMIN_KEY:-olabs-admin-339d287c44315dbc77cdff781c1a43fb8a7b242996f2c5b883bda1bfcfae83a3}"
+# Current GCP Confidential Space dev deployment; pin published by the
+# operator 2026-07-02 (rotates with ACME finalization — on mismatch,
+# re-derive via ops/tests/safenode_gcp_attest.sh before trusting it).
+BASE="${LEANCLI_SAFE_NODE_URL:-https://rpc-gcp.safe-node.com}"
+PIN="${ATTESTED_TLS_PIN:-sha256//BoHHay/wHtVESvf+Bh2MKh4A3wwAnRg47MZPE3tn1fU=}"
+KEY="${LEANCLI_SAFE_NODE_API_KEY:-olabs-api-6f66df6d6bd1669ed0b2c3c4b2ef8e4307b334b8be7a2f3f6dcae10ada44f82b}"
+ADMIN="${SAFENODE_ADMIN_KEY:-olabs-admin-6b2b28301cc9c5752efecd051e3756a13008300a42dc16ec368a8d9b1d6a5785}"
 ADDR="${SAFENODE_PROBE_ADDR:-0x0000000000000000000000000000000000000000}"
 MAX_RETRIES="${SAFENODE_MAX_RETRIES:-20}"
 RETRY_DELAY="${SAFENODE_RETRY_DELAY:-5}"
 
-ADMIN_URL="https://rpc.safe-node.com/$ADMIN/admin"
-RPC_URL="https://rpc.safe-node.com/$KEY/json_rpc"
+ADMIN_URL="$BASE/$ADMIN/admin"
+RPC_URL="$BASE/$KEY/json_rpc"
 
 echo "=== admin_get_sync_status ==="
 SYNC="$(curl --pinnedpubkey "$PIN" -sS -X POST "$ADMIN_URL" \

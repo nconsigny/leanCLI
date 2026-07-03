@@ -15,9 +15,11 @@ import { usePoll } from "./poll.js";
  *    poll tick (single eth_getBalance, routed through the active provider
  *    so it's consensus-verified under provider=helios; falls back to
  *    direct RPC if the light client is down).
- *  - ERC-20 (`swap.balances`)                   — NOT polled here. It's a
- *    large verified eth_call fan-out (one balanceOf per registry token),
- *    so token discovery runs only on the wallet-hub screen on demand.
+ *  - ERC-20 (`swap.balances`)                   — SLOWEST tier, every 300s
+ *    (+ manual `r`). It's a large verified eth_call fan-out (one balanceOf
+ *    per registry token per wallet), so it gets its own tier far above the
+ *    60s balance loop; the wallet pane renders the non-zero rows per
+ *    wallet when the pane has spare height.
  *  - shielded (railgun + privacy pools)         — ON DEMAND only (`s`).
  *    Both spawn the privacy sidecar and can take 30-60s+ on first call
  *    (Subsquid sync / POI fetch) and require an unlocked wallet. They
@@ -80,6 +82,50 @@ export type WalletData = {
   refresh: () => void;
   syncShielded: () => void;
 };
+
+// ── Shared cache ──────────────────────────────────────────────────────
+// The dashboard's `useWalletData` is the single balance/token poller. Other
+// screens mounted alongside it (notably the SPHINCS account hub, which App
+// renders as a dashboard sub-flow while the Dashboard stays mounted) read
+// its already-fetched balances from this module singleton instead of firing
+// their own slow verified `chain.balance` / `swap.balances` reads. It is a
+// display-only cache; nothing here feeds a signing decision.
+let sharedWalletData: WalletData | null = null;
+const sharedListeners = new Set<() => void>();
+
+function publishWalletData(d: WalletData): void {
+  sharedWalletData = d;
+  for (const l of sharedListeners) l();
+}
+
+/** Subscribe to the dashboard's live wallet data. Returns `null` when the
+ *  dashboard poller isn't mounted (e.g. a full-screen route), so callers
+ *  fall back to their own reads. */
+export function useSharedWalletData(): WalletData | null {
+  const [, force] = useState(0);
+  useEffect(() => {
+    const l = () => force((x) => x + 1);
+    sharedListeners.add(l);
+    // Re-read on mount in case data landed before we subscribed.
+    l();
+    return () => {
+      sharedListeners.delete(l);
+    };
+  }, []);
+  return sharedWalletData;
+}
+
+/** Find the poller's cached row for a smart-account / EOA address (case
+ *  insensitive). `null` if the cache is empty or the address isn't in the
+ *  current chain's enumerated set. */
+export function sharedRowFor(
+  data: WalletData | null,
+  address: string | null | undefined,
+): WalletRow | null {
+  if (!data || !address) return null;
+  const a = address.toLowerCase();
+  return data.rows.find((r) => r.address?.toLowerCase() === a) ?? null;
+}
 
 const ROW_CAP = 6;
 
@@ -238,12 +284,11 @@ export function useWalletData(
       // balance traffic while the user is elsewhere (e.g. network monitor).
       if (!enabled) return;
       const snapshot = rowsRef.current;
-      // ETH balance ONLY on the dashboard: one verified eth_getBalance per
-      // row (chain.balance routes through the active provider). Token
-      // discovery (swap.balances) is intentionally NOT polled here — it's a
+      // ETH balance ONLY on this loop: one verified eth_getBalance per row
+      // (chain.balance routes through the active provider). Token discovery
+      // (swap.balances) has its own far slower 300s tier below — it's a
       // large verified eth_call fan-out (one balanceOf per registry token,
-      // now serialized through the verifier), so it runs only on the
-      // wallet-hub screen (ManageWalletScreen) on demand, not continuously.
+      // serialized through the verifier) and must never ride this loop.
       // Slowed to 60s (was 20s) to keep the verified-read + privacy cost low.
       //
       // Fired CONCURRENTLY, not sequentially: rows can sit on different
@@ -364,6 +409,44 @@ export function useWalletData(
     [activeChain, refreshKey, enabled, rowsKey],
   );
 
+  // ERC-20 balances: one `swap.balances` registry fan-out per row. This is
+  // the expensive read (a verified balanceOf eth_call per registry token,
+  // serialized daemon-side), so it sits on the SLOWEST tier — 300s + manual
+  // `r` — and is paused with `enabled` like the other polls. Fail-soft: an
+  // error leaves the row's last-known tokens in place. Native ETH (address
+  // null) is dropped — the head line already shows it — as are zero rows.
+  usePoll(
+    async (isCancelled) => {
+      if (!enabled) return;
+      const snapshot = rowsRef.current;
+      await Promise.all(
+        snapshot.map(async (row) => {
+          if (!row || !row.address) return;
+          const b = await call<{
+            balances: Array<{ symbol: string; address: string | null; decimals: number; balance: string }>;
+          }>("swap.balances", { chainId: row.chain, address: row.address }, { timeoutMs: 180_000 });
+          if (isCancelled()) return;
+          if (!b.ok) return; // fail-soft: keep last-known
+          const tokens: TokenBalance[] = (b.result?.balances ?? [])
+            .filter((t) => t && t.address !== null)
+            .map((t) => ({
+              symbol: t.symbol ?? "?",
+              decimals: t.decimals ?? 18,
+              balance: hexToBigInt(t.balance),
+            }))
+            .filter((t) => t.balance > 0n);
+          setRows((prev) =>
+            prev.map((p) =>
+              p.address === row.address && p.chain === row.chain ? { ...p, tokens } : p,
+            ),
+          );
+        }),
+      );
+    },
+    300_000,
+    [activeChain, refreshKey, enabled, rowsKey],
+  );
+
   const syncShielded = () => {
     if (shieldedBusy) return;
     setShieldedBusy(true);
@@ -387,18 +470,24 @@ export function useWalletData(
     })();
   };
 
-  return {
+  const data: WalletData = {
     rows,
     droppedRows,
     enumErr,
     shielded,
     refresh: () => {
-      // Manual refresh re-runs the native-balance pass (usePoll fires on dep
-      // change). Token discovery isn't polled on the dashboard — it's
-      // wallet-hub only — so 'r' never triggers a registry-wide eth_call
-      // fan-out regardless of how many times it's pressed.
+      // Manual refresh re-runs every read tier (usePoll fires on dep
+      // change), INCLUDING the ERC-20 registry fan-out — so 'r' is the
+      // "I just moved tokens, show me now" escape hatch between the slow
+      // 300s token ticks.
       setRefreshKey((k) => k + 1);
     },
     syncShielded,
   };
+  // Publish to the shared cache so sibling screens (SPHINCS hub) reuse these
+  // balances instead of re-reading. Runs on every data change.
+  useEffect(() => {
+    publishWalletData(data);
+  });
+  return data;
 }

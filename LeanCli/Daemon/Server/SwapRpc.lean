@@ -182,8 +182,36 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   | some (_, tinAddr), some (_, toutAddr) =>
                       let quoter := LeanCli.Swap.UniV3.quoterFor chainId
                       let router := LeanCli.Swap.UniV3.routerFor chainId
-                      let fees : List Nat := [500, 3000, 10000]
                       let via? ← verifiedReadVia state chainId.toNat ep
+                      -- Existence probe: ONE batched factory.getPool over
+                      -- every candidate tier before quoting. Quoting a
+                      -- nonexistent pool REVERTS, and a reverting read pays
+                      -- a full EVM execution on the verified backend
+                      -- (observed as 3 × ~30s tier probes for a pair with
+                      -- no pools); getPool is a cheap mapping read that
+                      -- never reverts. Also widens the tier set to include
+                      -- 100 (0.01%, stable pairs) which the old
+                      -- revert-probe loop never tried. Probe failure falls
+                      -- back to the legacy tier list rather than erroring —
+                      -- the probe is an optimization, not a gate.
+                      let allFees : List Nat := [100, 500, 3000, 10000]
+                      let factory := LeanCli.Swap.UniV3.factoryFor chainId
+                      let poolProbe := LeanCli.Ethereum.Multicall3.encodeAggregate3 <|
+                        allFees.map fun fee =>
+                          { target := factory, allowFailure := true,
+                            callData := LeanCli.Swap.UniV3.encodeGetPool tinAddr toutAddr fee }
+                      let fees : List Nat ←
+                        match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep
+                            LeanCli.Ethereum.Multicall3.address poolProbe "latest" via? with
+                        | .ok ret =>
+                            match (asString ret).bind LeanCli.Ethereum.Multicall3.decodeAggregate3 with
+                            | some results =>
+                                pure <| (allFees.zip results).filterMap fun (fee, ok, hex) =>
+                                  match (if ok then LeanCli.Swap.UniV3.decodeWordAt hex 0 else none) with
+                                  | some w => if w != 0 then some fee else none
+                                  | none => none
+                            | none => pure [500, 3000, 10000]
+                        | .error _ => pure [500, 3000, 10000]
                       let mut best : Option (Nat × Nat) := none
                       for fee in fees do
                         let data := LeanCli.Swap.UniV3.encodeQuoteExactInputSingle
@@ -204,7 +232,15 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                         | .error _ => pure ()
                       match best with
                       | none =>
-                          pure <| .error { code := -32020, message := "no Uniswap V3 pool returned a quote (all fee tiers reverted)", data := none }
+                          -- Distinguish "the pair has no pools at all" (probe
+                          -- found nothing; fees was empty, loop was a no-op)
+                          -- from "pools exist but every quote failed".
+                          let msg :=
+                            if fees.isEmpty then
+                              s!"no Uniswap V3 pool exists for this pair on {chainName} (checked fee tiers 0.01% / 0.05% / 0.3% / 1%)"
+                            else
+                              "no Uniswap V3 pool returned a quote (all fee tiers reverted)"
+                          pure <| .error { code := -32020, message := msg, data := none }
                       | some (amt, fee) =>
                           pure <| .ok <| .obj #[
                             ("amountOut", .num (Int.ofNat amt)),

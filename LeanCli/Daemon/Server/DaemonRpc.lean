@@ -242,12 +242,13 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
           ]
   | "daemon.safeNode.toggle" =>
       -- Why: spawn or tear down the persistent safenode sidecar at
-      -- runtime. Idempotent. Spawning runs the full TDX verify flow
-      -- (Rust quote verifier + RTMR3 replay + attested-TLS pin); a
-      -- few seconds of latency is expected. Failure to attest =>
-      -- error to caller, no state mutation. When enabled, helios
-      -- transparently routes through the TDX-pinned proxy via
-      -- `Endpoints.applySafeNodeOverride`.
+      -- runtime. Idempotent. Spawning runs the full attestation flow
+      -- (GCP Confidential Space OIDC-token verify, or Phala TDX quote
+      -- verify + RTMR3 replay, per LEANCLI_SAFE_NODE_ATTESTATION) and
+      -- derives the attested-TLS pin; a few seconds of latency is
+      -- expected. Failure to attest => error to caller, no state
+      -- mutation. When enabled, helios transparently routes through
+      -- the attested-pin proxy via `Endpoints.applySafeNodeOverride`.
       let enable := ((getField "enable" req.params) >>= asBool).getD true
       if enable then
         let runtimeRoot ← match ← IO.getEnv "XDG_RUNTIME_DIR" with
@@ -271,8 +272,8 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
         catch e =>
           pure <| .error {
             code := -32099,
-            message := s!"failed to start safenode (TDX attestation may have failed): {e}",
-            data := some (.str "check stderr for verify_client_tdx output; ensure LEANCLI_SAFE_NODE_URL / LEANCLI_SAFE_NODE_API_KEY / TDX_QUOTE_VERIFIER_BIN are set"),
+            message := s!"failed to start safenode (attestation may have failed): {e}",
+            data := some (.str "check stderr for verify_client_tdx output; ensure LEANCLI_SAFE_NODE_URL / LEANCLI_SAFE_NODE_API_KEY are set, plus LEANCLI_SAFE_NODE_GCP_IMAGE_DIGEST (gcp mode) or TDX_QUOTE_VERIFIER_BIN (phala mode)"),
           }
       else
         LeanCli.Daemon.State.safeNodeDisable state
@@ -281,7 +282,8 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       match ← LeanCli.Daemon.State.safeNodeClient? state with
       | some c =>
           -- Forward to the sidecar's safenode.status; it owns the
-          -- attestation metadata (pin, mrtd, rtmr*).
+          -- attestation metadata (mode, pin, gcp image digest / mrtd /
+          -- rtmr* depending on mode).
           let resp ← LeanCli.SafeNode.Persistent.call c "safenode.status" (.obj #[])
           match resp with
           | .ok j =>

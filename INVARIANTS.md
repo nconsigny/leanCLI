@@ -232,6 +232,36 @@ call-site gate exactly (shielded purposes are only ever permitted for
 gate proved in `LeanCli/Invariants/Bridge.lean::gateDecision_denied_when_policy_denies`,
 `::callGated_denied_when_policy_denies`, `::callGated_allowed_proceeds`.
 
+### 5.12 Interactive shielded operations are user-confirmed before broadcast
+Shielded calldata is opaque to the network but not to the user signing it.
+Every interactive shielded operation is confirmed before any broadcast; no
+interactive surface calls a one-shot prepare+sign+broadcast RPC.
+
+- **Shields (deposit).** The TUI calls `shielded.prepareDeposit` /
+  `shielded.railgun.prepareShield`, which return UNSIGNED `{to,value,data}`
+  legs, and routes each leg through the standard pre-sign pipeline
+  (`tx.decodeIntent → tx.simulate → ConfirmGate → eoa.send`) via
+  `SendRawFlow`. This is the same gate as every other send (ties into 2.x:
+  *broadcast tx → confirmed userIntent*).
+- **Privacy Pools unshield.** A PP withdraw carries no EOA signature (the
+  relayer submits the ZK proof), so there is no daemon-local signature to
+  gate. `shielded.quoteUnshield` builds the proof WITHOUT broadcasting and
+  returns the relayer fee terms; the TUI confirms recipient/amount/fee
+  before `shielded.unshieldDrain` relays.
+- **Railgun unshield.** Signed inside the sidecar — forced by the
+  `@kohaku-eth/railgun` WASM signer, which exposes no unsigned UserOp /
+  userOpHash / 7702-auth to sign externally (so the EOA key must enter the
+  sidecar). Mitigated by a TUI disclosure ConfirmGate before the RPC.
+  🔒 boundary until the upstream SDK exposes build-unsigned + getUserOpHash
+  + build-7702-auth + submit-pre-signed.
+- The one-shot composite `shielded.deposit` / `shielded.railgun.shield`
+  (prepare+sign+broadcast, no daemon-side gate) are retained ONLY for the
+  headless CLI (no interactive confirm surface) and marked ⚠ UNGATED.
+
+**Status:** 📝 informal. This is a TUI+daemon routing property over runtime
+types, not the abstract `Invariants/` model — tracked here so the routing is
+not silently regressed. The policy gate it composes with is 5.7 (✅).
+
 ### 5.8 Bridge responses cannot be confused
 The JSON envelope `responseToJson` carries an `ok : Bool` that is `true`
 exactly for `Response.ok` and `false` for both `Response.err` and

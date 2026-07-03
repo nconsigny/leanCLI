@@ -246,6 +246,32 @@ private def skillForPhrases (promptLower : String) : String :=
     "send-native"
   else ""
 
+/-- Drop the conjunction matcher's "can't batch / please split" notes
+    (`RuleParser.matchConjunction`) from a regex JSON's `unresolved`
+    list. The atomic-batch path uses this: once we've actually drafted
+    (or attempted) an `executeBatch` for a smart account, those notes are
+    stale and contradict the drafted batch — leaving them in makes the
+    TUI say "please split into separate prompts" right next to a
+    submitted two-leg batch. The legitimate EOA/unsupported case never
+    reaches this — it falls through to the clarification short-circuit
+    with the notes intact. -/
+private def stripBatchSplitNotes (regexJson : Json) : Json :=
+  let isSplitNote (s : String) : Bool :=
+    (s.splitOn "split into separate").length > 1
+      || (s.splitOn "does not draft batched").length > 1
+  match regexJson with
+  | .obj fields =>
+      .obj (fields.map (fun kv =>
+        if kv.fst = "unresolved" then
+          match kv.snd with
+          | .arr xs => (kv.fst, .arr (xs.filter (fun x =>
+              match x with
+              | .str s => !isSplitNote s
+              | _      => true)))
+          | other => (kv.fst, other)
+        else kv))
+  | other => other
+
 /-- Uniform output re-check for a built `chat.draft` response. If the
     response carries an `encoded` leaf, re-decode its native `value` and
     calldata `data` and assert every magnitude equals a Lean-derived
@@ -1266,6 +1292,10 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
           -- executeBatch frame. If any leg needs a separate approval or the
           -- sender is not a smart account, fall through to the hard
           -- clarification below instead of proposing a partial sequence.
+          -- The atomic-batch path drafts an executeBatch for smart
+          -- accounts, so the conjunction matcher's "please split" notes
+          -- are stale here — strip them so the response is coherent.
+          let regexJsonBatch := stripBatchSplitNotes regexJson
           let aaveBatchEarly : Option Json ← do
             match parseTwoAaveBatchLegs prompt with
             | none => pure none
@@ -1310,7 +1340,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                               let summary :=
                                 s!"Aave V3 atomic batch via SPHINCS executeBatch: 1) {summaryA}; 2) {summaryB}"
                               pure <| some <| .obj #[
-                                ("regex",          regexJson),
+                                ("regex",          regexJsonBatch),
                                 ("backend",        .str "wallet-direct-aave-batch"),
                                 ("intentActionTag", .str "executeBatch"),
                                 ("canonical",       .str summary),
@@ -1318,7 +1348,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                               ]
                           | .error (kind, msg), _ =>
                               pure <| some <| .obj #[
-                                ("regex",          regexJson),
+                                ("regex",          regexJsonBatch),
                                 ("backend",        .str "wallet-direct-aave-batch"),
                                 ("intentActionTag", .str "executeBatch"),
                                 ("canonical",       .str s!"Aave batch not prepared ({kind})"),
@@ -1326,7 +1356,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                               ]
                           | _, .error (kind, msg) =>
                               pure <| some <| .obj #[
-                                ("regex",          regexJson),
+                                ("regex",          regexJsonBatch),
                                 ("backend",        .str "wallet-direct-aave-batch"),
                                 ("intentActionTag", .str "executeBatch"),
                                 ("canonical",       .str s!"Aave batch not prepared ({kind})"),

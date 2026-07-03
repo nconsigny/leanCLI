@@ -14,6 +14,8 @@ import LeanCli.Ethereum.Intent
 import LeanCli.Ethereum.IntentCanonical
 import LeanCli.Ethereum.IntentEncode
 import LeanCli.Ethereum.IntentJson
+import LeanCli.Ethereum.RevertDecode
+import LeanCli.Sphincs.Send
 import LeanCli.Helios.Bridge
 import LeanCli.Helios.Persistent
 import LeanCli.Keystore.Tpm2Runtime
@@ -57,6 +59,13 @@ simulate result without caring which backend produced it. -/
 def mergeFields (j : Json) (extra : Array (String × Json)) : Json :=
   match j with
   | .obj fields => .obj (fields ++ extra)
+  | _ => j
+
+/-- Replace field `k` (or append it) — unlike `mergeFields`, never leaves
+a duplicate key for consumers whose JSON parser keeps the first one. -/
+def setField (j : Json) (k : String) (v : Json) : Json :=
+  match j with
+  | .obj fields => .obj ((fields.filter (fun kv => kv.fst ≠ k)) ++ #[(k, v)])
   | _ => j
 
 /-- Affordability — a signal DISTINCT from simulate's `ok` (revert). `eth_call`
@@ -188,7 +197,34 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       | .error err => pure (.error err)
       | .ok to =>
           let data := paramStringD req.params "data" "0x"
-          let from? := getField "from" req.params >>= asString
+          let callerFrom? := getField "from" req.params >>= asString
+          -- ERC-4337 executeBatch (0x34fcd5be) is EntryPoint-only:
+          -- BaseAccount._requireForExecute rejects every other msg.sender,
+          -- so simulating with from = the account (what the TUI passes)
+          -- dies at the gate with NotEntryPoint() and never executes the
+          -- batch body — the simulate "catches" the wrong revert and a
+          -- doomed batch sails through ConfirmGate looking merely odd.
+          -- Simulate as the EntryPoint (eth_call lets us impersonate the
+          -- only real caller); the inner leg revert then surfaces as
+          -- ExecuteError(index, bytes) which we decode below. from? feeds
+          -- the sim only — affordability still checks the CALLER's
+          -- balance, since the account (not the EntryPoint) pays.
+          let isExecuteBatch := data.toLower.startsWith "0x34fcd5be"
+          let from? : Option String :=
+            if isExecuteBatch then some LeanCli.Sphincs.Send.entryPointV09Address
+            else callerFrom?
+          -- Sidecar backends read `from` out of the raw params blob, so
+          -- patch it there too (mergeFields appends; last field wins in
+          -- the sidecars' JSON field lookup by construction — but be
+          -- explicit and rewrite instead of relying on that).
+          let simParams : Json :=
+            if isExecuteBatch then
+              match req.params with
+              | .obj fields =>
+                  .obj <| (fields.filter (fun kv => kv.fst ≠ "from"))
+                    ++ #[("from", .str LeanCli.Sphincs.Send.entryPointV09Address)]
+              | other => other
+            else req.params
           let value := paramStringD req.params "value" "0x0"
           let block := paramStringD req.params "block" "latest"
           let chain? := getField "chain" req.params >>= asString
@@ -210,13 +246,17 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   -- Route to the persistent Colibri client if running;
                   -- fall back to the one-shot sidecar otherwise. Same
                   -- shape as the dedicated `tx.simulateColibri` handler.
-                  let cParams := mergeHeliosDefaults req.params endpoint cfg.chainId
+                  let cParams := mergeHeliosDefaults simParams endpoint cfg.chainId
                   -- mergeHeliosDefaults also injects executionRpc which
                   -- Colibri ignores — harmless. chainId injection is the
                   -- piece both backends need.
                   match ← LeanCli.Daemon.State.colibriClient? state with
                   | some c =>
-                      let resp ← LeanCli.Colibri.Persistent.call c "tx.simulate" cParams
+                      -- Shared single-connection client: MUST hold
+                      -- verifyLock or this round-trip interleaves frames
+                      -- with concurrent verified reads (no id matching).
+                      let resp ← LeanCli.Daemon.State.withVerifyLock state
+                        (LeanCli.Colibri.Persistent.call c "tx.simulate" cParams)
                       pure <| LeanCli.Colibri.Persistent.responseToJson resp
                   | none =>
                       let resp ← LeanCli.Colibri.Bridge.call
@@ -227,15 +267,31 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   -- proxy URL for executionRpc on mainnet/sepolia so
                   -- proofs are fetched obliviously. No-op otherwise.
                   let endpoint ← applySafeNodeOverride state endpoint cfg.chainId
-                  let hParams := mergeHeliosDefaults req.params endpoint cfg.chainId
-                  match ← LeanCli.Daemon.State.heliosClient? state with
-                  | some c =>
-                      let resp ← LeanCli.Helios.Persistent.call c "tx.simulate" hParams
-                      pure <| LeanCli.Helios.Persistent.responseToJson resp
+                  -- Ask the sidecar for a gas estimate only when the caller
+                  -- pays gas directly. estimateGas is a full second REVM
+                  -- replay with a fresh proof cache (~doubles latency); for
+                  -- an executeBatch sim the bundler owns userOp gas
+                  -- estimation, so the figure would never be displayed.
+                  let hParams := setField
+                    (mergeHeliosDefaults simParams endpoint cfg.chainId)
+                    "estimateGas" (.bool (!isExecuteBatch))
+                  -- Prefer the dedicated simulate connection (simLock) so
+                  -- this multi-second REVM run overlaps the verified
+                  -- metadata/preflight reads instead of racing or queueing
+                  -- on the shared conn; fall back to the shared conn under
+                  -- verifyLock, then to a one-shot spawn.
+                  match ← LeanCli.Daemon.State.heliosSimCall state "tx.simulate" hParams with
+                  | some resp => pure <| LeanCli.Helios.Persistent.responseToJson resp
                   | none =>
-                      let resp ← LeanCli.Helios.Bridge.call
-                        { method := "tx.simulate", params := hParams, id := 0 }
-                      pure <| LeanCli.Helios.Bridge.responseToJson resp
+                      match ← LeanCli.Daemon.State.heliosClient? state with
+                      | some c =>
+                          let resp ← LeanCli.Daemon.State.withVerifyLock state
+                            (LeanCli.Helios.Persistent.call c "tx.simulate" hParams)
+                          pure <| LeanCli.Helios.Persistent.responseToJson resp
+                      | none =>
+                          let resp ← LeanCli.Helios.Bridge.call
+                            { method := "tx.simulate", params := hParams, id := 0 }
+                          pure <| LeanCli.Helios.Bridge.responseToJson resp
               | .rpc =>
                 -- Build the call object once; eth_call and eth_estimateGas
                 -- accept the same shape.
@@ -322,8 +378,23 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               -- verification). The gas figure is whatever the backend's
               -- simulate produced — `gasEstimate` arrives as a hex string
               -- from direct RPC or a number from a sidecar.
+              -- Lift the sidecar's nested gas figure (`result.gasUsed`) to
+              -- the top-level `gasEstimate` that affordability (below) and
+              -- the TUI's ConfirmGate read; the direct-RPC branch already
+              -- emits it top-level. Before this lift the helios/colibri
+              -- estimate was computed and then dropped on the floor.
+              let simJson := match getField "gasEstimate" simJson with
+                | some _ => simJson
+                | none =>
+                    match getField "result" simJson >>= getField "gasUsed" with
+                    | some (.str s) => setField simJson "gasEstimate" (.str s)
+                    | some (.num n) => setField simJson "gasEstimate" (.num n)
+                    | _ => simJson
               let gasHint? := getField "gasEstimate" simJson >>= jsonHexOrNat?
-              let affordField ← affordabilityField cfg.policy endpoint from? value block gasHint?
+              -- Affordability checks the CALLER's balance (the account
+              -- pays for the userOp), not the EntryPoint we impersonated
+              -- for an executeBatch sim.
+              let affordField ← affordabilityField cfg.policy endpoint callerFrom? value block gasHint?
               -- Honest verification verdict (Phase 1). The daemon knows which
               -- backend executed this simulation, so it never has to guess:
               --   helios/colibri → consensus-verified; rpc → unverified.
@@ -343,7 +414,30 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                 ] ++ (match provenBlock? with
                       | some b => #[("provenAtBlock", b)]
                       | none   => #[]))]
-              pure <| .ok <| mergeFields (mergeFields simJson affordField) verifFields
+              -- Normalize the simulate verdict across backends. The
+              -- sidecars wrap their payload as `{ok:true, result:{…,
+              -- revertReason}}` where `ok` means "the SIDECAR call
+              -- worked" — NOT "the tx would succeed". Consumers that read
+              -- the top-level `ok` (the TUI's ConfirmGate does) would
+              -- render "✓ would succeed" over a reverting helios sim —
+              -- exactly how three doomed txs reached the bundler in one
+              -- session. Lift the nested revertReason to the top level
+              -- and flip `ok` to false whenever a revert is present.
+              let revertMsg? : Option String :=
+                (getField "revertReason" simJson >>= asString)
+                  <|> (getField "result" simJson >>= getField "revertReason" >>= asString)
+              let simJson := match revertMsg? with
+                | some msg =>
+                    setField (setField simJson "ok" (.bool false)) "revertReason" (.str msg)
+                | none => simJson
+              -- Humanize the revert ("batch leg 2 reverted: Aave:
+              -- SUPPLY_CAP_EXCEEDED (51)") — the raw field stays for
+              -- debugging; ConfirmGate shows the decoded line.
+              let decodedField : Array (String × Json) :=
+                match revertMsg? >>= LeanCli.Ethereum.RevertDecode.humanize with
+                | some human => #[("revertDecoded", .str human)]
+                | none       => #[]
+              pure <| .ok <| mergeFields (mergeFields (mergeFields simJson affordField) verifFields) decodedField
   | "tx.preflightContext" =>
       -- Why: surface "what does the chain currently say?" alongside the
       -- deterministic simulate output. For approves we read the current
@@ -391,7 +485,8 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       -- copy only; the signed tx is re-decoded in Lean before broadcast.
       match ← LeanCli.Daemon.State.colibriClient? state with
       | some c =>
-          let resp ← LeanCli.Colibri.Persistent.call c "tx.simulate" req.params
+          let resp ← LeanCli.Daemon.State.withVerifyLock state
+            (LeanCli.Colibri.Persistent.call c "tx.simulate" req.params)
           pure <| .ok <| LeanCli.Colibri.Persistent.responseToJson resp
       | none =>
           let resp ← LeanCli.Colibri.Bridge.call
@@ -406,7 +501,8 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       -- callers can fall back to the untrusted-RPC path.
       match ← LeanCli.Daemon.State.colibriClient? state with
       | some c =>
-          let resp ← LeanCli.Colibri.Persistent.call c "eth.proxy" req.params
+          let resp ← LeanCli.Daemon.State.withVerifyLock state
+            (LeanCli.Colibri.Persistent.call c "eth.proxy" req.params)
           pure <| .ok <| LeanCli.Colibri.Persistent.responseToJson resp
       | none =>
           pure <| .error {
@@ -479,14 +575,21 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       | .ok endpoint =>
           let endpoint ← applySafeNodeOverride state endpoint cfg.chainId
           let injected := mergeHeliosDefaults req.params endpoint cfg.chainId
-          match ← LeanCli.Daemon.State.heliosClient? state with
-          | some c =>
-              let resp ← LeanCli.Helios.Persistent.call c "tx.simulate" injected
-              pure <| .ok <| LeanCli.Helios.Persistent.responseToJson resp
+          -- Same routing as the main `tx.simulate` helios branch:
+          -- dedicated simulate conn → shared conn under verifyLock →
+          -- one-shot spawn.
+          match ← LeanCli.Daemon.State.heliosSimCall state "tx.simulate" injected with
+          | some resp => pure <| .ok <| LeanCli.Helios.Persistent.responseToJson resp
           | none =>
-              let resp ← LeanCli.Helios.Bridge.call
-                { method := "tx.simulate", params := injected, id := 0 }
-              pure <| .ok <| LeanCli.Helios.Bridge.responseToJson resp
+              match ← LeanCli.Daemon.State.heliosClient? state with
+              | some c =>
+                  let resp ← LeanCli.Daemon.State.withVerifyLock state
+                    (LeanCli.Helios.Persistent.call c "tx.simulate" injected)
+                  pure <| .ok <| LeanCli.Helios.Persistent.responseToJson resp
+              | none =>
+                  let resp ← LeanCli.Helios.Bridge.call
+                    { method := "tx.simulate", params := injected, id := 0 }
+                  pure <| .ok <| LeanCli.Helios.Bridge.responseToJson resp
   | "eth.proxyHelios" =>
       -- Why: generic helios-backed read surface. Same shape as
       -- `eth.proxyVerified` (Colibri) but routes through the helios
@@ -504,7 +607,10 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
           let injected := mergeHeliosDefaults req.params endpoint cfg.chainId
           match ← LeanCli.Daemon.State.heliosClient? state with
           | some c =>
-              let resp ← LeanCli.Helios.Persistent.call c "eth.proxy" injected
+              -- Read-shaped: stays on the shared connection, so it MUST
+              -- hold verifyLock like every other verified read.
+              let resp ← LeanCli.Daemon.State.withVerifyLock state
+                (LeanCli.Helios.Persistent.call c "eth.proxy" injected)
               pure <| .ok <| LeanCli.Helios.Persistent.responseToJson resp
           | none =>
               pure <| .error {
@@ -589,6 +695,13 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       let lookback : Nat :=
         ((getField "lookback" req.params) >>= asNat).getD
           LeanCli.Daemon.Preflight.approvalsLookback
+      -- Full-history coverage is the default (activity-anchored chunked
+      -- sweep + per-owner session cache — see Preflight.auditApprovals).
+      -- An explicit `lookback` opts back into the bounded window; the
+      -- `deep` flag overrides either way.
+      let deep : Bool :=
+        ((getField "deep" req.params) >>= asBool).getD
+          ((getField "lookback" req.params).isNone)
       let chain? := getField "chain" req.params >>= asString
       match walletStr? with
       | none =>
@@ -604,7 +717,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
           | .ok endpoint =>
               let result ← LeanCli.Daemon.Preflight.auditApprovals
-                state cfg.policy endpoint chainIdParam wallet lookback
+                state cfg.policy endpoint chainIdParam wallet lookback deep
               pure (.ok result)
   | "tx.decodeIntent" =>
       -- Why: forwards { chainId, to, value, data, from? } to the clearsign
@@ -623,34 +736,27 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
         ((getField "data" req.params) >>= asString).getD ""
       let mut tokenMetaPairs : Array (String × Json) := #[]
       let ep := chainEndpointFor cfg req.params chainIdParam
-      if !toParam.isEmpty then
-        match ← LeanCli.Daemon.TokenMeta.lookupOrFetch
-            state cfg.policy ep chainIdParam toParam with
+      -- Prefetch metadata for `to` plus every embedded address-shaped
+      -- 32-byte word in the calldata (the scanner slides a 32-byte window
+      -- every 4 bytes to catch multicall-inner params, so it surfaces junk:
+      -- misaligned fragments, EOAs, small uint256 values). All candidates
+      -- go through ONE Multicall3-batched verified eth_call —
+      -- `TokenMeta.lookupOrFetchBatch` — instead of up to three serial
+      -- verified reads each, which previously queued behind `tx.simulate`
+      -- on the mutex-serialized light-client connection and dominated
+      -- pre-sign latency. Junk candidates fail inside the batch and are
+      -- negative-cached; failures stay silent (render-only surface).
+      let candidates : Array String :=
+        (if toParam.isEmpty then #[] else #[toParam])
+          ++ scanCalldataAddresses dataParam
+      let metas ← LeanCli.Daemon.TokenMeta.lookupOrFetchBatch
+        state cfg.policy ep chainIdParam candidates
+      for (lower, m?) in metas do
+        match m? with
         | some m =>
-            tokenMetaPairs := tokenMetaPairs.push (toParam.toLower,
+            tokenMetaPairs := tokenMetaPairs.push (lower,
               LeanCli.Daemon.TokenMeta.toJson m)
         | none => pure ()
-      -- Walk calldata for embedded address-shaped words (12 zero bytes +
-      -- 20 nonzero bytes) and prefetch metadata for each. The scanner slides
-      -- a 32-byte window every 4 bytes to catch multicall-inner params, so it
-      -- surfaces a lot of junk (misaligned fragments, EOAs, small uint256
-      -- values). `lookupOrFetchIfContract` gates each candidate behind one
-      -- `eth_getCode` and negative-caches non-contracts, so we don't pay a
-      -- fan-out of reverting decimals/symbol reads here (the old behaviour
-      -- pushed `tx.decodeIntent` to ~18s on a single-hop swap).
-      let embeddedAddrs := scanCalldataAddresses dataParam
-      for addr in embeddedAddrs do
-        let lower := addr.toLower
-        let alreadyHave := tokenMetaPairs.any (fun p => p.1 == lower)
-        if alreadyHave then
-          pure ()
-        else
-          match ← LeanCli.Daemon.TokenMeta.lookupOrFetchIfContract
-              state cfg.policy ep chainIdParam addr with
-          | some m =>
-              tokenMetaPairs := tokenMetaPairs.push (lower,
-                LeanCli.Daemon.TokenMeta.toJson m)
-          | none => pure ()
       let tokenMeta : Json := .obj tokenMetaPairs
       -- ENS namehash → name session cache. Empty in the MVP — the
       -- shape is in place so the sidecar's `ensName` formatter has

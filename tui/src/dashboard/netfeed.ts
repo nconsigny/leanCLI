@@ -113,7 +113,10 @@ export type NetFeed = {
   clear: () => void;
 };
 
-const RECENT_CAP = 8;
+/** Ring size for the dashboard's request tail. The network pane grows to
+ *  ~30 rows in full screen and fills its spare height with events, so keep
+ *  enough history to paint the tallest tail (the full monitor keeps more). */
+const RECENT_CAP = 40;
 
 /** Tail the daemon's network log. `logPath` comes from network.show
  *  (undefined = still resolving, null = LEANCLI_NETWORK_LOG=0). */
@@ -206,6 +209,23 @@ export type StatusSnapshot = {
     socketPath: string;
     rpc: EndpointInfo;
     ens: EndpointInfo | null;
+  };
+  /** Build provenance for the running daemon. `stale` is true when a
+   *  newer daemon binary exists on disk than the process is running —
+   *  i.e. you rebuilt but never bounced the daemon. Optional because
+   *  older daemons don't emit it. */
+  versions?: {
+    checkoutRoot: string | null;
+    /** `{semver}+{commit-count}`, e.g. "0.1.0+1487" — increases per commit. */
+    buildVersion: string;
+    /** Short HEAD sha (with `*` if the tree was dirty at build). */
+    buildSha: string;
+    daemonBinMtimeMs: number | null;
+    daemonBinOnDiskMtimeMs: number | null;
+    runningBinMtimeMs: number | null;
+    stale: boolean;
+    tuiBundleMtimeMs: number | null;
+    gitHead: string;
   };
 };
 

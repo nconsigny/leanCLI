@@ -36,6 +36,14 @@ def routerFor : LeanCli.Swap.Tokens.ChainId → String
   | .mainnet => swapRouter02Mainnet
   | .sepolia => swapRouter02Sepolia
 
+def factoryMainnet : String := "0x1f98431c8ad98523631ae4a59f267346ea31f984"
+def factorySepolia : String := "0x0227628f3f023bb0b980b67d528571c95c6dac1c"
+
+/-- Canonical Uniswap V3 factory per chain (Uniswap deployment docs). -/
+def factoryFor : LeanCli.Swap.Tokens.ChainId → String
+  | .mainnet => factoryMainnet
+  | .sepolia => factorySepolia
+
 /-! ## Selectors
 
   - quoteExactInputSingle((address,address,uint256,uint24,uint160))
@@ -151,6 +159,15 @@ def encodeQuoteExactInputSingle (p : QuoteExactInputSingleParams) : String :=
     encodeUint256 p.amountIn ++
     encodeUint24 p.fee ++
     encodeUint160 p.sqrtPriceLimitX96
+
+/-- `getPool(address,address,uint24)` calldata (selector `0x1698ee82`,
+    verified with `cast sig`). A plain mapping read on the factory — never
+    reverts; returns the pool address, or the zero address when no pool
+    exists for pair+fee. Used as a cheap existence probe before quoting:
+    `quoteExactInputSingle` against a nonexistent pool REVERTS, and a
+    reverting read pays a full EVM execution on the verified backend. -/
+def encodeGetPool (tokenA tokenB : String) (fee : Nat) : String :=
+  "0x1698ee82" ++ encodeAddress tokenA ++ encodeAddress tokenB ++ encodeUint256 fee
 
 structure ExactInputSingleParams where
   tokenIn : String

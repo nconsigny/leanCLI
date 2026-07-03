@@ -5,6 +5,7 @@ import LeanCli.Network.Policy
 import LeanCli.Encoding.Json
 import LeanCli.Crypto.Hex
 import LeanCli.Swap.UniV3
+import LeanCli.Ethereum.Multicall3
 import LeanCli.Util.Units
 
 /-!
@@ -199,7 +200,13 @@ private def renderAmount (amt : Nat) (meta? : Option LeanCli.Daemon.TokenMeta.To
 the value equals `2^256 - 1` — the conventional infinite-approval
 sentinel. -/
 private def renderApproveAmount (amt : Nat) (meta? : Option LeanCli.Daemon.TokenMeta.TokenMeta) : String :=
+  -- ≥ half of max uint256 counts as unlimited: protocols spend FROM a
+  -- max approval (transferFrom decrements it), so the live allowance of
+  -- an "unlimited" grant is maxUint256-minus-spent — never exactly max.
+  -- Without the threshold the audit renders a 78-digit number where
+  -- every other tool (and the user's mental model) says "unlimited".
   if amt = maxUint256 then "unlimited (max uint256)"
+  else if amt ≥ maxUint256 / 2 then "unlimited (max uint256, partially spent)"
   else renderAmount amt meta?
 
 /-- Classify the change from `curr` → `new` for an approve call. -/
@@ -230,7 +237,12 @@ def spenderLabel (addr : String) : Option String :=
     ("0x87870bca3f3fd6335c3f4ce8392d69350b4fa4e2", "Aave V3 Pool"),
     ("0x7d2768de32b0b80b7a3454c06bdac94a69ddc7a9", "Aave V2 LendingPool"),
     ("0xba12222222228d8ba445958a75a0704d566bf2c8", "Balancer V2 Vault"),
-    ("0xd9e1ce17f2641f24ae83637ab66a2cca9c378b9f", "SushiSwap Router")
+    ("0xd9e1ce17f2641f24ae83637ab66a2cca9c378b9f", "SushiSwap Router"),
+    -- Sepolia deployments (the dev network — CLAUDE.md): without these,
+    -- every approval the audit finds on Sepolia renders as bare hex.
+    ("0x3bfa4769fb09eefc5a80d6e87c3b9c650f7ae48e", "Uniswap V3 SwapRouter02 (Sepolia)"),
+    ("0x6ae43d3271ff6888e7fc43fd7321a503ff738951", "Aave V3 Pool (Sepolia)"),
+    ("0xd8da6bf26964af9d7eed9e03e53415d37aa96045", "vitalik.eth")
   ]
   (known.find? (fun p => p.fst == addr.toLower)).map (·.snd)
 
@@ -401,91 +413,241 @@ private def parsePermit2Log (log : Json) : Option (String × String × Nat) := d
   let blk : Nat := (((getField "blockNumber" log) >>= asString) >>= parseHexQuantity).getD 0
   some (token.toLower, spender.toLower, blk)
 
-/-- `eth_call(isApprovedForAll(owner, operator))` on an ERC-721/1155
-contract. Returns the live operator-approval bit (`none` if the call
-reverts — e.g. the contract isn't actually an NFT). -/
-private def readIsApprovedForAll
+/-- Lowest block at which `owner` shows on-chain activity, by binary
+search over ONE monotone signal chosen at head: contract code (smart
+accounts — code appears at deployment), else nonce (EOAs — an approve IS
+an outgoing tx), else balance (funded-but-unused). Approval logs cannot
+predate the chosen signal's first nonzero block, so it is a sound lower
+bound for a full-history approvals sweep. (An ERC-2612 permit granted by
+a never-funded, never-active EOA is the one theoretical exception —
+accepted.) Reads are direct: this only anchors log DISCOVERY; every
+displayed row is still rebuilt from batched verified re-reads. Returns
+`none` when the account shows no activity at head or the RPC lacks
+archive state — callers fall back to the bounded window. ~⌈log₂ head⌉
+round-trips (≈24 on Sepolia). -/
+private def firstActivityBlock
     (policy : LeanCli.Network.Policy.Policy)
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
-    (via? : Option LeanCli.RPC.Outbound.VerifyVia)
-    (token owner operator : String) : IO (Option Bool) := do
-  let data := selIsApprovedForAll
-    ++ LeanCli.Swap.UniV3.encodeAddress owner
-    ++ LeanCli.Swap.UniV3.encodeAddress operator
-  match ← LeanCli.RPC.Outbound.ethCall policy endpoint token data "latest" via? with
-  | .ok j =>
-      match asString j with
-      | some s => pure (some ((parseHexQuantity s).getD 0 ≠ 0))
-      | none => pure none
-  | .error _ => pure none
+    (owner : String) (head : Nat) : IO (Option Nat) := do
+  let codeAt := fun (b : Nat) => do
+    match ← LeanCli.RPC.Outbound.getCode policy endpoint owner (natQuantityHex b) none with
+    | .ok j =>
+        let c := ((asString j).getD "0x").toLower
+        pure (some (c != "0x" && c != "0x0" && !c.isEmpty))
+    | .error _ => pure none
+  let nonceAt := fun (b : Nat) => do
+    match ← LeanCli.RPC.Outbound.getTransactionCount policy endpoint owner (natQuantityHex b) none with
+    | .ok j => pure (((asString j).bind parseHexQuantity).map (· != 0))
+    | .error _ => pure none
+  let balanceAt := fun (b : Nat) => do
+    match ← LeanCli.RPC.Outbound.getBalance policy endpoint owner (natQuantityHex b) none with
+    | .ok j => pure (((asString j).bind parseHexQuantity).map (· != 0))
+    | .error _ => pure none
+  -- Pick the strongest signal that is nonzero at head.
+  let signal ← do
+    match ← codeAt head with
+    | some true => pure (some codeAt)
+    | _ =>
+        match ← nonceAt head with
+        | some true => pure (some nonceAt)
+        | _ =>
+            match ← balanceAt head with
+            | some true => pure (some balanceAt)
+            | _ => pure none
+  match signal with
+  | none => pure none  -- no activity, or head-state read failed
+  | some active =>
+      -- A probe ERROR is treated as "inactive": providers reject state
+      -- reads below their archive horizon (Ankr errors at genesis-era
+      -- Sepolia blocks), and aborting on the first such error silently
+      -- degraded every deep scan to the bounded window. Treating the
+      -- unreadable region as inactive converges to the lowest PROVABLY
+      -- active block — on a true archive node that IS first activity; on
+      -- a pruned node it is the archive horizon, which is the best any
+      -- log scan could anchor to anyway. Too many errors (> 8) means the
+      -- provider serves no history at all → give up, bounded fallback.
+      let mut lo : Nat := 0  -- invariant: not provably active at lo
+      let mut hi : Nat := head  -- invariant: active at hi
+      let mut errs : Nat := 0
+      for _ in [0:40] do
+        if hi ≤ lo + 1 then break
+        let mid := (lo + hi) / 2
+        match ← active mid with
+        | some true  => hi := mid
+        | some false => lo := mid
+        | none =>
+            errs := errs + 1
+            if errs > 8 then return none  -- effectively no archive; fall back
+            lo := mid
+      pure (some hi)
 
-/-- `eth_call(allowance(owner, token, spender))` on the canonical Permit2
-contract. Decodes the packed return into `(amount, expiration)` (the
-trailing nonce word is ignored). `none` on revert / malformed data. -/
-private def readPermit2Allowance
+/-- Chunked direct `eth_getLogs` walk over `[fromBlock, toBlock]`.
+Providers cap the block range per query (Ankr: 10k; others vary), so the
+chunk size adapts: halve on a range-cap error (floor 2 500), grow ×2 on
+success (cap 200 000) — a generous provider converges to few large
+chunks, a capped one to its limit. Discovery-only and therefore direct,
+per the documented `getLogsAnyAddress` decision: routing a wide window
+through the light client re-verifies every matching block's receipts and
+stalls for minutes, and only the batched verified re-read is load-bearing
+for what the audit displays. Fails after 3 consecutive errors at the
+minimum chunk size (provider outage, not a range cap). -/
+private def chunkedLogScan
+    (policy : LeanCli.Network.Policy.Policy)
+    (endpoint : LeanCli.RPC.Outbound.Endpoint)
+    (address? : Option String) (topics : Array Json)
+    (fromBlock toBlock : Nat) : IO (Except String (Array Json)) := do
+  let minChunk : Nat := 2500
+  let mut out : Array Json := #[]
+  let mut b := fromBlock
+  -- Start at the common public-provider cap (10k) and grow only while a
+  -- larger size has never been rejected. `ceiling` records the smallest
+  -- size the provider refused; growing is gated on staying under it.
+  -- Without the gate the walk ping-ponged: every successful chunk doubled
+  -- straight into the provider's cap, failed, halved back — 2× the
+  -- requests with every other one a guaranteed rpc-error in the netfeed.
+  let mut chunk : Nat := 10000
+  let mut ceiling : Nat := 400000
+  let mut failStreak : Nat := 0
+  let mut grewInto : Bool := false  -- current size is an untested growth probe
+  let mut iters : Nat := 0
+  while b ≤ toBlock do
+    iters := iters + 1
+    if iters > 4000 then
+      return .error s!"eth_getLogs chunk budget exceeded (stuck near block {b})"
+    let e := min (b + chunk - 1) toBlock
+    let res ← match address? with
+      | some addr =>
+          LeanCli.RPC.Outbound.getLogs policy endpoint
+            (natQuantityHex b) (natQuantityHex e) addr topics none
+      | none =>
+          LeanCli.RPC.Outbound.getLogsAnyAddress policy endpoint
+            (natQuantityHex b) (natQuantityHex e) topics
+    match res with
+    | .ok j =>
+        out := out ++ ((asArray j).getD #[])
+        b := e + 1
+        -- Grow only when more than one chunk of work remains AND the
+        -- doubled size hasn't been observed to fail.
+        grewInto := false
+        if b + chunk ≤ toBlock && chunk * 2 < ceiling then
+          chunk := chunk * 2
+          grewInto := true
+        failStreak := 0
+    | .error err =>
+        -- Ankr's -32062 range-cap error is NOT deterministic (load-balanced
+        -- backends enforce different caps / rate limits): 10k chunks succeed
+        -- and fail interleaved within one sweep. Shrinking on error is
+        -- therefore WRONG below the common public cap — observed ratcheting
+        -- every sweep down to 2 500-block chunks, tripling the walk. Policy:
+        -- backoff-retry the same window at the same size (2 attempts, 150/
+        -- 300ms) before concluding anything; only a size that fails three
+        -- times in a row counts as over the provider's cap and shrinks
+        -- (which still handles providers whose true cap is under 10k).
+        if grewInto then
+          -- An untested growth probe failed: almost certainly the cap, and
+          -- the pre-growth size just worked — fall straight back, no
+          -- retries (each would be a deterministic error in the netfeed).
+          ceiling := chunk
+          chunk := max (chunk / 2) minChunk
+          grewInto := false
+          failStreak := 0
+        else
+          failStreak := failStreak + 1
+          if failStreak ≤ 2 then
+            IO.sleep (UInt32.ofNat (150 * failStreak))
+          else if chunk > minChunk then
+            ceiling := chunk  -- confirmed cap: never grow back into it
+            chunk := max (chunk / 2) minChunk
+            failStreak := 0
+          else if failStreak ≥ 5 then
+            return .error s!"eth_getLogs failed at block {b} (min chunk): {err}"
+  pure (.ok out)
+
+/-- One Multicall3 `aggregate3` over `calls` through the given read path;
+returns the per-call `(success, returnData)` list in input order, or
+`none` when the batch itself fails (policy denial / transport / decode).
+The approvals audit's live re-reads (allowance / isApprovedForAll /
+Permit2) were previously ONE verified eth_call PER discovered pair,
+serialized on the mutex-guarded light-client connection — several
+seconds each, minutes total for a busy wallet. One batch is a single
+verified round-trip regardless of N; `allowFailure := true` keeps the
+per-pair fail-soft rule (a reverting probe drops that pair, not the
+audit). -/
+private def batchedCalls
     (policy : LeanCli.Network.Policy.Policy)
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
     (via? : Option LeanCli.RPC.Outbound.VerifyVia)
-    (owner token spender : String) : IO (Option (Nat × Nat)) := do
-  let data := selPermit2Allowance
-    ++ LeanCli.Swap.UniV3.encodeAddress owner
-    ++ LeanCli.Swap.UniV3.encodeAddress token
-    ++ LeanCli.Swap.UniV3.encodeAddress spender
-  match ← LeanCli.RPC.Outbound.ethCall policy endpoint permit2Address data "latest" via? with
-  | .ok j =>
-      match asString j with
-      | some s =>
-          match wordAt s 0, wordAt s 1 with
-          | some amt, some exp => pure (some (amt, exp))
-          | _, _ => pure none
-      | none => pure none
+    (calls : List LeanCli.Ethereum.Multicall3.Call3) :
+    IO (Option (List (Bool × String))) := do
+  if calls.isEmpty then return some []
+  let data := LeanCli.Ethereum.Multicall3.encodeAggregate3 calls
+  match ← LeanCli.RPC.Outbound.ethCall policy endpoint
+      LeanCli.Ethereum.Multicall3.address data "latest" via? with
+  | .ok j => pure ((asString j).bind LeanCli.Ethereum.Multicall3.decodeAggregate3)
   | .error _ => pure none
 
 /-- Scan ERC-721/1155 `ApprovalForAll` operator approvals for `owner`
-across all NFT contracts in the window. Mirrors the ERC-20 scan: discover
-via logs, dedupe per `(contract, operator)`, then re-read the live
-`isApprovedForAll` so revoked operators drop out. Best-effort — returns
-`#[]` (not a failure) when the log query is unavailable. -/
+across all NFT contracts in `[fromBlock, head]`, merged into
+`priorPairs` (the deep-scan cache from earlier sweeps). Discover via a
+chunked direct log walk, dedupe per `(contract, operator)`, then re-read
+the live `isApprovedForAll` in one batch so revoked operators drop out.
+Returns `(rows, mergedPairs, swept)` — `swept = false` means the log walk
+failed and only `priorPairs` were re-read, so callers must NOT advance
+the cache watermark. Best-effort surface: failures yield empty rows, not
+an error. -/
 private def scanApprovalForAll
     (state : LeanCli.Daemon.State.Shared)
     (policy : LeanCli.Network.Policy.Policy)
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
     (via? : Option LeanCli.RPC.Outbound.VerifyVia)
-    (chainId : Nat) (owner : String) (fromBlock head : Nat) : IO (Array Json) := do
+    (chainId : Nat) (owner : String) (fromBlock head : Nat)
+    (priorPairs : List ((String × String) × Nat)) :
+    IO (Array Json × List ((String × String) × Nat) × Bool) := do
   -- ApprovalForAll shares ERC-20 Approval's topic layout for the first
   -- two indexed args (owner, operator), so `parseApprovalLog` reads the
   -- operator out of topics[2] verbatim.
   let topics : Array Json := #[.str topicApprovalForAll, .str (paddedAddrTopic owner)]
-  match ← LeanCli.RPC.Outbound.getLogsAnyAddress policy endpoint
-      (natQuantityHex fromBlock) (natQuantityHex head) topics with
-  | .error _ => pure #[]
-  | .ok j =>
-      match asArray j with
-      | none => pure #[]
-      | some logs =>
-          let triples := logs.filterMap parseApprovalLog
-          let deduped : List ((String × String) × Nat) :=
-            triples.foldl (fun acc t => upsertLatest acc t.1 t.2.1 t.2.2) []
-          let mut rows : Array Json := #[]
-          for entry in deduped do
-            let token    := entry.fst.fst
-            let operator := entry.fst.snd
-            let blk      := entry.snd
-            match ← readIsApprovedForAll policy endpoint via? token owner operator with
-            | some true =>
-                let meta? ← LeanCli.Daemon.TokenMeta.lookupOrFetch
-                  state policy endpoint chainId token
-                let sym := match meta? with | some m => m.symbol | none => ""
-                rows := rows.push <| .obj (#[
-                  ("token",         .str token),
-                  ("operator",      .str operator),
-                  ("approved",      .bool true),
-                  ("tokenSymbol",   .str sym),
-                  ("standard",      .str "ERC-721/1155 ApprovalForAll"),
-                  ("lastSeenBlock", .num (Int.ofNat blk))
-                ] ++ labelField "operatorLabel" operator)
-            | _ => pure ()  -- false / revoked / not-an-NFT: skip
-          pure rows
+  let (deduped, swept) ←
+    match ← chunkedLogScan policy endpoint none topics fromBlock head with
+    | .ok logs =>
+        let triples := logs.filterMap parseApprovalLog
+        let merged : List ((String × String) × Nat) :=
+          triples.foldl (fun acc t => upsertLatest acc t.1 t.2.1 t.2.2) priorPairs
+        pure (merged, true)
+    | .error _ => pure (priorPairs, false)
+  -- ONE batched isApprovedForAll re-read for every deduped
+  -- (contract, operator) pair; false / reverted / not-an-NFT
+  -- entries drop out of the zip below.
+  let probeCalls : List LeanCli.Ethereum.Multicall3.Call3 :=
+    deduped.map fun e =>
+      { target := e.fst.fst, allowFailure := true,
+        callData := selIsApprovedForAll
+          ++ LeanCli.Swap.UniV3.encodeAddress owner
+          ++ LeanCli.Swap.UniV3.encodeAddress e.fst.snd }
+  match ← batchedCalls policy endpoint via? probeCalls with
+  | none => pure (#[], deduped, swept)  -- re-read failed; keep discovery
+  | some results =>
+      let live := (deduped.zip results).filterMap fun (e, ok, ret) =>
+        if ok && ((wordAt ret 0).getD 0 ≠ 0) then some e else none
+      let metas ← LeanCli.Daemon.TokenMeta.lookupOrFetchBatch
+        state policy endpoint chainId (live.map (·.fst.fst)).toArray
+      let metaFor := fun (t : String) =>
+        (metas.find? (fun p => p.1 == t.toLower)).bind (·.2)
+      let mut rows : Array Json := #[]
+      for entry in live do
+        let token    := entry.fst.fst
+        let operator := entry.fst.snd
+        let blk      := entry.snd
+        let sym := match metaFor token with | some m => m.symbol | none => ""
+        rows := rows.push <| .obj (#[
+          ("token",         .str token),
+          ("operator",      .str operator),
+          ("approved",      .bool true),
+          ("tokenSymbol",   .str sym),
+          ("standard",      .str "ERC-721/1155 ApprovalForAll"),
+          ("lastSeenBlock", .num (Int.ofNat blk))
+        ] ++ labelField "operatorLabel" operator)
+      pure (rows, deduped, swept)
 
 /-- Scan Permit2 allowances granted by `owner`. Lighter than the ERC-20
 sweep — the logs are address-filtered to the single Permit2 contract.
@@ -497,48 +659,70 @@ private def scanPermit2
     (policy : LeanCli.Network.Policy.Policy)
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
     (via? : Option LeanCli.RPC.Outbound.VerifyVia)
-    (chainId : Nat) (owner : String) (fromBlock head : Nat) : IO (Array Json) := do
+    (chainId : Nat) (owner : String) (fromBlock head : Nat)
+    (priorPairs : List ((String × String) × Nat)) :
+    IO (Array Json × List ((String × String) × Nat) × Bool) := do
   -- topic0 alternation `[Approval | Permit]`, topic1 = owner.
   let topics : Array Json := #[
     .arr #[.str topicPermit2Approval, .str topicPermit2Permit],
     .str (paddedAddrTopic owner)
   ]
-  match ← LeanCli.RPC.Outbound.getLogs policy endpoint
-      (natQuantityHex fromBlock) (natQuantityHex head) permit2Address topics via? with
-  | .error _ => pure #[]
-  | .ok j =>
-      match asArray j with
-      | none => pure #[]
-      | some logs =>
-          let triples := logs.filterMap parsePermit2Log
-          let deduped : List ((String × String) × Nat) :=
-            triples.foldl (fun acc t => upsertLatest acc t.1 t.2.1 t.2.2) []
-          let mut rows : Array Json := #[]
-          for entry in deduped do
-            let token   := entry.fst.fst
-            let spender := entry.fst.snd
-            let blk     := entry.snd
-            match ← readPermit2Allowance policy endpoint via? owner token spender with
-            | some (amt, exp) =>
-                if amt > 0 then
-                  let meta? ← LeanCli.Daemon.TokenMeta.lookupOrFetch
-                    state policy endpoint chainId token
-                  let sym := match meta? with | some m => m.symbol | none => ""
-                  let human :=
-                    if amt = maxUint160 then "unlimited (max uint160)"
-                    else renderAmount amt meta?
-                  rows := rows.push <| .obj (#[
-                    ("token",         .str token),
-                    ("spender",       .str spender),
-                    ("amount",        .str (toString amt)),
-                    ("amountHuman",   .str human),
-                    ("tokenSymbol",   .str sym),
-                    ("expiration",    .num (Int.ofNat exp)),
-                    ("via",           .str "Permit2"),
-                    ("lastSeenBlock", .num (Int.ofNat blk))
-                  ] ++ labelField "spenderLabel" spender)
-            | none => pure ()  -- allowance read failed; skip, don't fabricate
-          pure rows
+  -- Log DISCOVERY goes direct + chunked (see `chunkedLogScan`): the logs
+  -- only nominate candidate pairs — the batched live re-read below
+  -- (which IS routed through the verified backend) is what the rows are
+  -- built from, so a lying RPC can hide a grant from this render-only
+  -- list but cannot fabricate one. `swept = false` on walk failure keeps
+  -- the deep-scan watermark honest.
+  let (deduped, swept) ←
+    match ← chunkedLogScan policy endpoint (some permit2Address) topics fromBlock head with
+    | .ok logs =>
+        let triples := logs.filterMap parsePermit2Log
+        let merged : List ((String × String) × Nat) :=
+          triples.foldl (fun acc t => upsertLatest acc t.1 t.2.1 t.2.2) priorPairs
+        pure (merged, true)
+    | .error _ => pure (priorPairs, false)
+  -- ONE batched Permit2 allowance(owner, token, spender) re-read
+  -- for every deduped pair; spent / expired-to-zero drop out.
+  let probeCalls : List LeanCli.Ethereum.Multicall3.Call3 :=
+    deduped.map fun e =>
+      { target := permit2Address, allowFailure := true,
+        callData := selPermit2Allowance
+          ++ LeanCli.Swap.UniV3.encodeAddress owner
+          ++ LeanCli.Swap.UniV3.encodeAddress e.fst.fst
+          ++ LeanCli.Swap.UniV3.encodeAddress e.fst.snd }
+  match ← batchedCalls policy endpoint via? probeCalls with
+  | none => pure (#[], deduped, swept)  -- re-read failed; keep discovery
+  | some results =>
+      let live := (deduped.zip results).filterMap fun (e, ok, ret) =>
+        if !ok then none
+        else match wordAt ret 0, wordAt ret 1 with
+          | some amt, some exp => if amt > 0 then some (e, amt, exp) else none
+          | _, _ => none
+      let metas ← LeanCli.Daemon.TokenMeta.lookupOrFetchBatch
+        state policy endpoint chainId (live.map (·.fst.fst.fst)).toArray
+      let metaFor := fun (t : String) =>
+        (metas.find? (fun p => p.1 == t.toLower)).bind (·.2)
+      let mut rows : Array Json := #[]
+      for (entry, amt, exp) in live do
+          let token   := entry.fst.fst
+          let spender := entry.fst.snd
+          let blk     := entry.snd
+          let meta? := metaFor token
+          let sym := match meta? with | some m => m.symbol | none => ""
+          let human :=
+            if amt = maxUint160 then "unlimited (max uint160)"
+            else renderAmount amt meta?
+          rows := rows.push <| .obj (#[
+            ("token",         .str token),
+            ("spender",       .str spender),
+            ("amount",        .str (toString amt)),
+            ("amountHuman",   .str human),
+            ("tokenSymbol",   .str sym),
+            ("expiration",    .num (Int.ofNat exp)),
+            ("via",           .str "Permit2"),
+            ("lastSeenBlock", .num (Int.ofNat blk))
+          ] ++ labelField "spenderLabel" spender)
+      pure (rows, deduped, swept)
 
 /-- Scan outgoing approvals for `owner` over the last `lookback` blocks
 and return the TUI-shaped audit JSON. Covers the three approval surfaces
@@ -564,69 +748,135 @@ def auditApprovals
     (state : LeanCli.Daemon.State.Shared)
     (policy : LeanCli.Network.Policy.Policy)
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
-    (chainId : Nat) (owner : String) (lookback : Nat) : IO Json := do
-  let via? ← LeanCli.Daemon.State.buildColibriVia state chainId
+    (chainId : Nat) (owner : String) (lookback : Nat)
+    (deep : Bool := false) : IO Json := do
+  -- Route live re-reads through the daemon's SELECTED read backend
+  -- (helios/colibri/rpc) — this was hardwired to colibri, so under
+  -- provider=helios every audit re-read ran on the slow WASM light
+  -- client while the rest of the daemon read via helios.
+  let via? ← LeanCli.Daemon.State.buildVerifiedReadVia state chainId endpoint.url
   match ← readBlockNumber policy endpoint via? with
   | none =>
       pure <| approvalsUnavailable chainId owner
         "eth_blockNumber unavailable on this provider; cannot scan approvals"
   | some head =>
-      let fromBlock := if head ≤ lookback then 0 else head - lookback
+      -- Discovery window. `deep` = full-history coverage: resume from the
+      -- session cache when one exists (only the blocks mined since the
+      -- last audit are swept), else anchor at the account's first
+      -- activity via binary search. When neither is available (no
+      -- archive state on the RPC), or when the caller asked for a
+      -- bounded audit, fall back to the classic lookback window.
+      let ownerKey := s!"{chainId}:{owner.toLower}"
+      let boundedFrom := if head ≤ lookback then 0 else head - lookback
+      let cached? ← if deep then LeanCli.Daemon.State.getApprovalScan state ownerKey
+                    else pure none
+      let prior : LeanCli.Daemon.State.ApprovalScan ←
+        match cached? with
+        | some c => pure c
+        | none =>
+            if deep then
+              match ← firstActivityBlock policy endpoint owner head with
+              | some b => pure { scannedFrom := b, scannedTo := 0 }
+              | none   => pure { scannedFrom := boundedFrom, scannedTo := 0 }
+            else pure { scannedFrom := boundedFrom, scannedTo := 0 }
+      let fromBlock :=
+        if prior.scannedTo > 0 then min (prior.scannedTo + 1) head
+        else prior.scannedFrom
+      -- NFT + Permit2 surfaces run CONCURRENTLY with the ERC-20 sweep:
+      -- their log walks are independent direct HTTP, and their batched
+      -- verified re-reads serialize safely on `verifyLock`. Sequential,
+      -- the three sweeps tripled the cold-scan wall time.
+      let nftTask ← IO.asTask
+        (scanApprovalForAll state policy endpoint via? chainId owner fromBlock head prior.nft)
+      let p2Task ← IO.asTask
+        (scanPermit2 state policy endpoint via? chainId owner fromBlock head prior.permit2)
       -- topic0 = Approval, topic1 = owner (left-padded). topic2 (spender)
       -- is left unconstrained so every spender is caught.
       let topics : Array Json := #[.str topicApproval, .str (paddedAddrTopic owner)]
-      match ← LeanCli.RPC.Outbound.getLogsAnyAddress policy endpoint
-          (natQuantityHex fromBlock) (natQuantityHex head) topics with
-      | .error e =>
-          pure <| approvalsUnavailable chainId owner
-            s!"eth_getLogs failed on this provider: {e}"
-      | .ok j =>
-          match asArray j with
-          | none =>
-              pure <| approvalsUnavailable chainId owner
-                "eth_getLogs returned a non-array result"
-          | some logs =>
-              let triples := logs.filterMap parseApprovalLog
-              let deduped : List ((String × String) × Nat) :=
-                triples.foldl (fun acc t => upsertLatest acc t.1 t.2.1 t.2.2) []
-              let mut rows : Array Json := #[]
-              for entry in deduped do
-                let token   := entry.fst.fst
-                let spender := entry.fst.snd
-                let blk     := entry.snd
-                match ← readAllowance policy endpoint via? token owner spender with
-                | some amt =>
-                    -- Drop pairs whose live allowance is 0: already
-                    -- revoked or spent down — nothing actionable to show.
-                    if amt > 0 then
-                      let meta? ← LeanCli.Daemon.TokenMeta.lookupOrFetch
-                        state policy endpoint chainId token
-                      let sym := match meta? with | some m => m.symbol | none => ""
-                      rows := rows.push <| .obj (#[
-                        ("token",         .str token),
-                        ("spender",       .str spender),
-                        ("amount",        .str (toString amt)),
-                        ("amountHuman",   .str (renderApproveAmount amt meta?)),
-                        ("tokenSymbol",   .str sym),
-                        ("lastSeenBlock", .num (Int.ofNat blk))
-                      ] ++ labelField "spenderLabel" spender)
-                | none => pure ()  -- allowance read failed; skip, don't fabricate
-              -- Additive coverage: NFT operator approvals + Permit2 grants.
-              -- Both are best-effort and return #[] on provider failure, so
-              -- the ERC-20 result is never blocked on them.
-              let nftRows ← scanApprovalForAll state policy endpoint via? chainId owner fromBlock head
-              let permit2Rows ← scanPermit2 state policy endpoint via? chainId owner fromBlock head
-              pure <| .obj #[
-                ("chainId",          .num (Int.ofNat chainId)),
-                ("wallet",           .str owner),
-                ("approvals",        .arr rows),
-                ("nftApprovals",     .arr nftRows),
-                ("permit2Approvals", .arr permit2Rows),
-                ("implemented",      .bool true),
-                ("fromBlock",        .num (Int.ofNat fromBlock)),
-                ("toBlock",          .num (Int.ofNat head)),
-                ("note",             .str s!"scanned blocks {fromBlock}–{head}: {rows.size} ERC-20 allowance(s), {nftRows.size} NFT operator approval(s), {permit2Rows.size} Permit2 grant(s); zero/revoked omitted, all amounts re-read live")
-              ]
+      let erc20Sweep ← chunkedLogScan policy endpoint none topics fromBlock head
+      -- Merge the sweep into prior discovery. A failed sweep falls back to
+      -- the cached pairs (the live re-reads below still verify them); with
+      -- no prior discovery either, the audit is genuinely unavailable.
+      let erc20Swept := match erc20Sweep with | .ok _ => true | .error _ => false
+      let deduped : List ((String × String) × Nat) :=
+        match erc20Sweep with
+        | .ok logs =>
+            (logs.filterMap parseApprovalLog).foldl
+              (fun acc t => upsertLatest acc t.1 t.2.1 t.2.2) prior.erc20
+        | .error _ => prior.erc20
+      if !erc20Swept && prior.erc20.isEmpty then
+        let msg := match erc20Sweep with | .error e => e | .ok _ => "unknown"
+        return approvalsUnavailable chainId owner
+          s!"eth_getLogs failed on this provider: {msg}"
+      -- ONE batched allowance(owner, spender) re-read for every
+      -- deduped pair (was: one verified eth_call per pair, serial
+      -- on the light-client connection — minutes for a busy
+      -- wallet). Pairs whose live allowance is 0 (revoked / spent
+      -- down) and pairs whose probe failed drop out of the zip —
+      -- skip, don't fabricate.
+      let allowanceCalls : List LeanCli.Ethereum.Multicall3.Call3 :=
+        deduped.map fun e =>
+          { target := e.fst.fst, allowFailure := true,
+            callData := selAllowance
+              ++ LeanCli.Swap.UniV3.encodeAddress owner
+              ++ LeanCli.Swap.UniV3.encodeAddress e.fst.snd }
+      let results? ← batchedCalls policy endpoint via? allowanceCalls
+      let live : List (((String × String) × Nat) × Nat) :=
+        match results? with
+        | none => []
+        | some results =>
+            (deduped.zip results).filterMap fun (e, ok, ret) =>
+              if !ok then none
+              else match wordAt ret 0 with
+                | some amt => if amt > 0 then some (e, amt) else none
+                | none => none
+      let metas ← LeanCli.Daemon.TokenMeta.lookupOrFetchBatch
+        state policy endpoint chainId (live.map (·.fst.fst.fst)).toArray
+      let metaFor := fun (t : String) =>
+        (metas.find? (fun p => p.1 == t.toLower)).bind (·.2)
+      let mut rows : Array Json := #[]
+      for (entry, amt) in live do
+        let token   := entry.fst.fst
+        let spender := entry.fst.snd
+        let blk     := entry.snd
+        let meta? := metaFor token
+        let sym := match meta? with | some m => m.symbol | none => ""
+        rows := rows.push <| .obj (#[
+          ("token",         .str token),
+          ("spender",       .str spender),
+          ("amount",        .str (toString amt)),
+          ("amountHuman",   .str (renderApproveAmount amt meta?)),
+          ("tokenSymbol",   .str sym),
+          ("lastSeenBlock", .num (Int.ofNat blk))
+        ] ++ labelField "spenderLabel" spender)
+      -- Join the concurrent NFT + Permit2 surfaces (spawned before the
+      -- ERC-20 sweep). Both are best-effort and yield empty rows on
+      -- provider failure, so the ERC-20 result is never blocked on them.
+      let (nftRows, nftPairs, nftSwept) ← IO.ofExcept nftTask.get
+      let (permit2Rows, p2Pairs, p2Swept) ← IO.ofExcept p2Task.get
+      -- Advance the deep-scan watermark ONLY when every surface's
+      -- log walk actually covered [fromBlock, head]; a partial
+      -- failure leaves the watermark in place so the next audit
+      -- rescans the same window instead of silently skipping it.
+      if deep && erc20Swept && nftSwept && p2Swept then
+        LeanCli.Daemon.State.putApprovalScan state ownerKey {
+          scannedFrom := prior.scannedFrom, scannedTo := head,
+          erc20 := deduped, nft := nftPairs, permit2 := p2Pairs }
+      let coverage :=
+        if deep then s!"full history (activity-anchored) blocks {prior.scannedFrom}–{head}"
+        else s!"blocks {fromBlock}–{head}"
+      pure <| .obj #[
+        ("chainId",          .num (Int.ofNat chainId)),
+        ("wallet",           .str owner),
+        ("approvals",        .arr rows),
+        ("nftApprovals",     .arr nftRows),
+        ("permit2Approvals", .arr permit2Rows),
+        ("implemented",      .bool true),
+        ("fromBlock",        .num (Int.ofNat prior.scannedFrom)),
+        ("toBlock",          .num (Int.ofNat head)),
+        ("deep",             .bool deep),
+        ("note",             .str s!"scanned {coverage}: {rows.size} ERC-20 allowance(s), {nftRows.size} NFT operator approval(s), {permit2Rows.size} Permit2 grant(s); zero/revoked omitted, all amounts re-read live")
+      ]
 
 /-! ## Top-level run
 
@@ -641,7 +891,8 @@ def run
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
     (chainId : Nat) (fromAddr to valueHex data : String)
     (lookback : Nat) : IO Json := do
-  let via? ← LeanCli.Daemon.State.buildColibriVia state chainId
+  -- Selected read backend, not hardwired colibri (see auditApprovals).
+  let via? ← LeanCli.Daemon.State.buildVerifiedReadVia state chainId endpoint.url
   let kind := classify valueHex data
   match kind with
   | .native =>

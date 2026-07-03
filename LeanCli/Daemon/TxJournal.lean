@@ -1,4 +1,5 @@
 import LeanCli.Encoding.Json
+import Std.Time
 
 /-!
 # Local transaction journal
@@ -13,6 +14,15 @@ never fail the user's tx.
 namespace LeanCli.Daemon.TxJournal
 
 open LeanCli.Encoding.Json
+
+/-- Wall-clock epoch seconds. MUST be used for journal `timestamp` fields:
+    `IO.monoMsNow` is a monotonic uptime clock (seconds-since-boot), so
+    dividing it by 1000 produced tiny values that render as "1970-01-01"
+    in the TUI. `Std.Time.Timestamp.now` is the real Unix epoch (same
+    source as `Swap.Prepare.nowEpochSeconds`). -/
+def nowEpochSeconds : IO Nat := do
+  let ts ← Std.Time.Timestamp.now
+  pure ts.toSecondsSinceUnixEpoch.toInt.toNat
 
 structure Entry where
   timestamp     : Nat
@@ -144,8 +154,7 @@ def appendInclusion (slotName userOpHash inclusionTxHash : String)
   try
     ensureDir
     let path ← journalPath slotName
-    let nowMs ← IO.monoMsNow
-    let nowSec : Nat := nowMs / 1000
+    let nowSec ← nowEpochSeconds
     let base : Array (String × Json) := #[
       ("timestamp", .num (Int.ofNat nowSec)),
       ("kind", .str "sphincs.inclusion"),
@@ -174,8 +183,7 @@ def appendStatus (slotName txHash status : String)
   try
     ensureDir
     let path ← journalPath slotName
-    let nowMs ← IO.monoMsNow
-    let nowSec : Nat := nowMs / 1000
+    let nowSec ← nowEpochSeconds
     let base : Array (String × Json) := #[
       ("timestamp", .num (Int.ofNat nowSec)),
       ("kind", .str "status"),

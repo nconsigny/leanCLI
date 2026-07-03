@@ -29,10 +29,26 @@ Privacy Pools + Railgun + Tornado Cash flows. Sixteen arms covering
 deposit / withdraw / transfer for each shielded backend, plus the
 common ping / balance / reveal / import / delete utilities.
 
-Trust posture: shielded calldata is opaque to the network but the
-daemon still decodes + simulates + confirms every produced tx through
-the standard pre-sign pipeline at the TUI / SendRawFlow boundary.
-"It's shielded" does not grant signing authority.
+Trust posture: shielded calldata is opaque to the network but NOT to the
+user signing it. The interactive surfaces gate every shielded operation
+before any broadcast; "it's shielded" does not grant signing authority:
+
+* Shields (deposit) — `shielded.prepareDeposit` / `shielded.railgun.prepareShield`
+  return UNSIGNED `{to,value,data}` legs that the TUI routes through the
+  standard pre-sign pipeline (decode → simulate → ConfirmGate → eoa.send),
+  one leg at a time. See `ShieldFlow.tsx`.
+* PP unshield — has no EOA signature (the relayer submits the ZK proof), so
+  `shielded.quoteUnshield` builds the proof without broadcasting and returns
+  the relayer's fee terms; the TUI confirms those before `shielded.unshieldDrain`
+  relays. See `UnshieldConfirmGate` in `WalletUnshieldFlow.tsx`.
+* Railgun unshield — signed inside the sidecar (upstream WASM limitation; see
+  the `shielded.railgun.unshield` arm). Mitigated by the same TUI confirm gate
+  before the RPC, not by daemon-local signing.
+
+The one-shot composite `shielded.deposit` / `shielded.railgun.shield` RPCs
+(prepare+sign+broadcast, NO daemon-side gate) are retained ONLY for the
+headless CLI, where there is no interactive confirm surface — they are
+marked ⚠ UNGATED at their arms and MUST NOT be called from interactive code.
 -/
 
 namespace LeanCli.Daemon.Server.ShieldedRpc
@@ -697,10 +713,20 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       -- (0x304a…4b4c). The SDK signs and embeds this authorization
       -- inside every broadcast UserOp; no separate setup tx is needed.
       --
-      -- Trust note: the EOA private key is passed to the sidecar via
-      -- env for the duration of this call. Mitigation: short-lived
-      -- sidecar process; user has already gone through ConfirmGate
-      -- before this RPC is invoked.
+      -- ⚠ Trust note: UNLIKE every other signing surface, the EOA private
+      -- key is passed INTO the sidecar (via env) and the UserOp is signed
+      -- there, not by the verified core. This is forced by the upstream SDK:
+      -- the `@kohaku-eth/railgun` WASM `prepareUserOp(...)` returns an opaque
+      -- `SignableUserOperation` whose only method is `.sign(signer)` — it
+      -- exposes no `userOpHash`, no unsigned UserOp, and no 7702-auth payload
+      -- to sign externally, so the key cannot stay in the daemon.
+      -- TODO(upstream): to make this daemon-local-signed, the SDK must expose
+      --   (1) build-unsigned-UserOp, (2) getUserOpHash, (3) build-7702-auth,
+      --   (4) submit-pre-signed-UserOp. Until then the in-repo mitigation is
+      --   the TUI disclosure ConfirmGate (WalletUnshieldFlow's
+      --   UnshieldConfirmGate) shown BEFORE this RPC + a short-lived sidecar.
+      -- (PP unshield is NOT affected — its withdraw is a relayer-submitted
+      -- proof with no EOA signature, gated by shielded.quoteUnshield.)
       --
       -- Bundler URL resolution:
       --   1. LEANCLI_RG_BUNDLER_URL (explicit override) — wins.
@@ -940,7 +966,30 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               shieldedBridgeCall cfg "shielded.prepareWithdraw"
                 (.obj #[("recipient", .str recipient), ("amountEth", .str amountEth)]) (some mnemonic) req
       | _, _ => pure (.error invalidParams)
+  | "shielded.quoteUnshield" =>
+      -- Pre-broadcast quote for the gated unshield flow: builds the
+      -- withdrawal proof WITHOUT broadcasting and returns the relayer's fee
+      -- terms (recipient/amount/feeBPS/gas) so the TUI can show a ConfirmGate
+      -- before `shielded.unshieldDrain` actually relays. A PP v1 withdraw
+      -- carries no EOA signature (the relayer submits the proof), so
+      -- confirming these terms IS the pre-broadcast trust anchor — there is
+      -- no daemon-local signature to gate. Read-only on-chain (no state
+      -- change); the proof is discarded and rebuilt by the drain.
+      match paramString req.params "recipient", paramString req.params "amountEth" with
+      | .ok recipient, .ok amountEth =>
+          let passphrase? : Option String := getField "passphrase" req.params >>= asString
+          match ← unlockPpSecretSmart state passphrase? with
+          | .error err => pure (.error err)
+          | .ok mnemonic =>
+              shieldedBridgeCall cfg "shielded.quoteUnshield"
+                (.obj #[("recipient", .str recipient), ("amountEth", .str amountEth)])
+                (some mnemonic) req
+      | _, _ => pure (.error invalidParams)
   | "shielded.unshieldDrain" =>
+      -- ⚠ Broadcasts via the relayer. The gated TUI path calls
+      -- `shielded.quoteUnshield` first and only reaches here after the user
+      -- confirms the quoted terms. (The headless CLI calls it directly —
+      -- caller is responsible for confirming intent.)
       match paramString req.params "recipient", paramString req.params "amountEth" with
       | .ok recipient, .ok amountEth =>
           let passphrase? : Option String := getField "passphrase" req.params >>= asString

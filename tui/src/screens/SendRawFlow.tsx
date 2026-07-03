@@ -578,15 +578,20 @@ function ConfirmGate({
             {String(sim.affordability.senderBalanceHuman)}
           </Text>
         )}
-        {sim?.revertReason && (
+        {sim?.revertDecoded ? (
+          <Text color={theme.err} bold>
+            revert: {String(sim.revertDecoded).slice(0, 200)}
+          </Text>
+        ) : sim?.revertReason ? (
           <Text color={theme.err}>revert: {String(sim.revertReason).slice(0, 200)}</Text>
-        )}
+        ) : null}
         <TransfersBlock sim={sim} />
       </ProvenancePanel>
       {!okSim && !sim?.simRpcError && (
-        <Text color={theme.warn}>
-          ⚠ Simulation failed. Pressing Enter will still broadcast — only
-          do this if you understand why simulation is wrong.
+        <Text color={theme.err} bold>
+          ⚠ Simulation says this tx WILL revert on-chain. Pressing Enter
+          still broadcasts (and pays gas / burns a SPHINCS sign) — only
+          proceed if you understand why the simulation is wrong.
         </Text>
       )}
     </Layout>

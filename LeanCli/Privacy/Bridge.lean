@@ -79,6 +79,12 @@ def encodeRequest (req : Request) : String :=
 def methodPurpose (method : String) : Purpose :=
   if method = "shielded.broadcast" || method = "shielded.signAndBroadcast"
       || method = "shielded.prepareWithdraw"
+      -- shielded.quoteUnshield POSTs the recipient + amount to the relayer's
+      -- /quote endpoint to read back a fee (no broadcast, no on-chain
+      -- effect), but that egress reveals the same withdrawal parameters as
+      -- prepareWithdraw, so it is classified identically — denied wherever a
+      -- shielded broadcast would be (e.g. strict-mainnet).
+      || method = "shielded.quoteUnshield"
       -- Railgun unshield/transfer build a private op AND relay it via the
       -- bundled Waku broadcaster inside the bridge handler, mirroring PP's
       -- shielded.prepareWithdraw. Classify as broadcast so the policy gate

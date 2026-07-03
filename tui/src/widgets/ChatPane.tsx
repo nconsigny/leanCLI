@@ -4,6 +4,7 @@ import Spinner from "ink-spinner";
 import TextInput from "ink-text-input";
 import { call, isCancelled } from "../daemon.js";
 import { theme } from "../theme.js";
+import { approvalAuditRows, type ApprovalAuditData } from "../format.js";
 import AnimatedKoi from "./AnimatedKoi.js";
 import {
   type Phase,
@@ -258,14 +259,19 @@ export default function ChatPane({
     },
   );
 
-  const updateTurnDispatch = (
-    target: Extract<Turn, { kind: "assistant" }>,
-    next: DispatchState,
-  ) =>
+  // Address the turn by INDEX, never by object identity: setting the
+  // "running" state REPLACES the turn object in state, so a completion
+  // update that searched by `indexOf(originalTurn)` could never find it
+  // again and silently no-op'd — the dispatch spinner stayed "running"
+  // forever no matter what the daemon answered. Turns are append-only
+  // within a chat phase, so an index captured at dispatch time stays
+  // valid; a `/clear` resets the phase and the guard below drops the
+  // stale update harmlessly.
+  const updateTurnDispatchAt = (idx: number, next: DispatchState) =>
     setPhase((p) => {
       if (p.kind !== "chat") return p;
-      const idx = p.turns.indexOf(target);
-      if (idx < 0) return p;
+      const target = p.turns[idx];
+      if (!target || target.kind !== "assistant") return p;
       const copy = [...p.turns];
       copy[idx] = { ...target, dispatch: next };
       return { ...p, turns: copy };
@@ -278,55 +284,69 @@ export default function ChatPane({
     const r = turn.result;
     if (!r) return;
     if (turn.dispatch && turn.dispatch.kind !== "idle") return;
-    updateTurnDispatch(turn, { kind: "running" });
-    if (r.audit) {
-      const resp = await call<AuditResult>(r.audit.rpc, r.audit.params, { timeoutMs: 60_000 });
-      updateTurnDispatch(
-        turn,
-        resp.ok
-          ? { kind: "auditDone", data: resp.result }
-          : { kind: "error", message: resp.error.message },
-      );
-      return;
-    }
-    if (r.prepare) {
-      const resp = await call<{ txs?: PreparedTx[]; transactions?: PreparedTx[] }>(
-        r.prepare.rpc,
-        r.prepare.params,
-        { timeoutMs: 300_000 },
-      );
-      if (!resp.ok) {
-        updateTurnDispatch(turn, { kind: "error", message: resp.error.message });
-        return;
-      }
-      const txs = (resp.result.txs ?? resp.result.transactions ?? []) as PreparedTx[];
-      updateTurnDispatch(turn, { kind: "prepareDone", txs });
-      const first = txs[0];
-      if (first && onApprove) {
-        onApprove(
-          {
-            to: first.to,
-            value: first.value,
-            data: first.data,
-            rationale: `from local-LLM chat · ${r.intentActionTag ?? "shielded"} tx 1 of ${txs.length}`,
-            canonical: r.canonical,
-          },
-          phase.chainId,
+    // Capture the index NOW (the `turn` object came from this render's
+    // state, so identity still holds here — and never again after the
+    // first dispatch update replaces it).
+    const idx = phase.kind === "chat" ? phase.turns.indexOf(turn) : -1;
+    if (idx < 0) return;
+    const setDispatch = (next: DispatchState) => updateTurnDispatchAt(idx, next);
+    setDispatch({ kind: "running" });
+    try {
+      if (r.audit) {
+        // Full-history first scan takes ~30-90s per wallet (activity-anchored
+        // chunked log sweep); later audits are incremental off the daemon's
+        // per-owner cache and return in seconds. Same 300s cap as prepare.
+        const resp = await call<AuditResult>(r.audit.rpc, r.audit.params, { timeoutMs: 300_000 });
+        setDispatch(
+          resp.ok
+            ? { kind: "auditDone", data: resp.result }
+            : { kind: "error", message: resp.error.message },
         );
-      }
-      return;
-    }
-    if (r.create) {
-      if (!onCreateWallet) {
-        updateTurnDispatch(turn, {
-          kind: "error",
-          message: "wallet creation flow not wired; use the main menu",
-        });
         return;
       }
-      const kind = r.create.params.kind;
-      onCreateWallet(kind, r.create.params.label);
-      updateTurnDispatch(turn, { kind: "createHandedOff", walletKind: kind, label: r.create.params.label });
+      if (r.prepare) {
+        const resp = await call<{ txs?: PreparedTx[]; transactions?: PreparedTx[] }>(
+          r.prepare.rpc,
+          r.prepare.params,
+          { timeoutMs: 300_000 },
+        );
+        if (!resp.ok) {
+          setDispatch({ kind: "error", message: resp.error.message });
+          return;
+        }
+        const txs = (resp.result.txs ?? resp.result.transactions ?? []) as PreparedTx[];
+        setDispatch({ kind: "prepareDone", txs });
+        const first = txs[0];
+        if (first && onApprove) {
+          onApprove(
+            {
+              to: first.to,
+              value: first.value,
+              data: first.data,
+              rationale: `from local-LLM chat · ${r.intentActionTag ?? "shielded"} tx 1 of ${txs.length}`,
+              canonical: r.canonical,
+            },
+            phase.chainId,
+          );
+        }
+        return;
+      }
+      if (r.create) {
+        if (!onCreateWallet) {
+          setDispatch({
+            kind: "error",
+            message: "wallet creation flow not wired; use the main menu",
+          });
+          return;
+        }
+        const kind = r.create.params.kind;
+        onCreateWallet(kind, r.create.params.label);
+        setDispatch({ kind: "createHandedOff", walletKind: kind, label: r.create.params.label });
+      }
+    } catch (e) {
+      // Transport-level throw: always surface — the spinner must never
+      // be left in "running" with no path out.
+      setDispatch({ kind: "error", message: e instanceof Error ? e.message : String(e) });
     }
   };
 
@@ -440,12 +460,20 @@ export default function ChatPane({
       : null;
   const fixedRows = 2 + (affordance ? 1 : 0);
   const transcriptBudget = Math.max(3, contentHeight - fixedRows);
-  const allLines = turns.flatMap((t, i) => turnToLines(t, i, t === latestSignable));
+  const allLines = turns.flatMap((t, i) => turnToLines(t, i, t === latestSignable, wallets));
   const dropped = Math.max(0, allLines.length - transcriptBudget + (allLines.length > transcriptBudget ? 1 : 0));
   const visible = dropped > 0 ? allLines.slice(allLines.length - (transcriptBudget - 1)) : allLines;
 
-  return (
-    <Box flexDirection="column">
+  // The koi is the pane's identity cue: render it whenever chat owns the
+  // main slot (showKoi) and the pane is tall enough for the 24×12 fish.
+  // NOT gated on `turns.length === 0` — see the persistent rail below.
+  const koiVisible = showKoi && contentHeight >= 14;
+
+  // Everything except the koi rail: status row, then the welcome examples
+  // (empty conversation) or the windowed transcript, then affordance +
+  // input. Sits to the RIGHT of the koi when the rail is shown.
+  const body = (
+    <Box flexDirection="column" flexGrow={1} minWidth={0}>
       <Text wrap="truncate-end" color={theme.dim}>
         {phase.modelName ?? modelName ?? "local model"} · {phase.chainName} ({phase.chainId})
         {phase.busy ? " · " : ""}
@@ -456,36 +484,28 @@ export default function ChatPane({
         )}
       </Text>
       {turns.length === 0 ? (
-        // Welcome state: show the Kohaku koi beside the examples — same
-        // identity the full le-chat screen carries, so collapsing the
-        // full chat (ctrl+o) back into this pane is visually continuous.
-        // The koi is 24×12; only render it when the pane has the room,
-        // and it costs nothing once the conversation starts (this whole
-        // block is replaced by the transcript below).
-        showKoi && contentHeight >= 14 ? (
-          <Box flexDirection="row">
-            <Box width={24} minWidth={24} height={12} flexShrink={0} marginRight={2}>
-              <AnimatedKoi size="tiny" />
-            </Box>
-            <Box flexDirection="column" flexGrow={1} minWidth={0}>
-              <Text wrap="truncate-end" color={theme.koiCream} bold>
-                le chat · local LLM
+        // Welcome state: the koi (rail, below) carries the identity, so the
+        // richer header only appears when that rail is present; otherwise
+        // fall back to a bare examples list that fits a short pane.
+        koiVisible ? (
+          <Box flexDirection="column" flexGrow={1} minWidth={0}>
+            <Text wrap="truncate-end" color={theme.koiCream} bold>
+              le chat · local LLM
+            </Text>
+            <Text wrap="truncate-end" color={theme.dim}>
+              untrusted model · Lean validator · canonical text in confirm
+            </Text>
+            <Box marginTop={1} flexDirection="column">
+              <Text color={theme.dim}>Examples:</Text>
+              <Text wrap="truncate-end" color={theme.dim}>
+                {"  "}<Text color={theme.primary}>send 0.001 ETH to niard.eth</Text>
               </Text>
               <Text wrap="truncate-end" color={theme.dim}>
-                untrusted model · Lean validator · canonical text in confirm
+                {"  "}<Text color={theme.primary}>swap 0.1 ETH to USDC</Text>
               </Text>
-              <Box marginTop={1} flexDirection="column">
-                <Text color={theme.dim}>Examples:</Text>
-                <Text wrap="truncate-end" color={theme.dim}>
-                  {"  "}<Text color={theme.primary}>send 0.001 ETH to niard.eth</Text>
-                </Text>
-                <Text wrap="truncate-end" color={theme.dim}>
-                  {"  "}<Text color={theme.primary}>swap 0.1 ETH to USDC</Text>
-                </Text>
-                <Text wrap="truncate-end" color={theme.dim}>
-                  {"  "}<Text color={theme.primary}>approve 100 USDC for vitalik.eth</Text>
-                </Text>
-              </Box>
+              <Text wrap="truncate-end" color={theme.dim}>
+                {"  "}<Text color={theme.primary}>approve 100 USDC for vitalik.eth</Text>
+              </Text>
             </Box>
           </Box>
         ) : (
@@ -535,6 +555,23 @@ export default function ChatPane({
       </Box>
     </Box>
   );
+
+  // Persistent koi rail. The koi is the main pane's identity cue, so it
+  // STAYS for the whole session — welcome state and an active conversation
+  // alike — instead of vanishing after the first request (the old behaviour
+  // gated it on an empty transcript). Vertical windowing is unchanged: the
+  // koi is a fixed 24×12 column beside `body`, which still gets the full
+  // contentHeight. Dropped only when the pane is demoted to a side column
+  // (showKoi=false) or is too short for the fish (contentHeight < 14).
+  if (!koiVisible) return body;
+  return (
+    <Box flexDirection="row">
+      <Box width={24} minWidth={24} height={12} flexShrink={0} marginRight={2}>
+        <AnimatedKoi size="tiny" />
+      </Box>
+      {body}
+    </Box>
+  );
 }
 
 function directiveRpc(turn: Extract<Turn, { kind: "assistant" }>): string {
@@ -550,6 +587,7 @@ function turnToLines(
   t: Turn,
   i: number,
   isLatestSignable: boolean,
+  wallets: Array<{ name: string; address: string }> = [],
 ): React.ReactElement[] {
   const k = (suffix: string) => `t${i}-${suffix}`;
   if (t.kind === "user") {
@@ -643,7 +681,10 @@ function turnToLines(
   const d = t.dispatch;
   if (d && d.kind !== "idle") {
     const text =
-      d.kind === "running" ? "⠿ dispatching…"
+      d.kind === "running"
+        ? r.audit
+          ? "⠿ scanning approval history… (first scan per wallet ≈ 1 min; cached after)"
+          : "⠿ dispatching…"
       : d.kind === "auditDone" ? `✓ audit: ${d.data.approvals.length + (d.data.nftApprovals?.length ?? 0) + (d.data.permit2Approvals?.length ?? 0)} approval(s)`
       : d.kind === "prepareDone" ? `✓ prepared ${d.txs.length} tx(s) — first queued via ConfirmGate`
       : d.kind === "createHandedOff" ? `↳ handed off to ${d.walletKind} creation flow`
@@ -656,6 +697,32 @@ function turnToLines(
         {text}
       </Text>,
     );
+    // Inline audit results: riskiest rows first, capped for the pane —
+    // the full chat (ctrl+o) has the complete list with block heights.
+    if (d.kind === "auditDone") {
+      const rows = approvalAuditRows(d.data as ApprovalAuditData, wallets);
+      const shown = rows.slice(0, 8);
+      shown.forEach((row, ri) =>
+        lines.push(
+          <Text key={k(`ar${ri}`)} wrap="truncate-end" color={row.warn ? theme.warn : theme.dim}>
+            {"    "}
+            {row.text}
+          </Text>,
+        ),
+      );
+      if (rows.length > shown.length)
+        lines.push(
+          <Text key={k("armore")} wrap="truncate-end" color={theme.dim}>
+            {"    "}… {rows.length - shown.length} more — ctrl+o for the full list
+          </Text>,
+        );
+      if (rows.length > 0)
+        lines.push(
+          <Text key={k("arhint")} wrap="truncate-end" color={theme.dim}>
+            {"    "}↳ revoke one: {`"revoke ${d.data.approvals[0]?.tokenSymbol || "<token>"} for <spender address>"`}
+          </Text>,
+        );
+    }
   }
   if (r.agentTrace && r.agentTrace.length > 0) {
     const calls = r.agentTrace.filter((x) => x.kind === "tool_call").length;

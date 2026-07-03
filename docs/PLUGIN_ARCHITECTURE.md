@@ -27,7 +27,7 @@ Select the default at daemon boot with **`LEANCLI_PROVIDER`**:
 | `helios` (default) | `@a16z/helios` light client + embedded REVM. Consensus-verified state via sync-committee proofs. Default backend. |
 | `colibri` | Colibri stateless light client (WASM EVM + committee proofs). |
 | `rpc` | Direct configured RPC endpoint. No light-client verification. |
-| `safenode` | Helios fronted by the TDX-attested SafeNode ORAM proxy. Selects `.helios` and requires `LEANCLI_SAFE_NODE_URL`; if that URL is unset, helios reads directly until it is configured. |
+| `safenode` | Helios fronted by the TEE-attested SafeNode ORAM proxy. Selects `.helios` and requires `LEANCLI_SAFE_NODE_URL` (+ `LEANCLI_SAFE_NODE_API_KEY`); if that URL is unset, helios reads directly until it is configured. Attestation is GCP Confidential Space (`LEANCLI_SAFE_NODE_GCP_IMAGE_DIGEST`, pure Node, current deployment) or Phala TDX quote (`TDX_QUOTE_VERIFIER_BIN`), selected via `LEANCLI_SAFE_NODE_ATTESTATION`. |
 
 `LEANCLI_READ_BACKEND` is still accepted as a back-compat alias;
 `LEANCLI_PROVIDER` wins when both are set. Unrecognized values fall back

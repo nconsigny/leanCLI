@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 /*
- * leancli-safenode-bridge — TDX-attested oblivious-RPC proxy
+ * leancli-safenode-bridge — TEE-attested oblivious-RPC proxy
  *
  * Slots in *upstream* of Helios in the verified-read pipeline:
  *
  *   helios's executionRpc = http://127.0.0.1:<port>   (this sidecar)
  *                                  │
- *                                  ▼  (TLS pin == TDX-attested cert SPKI)
- *                          https://rpc.safe-node.com/<USER_KEY>/json_rpc
+ *                                  ▼  (TLS pin == TEE-attested cert SPKI)
+ *                          https://rpc-gcp.safe-node.com/<USER_KEY>/json_rpc
  *                                  │
  *                                  ▼
  *                            oblivious_node (TDX CVM, ORAM)
@@ -15,11 +15,24 @@
  * Privacy comes from the ORAM server (it can't tell which slot/address you
  * queried). Integrity comes from two checks:
  *
- *   1. Boot-time: this sidecar runs verify_client_tdx.mjs to fetch a TDX
- *      quote over `domain + sha256(cert PEM) + challenge`, verify it via
- *      the companion Rust binary `tdx_quote_verifier`, and derive the
- *      attested TLS pin (sha256//<base64 SPKI hash>). On failure we
- *      refuse to start so the daemon falls back to plain helios.
+ *   1. Boot-time: this sidecar runs verify_client_tdx.mjs to attest the
+ *      deployment and derive the attested TLS pin
+ *      (sha256//<base64 SPKI hash>). Two attestation modes:
+ *
+ *        gcp   (GCP Confidential Space, the current safe-node deployment)
+ *              Verifies a Google-signed OIDC token: audience, nonce bound
+ *              to the served TLS cert + fresh challenge, GCP_INTEL_TDX
+ *              hardware, secure boot, debug-disabled, STABLE image, the
+ *              expected container image digest, entrypoint, and env
+ *              launch policy. Pure Node — no Rust verifier needed.
+ *
+ *        phala (dstack/Phala TDX CVM, the original deployment)
+ *              Fetches a TDX quote over `domain + sha256(cert PEM) +
+ *              challenge` and verifies it via the companion Rust binary
+ *              `tdx_quote_verifier` (RTMR3 replay, compose-hash).
+ *
+ *      On failure we refuse to start so the daemon falls back to plain
+ *      helios.
  *
  *   2. Per-request: every outbound HTTPS request enforces that exact pin
  *      via undici's `Agent({ connect: { checkServerIdentity } })`. A MITM
@@ -54,11 +67,33 @@
  *
  * Environment (read once at startup; --listen mode caches them):
  *
- *   LEANCLI_SAFE_NODE_URL          required. e.g. "https://rpc.safe-node.com"
+ *   LEANCLI_SAFE_NODE_URL          required. e.g. "https://rpc-gcp.safe-node.com"
  *   LEANCLI_SAFE_NODE_API_KEY      required. user-tier API key; inserted
  *                                 into the URL path before /json_rpc.
  *   LEANCLI_SAFE_NODE_DOMAIN       optional. TLS domain to verify; defaults
  *                                 to the hostname of LEANCLI_SAFE_NODE_URL.
+ *   LEANCLI_SAFE_NODE_ATTESTATION  optional. "gcp" | "phala". Defaults to
+ *                                 "gcp" when LEANCLI_SAFE_NODE_GCP_IMAGE_DIGEST
+ *                                 is set, else "phala".
+ *   LEANCLI_SAFE_NODE_EXPECTED_PIN optional. operator-published pin
+ *                                 (sha256//<base64>); if set, the freshly
+ *                                 attested pin must match or we refuse to
+ *                                 start. Defense-in-depth, both modes.
+ *
+ * GCP Confidential Space mode:
+ *
+ *   LEANCLI_SAFE_NODE_GCP_IMAGE_DIGEST  required for gcp mode. Expected
+ *                                 OCI image digest ("sha256:<hex>") from
+ *                                 the operator's build.
+ *   LEANCLI_SAFE_NODE_GCP_AUDIENCE      optional. OIDC token audience;
+ *                                 defaults to "safe-node:<domain>".
+ *   LEANCLI_SAFE_NODE_GCP_ENV           optional. comma-separated
+ *                                 NAME=VALUE pairs pinned against the
+ *                                 container's env launch policy
+ *                                 (forwarded as --expected-gcp-env).
+ *
+ * Phala/dstack TDX-quote mode:
+ *
  *   LEANCLI_SAFE_NODE_PCCS_URL     optional. forwarded to verify_client_tdx
  *                                 as --pccs-url.
  *   LEANCLI_SAFE_NODE_MRTD         optional. expected MRTD hex; forwarded
@@ -69,12 +104,13 @@
  *                                 ship it. Without it verify_client_tdx
  *                                 falls back to `cargo run` from the
  *                                 source tree, which only works if you
- *                                 cloned obliviouslabs/oblivious_node.
+ *                                 cloned obliviouslabs/tdx_easy_https.
+ *                                 NOT needed in gcp mode.
  *
  * Failure modes
  * -------------
  *
- *   - TDX verify fails → sidecar exits non-zero. Daemon logs the failure
+ *   - Attestation fails → sidecar exits non-zero. Daemon logs the failure
  *     and continues without safenode (helios reads still work over the
  *     configured rpcEndpoint, just without ORAM privacy).
  *   - Upstream returns -32001 ("data non availability") → we retry once
@@ -136,20 +172,86 @@ function spkiPinFromDerCert(derBuf) {
 }
 
 /**
- * Run the vendored verify_client_tdx.mjs synchronously, parse stdout for
- * `attested_tls_pin=` and `mrtd=` lines, and return the structured result.
- * Throws on non-zero exit or missing pin.
+ * Pick the attestation mode. Explicit LEANCLI_SAFE_NODE_ATTESTATION wins;
+ * otherwise "gcp" when an expected image digest is configured (GCP
+ * verification is meaningless without one) and "phala" when it isn't.
  */
-function runTdxVerify({ baseUrl, domain, expectedMrtd, pccsUrl, verifierBin }) {
+function attestationModeFromEnv(env = process.env) {
+  const forced = (env.LEANCLI_SAFE_NODE_ATTESTATION || '').trim().toLowerCase();
+  if (forced === 'gcp' || forced === 'gcp-confidential-space') return 'gcp';
+  if (forced === 'phala' || forced === 'tdx' || forced === 'dstack') return 'phala';
+  if (forced) {
+    throw new Error(
+      `unknown LEANCLI_SAFE_NODE_ATTESTATION "${forced}" (expected "gcp" or "phala")`
+    );
+  }
+  return (env.LEANCLI_SAFE_NODE_GCP_IMAGE_DIGEST || '').length ? 'gcp' : 'phala';
+}
+
+/**
+ * Collect everything the attestation flow needs from the environment.
+ * Read once; --listen mode caches the result for safenode.verify re-runs.
+ */
+function readAttestConfig({ baseUrl, domain }) {
+  const mode = attestationModeFromEnv();
+  const gcpEnvPins = (readEnv('LEANCLI_SAFE_NODE_GCP_ENV') || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+  for (const pair of gcpEnvPins) {
+    if (pair.indexOf('=') <= 0) {
+      throw new Error(`LEANCLI_SAFE_NODE_GCP_ENV entries must be NAME=VALUE, got "${pair}"`);
+    }
+  }
+  const cfg = {
+    baseUrl,
+    domain,
+    mode,
+    expectedPin: readEnv('LEANCLI_SAFE_NODE_EXPECTED_PIN'),
+    // gcp mode
+    gcpImageDigest: readEnv('LEANCLI_SAFE_NODE_GCP_IMAGE_DIGEST'),
+    gcpAudience: readEnv('LEANCLI_SAFE_NODE_GCP_AUDIENCE') || `safe-node:${domain}`,
+    gcpEnvPins,
+    // phala mode
+    expectedMrtd: readEnv('LEANCLI_SAFE_NODE_MRTD'),
+    pccsUrl: readEnv('LEANCLI_SAFE_NODE_PCCS_URL'),
+    verifierBin: readEnv('TDX_QUOTE_VERIFIER_BIN'),
+  };
+  if (mode === 'gcp' && !cfg.gcpImageDigest) {
+    throw new Error(
+      'LEANCLI_SAFE_NODE_GCP_IMAGE_DIGEST is required for GCP Confidential Space attestation'
+    );
+  }
+  return cfg;
+}
+
+/**
+ * Run the vendored verify_client_tdx.mjs synchronously in the configured
+ * attestation mode, parse stdout for `attested_tls_pin=` (and friends),
+ * and return the structured result. Throws on non-zero exit, missing pin,
+ * or a mismatch against the operator-published expected pin.
+ */
+function runAttestVerify(cfg) {
   const verifier = resolve(scriptDir(), 'verify_client_tdx.mjs');
   if (!fs.existsSync(verifier)) {
     throw new Error(`verify_client_tdx.mjs missing at ${verifier}`);
   }
-  const args = [verifier, baseUrl];
-  if (expectedMrtd) args.push(expectedMrtd);
-  args.push('--strict-digests', '--attested-tls', '--tls-domain', domain);
-  if (pccsUrl) args.push('--pccs-url', pccsUrl);
-  if (verifierBin) args.push('--verifier-bin', verifierBin);
+  const args = [verifier, cfg.baseUrl];
+  if (cfg.mode === 'gcp') {
+    args.push(
+      '--gcp-confidential-space',
+      '--attested-tls',
+      '--tls-domain', cfg.domain,
+      '--gcp-audience', cfg.gcpAudience,
+      '--expected-gcp-image-digest', cfg.gcpImageDigest
+    );
+    for (const pair of cfg.gcpEnvPins) args.push('--expected-gcp-env', pair);
+  } else {
+    if (cfg.expectedMrtd) args.push(cfg.expectedMrtd);
+    args.push('--strict-digests', '--attested-tls', '--tls-domain', cfg.domain);
+    if (cfg.pccsUrl) args.push('--pccs-url', cfg.pccsUrl);
+    if (cfg.verifierBin) args.push('--verifier-bin', cfg.verifierBin);
+  }
 
   const result = spawnSync(process.execPath, args, {
     cwd: scriptDir(),
@@ -159,7 +261,7 @@ function runTdxVerify({ baseUrl, domain, expectedMrtd, pccsUrl, verifierBin }) {
   });
   if (result.status !== 0) {
     const reason = (result.stderr || result.stdout || `exit ${result.status}`).trim();
-    throw new Error(`TDX verify failed: ${reason}`);
+    throw new Error(`attestation (${cfg.mode}) failed: ${reason}`);
   }
   const stdout = result.stdout || '';
   const lines = stdout.split('\n');
@@ -168,19 +270,36 @@ function runTdxVerify({ baseUrl, domain, expectedMrtd, pccsUrl, verifierBin }) {
 
   const pin = find('attested_tls_pin=');
   if (!pin) {
-    throw new Error(`TDX verify succeeded but no attested_tls_pin in stdout:\n${stdout}`);
+    throw new Error(`attestation (${cfg.mode}) succeeded but no attested_tls_pin in stdout:\n${stdout}`);
+  }
+  if (cfg.expectedPin && pin !== cfg.expectedPin) {
+    throw new Error(
+      `attested TLS pin does not match LEANCLI_SAFE_NODE_EXPECTED_PIN ` +
+        `(expected=${cfg.expectedPin} actual=${pin}) — refusing to proxy`
+    );
   }
   const attestation = {
+    mode: cfg.mode,
     pin,
-    domain: find('attested_tls_domain=') || domain,
+    domain:
+      find('attested_tls_domain=') || find('gcp_confidential_space_domain=') || cfg.domain,
     certificateSha256: find('attested_tls_certificate_sha256='),
+    // Phala/dstack quote fields (null in gcp mode — the Confidential Space
+    // token attests the image, not raw RTMRs).
     mrtd: find('mrtd='),
     rtmr0: find('rtmr0='),
     rtmr1: find('rtmr1='),
     rtmr2: find('rtmr2='),
     rtmr3: find('rtmr3='),
     composeHash: find('compose_hash='),
-    teeType: find('tee_type='),
+    // GCP Confidential Space fields (null in phala mode). hwmodel is
+    // enforced to GCP_INTEL_TDX inside the verifier, so surfacing it as
+    // teeType is a verified claim, not a guess.
+    gcpAudience: find('gcp_confidential_space_audience='),
+    gcpImageDigest: find('gcp_confidential_space_image_digest='),
+    gcpImageReference: find('gcp_confidential_space_image_reference='),
+    gcpSwVersion: find('gcp_confidential_space_swversion='),
+    teeType: find('tee_type=') ?? (cfg.mode === 'gcp' ? 'GCP_INTEL_TDX' : null),
     attestedAtMs: Date.now(),
   };
   return attestation;
@@ -352,23 +471,23 @@ async function listenMode(socketPath) {
   const baseUrl = readEnv('LEANCLI_SAFE_NODE_URL', { required: true });
   const apiKey = readEnv('LEANCLI_SAFE_NODE_API_KEY', { required: true });
   const domain = readEnv('LEANCLI_SAFE_NODE_DOMAIN') || new URL(baseUrl).hostname;
-  const expectedMrtd = readEnv('LEANCLI_SAFE_NODE_MRTD');
-  const pccsUrl = readEnv('LEANCLI_SAFE_NODE_PCCS_URL');
-  const verifierBin = readEnv('TDX_QUOTE_VERIFIER_BIN');
   // Non-private fallback for every eth_* method safe-node doesn't implement
-  // (everything other than eth_getProof). Default = a16z's Sepolia public
-  // node, which is the same one safe-node itself feeds from for seed sync.
-  // The privacy property holds: an observer at this RPC sees block-header /
-  // chainId reads and helios's REVM internals — they do NOT see which
-  // address/slot we proved, because that travels safe-node's ORAM channel.
+  // (everything other than eth_getProof). Default = a public Sepolia
+  // node — the GCP safe-node deployment serves Sepolia (ETH_NETWORK=sepolia
+  // is part of the attested launch policy). The privacy property holds: an
+  // observer at this RPC sees block-header / chainId reads and helios's
+  // REVM internals — they do NOT see which address/slot we proved, because
+  // that travels safe-node's ORAM channel.
   const fallbackUrl =
     readEnv('LEANCLI_SAFE_NODE_FALLBACK_RPC') ||
     'https://ethereum-sepolia-rpc.publicnode.com';
 
-  // Boot-time TDX verify. Failure ⇒ refuse to start; daemon falls back.
+  // Boot-time attestation. Failure ⇒ refuse to start; daemon falls back.
   let attestation;
+  let attestCfg;
   try {
-    attestation = runTdxVerify({ baseUrl, domain, expectedMrtd, pccsUrl, verifierBin });
+    attestCfg = readAttestConfig({ baseUrl, domain });
+    attestation = runAttestVerify(attestCfg);
   } catch (e) {
     process.stderr.write(`[safenode] ${e.message}\n`);
     process.exit(2);
@@ -452,6 +571,7 @@ async function listenMode(socketPath) {
     fallbackUrl,
     privateMethods: [...SAFENODE_METHODS],
     backfillDelaysMs: BACKFILL_DELAYS_MS,
+    attestationMode: attestation.mode,
     attestedAtMs: attestation.attestedAtMs,
     pin: attestation.pin,
     mrtd: attestation.mrtd,
@@ -460,6 +580,10 @@ async function listenMode(socketPath) {
     rtmr2: attestation.rtmr2,
     rtmr3: attestation.rtmr3,
     composeHash: attestation.composeHash,
+    gcpAudience: attestation.gcpAudience,
+    gcpImageDigest: attestation.gcpImageDigest,
+    gcpImageReference: attestation.gcpImageReference,
+    gcpSwVersion: attestation.gcpSwVersion,
     teeType: attestation.teeType,
     supportedChainIds: [...SUPPORTED_CHAIN_IDS],
   });
@@ -481,7 +605,7 @@ async function listenMode(socketPath) {
           continue;
         }
         Promise.resolve()
-          .then(() => handleControl(req, { agent, baseUrl, domain, expectedMrtd, pccsUrl, verifierBin, statusJson, applyNewAttestation: (next) => { attestation = next; agent = buildPinnedAgent(next.pin, domain); } }))
+          .then(() => handleControl(req, { attestCfg, statusJson, applyNewAttestation: (next) => { attestation = next; agent = buildPinnedAgent(next.pin, domain); } }))
           .then((reply) => conn.write(reply + '\n'))
           .catch((e) => conn.write(err(req?.id ?? null, -32603, `internal: ${e?.message ?? e}`) + '\n'));
       }
@@ -520,13 +644,7 @@ async function handleControl(req, ctx) {
       return ok(id, { proxyUrl: ctx.statusJson().proxyUrl });
     case 'safenode.verify': {
       try {
-        const next = runTdxVerify({
-          baseUrl: ctx.baseUrl,
-          domain: ctx.domain,
-          expectedMrtd: ctx.expectedMrtd,
-          pccsUrl: ctx.pccsUrl,
-          verifierBin: ctx.verifierBin,
-        });
+        const next = runAttestVerify(ctx.attestCfg);
         ctx.applyNewAttestation(next);
         return ok(id, ctx.statusJson());
       } catch (e) {
@@ -553,15 +671,12 @@ async function rpcMode(encoded) {
   const baseUrl = readEnv('LEANCLI_SAFE_NODE_URL', { required: true });
   const apiKey = readEnv('LEANCLI_SAFE_NODE_API_KEY', { required: true });
   const domain = readEnv('LEANCLI_SAFE_NODE_DOMAIN') || new URL(baseUrl).hostname;
-  const expectedMrtd = readEnv('LEANCLI_SAFE_NODE_MRTD');
-  const pccsUrl = readEnv('LEANCLI_SAFE_NODE_PCCS_URL');
-  const verifierBin = readEnv('TDX_QUOTE_VERIFIER_BIN');
 
   const fallbackUrl =
     readEnv('LEANCLI_SAFE_NODE_FALLBACK_RPC') ||
     'https://ethereum-sepolia-rpc.publicnode.com';
 
-  const attestation = runTdxVerify({ baseUrl, domain, expectedMrtd, pccsUrl, verifierBin });
+  const attestation = runAttestVerify(readAttestConfig({ baseUrl, domain }));
   const agent = buildPinnedAgent(attestation.pin, domain);
   const fallbackAgent = new Agent({ connect: { rejectUnauthorized: true } });
   const upstreamUrl = joinUrl(baseUrl, apiKey);
@@ -572,10 +687,13 @@ async function rpcMode(encoded) {
         proxyUrl: null,
         upstreamUrl,
         upstreamDomain: domain,
+        attestationMode: attestation.mode,
         attestedAtMs: attestation.attestedAtMs,
         pin: attestation.pin,
         mrtd: attestation.mrtd,
         rtmr3: attestation.rtmr3,
+        gcpImageDigest: attestation.gcpImageDigest,
+        teeType: attestation.teeType,
       }) + '\n'
     );
     return;
@@ -621,7 +739,11 @@ if (listenIdx !== -1 && argv[listenIdx + 1]) {
   process.stderr.write(
     'usage: bridge.mjs (--listen <uds-socket> | --rpc <json>)\n' +
       'env: LEANCLI_SAFE_NODE_URL, LEANCLI_SAFE_NODE_API_KEY (required)\n' +
-      '     LEANCLI_SAFE_NODE_DOMAIN, LEANCLI_SAFE_NODE_MRTD, LEANCLI_SAFE_NODE_PCCS_URL (optional)\n' +
+      '     LEANCLI_SAFE_NODE_DOMAIN, LEANCLI_SAFE_NODE_ATTESTATION (gcp|phala),\n' +
+      '     LEANCLI_SAFE_NODE_EXPECTED_PIN (optional)\n' +
+      'gcp: LEANCLI_SAFE_NODE_GCP_IMAGE_DIGEST (required),\n' +
+      '     LEANCLI_SAFE_NODE_GCP_AUDIENCE, LEANCLI_SAFE_NODE_GCP_ENV (optional)\n' +
+      'phala: LEANCLI_SAFE_NODE_MRTD, LEANCLI_SAFE_NODE_PCCS_URL (optional),\n' +
       '     TDX_QUOTE_VERIFIER_BIN (path to companion Rust verifier)\n'
   );
   process.exit(2);

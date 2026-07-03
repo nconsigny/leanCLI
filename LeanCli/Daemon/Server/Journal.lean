@@ -28,8 +28,7 @@ def journalRecord
     (signMs? : Option Nat := none)
     (paramSet? : Option String := none)
     (userOpHash? : Option String := none) : IO Unit := do
-  let nowMs ← IO.monoMsNow
-  let nowSec : Nat := nowMs / 1000
+  let nowSec ← LeanCli.Daemon.TxJournal.nowEpochSeconds
   let entry : LeanCli.Daemon.TxJournal.Entry :=
     { timestamp := nowSec, txHash := txHash, fromAddr := fromAddr,
       toAddr := toAddr, valueWei := valueWei, dataHex := dataHex,

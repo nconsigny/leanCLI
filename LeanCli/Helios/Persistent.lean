@@ -93,6 +93,19 @@ def start (socketPath : String) : IO Client := do
       let buf ← IO.mkRef (ByteArray.empty)
       pure { conn, socket := socketPath, pidFd := none, nextId, buf }
 
+/-- Open an ADDITIONAL connection to a sidecar already spawned via `start`
+    (the `--listen` server accepts multiple peers, each with its own frame
+    buffer). A second connection gives long-running `tx.simulate`
+    round-trips their own wire, so they can neither interleave frames with
+    nor head-of-line-block the shared verified-read connection. Does NOT
+    spawn: throws if nothing is listening — callers fall back to the
+    shared connection. -/
+def connectExisting (socketPath : String) : IO Client := do
+  let conn ← connect socketPath
+  let nextId ← IO.mkRef 1
+  let buf ← IO.mkRef (ByteArray.empty)
+  pure { conn, socket := socketPath, pidFd := none, nextId, buf }
+
 /-- Read one newline-terminated frame from the connection, draining the
     held line buffer first. Returns the bytes BEFORE the newline. -/
 private partial def recvLine (c : Client) : IO ByteArray := do

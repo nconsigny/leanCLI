@@ -238,6 +238,45 @@ private def resolveCheckoutRoot : IO (Option System.FilePath) := do
         if (← (cwd / "lakefile.lean").pathExists) then return some cwd
         else return none
 
+/-- Process-lifetime cache for the build identity. Allocated at module
+    load (cheap — just a ref, no git); the git calls fire lazily on the
+    first `status.snapshot` and are then frozen, so the reported version
+    reflects the commit the DAEMON was launched at (≈ the build it runs),
+    not wherever HEAD drifts to afterward. The CLI never calls
+    `versionsJson`, so it never forks git. -/
+initialize buildIdCache : IO.Ref (Option (String × String)) ← IO.mkRef none
+
+/-- `(buildVersion, buildSha)` for the running daemon, best-effort from
+    git. `buildVersion` is the static semver suffixed with the commit
+    count (`0.1.0+1487`) — a number that strictly increases per commit —
+    and `buildSha` is the short HEAD sha with a `*` dirty marker.
+    Degrades to `(LeanCli.version, "unknown")` outside a git checkout. -/
+private def computeBuildId : IO (String × String) := do
+  match (← resolveCheckoutRoot) with
+  | none => pure (LeanCli.version, "unknown")
+  | some root =>
+    let runGit (args : Array String) : IO String := do
+      try
+        let r ← IO.Process.output { cmd := "git", cwd := root.toString, args := args }
+        pure (if r.exitCode == 0 then r.stdout.trimAscii.toString else "")
+      catch _ => pure ""
+    let count ← runGit #["rev-list", "--count", "HEAD"]
+    let sha   ← runGit #["rev-parse", "--short", "HEAD"]
+    let dirty ← runGit #["status", "--porcelain"]
+    let ver := if count.isEmpty then LeanCli.version else s!"{LeanCli.version}+{count}"
+    let sha' := (if sha.isEmpty then "unknown" else sha)
+                  ++ (if dirty.isEmpty then "" else "*")
+    pure (ver, sha')
+
+/-- Get-or-compute the cached build identity. -/
+private def buildId : IO (String × String) := do
+  match (← buildIdCache.get) with
+  | some v => pure v
+  | none   =>
+      let v ← computeBuildId
+      buildIdCache.set (some v)
+      pure v
+
 /-- Build-time mtime markers + (if available) git commit object-id. If
     the checkout root cannot be resolved (no `$LEANCLI_HOME/checkout`,
     no `lakefile.lean` in cwd), every field is `null` — the Status page
@@ -247,12 +286,30 @@ private def versionsJson : IO Json := do
   let binMtime ← match checkoutRoot with
     | some root => mtimeMs? (root / ".lake" / "build" / "bin" / "leancli")
     | none => pure none
+  -- On-disk daemon binary: what a fresh `lake build` produced.
+  let daemonBinMtime ← match checkoutRoot with
+    | some root => mtimeMs? (root / ".lake" / "build" / "bin" / "leancli-daemon")
+    | none => pure none
+  -- Running daemon binary: `/proc/self/exe` resolves to the inode THIS
+  -- process was launched from. After a rebuild that the daemon was not
+  -- bounced for, lake writes a new file at the on-disk path (new inode)
+  -- while the running process keeps the old (now-unlinked) inode — so
+  -- `runningBinMtimeMs` stays at the old build time while
+  -- `daemonBinOnDiskMtimeMs` jumps forward. That gap is exactly "stale".
+  let runningMtime ← mtimeMs? (System.FilePath.mk "/proc/self/exe")
   let bundleMtime ← match checkoutRoot with
     | some root => mtimeMs? (root / "tui" / "dist" / "index.mjs")
     | none => pure none
   let gitHead ← match checkoutRoot with
     | some root => gitHead? root
     | none => pure ""
+  -- Stale ⇔ a newer daemon binary exists on disk than the one running.
+  -- Strict `>`: an un-rebuilt daemon runs the very inode it stats, so the
+  -- two times are equal and `stale` is false.
+  let stale : Bool := match daemonBinMtime, runningMtime with
+    | some onDisk, some running => onDisk > running
+    | _, _ => false
+  let (buildVersion, buildSha) ← buildId
   let asJson : Option Int → Json
     | some n => .num n
     | none   => .null
@@ -260,7 +317,12 @@ private def versionsJson : IO Json := do
     ("checkoutRoot", match checkoutRoot with
       | some r => .str r.toString
       | none => .null),
+    ("buildVersion", .str buildVersion),
+    ("buildSha", .str buildSha),
     ("daemonBinMtimeMs", asJson binMtime),
+    ("daemonBinOnDiskMtimeMs", asJson daemonBinMtime),
+    ("runningBinMtimeMs", asJson runningMtime),
+    ("stale", .bool stale),
     ("tuiBundleMtimeMs", asJson bundleMtime),
     ("gitHead", .str gitHead)
   ]

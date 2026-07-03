@@ -217,11 +217,33 @@ private partial def executeSphincsUserOp
                                   (nonceSelBytes
                                     ++ (LeanCli.Sphincs.UserOp.hexToWord32? sender).getD ByteArray.empty
                                     ++ LeanCli.Sphincs.UserOp.padLeft32 ByteArray.empty)
-                              let nonceN : Nat ← do
+                              -- Fail-closed nonce read. A userOp signed with a
+                              -- guessed nonce is guaranteed AA25 at the bundler:
+                              -- observed 2026-07-03 — a transient DNS outage made
+                              -- this read fail, the old `| .error _ => pure 0`
+                              -- fallback signed nonce 0 against an on-chain nonce
+                              -- of 43, and a ~3s SPHINCS signature was burned on
+                              -- an unsendable op. Unlike gas (floored below), a
+                              -- nonce has no safe default — abort BEFORE the
+                              -- expensive sign. One retry absorbs a transient
+                              -- blip without masking a real outage.
+                              let nonceOnce : IO (Except String Nat) := do
                                 match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep
                                     Sphincs.Send.entryPointV09Address nonceCalldata "latest" none with
-                                | .ok r => pure ((parseHexQuantity ((asString r).getD "0x0")).getD 0)
-                                | .error _ => pure 0
+                                | .ok r =>
+                                    match asString r >>= parseHexQuantity with
+                                    | some n => pure (.ok n)
+                                    | none   => pure (.error "unparseable EntryPoint.getNonce return")
+                                | .error e => pure (.error e)
+                              let nonceRes : Except String Nat ← do
+                                match ← nonceOnce with
+                                | .ok n => pure (.ok n)
+                                | .error _ => nonceOnce
+                              let nonceErr := match nonceRes with
+                                | .error e => e
+                                | .ok _ => ""
+                              let .ok nonceN := nonceRes
+                                | pure <| .error { code := -32022, message := "could not read account nonce (EntryPoint.getNonce) — send aborted before signing; check network/RPC and retry", data := some (.str nonceErr) }
                               let gp ← LeanCli.RPC.Outbound.gasPrice cfg.policy ep none
                               let pp ← LeanCli.RPC.Outbound.maxPriorityFeePerGas cfg.policy ep none
                               let parseHexJ (j : Except String Json) : Nat :=
@@ -639,7 +661,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                                         mslot.kek name ps ownerAddress km.sk with
                                     | .error _ => pure none
                                     | .ok w => pure (some w)
-                              let now ← IO.monoMsNow
+                              let createdAtSec ← LeanCli.Daemon.TxJournal.nowEpochSeconds
                               let baseRecord : LeanCli.Wallet.SphincsHybridStore.Record := {
                                 version := LeanCli.Wallet.SphincsHybridStore.currentVersion,
                                 name := name,
@@ -655,7 +677,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                                 masterWrap := masterWrap?,
                                 smartAccountAddress := none,
                                 customPassphrase := userSuppliedPassphrase,
-                                createdAt := now / 1000
+                                createdAt := createdAtSec
                               }
                               -- Auto-compute the counterfactual address when a
                               -- factory is configured for (chain, paramSet).

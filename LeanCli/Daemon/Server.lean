@@ -147,7 +147,8 @@ def methodHandler (cfg : Config) (state : LeanCli.Daemon.State.Shared)
   -- 404 — which is exactly what blanked the TUI provider toggle
   -- (`daemon.readBackend.status` → method not found).
   if req.method.startsWith "daemon.helios." || req.method.startsWith "daemon.colibri."
-      || req.method.startsWith "daemon.readBackend." || req.method.startsWith "eth." then
+      || req.method.startsWith "daemon.readBackend." || req.method.startsWith "daemon.approvals."
+      || req.method.startsWith "eth." then
     return ← TxRpc.dispatch cfg state notify req
   if req.method.startsWith "daemon." || req.method.startsWith "status."
       || req.method.startsWith "network." then
@@ -376,6 +377,29 @@ def run (cfg : Config) : IO Unit := do
     try
       let _ ← LeanCli.Daemon.State.heliosEnable state heliosSocket
       IO.eprintln s!"leancli-daemon: helios enabled (primary, socket={heliosSocket})"
+      -- Background consensus warmup. Helios defers its sync-committee
+      -- bootstrap to the first proofable request; without this it lands
+      -- on the user's FIRST wallet action after a restart (observed as a
+      -- ~28s first verified read with every queued read behind it paying
+      -- the same wait). One cheap `eth_blockNumber` through the dedicated
+      -- simulate connection triggers the bootstrap now, off the accept
+      -- path and without holding `verifyLock`, so early TUI reads stay
+      -- unblocked and simply share the sidecar-side bootstrap (getClient
+      -- caches the in-flight creation promise). Best-effort: a warmup
+      -- failure only means the first real read pays the sync, as before.
+      discard <| IO.asTask do
+        let warmupParams : Json := .obj #[
+          ("chainId", .num (Int.ofNat cfg.chainId)),
+          ("executionRpc", .str cfg.rpcEndpoint.url),
+          ("method", .str "eth_blockNumber"),
+          ("params", .arr #[])
+        ]
+        let t0 ← IO.monoMsNow
+        match ← LeanCli.Daemon.State.heliosSimCall state "eth.proxy" warmupParams with
+        | some _ =>
+            IO.eprintln s!"leancli-daemon: helios consensus warmup done ({(← IO.monoMsNow) - t0}ms)"
+        | none =>
+            IO.eprintln "leancli-daemon: helios warmup skipped (sim connection unavailable); first read pays the sync"
     catch e =>
       IO.eprintln s!"leancli-daemon: helios auto-enable failed ({e}); use daemon.helios.toggle to retry"
   -- Opt-in safenode (TDX-attested ORAM proxy). Only spawned when the

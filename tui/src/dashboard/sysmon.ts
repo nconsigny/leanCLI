@@ -35,10 +35,12 @@ export type SystemStats = {
    *  broken GPU driver no longer masquerades as "no GPU detected" — that
    *  silent fallback is exactly what hides llama running on CPU. */
   gpuError: string | null;
-  /** llama-server process CPU%, htop convention (100% = one full core, so
-   *  multi-core CPU inference reads e.g. 720%). null until two samples land
-   *  or when no llama-server process is found. The tell-tale that the model
-   *  is running on CPU rather than the GPU. */
+  /** llama-server process CPU% as a share of the WHOLE machine (0–100,
+   *  all cores saturated = 100) — the same scale as `cpuPct` so the two
+   *  read side by side. (Was htop convention, 100% = one core, which
+   *  rendered confusing >100% values.) null until two samples land or when
+   *  no llama-server process is found. A large share is the tell-tale that
+   *  the model is running on CPU rather than the GPU. */
   llamaCpuPct: number | null;
 };
 
@@ -258,9 +260,10 @@ export function useSystemStats(intervalMs: number): SystemStats {
         const dTotal = cur.total - prevCpu.current.total;
         if (dTotal > 0) cpuPct = Math.max(0, Math.min(100, Math.round((100 * dBusy) / dTotal)));
       }
-      // llama-server process CPU% (htop convention, 100% = one core). Shares
-      // the system total-jiffies delta as its denominator, so it must read
-      // `cur.total` BEFORE prevCpu is overwritten below.
+      // llama-server process CPU% (machine share, 0–100 — same scale as
+      // cpuPct above). Shares the system total-jiffies delta as its
+      // denominator, so it must read `cur.total` BEFORE prevCpu is
+      // overwritten below.
       let llamaCpuPct: number | null = null;
       if (cur) {
         let jif = llamaPid.current === null ? null : readProcJiffies(llamaPid.current);
@@ -276,7 +279,9 @@ export function useSystemStats(intervalMs: number): SystemStats {
             const dJif = jif - prev.jif;
             const dTotal = cur.total - prev.total;
             if (dTotal > 0 && dJif >= 0) {
-              llamaCpuPct = Math.max(0, Math.round((100 * dJif * CORE_COUNT) / dTotal));
+              // dTotal already sums ALL cores (aggregate "cpu " line), so
+              // dJif/dTotal IS the machine share — no core multiplier.
+              llamaCpuPct = Math.max(0, Math.min(100, Math.round((100 * dJif) / dTotal)));
             }
           }
           prevLlamaJif.current = { jif, total: cur.total };

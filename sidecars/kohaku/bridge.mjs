@@ -759,6 +759,75 @@ async function shieldedUnshieldDrain(env, params) {
   };
 }
 
+// Why: quote an unshield WITHOUT broadcasting, so the daemon/TUI can show
+// recipient + amount + relayer fee in a ConfirmGate before any relay fires.
+// A Privacy Pools v1 withdraw carries NO EOA signature — the relayer submits
+// the ZK proof — so confirming the quoted terms IS the pre-broadcast gate
+// (there is no daemon-local signature to perform). We build a real proof
+// here (prepareUnshield) only to read its bundled relayer quote, then
+// discard it: an un-broadcast proof has no on-chain effect, so the
+// subsequent shielded.unshieldDrain rebuilding + broadcasting is safe. We do
+// NOT persist state on a quote.
+async function shieldedQuoteUnshield(env, params) {
+  const recipient = params?.recipient;
+  if (!recipient || !/^0x[0-9a-fA-F]{40}$/.test(recipient)) {
+    throw new Error("recipient must be a 0x-prefixed 20-byte address");
+  }
+  const target = params?.amountWei
+    ? BigInt(params.amountWei)
+    : parseEther(String(params?.amountEth ?? "0"));
+  if (target <= 0n) throw new Error("amount must be > 0");
+  const plugin = await buildPlugin(env);
+  if (plugin.sync) await plugin.sync();
+  // Largest single approved note tells us whether this is one relay or a
+  // multi-note drain (each note relays separately, each with its own fee).
+  const allNotes = await plugin.notes([ethAsset()]);
+  const usable = allNotes
+    .filter((n) => (n.approved ?? true) && BigInt(n.balance ?? 0) > 0n)
+    .map((n) => BigInt(n.balance))
+    .sort((a, b) => (a < b ? 1 : a > b ? -1 : 0));
+  const approvedTotal = usable.reduce((s, b) => s + b, 0n);
+  const biggest = usable.length > 0 ? usable[0] : 0n;
+  if (biggest <= 0n) {
+    throw new Error(
+      "no approved notes available to unshield — your deposit may still be " +
+      "awaiting OxBow ASP approval. Wait for ASP indexing and retry.",
+    );
+  }
+  const chunk = target < biggest ? target : biggest;
+  let op;
+  try {
+    op = await plugin.prepareUnshield({ asset: ethAsset(), amount: chunk }, recipient);
+  } catch (e) {
+    const msg = e?.message ?? String(e);
+    if (msg.includes("Leaf not found")) {
+      throw new Error(
+        "Your deposit is not yet approved by the OxBow ASP (Approval Service " +
+        "Provider). Privacy Pools v1 requires deposits to be in the ASP's " +
+        "merkle tree before they can be unshielded. Wait for ASP indexing and " +
+        "retry. Underlying SDK error: " + msg,
+      );
+    }
+    throw e;
+  }
+  const q = op?.quoteData?.quote ?? {};
+  const relayData = op?.rawData?.relayData ?? {};
+  return {
+    chainId: env.LEANCLI_CHAIN_ID,
+    recipient,
+    requestedWei: target,
+    chunkWei: chunk,                 // amount of the first (or only) relay
+    multiRelay: target > biggest,    // true ⇒ spans multiple notes ⇒ more relays
+    approvedTotalWei: approvedTotal,
+    feeBPS: q.feeBPS ?? null,
+    baseFeeBPS: q.baseFeeBPS ?? null,
+    gasPriceWei: q.gasPrice ?? null,
+    relayTxCostWei: q?.detail?.relayTxCost?.eth ?? null,
+    relayFeeBps: relayData?.relayFeeBps ?? null,
+    relayerId: op?.quoteData?.relayerId ?? null,
+  };
+}
+
 // ----------------------------------------------------------------------
 // Tornado Cash — drafting stubs (PR 2)
 //
@@ -910,6 +979,8 @@ async function dispatch(req) {
       return jsonifyResult(id, await shieldedPrepareDeposit(env, params));
     case "shielded.unshieldDrain":
       return jsonifyResult(id, await shieldedUnshieldDrain(env, params));
+    case "shielded.quoteUnshield":
+      return jsonifyResult(id, await shieldedQuoteUnshield(env, params));
     case "shielded.prepareWithdraw":
       return jsonifyResult(id, await shieldedPrepareWithdraw(env, params));
     case "shielded.railgun.balance":

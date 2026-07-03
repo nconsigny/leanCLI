@@ -97,3 +97,67 @@ export function verificationSourceLine(sim: any): string {
     return `eth_call + eth_estimateGas via Colibri — committee-verified${v?.verified ? "" : " (proof unconfirmed)"}${at}`;
   return "eth_call + eth_estimateGas on the configured RPC endpoint — UNVERIFIED (untrusted execution node)";
 }
+
+/* ---------- approvals-audit rendering ---------- */
+
+export type ApprovalAuditData = {
+  wallet?: string;
+  approvals: Array<{
+    token: string; spender: string; amount?: string; amountHuman?: string;
+    tokenSymbol?: string; spenderLabel?: string; lastSeenBlock?: number;
+  }>;
+  nftApprovals?: Array<{
+    token: string; operator: string; tokenSymbol?: string;
+    operatorLabel?: string; lastSeenBlock?: number;
+  }>;
+  permit2Approvals?: Array<{
+    token: string; spender: string; amount?: string; amountHuman?: string;
+    tokenSymbol?: string; spenderLabel?: string; expiration?: number;
+  }>;
+};
+
+export type ApprovalRow = { text: string; warn: boolean };
+
+/** Format an approvals audit as aligned single-line rows, riskiest first:
+ *  unlimited ERC-20 grants and NFT operator approvals carry a ⚠ and sort
+ *  to the top; bounded grants follow. Spenders render as their protocol
+ *  label (daemon-side table), as "your <name>" when they're one of the
+ *  user's own wallets, or as a short address. Shared by the in-pane chat
+ *  and the full chat so the two renderings can't drift. */
+export function approvalAuditRows(
+  d: ApprovalAuditData,
+  wallets: Array<{ name: string; address: string }> = [],
+): ApprovalRow[] {
+  const who = (addr: string, label?: string): string => {
+    const w = wallets.find((x) => x.address.toLowerCase() === addr.toLowerCase());
+    if (w) return `your ${w.name}`;
+    return label ?? shortAddr(addr);
+  };
+  const unlimited = (h?: string) => (h ?? "").startsWith("unlimited");
+  const sym = (s?: string, addr?: string) => (s || shortAddr(addr ?? "")).padEnd(8);
+  const rows: ApprovalRow[] = [];
+  const erc20 = [...d.approvals].sort(
+    (a, b) => (unlimited(a.amountHuman) ? 0 : 1) - (unlimited(b.amountHuman) ? 0 : 1),
+  );
+  for (const a of erc20) {
+    const warn = unlimited(a.amountHuman);
+    rows.push({
+      warn,
+      text: `${warn ? "⚠" : " "} ${sym(a.tokenSymbol, a.token)} → ${who(a.spender, a.spenderLabel).padEnd(32)} ${a.amountHuman || a.amount || "?"}`,
+    });
+  }
+  for (const n of d.nftApprovals ?? []) {
+    rows.push({
+      warn: true,
+      text: `⚠ ${sym(n.tokenSymbol, n.token)} → ${who(n.operator, n.operatorLabel).padEnd(32)} can move ALL NFTs (ApprovalForAll)`,
+    });
+  }
+  for (const p of d.permit2Approvals ?? []) {
+    const warn = unlimited(p.amountHuman);
+    rows.push({
+      warn,
+      text: `${warn ? "⚠" : " "} ${sym(p.tokenSymbol, p.token)} → ${who(p.spender, p.spenderLabel).padEnd(32)} ${p.amountHuman || p.amount || "?"} · via Permit2`,
+    });
+  }
+  return rows;
+}

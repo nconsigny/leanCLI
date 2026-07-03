@@ -2,6 +2,7 @@ import LeanCli.Daemon.State
 import LeanCli.RPC.Outbound
 import LeanCli.Network.Policy
 import LeanCli.Crypto.Hex
+import LeanCli.Ethereum.Multicall3
 
 /-!
 # ERC-20 token metadata cache
@@ -105,11 +106,18 @@ def fetchAndCache
     (state : LeanCli.Daemon.State.Shared)
     (policy : LeanCli.Network.Policy.Policy)
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
-    (chainId : Nat) (address : String) : IO (Option TokenMeta) := do
+    (chainId : Nat) (address : String) (direct : Bool := false) : IO (Option TokenMeta) := do
   -- Route through the daemon's *selected* read backend (helios/colibri/rpc)
   -- so metadata reads are verified by the same provider as the simulate —
   -- not hardwired to colibri. `endpoint.url` is the helios executionRpc.
-  let via? ← LeanCli.Daemon.State.buildVerifiedReadVia state chainId endpoint.url
+  --
+  -- `direct := true` bypasses the verified backend for DISPLAY-ONLY callers
+  -- (e.g. `defi.positions`): the light client mis-serves some ERC-20 views
+  -- (it returned wrong `decimals()` for GHO, so a 309-GHO debt rendered as
+  -- "<0.01"), and metadata never reaches a signing decision on that path.
+  -- The signing path (`decodeIntent → ConfirmGate`) keeps the verified read.
+  let via? ← if direct then pure none
+             else LeanCli.Daemon.State.buildVerifiedReadVia state chainId endpoint.url
   let decRes ← LeanCli.RPC.Outbound.ethCall policy endpoint address decimalsSelector "latest" via?
   let symRes ← LeanCli.RPC.Outbound.ethCall policy endpoint address symbolSelector "latest" via?
   match decRes, symRes with
@@ -139,38 +147,85 @@ def markNoCode (state : LeanCli.Daemon.State.Shared) (chainId : Nat)
     if s.noCodeAddrs.contains key then s
     else { s with noCodeAddrs := key :: s.noCodeAddrs })
 
-/-- Cache-or-fetch for *speculative* candidates (addresses scanned out of
-    calldata by `scanCalldataAddresses`, many of which are misaligned junk or
-    EOAs). Gates the two-call decimals/symbol fetch behind a single
-    `eth_getCode`: addresses with no contract code are recorded in the
-    negative cache and skipped — both this decode and every later one — so a
-    swap no longer pays a fan-out of reverting reads on the fee word, the wei
-    value, the recipient EOA, and overlapping window fragments. A positive
-    metadata-cache hit short-circuits before any RPC. -/
-def lookupOrFetchIfContract
+/-- Batched cache-or-fetch for *speculative* candidates (addresses scanned
+    out of calldata by `scanCalldataAddresses`, many of which are misaligned
+    junk or EOAs) via ONE Multicall3 `aggregate3` eth_call, routed through
+    the same verified read backend as any other metadata read. On the
+    light-client provider each verified eth_call is a full REVM run over the
+    mutex-serialized shared connection, so the previous per-candidate
+    pattern (getCode gate + decimals + symbol = up to 3 serial calls each)
+    dominated `tx.decodeIntent` latency; the batch is one round-trip
+    regardless of N.
+
+    Junk self-selects out inside the batch (`allowFailure := true`): a
+    reverting candidate comes back `success = false`, an EOA succeeds with
+    empty return data and fails ABI decode — both land in the negative
+    cache, so later decodes skip them without any RPC. Only a candidate
+    whose `decimals()` AND `symbol()` both succeed and decode is cached as
+    a token. On a batch-level failure (policy denial / transport /
+    malformed return) every miss reports `none` and nothing is cached —
+    the same silent-degradation rule as `fetchAndCache`.
+
+    Returns one `(lowercased address, meta?)` entry per distinct input
+    address (deduped on the cache-key form). -/
+def lookupOrFetchBatch
     (state : LeanCli.Daemon.State.Shared)
     (policy : LeanCli.Network.Policy.Policy)
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
-    (chainId : Nat) (address : String) : IO (Option TokenMeta) := do
-  match ← lookup state chainId address with
-  | some m => pure (some m)
-  | none =>
-      if ← isKnownNoCode state chainId address then pure none
-      else
-        let via? ← LeanCli.Daemon.State.buildVerifiedReadVia state chainId endpoint.url
-        match ← LeanCli.RPC.Outbound.getCode policy endpoint address "latest" via? with
-        | .ok codeJson =>
-            let code := (LeanCli.Encoding.Json.asString codeJson).getD "0x"
-            -- "0x" / "" → no code. Anything longer is deployed bytecode.
-            if code == "0x" || code == "0x0" || code.isEmpty then
-              markNoCode state chainId address
-              pure none
-            else
-              fetchAndCache state policy endpoint chainId address
-        | .error _ =>
-            -- Read failed (policy denial / transport); don't poison the
-            -- negative cache — just skip this candidate for now.
-            pure none
+    (chainId : Nat) (addresses : Array String) :
+    IO (Array (String × Option TokenMeta)) := do
+  let mut uniq : Array String := #[]
+  for a in addresses do
+    let lo := a.toLower
+    if !uniq.contains lo then uniq := uniq.push lo
+  let mut out : Array (String × Option TokenMeta) := #[]
+  let mut misses : Array String := #[]
+  for lo in uniq do
+    match ← lookup state chainId lo with
+    | some m => out := out.push (lo, some m)
+    | none =>
+        if ← isKnownNoCode state chainId lo then
+          out := out.push (lo, none)
+        else
+          misses := misses.push lo
+  if misses.isEmpty then
+    return out
+  -- Two calls per miss, in input order: decimals() then symbol().
+  let calls : List LeanCli.Ethereum.Multicall3.Call3 :=
+    misses.foldl (init := []) fun acc a =>
+      acc ++ [ { target := a, allowFailure := true, callData := decimalsSelector },
+               { target := a, allowFailure := true, callData := symbolSelector } ]
+  let batchData := LeanCli.Ethereum.Multicall3.encodeAggregate3 calls
+  let via? ← LeanCli.Daemon.State.buildVerifiedReadVia state chainId endpoint.url
+  match ← LeanCli.RPC.Outbound.ethCall policy endpoint
+      LeanCli.Ethereum.Multicall3.address batchData "latest" via? with
+  | .ok ret =>
+      match (LeanCli.Encoding.Json.asString ret).bind
+          LeanCli.Ethereum.Multicall3.decodeAggregate3 with
+      | some results =>
+          let resultsArr := results.toArray
+          for i in [0:misses.size] do
+            let addr := misses[i]!
+            match resultsArr[2*i]?, resultsArr[2*i+1]? with
+            | some (decOk, decHex), some (symOk, symHex) =>
+                match (if decOk then decodeDecimalsReturn decHex else none),
+                      (if symOk then decodeSymbolReturn symHex else none) with
+                | some d, some s =>
+                    let m : TokenMeta := { decimals := d, symbol := s }
+                    setMeta state chainId addr m
+                    out := out.push (addr, some m)
+                | _, _ =>
+                    -- Reverted or non-ERC-20 shaped: known non-token.
+                    markNoCode state chainId addr
+                    out := out.push (addr, none)
+            | _, _ =>
+                -- Truncated result set; skip without caching.
+                out := out.push (addr, none)
+          pure out
+      | none =>
+          pure (out ++ misses.map (fun a => (a, none)))
+  | .error _ =>
+      pure (out ++ misses.map (fun a => (a, none)))
 
 /-- Cache-or-fetch. Always returns the cached value when present; misses
     are filled via `fetchAndCache`. Idempotent. -/
@@ -178,10 +233,17 @@ def lookupOrFetch
     (state : LeanCli.Daemon.State.Shared)
     (policy : LeanCli.Network.Policy.Policy)
     (endpoint : LeanCli.RPC.Outbound.Endpoint)
-    (chainId : Nat) (address : String) : IO (Option TokenMeta) := do
-  match ← lookup state chainId address with
-  | some m => pure (some m)
-  | none => fetchAndCache state policy endpoint chainId address
+    (chainId : Nat) (address : String) (direct : Bool := false) : IO (Option TokenMeta) := do
+  -- On a `direct` (display-only) read, skip the shared cache: a value fetched
+  -- earlier over the verified backend may be wrong (see `fetchAndCache`), so
+  -- always resolve fresh over direct RPC. The correct value is still cached
+  -- for later callers (decimals/symbol are immutable, so source-independent).
+  if direct then
+    fetchAndCache state policy endpoint chainId address (direct := true)
+  else
+    match ← lookup state chainId address with
+    | some m => pure (some m)
+    | none => fetchAndCache state policy endpoint chainId address
 
 /-- Render a `TokenMeta` as JSON for the bridge call. -/
 def toJson (m : TokenMeta) : LeanCli.Encoding.Json.Json :=

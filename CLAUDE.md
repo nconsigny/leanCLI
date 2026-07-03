@@ -59,7 +59,7 @@ Untrusted sidecars hosted under the Kohaku plugin model. Each Lean wrapper is th
 | `helios` (default) | `LeanCli/Helios/{Bridge,Persistent}.lean` | `@a16z/helios` Rust light client + embedded REVM; consensus-verified `eth_call`/`eth_estimateGas` against sync-committee-verified state | UI confirmation copy; **not** signing |
 | `colibri` | `LeanCli/Colibri/{Bridge,Persistent}.lean` | Colibri stateless light client (WASM EVM + committee proofs) | UI confirmation copy; **not** signing |
 | `rpc` | `LeanCli/RPC/Outbound.lean` | Direct configured RPC endpoint; no light-client verification | UI confirmation copy; **not** signing |
-| `safenode` | `LeanCli/SafeNode/Persistent.lean` (+ helios) | Helios fronted by the TDX-attested SafeNode ORAM proxy; requires `LEANCLI_SAFE_NODE_URL` | UI confirmation copy; **not** signing |
+| `safenode` | `LeanCli/SafeNode/Persistent.lean` (+ helios) | Helios fronted by the TEE-attested SafeNode ORAM proxy (GCP Confidential Space at `rpc-gcp.safe-node.com`, or Phala TDX); requires `LEANCLI_SAFE_NODE_URL` + `LEANCLI_SAFE_NODE_API_KEY`, and `LEANCLI_SAFE_NODE_GCP_IMAGE_DIGEST` for GCP attestation | UI confirmation copy; **not** signing |
 
 `LEANCLI_PROVIDER` is single-select (helios/colibri are mutually exclusive — "one or the other"). `LEANCLI_READ_BACKEND` is a back-compat alias; `LEANCLI_PROVIDER` wins. Unrecognized values fall back to `helios`.
 

@@ -291,7 +291,18 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                         ("returnData", ret)
                       ]
                   | .error err =>
-                      pure <| .error { code := -32020, message := "chain RPC failed", data := some (.str err) }
+                      -- Distinguish a (verified) EVM revert from a transport
+                      -- failure. Callers — especially the LLM agent's
+                      -- chain_read tool — must not misread "your calldata
+                      -- reverted" as "the RPC is down": observed as the
+                      -- model hand-rolling a wrong selector, getting
+                      -- `-32020 chain RPC failed`, and confidently telling
+                      -- the user the Aave Pool was unreachable. Code 3 is
+                      -- the Ethereum JSON-RPC convention for reverts.
+                      if (err.toLower.splitOn "revert").length > 1 then
+                        pure <| .error { code := 3, message := "execution reverted (the call ran and reverted — check calldata/selector; the RPC itself is fine)", data := some (.str err) }
+                      else
+                        pure <| .error { code := -32020, message := "chain RPC failed", data := some (.str err) }
       | _, _ => pure (.error invalidParams)
   | "chain.tokenBalance" =>
       match paramString req.params "token", paramString req.params "owner" with

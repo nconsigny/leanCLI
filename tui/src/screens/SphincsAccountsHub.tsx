@@ -12,6 +12,7 @@ import { call } from "../daemon.js";
 import { theme } from "../theme.js";
 import { EoaListEntry, ChainBalance } from "../types.js";
 import { bigIntToHex, formatEth, hexToBigInt, parseEthToWei, shortAddr } from "../format.js";
+import { useSharedWalletData, sharedRowFor } from "../dashboard/walletdata.js";
 
 /** Local TxJournal entry as returned by `chain.history`. Shape mirrors
  *  ManageWalletScreen's plus the SPHINCS+-specific timing fields the
@@ -200,6 +201,12 @@ export default function SphincsAccountsHub({
   initialName,
 }: Props) {
   const [state, setState] = useState<State>({ kind: "loading" });
+  // Live balances from the dashboard's poller (the wallet pane). When this
+  // slot's smart account is in that cache we reuse its ETH + token balances
+  // and skip our own slow verified reads entirely; `sharedRowFor` returns
+  // null on a full-screen route where the dashboard poller isn't mounted,
+  // and we fall back to the direct probe below.
+  const sharedWallet = useSharedWalletData();
   // Track whether we entered via a deep-link from WalletsHub (SEND/SWAP
   // for a SPHINCS wallet). When true, esc on send-form/swap-form bubbles
   // straight to `onBack` instead of bouncing through the detail screen —
@@ -308,6 +315,11 @@ export default function SphincsAccountsHub({
     if (state.kind !== "detail") return;
     const { name, smartAccountAddress, chainId } = state.row;
     if (!smartAccountAddress) return;
+    // Shared cache hit: the dashboard poller already holds this slot's
+    // balances — reuse them (see the render path) and don't fire our own
+    // verified reads. Only probe directly when the slot is absent from the
+    // cache (full-screen route, or a chain the pane isn't polling).
+    if (sharedRowFor(sharedWallet, smartAccountAddress)) return;
     if (ethBalances[name] !== undefined) return;
     setEthBalances((prev) => ({ ...prev, [name]: null }));
     setTokenBalances((prev) => ({ ...prev, [name]: null }));
@@ -1028,81 +1040,99 @@ export default function SphincsAccountsHub({
     actions.push({ label: "Rotate on-chain ECDSA owner (rotateOwner UserOp)", value: "rotate-owner" });
     actions.push({ label: "Deploy the SPHINCS- factory (one-time, Sepolia)", value: "factory-deploy" });
     actions.push({ label: "← Back", value: "back" });
+    // Balances: prefer the dashboard poller's cache for this slot; fall back
+    // to our own probe only when the slot isn't in that cache.
+    const sharedRow = sharedRowFor(sharedWallet, r.smartAccountAddress);
+    const ethWei: bigint | null | undefined = sharedRow
+      ? sharedRow.wei
+      : r.smartAccountAddress ? ethBalances[r.name] : undefined;
+    const tokenList: TokenChip[] | null | undefined = sharedRow
+      ? (sharedRow.tokens ?? []).map((t) => ({ symbol: t.symbol, decimals: t.decimals, balance: t.balance }))
+      : r.smartAccountAddress
+        ? (tokenBalances[r.name] ?? undefined)?.map((t) => ({ symbol: t.symbol, decimals: t.decimals, balance: t.balanceWei }))
+        : undefined;
+    const chainLabel = chainName(r.chainId);
+    const statusLabel =
+      status === undefined || status === null ? "status pending" : status ? "deployed" : "not deployed";
+    const LBL = 9; // label column width for aligned identity rows
     return (
       <Layout
-        title={`SPHINCS- account · ${r.name}`}
-        subtitle={`paramSet: ${r.paramSet} · chainId: ${r.chainId}`}
+        title={`SPHINCS account · ${r.name}`}
+        subtitle={`${r.paramSet} · ${chainLabel} · ${statusLabel}`}
         hint="↑/↓ move · → / enter select · esc back"
       >
-        <Box flexDirection="row">
-          <Box flexDirection="column" flexGrow={1} flexBasis={0} minWidth={0}>
-            <Text color={theme.dim}>owner (ECDSA): <Text color={theme.primary}>{r.ownerAddress}</Text></Text>
-            <Text color={theme.dim}>ECDSA source: {attach}</Text>
-            <Text color={theme.dim}>pkSeed: <Text>{r.pkSeed}</Text></Text>
-            <Text color={theme.dim}>pkRoot: <Text>{r.pkRoot}</Text></Text>
-            <Text color={theme.dim}>master-enrolled: {r.masterEnrolled ? "yes" : "no"}</Text>
-            <Text color={theme.dim}>custom passphrase: {r.customPassphrase ? "yes" : "no"}</Text>
-            <Text color={theme.dim}>
-              smart-account addr: {r.smartAccountAddress ?? "(pending compute)"}
-            </Text>
-            <Text color={theme.dim}>
-              on-chain status:{" "}
-              {status === undefined || status === null
-                ? <Text color={theme.dim}>checking…</Text>
-                : status
-                  ? <Text color={theme.ok}>deployed</Text>
-                  : <Text color={theme.warn}>not deployed</Text>}
-            </Text>
-            <SmartAcctBalances
-              ethWei={r.smartAccountAddress ? ethBalances[r.name] : undefined}
-              tokens={r.smartAccountAddress ? tokenBalances[r.name] : undefined}
-              hasAddress={!!r.smartAccountAddress}
+        <Box flexDirection="column">
+          {/* ── identity (full width, no mid-string wrapping) ── */}
+          <Text>
+            <Text color={theme.dim}>{"smart".padEnd(LBL)}</Text>
+            {r.smartAccountAddress
+              ? <Text color={theme.primary}>{r.smartAccountAddress}</Text>
+              : <Text color={theme.warn}>(pending — run “Compute counterfactual address”)</Text>}
+          </Text>
+          <Text>
+            <Text color={theme.dim}>{"owner".padEnd(LBL)}</Text>
+            <Text color={theme.primary}>{r.ownerAddress}</Text>
+            <Text color={theme.dim}>{"  "}{attach}</Text>
+          </Text>
+          <BalancesLine
+            label={"balances".padEnd(LBL)}
+            ethWei={ethWei}
+            tokens={tokenList}
+            hasAddress={!!r.smartAccountAddress}
+          />
+          <Text color={theme.dim}>
+            {"keys".padEnd(LBL)}pkSeed {truncHex(r.pkSeed)} · pkRoot {truncHex(r.pkRoot)}
+          </Text>
+          <Text color={theme.dim}>
+            {"flags".padEnd(LBL)}master-enrolled {r.masterEnrolled ? "✓" : "✗"} · custom passphrase {r.customPassphrase ? "yes" : "no"}
+          </Text>
+          <Text color={theme.dim}>
+            {"created".padEnd(LBL)}{formatCreated(r.createdAt)}
+          </Text>
+          <Text color={theme.dim}>
+            {"bundler".padEnd(LBL)}
+            {bundlerUrls[r.name] === undefined
+              ? "(checking…)"
+              : bundlerUrls[r.name] === null
+                ? "(none set)"
+                : bundlerUrls[r.name]}
+          </Text>
+
+          {/* ── actions (full width, labels no longer truncated) ── */}
+          <Box marginTop={1} flexDirection="column">
+            <Text color={theme.primary} bold>Actions</Text>
+            <Select
+              items={actions}
+              arrowNav
+              onBack={onBack}
+              onSelect={async (it) => {
+                if (it.value === "back") onBack();
+                else if (it.value === "compute") setState({ kind: "compute-addr", row: r });
+                else if (it.value === "deploy") {
+                  const er = await call<EoaListEntry[]>("eoa.list", {});
+                  setState({
+                    kind: "deploy-pick-eoa",
+                    row: r,
+                    eoas: er.ok && Array.isArray(er.result) ? er.result : [],
+                  });
+                } else if (it.value === "send") setState({ kind: "send-form", row: r });
+                else if (it.value === "batch") setState({ kind: "batch-add-leg", row: r, legs: [] });
+                else if (it.value === "swap") setState({ kind: "swap-flow", row: r });
+                else if (it.value === "rotate-owner") setState({ kind: "rotate-owner-form", row: r });
+                else {
+                  const er = await call<EoaListEntry[]>("eoa.list", {});
+                  setState({
+                    kind: "factory-deploy-pick-eoa",
+                    row: r,
+                    eoas: er.ok && Array.isArray(er.result) ? er.result : [],
+                  });
+                }
+              }}
             />
-            <Text color={theme.dim}>created: {new Date(r.createdAt * 1000).toISOString()}</Text>
-            <Text color={theme.dim}>
-              bundler:{" "}
-              {bundlerUrls[r.name] === undefined || bundlerUrls[r.name] === null
-                ? <Text color={theme.dim}>(checking…)</Text>
-                : <Text color={theme.primary}>{bundlerUrls[r.name]}</Text>}
-            </Text>
-            <Box marginTop={1}>
-              <Select
-                items={actions}
-                arrowNav
-                onBack={onBack}
-                onSelect={async (it) => {
-                  if (it.value === "back") onBack();
-                  else if (it.value === "compute") setState({ kind: "compute-addr", row: r });
-                  else if (it.value === "deploy") {
-                    const er = await call<EoaListEntry[]>("eoa.list", {});
-                    setState({
-                      kind: "deploy-pick-eoa",
-                      row: r,
-                      eoas: er.ok && Array.isArray(er.result) ? er.result : [],
-                    });
-                  } else if (it.value === "send") setState({ kind: "send-form", row: r });
-                  else if (it.value === "batch") setState({ kind: "batch-add-leg", row: r, legs: [] });
-                  else if (it.value === "swap") setState({ kind: "swap-flow", row: r });
-                  else if (it.value === "rotate-owner") setState({ kind: "rotate-owner-form", row: r });
-                  else {
-                    const er = await call<EoaListEntry[]>("eoa.list", {});
-                    setState({
-                      kind: "factory-deploy-pick-eoa",
-                      row: r,
-                      eoas: er.ok && Array.isArray(er.result) ? er.result : [],
-                    });
-                  }
-                }}
-              />
-            </Box>
           </Box>
-          <Box
-            marginLeft={2}
-            flexDirection="column"
-            flexGrow={1}
-            flexBasis={0}
-            minWidth={0}
-          >
+
+          {/* ── recent actions (full width, below) ── */}
+          <Box marginTop={1}>
             <HistoryPanel history={historyCells[r.name] ?? { state: "loading" }} />
           </Box>
         </Box>
@@ -1189,68 +1219,68 @@ function ResolveStep({
   );
 }
 
-/** Render the smart-account's on-chain ETH + ERC-20 balances. The probe
- *  ran (or didn't, if the counterfactual address is still pending) in
- *  the detail-view effect; this component just decodes the cell state.
- *  Token rows are filtered to non-zero balances daemon-side — same rule
- *  as ManageWalletScreen's Tokens section. */
-function SmartAcctBalances({
+/** A single non-zero ERC-20 holding, normalized across the shared cache
+ *  (`{symbol,decimals,balance}`) and the direct probe (`balanceWei`). */
+type TokenChip = { symbol: string; decimals: number; balance: bigint };
+
+/** Chain label for the detail subtitle. */
+function chainName(chainId: number): string {
+  return chainId === 1 ? "mainnet" : chainId === 11155111 ? "sepolia" : `chain ${chainId}`;
+}
+
+/** Compact a long hex identity string (pkSeed / pkRoot) to `head…tail`. */
+function truncHex(s: string, head = 8, tail = 6): string {
+  return s.length <= head + tail + 1 ? s : `${s.slice(0, head)}…${s.slice(-tail)}`;
+}
+
+/** Render a slot's create time, guarding the epoch-zero placeholder the
+ *  journal writes when no real timestamp was recorded (shows as 1970). */
+function formatCreated(createdAt: number): string {
+  if (!createdAt || createdAt < 1_000_000_000) return "unknown";
+  return new Date(createdAt * 1000).toISOString().slice(0, 16).replace("T", " ");
+}
+
+/** One-line ETH + ERC-20 balances sourced from the dashboard poller's
+ *  cache (or the direct probe fallback). Token amounts render as compact
+ *  chips — the full per-token address list lives in the wallet pane. */
+function BalancesLine({
+  label,
   ethWei,
   tokens,
   hasAddress,
 }: {
+  label: string;
   ethWei: bigint | null | undefined;
-  tokens:
-    | undefined
-    | null
-    | { symbol: string; address: string; decimals: number; balanceWei: bigint }[];
+  tokens: TokenChip[] | null | undefined;
   hasAddress: boolean;
 }) {
   if (!hasAddress) {
     return (
-      <Text color={theme.dim}>
-        balances: <Text color={theme.warn}>(compute counterfactual first)</Text>
+      <Text>
+        <Text color={theme.dim}>{label}</Text>
+        <Text color={theme.warn}>compute counterfactual first</Text>
       </Text>
     );
   }
-  const ethLine =
-    ethWei === undefined || ethWei === null ? (
-      <Text>
-        <Text color={theme.primary}><Spinner type="dots" /></Text>
-        <Text color={theme.dim}>{" reading…"}</Text>
-      </Text>
-    ) : (
-      <Text>{formatEth(ethWei)}</Text>
-    );
+  const chips = (tokens ?? [])
+    .filter((t) => t.balance > 0n)
+    .map((t) => `${t.symbol} ${formatTokenAmount(t.balance, t.decimals)}`);
   return (
-    <Box flexDirection="column">
-      <Text>
-        <Text color={theme.dim}>ETH balance: </Text>
-        {ethLine}
-      </Text>
-      <Box flexDirection="column">
-        <Text color={theme.dim}>
-          ERC-20 (swap registry):{" "}
-          {tokens === undefined || tokens === null ? (
-            <>
-              <Text color={theme.primary}><Spinner type="dots" /></Text>
-              <Text color={theme.dim}>{" fanning out balanceOf…"}</Text>
-            </>
-          ) : tokens.length === 0 ? (
-            <Text color={theme.dim}>none</Text>
-          ) : null}
-        </Text>
-        {tokens && tokens.length > 0 &&
-          tokens.map((t) => (
-            <Text key={t.address}>
-              <Text color={theme.dim}>{"  · "}</Text>
-              <Text color={theme.accent}>{t.symbol.padEnd(8)}</Text>
-              <Text>{" "}{formatTokenAmount(t.balanceWei, t.decimals)}</Text>
-              <Text color={theme.dim}>{"  "}{t.address}</Text>
-            </Text>
-          ))}
-      </Box>
-    </Box>
+    <Text>
+      <Text color={theme.dim}>{label}</Text>
+      {ethWei === undefined || ethWei === null ? (
+        <Text color={theme.dim}><Spinner type="dots" /> reading…</Text>
+      ) : (
+        <Text color={theme.ok}>{formatEth(ethWei)}</Text>
+      )}
+      {tokens === undefined || tokens === null ? (
+        <Text color={theme.dim}> · <Spinner type="dots" /> tokens…</Text>
+      ) : chips.length > 0 ? (
+        <Text color={theme.accent}>{` · ${chips.join(" · ")}`}</Text>
+      ) : (
+        <Text color={theme.dim}> · no tokens</Text>
+      )}
+    </Text>
   );
 }
 
@@ -1321,8 +1351,11 @@ function CompactHistoryRow({ entry }: { entry: JournalEntry }) {
   try {
     valueWei = entry.valueWei ? BigInt(entry.valueWei) : 0n;
   } catch {}
+  // The journal writes epoch-zero when no real time was recorded, which
+  // rendered as a bogus "1970-01-01 00:04". Suppress anything before 2001
+  // rather than show a fake date.
   const when =
-    entry.timestamp > 0
+    entry.timestamp >= 1_000_000_000
       ? new Date(entry.timestamp * 1000).toISOString().slice(0, 16).replace("T", " ")
       : "";
   const isSphincs = entry.kind === "sphincs.userOp";

@@ -10,6 +10,11 @@ import { theme } from "../theme.js";
 import { AddressFreshness, ChainBalance, EoaListEntry } from "../types.js";
 import { hexToBigInt } from "../format.js";
 import UnlockEoaStep from "./UnlockEoaStep.js";
+import {
+  QuoteUnshieldStep,
+  UnshieldConfirmGate,
+  type UnshieldQuote,
+} from "./WalletUnshieldFlow.js";
 
 type AccountListEntry = {
   index: number;
@@ -57,6 +62,24 @@ type Phase =
     }
   /* recipient resolved → collect amount + privacy-pool passphrase */
   | { kind: "amount-passphrase"; recipient: string; source: RecipientSource }
+  /* fetch relayer fee quote (no broadcast) before the confirm gate */
+  | {
+      kind: "quote";
+      recipient: string;
+      source: RecipientSource;
+      amountEth: string;
+      passphrase: string;
+    }
+  | { kind: "quote-error"; message: string }
+  /* pre-broadcast confirm gate */
+  | {
+      kind: "confirm";
+      recipient: string;
+      source: RecipientSource;
+      amountEth: string;
+      passphrase: string;
+      quote: UnshieldQuote;
+    }
   /* dispatch shielded.unshieldDrain */
   | {
       kind: "running";
@@ -556,7 +579,7 @@ export default function UnshieldFlow({ onDone }: Props) {
           onCancel={() => setPhase({ kind: "pick-source" })}
           onSubmit={(v) =>
             setPhase({
-              kind: "running",
+              kind: "quote",
               recipient: phase.recipient,
               source: phase.source,
               amountEth: v.amountEth ?? "",
@@ -565,6 +588,64 @@ export default function UnshieldFlow({ onDone }: Props) {
           }
         />
       </Layout>
+    );
+  }
+
+  /* ─── quote (no broadcast) ─── */
+  if (phase.kind === "quote") {
+    return (
+      <QuoteUnshieldStep
+        recipient={phase.recipient}
+        amountEth={phase.amountEth}
+        passphrase={phase.passphrase}
+        onReady={(quote) =>
+          setPhase({
+            kind: "confirm",
+            recipient: phase.recipient,
+            source: phase.source,
+            amountEth: phase.amountEth,
+            passphrase: phase.passphrase,
+            quote,
+          })
+        }
+        onError={(message) => setPhase({ kind: "quote-error", message })}
+      />
+    );
+  }
+
+  if (phase.kind === "quote-error") {
+    return (
+      <Layout title="Unshield — could not quote" hint="esc — back to source picker">
+        <Banner kind="err" text={phase.message} />
+        <Box marginTop={1}>
+          <Select
+            items={[{ label: "← Back", value: "back" }]}
+            onSelect={() => setPhase({ kind: "pick-source" })}
+          />
+        </Box>
+      </Layout>
+    );
+  }
+
+  /* ─── confirm gate (the pre-broadcast trust anchor) ─── */
+  if (phase.kind === "confirm") {
+    return (
+      <UnshieldConfirmGate
+        protocol="pp"
+        recipient={phase.recipient}
+        amountEth={phase.amountEth}
+        quote={phase.quote}
+        onConfirm={() =>
+          setPhase({
+            kind: "running",
+            recipient: phase.recipient,
+            source: phase.source,
+            amountEth: phase.amountEth,
+            passphrase: phase.passphrase,
+          })
+        }
+        onCancel={() => onDone(false)}
+      />
     );
   }
 

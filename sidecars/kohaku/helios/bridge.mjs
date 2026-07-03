@@ -130,6 +130,22 @@ async function getClient(chainId, executionRpc, consensusRpcOverride, checkpoint
   const key = `${chainId}|${executionRpc}|${consensusRpc}`;
   let entry = clients.get(key);
   if (entry) return entry;
+  // Cache the IN-FLIGHT creation promise (not just the resolved entry) so
+  // concurrent first requests — e.g. the daemon's startup warmup racing an
+  // early TUI read on the second connection — share one consensus
+  // bootstrap instead of double-syncing. Failure evicts the entry so the
+  // next request retries cleanly.
+  const creating = createClient(chainId, executionRpc, consensusRpc, checkpointOverride, meta);
+  clients.set(key, creating);
+  try {
+    return await creating;
+  } catch (e) {
+    clients.delete(key);
+    throw e;
+  }
+}
+
+async function createClient(chainId, executionRpc, consensusRpc, checkpointOverride, meta) {
 
   // Checkpoint policy:
   //  - Caller-supplied wins.
@@ -159,9 +175,7 @@ async function getClient(chainId, executionRpc, consensusRpcOverride, checkpoint
   // waitSynced() blocks until the sync committee has caught up; cold-start
   // is typically a few seconds.
   await provider.waitSynced();
-  entry = { provider, executionRpc, consensusRpc, chainId, checkpoint };
-  clients.set(key, entry);
-  return entry;
+  return { provider, executionRpc, consensusRpc, chainId, checkpoint };
 }
 
 // Helios verifies eth_getLogs only within ~8191 blocks of head (one sync
@@ -299,6 +313,16 @@ async function dispatch(method, params, id) {
         to: params.to,
         value: params.value ?? "0x0",
         data: params.data ?? "0x",
+        // Explicit zero gas price (standard eth_call convention). Without
+        // it, helios's internal eth_createAccessList prefetch hint inherits
+        // the node's default gas (block gas limit), and the node's funds
+        // check rejects any `from` holding less than gasLimit×gasPrice
+        // (~0.33 ETH on Sepolia). Helios swallows that error and silently
+        // degrades to per-slot proof fetching with a FULL re-execution per
+        // miss — measured 131 serial round-trips / ~24s for an Aave read
+        // vs 34 parallel / ~1.3s with the hint working. Callers can still
+        // override via params.gasPrice.
+        gasPrice: params.gasPrice ?? "0x0",
       };
       for (const k of Object.keys(callObj)) {
         if (callObj[k] === undefined) delete callObj[k];
@@ -319,15 +343,24 @@ async function dispatch(method, params, id) {
           revertReason = e?.message ?? String(e);
         }
         let gasUsed = null;
-        try {
-          gasUsed = await provider.request({
-            method: "eth_estimateGas",
-            params: [callObj, block],
-          });
-        } catch (e) {
-          // estimateGas reverts when the call reverts; record reason if we
-          // didn't already capture one from eth_call above.
-          if (revertReason == null) revertReason = e?.message ?? String(e);
+        // Opt-in second replay: eth_estimateGas re-executes the whole call
+        // against a FRESH helios state cache (proofs are re-fetched), so it
+        // roughly doubles simulate latency. The daemon requests it only
+        // when the caller pays gas directly (EOA sends); for 4337
+        // executeBatch sims the bundler owns userOp gas estimation and the
+        // figure would be dead weight. Revert detection doesn't need it —
+        // eth_call above already captured any revert.
+        if (params.estimateGas === true) {
+          try {
+            gasUsed = await provider.request({
+              method: "eth_estimateGas",
+              params: [callObj, block],
+            });
+          } catch (e) {
+            // estimateGas reverts when the call reverts; record reason if we
+            // didn't already capture one from eth_call above.
+            if (revertReason == null) revertReason = e?.message ?? String(e);
+          }
         }
         // The block this simulation was verified against. For "latest"
         // we ask helios for its consensus-verified head so the daemon can

@@ -194,11 +194,22 @@ export function useRpcConfig(intervalMs: number): { cfg: RpcConfig; actions: Rpc
 
   const refresh = () => setRefreshKey((k) => k + 1);
 
+  // Action failures (e.g. safenode attestation refused) would otherwise
+  // vanish — call() returns {ok:false} without throwing, and the poll
+  // overwrites cfg.error on its next tick. Keep them in separate state
+  // and merge into the returned cfg so the settings card's err row shows
+  // WHY a toggle snapped back to off.
+  const [actionError, setActionError] = useState<string | null>(null);
+
   const guard = (name: string, fn: () => Promise<void>) => () => {
     if (pending) return;
     setPending(name);
+    setActionError(null);
     void fn()
-      .catch(() => {})
+      .catch((e: unknown) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        setActionError(`${name}: ${msg}`);
+      })
       .finally(() => {
         setPending(null);
         refresh();
@@ -224,8 +235,19 @@ export function useRpcConfig(intervalMs: number): { cfg: RpcConfig; actions: Rpc
         });
     },
     toggleSafeNode: guard("oram-tee", async () => {
-      // Enabling runs the full TDX quote-verify flow — seconds of latency.
-      await call("daemon.safeNode.toggle", { enable: !(cfg.safeNode?.running === true) }, { timeoutMs: 120_000 });
+      // Enabling runs the full attestation flow (GCP Confidential Space
+      // OIDC verify or Phala TDX quote) — seconds of latency.
+      const r = await call<{ ok?: boolean }>(
+        "daemon.safeNode.toggle",
+        { enable: !(cfg.safeNode?.running === true) },
+        { timeoutMs: 120_000 },
+      );
+      if (!r.ok) {
+        const data = (r.error as { data?: unknown }).data;
+        throw new Error(
+          `${r.error.message}${typeof data === "string" ? ` — ${data}` : ""}`,
+        );
+      }
     }),
     setChain: (chainId: number) => {
       if (pending) return;
@@ -239,5 +261,5 @@ export function useRpcConfig(intervalMs: number): { cfg: RpcConfig; actions: Rpc
     },
   };
 
-  return { cfg, actions };
+  return { cfg: actionError ? { ...cfg, error: cfg.error ?? actionError } : cfg, actions };
 }

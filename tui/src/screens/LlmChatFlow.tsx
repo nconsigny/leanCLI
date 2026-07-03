@@ -6,7 +6,7 @@ import Select, { SelectItem } from "../widgets/Select.js";
 import { KoiFrame } from "../widgets/KoiFrame.js";
 import { call, isCancelled } from "../daemon.js";
 import { theme } from "../theme.js";
-import { formatEth, hexToBigInt } from "../format.js";
+import { formatEth, hexToBigInt, approvalAuditRows, type ApprovalAuditData } from "../format.js";
 
 /**
  * Opt-in local-LLM chat flow — redesigned as a proper multi-turn chat.
@@ -770,14 +770,18 @@ export default function LlmChatFlow({
   // reference identity in phase.turns). Centralises the "find the right
   // index, copy the array, splice" boilerplate so the executors below
   // don't each reinvent it.
-  const updateTurnDispatch = (
-    target: Extract<Turn, { kind: "assistant" }>,
-    next: DispatchState,
-  ) =>
+  // Address the turn by INDEX, never by object identity: setting the
+  // "running" state REPLACES the turn object in state, so a completion
+  // update that searched by `indexOf(originalTurn)` could never find it
+  // again and silently no-op'd — the dispatch spinner stayed "running"
+  // forever no matter what the daemon answered. Turns are append-only
+  // within a chat phase, so an index captured at dispatch time stays
+  // valid; a reset phase drops the stale update harmlessly.
+  const updateTurnDispatchAt = (idx: number, next: DispatchState) =>
     setPhase((p) => {
       if (p.kind !== "chat") return p;
-      const idx = p.turns.indexOf(target);
-      if (idx < 0) return p;
+      const target = p.turns[idx];
+      if (!target || target.kind !== "assistant") return p;
       const copy = [...p.turns];
       copy[idx] = { ...target, dispatch: next };
       return { ...p, turns: copy };
@@ -794,14 +798,22 @@ export default function LlmChatFlow({
     const r = turn.result;
     if (!r) return;
     if (turn.dispatch && turn.dispatch.kind !== "idle") return;
-    updateTurnDispatch(turn, { kind: "running" });
+    // Capture the index NOW (identity still holds in this render; never
+    // again after the first dispatch update replaces the object).
+    const idx = phase.kind === "chat" ? phase.turns.indexOf(turn) : -1;
+    if (idx < 0) return;
+    const setDispatch = (next: DispatchState) => updateTurnDispatchAt(idx, next);
+    setDispatch({ kind: "running" });
     if (r.audit) {
-      const resp = await call<AuditResult>(r.audit.rpc, r.audit.params, { timeoutMs: 60_000 });
+      // Full-history first run can take ~30-90s on an old account (the
+      // chunked log sweep from first activity); later runs are incremental
+      // off the daemon's per-owner cache and come back in seconds.
+      const resp = await call<AuditResult>(r.audit.rpc, r.audit.params, { timeoutMs: 300_000 });
       if (!resp.ok) {
-        updateTurnDispatch(turn, { kind: "error", message: resp.error.message });
+        setDispatch({ kind: "error", message: resp.error.message });
         return;
       }
-      updateTurnDispatch(turn, { kind: "auditDone", data: resp.result });
+      setDispatch({ kind: "auditDone", data: resp.result });
       return;
     }
     if (r.prepare) {
@@ -814,12 +826,12 @@ export default function LlmChatFlow({
         { timeoutMs: 300_000 },
       );
       if (!resp.ok) {
-        updateTurnDispatch(turn, { kind: "error", message: resp.error.message });
+        setDispatch({ kind: "error", message: resp.error.message });
         return;
       }
       // The bridge has used both shape names historically; accept either.
       const txs = (resp.result.txs ?? resp.result.transactions ?? []) as PreparedTx[];
-      updateTurnDispatch(turn, { kind: "prepareDone", txs });
+      setDispatch({ kind: "prepareDone", txs });
       // Auto-queue the first tx through the existing per-tx ConfirmGate
       // (SendRawFlow): users have already pressed Execute, and the
       // canonical Intent + simulate result reach them via the next
@@ -844,7 +856,7 @@ export default function LlmChatFlow({
     }
     if (r.create) {
       if (!onCreateWallet) {
-        updateTurnDispatch(turn, {
+        setDispatch({
           kind: "error",
           message: "wallet creation flow not wired; open WalletsHub > Create EOA from the main menu",
         });
@@ -853,7 +865,7 @@ export default function LlmChatFlow({
       const kind = r.create.params.kind;
       const label = r.create.params.label;
       onCreateWallet(kind, label);
-      updateTurnDispatch(turn, { kind: "createHandedOff", walletKind: kind, label });
+      setDispatch({ kind: "createHandedOff", walletKind: kind, label });
       return;
     }
   };
@@ -1292,6 +1304,7 @@ function ChatBody({
               isLatestSignable={t === latestSignable}
               traceExpanded={expandedTraces.has(i)}
               isLatestTrace={i === latestTraceIdx}
+              wallets={wallets}
             />
           ))
         )}
@@ -1396,6 +1409,7 @@ function TurnRow({
   isLatestSignable,
   traceExpanded,
   isLatestTrace,
+  wallets = [],
 }: {
   turn: Turn;
   isLatestSignable: boolean;
@@ -1405,6 +1419,8 @@ function TurnRow({
    *  the one the global `t` keybinding will toggle. Used purely for
    *  the hint text on the fold line. */
   isLatestTrace: boolean;
+  /** User's own wallets, for "your <name>" labels in audit results. */
+  wallets?: Array<{ name: string; address: string }>;
 }) {
   if (turn.kind === "user") {
     return (
@@ -1504,7 +1520,7 @@ function TurnRow({
       {(r.prepare || r.audit || r.create) && (
         <DirectiveBlock prepare={r.prepare} audit={r.audit} create={r.create} />
       )}
-      <DispatchBlock dispatch={turn.dispatch} />
+      <DispatchBlock dispatch={turn.dispatch} wallets={wallets} />
       {r.agentTrace && r.agentTrace.length > 0 && (
         <AgentTraceBlock
           trace={r.agentTrace}
@@ -1722,7 +1738,13 @@ function actionableRpc(turn: Extract<Turn, { kind: "assistant" }>): string {
  *  null (the [Execute] button is the entire affordance). Running shows
  *  a spinner with context. Done renders the result inline per kind.
  *  Errors surface verbatim. */
-function DispatchBlock({ dispatch }: { dispatch?: DispatchState }) {
+function DispatchBlock({
+  dispatch,
+  wallets = [],
+}: {
+  dispatch?: DispatchState;
+  wallets?: Array<{ name: string; address: string }>;
+}) {
   if (!dispatch || dispatch.kind === "idle") return null;
   if (dispatch.kind === "running") {
     return (
@@ -1754,25 +1776,10 @@ function DispatchBlock({ dispatch }: { dispatch?: DispatchState }) {
         {!d.implemented && d.note && (
           <Text color={theme.warn}>! {d.note}</Text>
         )}
-        {d.approvals.map((row, i) => (
-          <Text key={`erc20-${i}`} color={theme.dim}>
-            {"  "}#{i + 1} ERC-20 {row.tokenSymbol ? `${row.tokenSymbol} ` : ""}token={shortAddr(row.token)} ·
-            {" "}spender={row.spenderLabel ? `${row.spenderLabel} (${shortAddr(row.spender)})` : shortAddr(row.spender)} ·
-            {" "}amount={row.amountHuman || row.amount} · lastBlock={row.lastSeenBlock}
-          </Text>
-        ))}
-        {nft.map((row, i) => (
-          <Text key={`nft-${i}`} color={theme.warn}>
-            {"  "}⚠ ApprovalForAll {row.tokenSymbol ? `${row.tokenSymbol} ` : ""}collection={shortAddr(row.token)} ·
-            {" "}operator={row.operatorLabel ? `${row.operatorLabel} (${shortAddr(row.operator)})` : shortAddr(row.operator)} ·
-            {" "}can move ALL NFTs · lastBlock={row.lastSeenBlock}
-          </Text>
-        ))}
-        {permit2.map((row, i) => (
-          <Text key={`p2-${i}`} color={theme.dim}>
-            {"  "}↪ Permit2 {row.tokenSymbol ? `${row.tokenSymbol} ` : ""}token={shortAddr(row.token)} ·
-            {" "}spender={row.spenderLabel ? `${row.spenderLabel} (${shortAddr(row.spender)})` : shortAddr(row.spender)} ·
-            {" "}amount={row.amountHuman || row.amount}{row.expiration ? ` · exp=${row.expiration}` : ""}
+        {approvalAuditRows(d as ApprovalAuditData, wallets).map((row, i) => (
+          <Text key={`ar-${i}`} wrap="truncate-end" color={row.warn ? theme.warn : theme.dim}>
+            {"  "}
+            {row.text}
           </Text>
         ))}
         {d.implemented && d.approvals[0] && (

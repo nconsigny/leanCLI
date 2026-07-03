@@ -375,6 +375,38 @@ def ensureReserveSupported
           pure <| .error <| .err "reserve_read_failed"
             s!"getReserveData() returned malformed data: {hex}"
 
+/-- Aave packs the `borrowingEnabled` flag at bit 58 of a reserve's
+    `ReserveConfigurationMap` (word 0 of `getReserveData`). `2^58`. -/
+private def borrowingEnabledBit : Nat := 288230376151711744
+
+/-- Borrow-specific reserve guard. Reads `getReserveData(asset)` once and
+    checks both that the reserve exists (aToken ≠ 0) and that borrowing is
+    enabled (config bit 58). A collateral-only asset — e.g. AAVE on the
+    Aave V3 Sepolia market — has the reserve configured but borrowing
+    disabled; borrowing it reverts on-chain with Aave error `'30'`
+    (BORROWING_NOT_ENABLED). Catching it here means we never burn a
+    signature (or, on the SPHINCS path, a UserOp) on a doomed borrow. -/
+def ensureBorrowable
+    (shim : ChainEthCallShim) (chainId : Nat) (ctx : Context) :
+    IO (Except PrepareResult Unit) := do
+  match ← shim ctx.pool (encodeGetReserveData ctx.assetAddr) chainId with
+  | .error e => pure (.error (.err "reserve_read_failed" e))
+  | .ok hex =>
+      let label := labelFor ctx.asset? ctx.assetAddr
+      match decodeAddressWordAt hex 8, LeanCli.Swap.UniV3.decodeWordAt hex 0 with
+      | some aToken, some config =>
+          if isZeroAddress aToken then
+            pure <| .error <| .err "unsupported_reserve"
+              s!"Aave V3 Pool on chainId {chainId} has no active reserve for {label} ({ctx.assetAddr})"
+          else if (config / borrowingEnabledBit) % 2 == 0 then
+            pure <| .error <| .err "borrowing_disabled"
+              s!"Aave V3 reserve for {label} ({ctx.assetAddr}) is collateral-only (borrowing disabled) on chainId {chainId} — borrowing it reverts with Aave error '30'. Borrow a borrowable reserve (e.g. USDC / DAI / GHO) instead."
+          else
+            pure (.ok ())
+      | _, _ =>
+          pure <| .error <| .err "reserve_read_failed"
+            s!"getReserveData() returned malformed data: {hex}"
+
 /-- Branch on the allowance: if `current ≥ required` return `.ready`,
     else attach a `maxUint256` approval to the asset and return
     `.needsApproval`. Common to `supply` and `repay`. -/
@@ -513,7 +545,7 @@ def prepareBorrow
   match resolveContext chainId sender onBehalfOf (poolAssetInput asset) with
   | .error r => pure r
   | .ok ctx =>
-    match ← ensureReserveSupported shim chainId ctx with
+    match ← ensureBorrowable shim chainId ctx with
     | .error r => pure r
     | .ok () =>
       let data := V3Pool.encodeBorrow ctx.assetAddr amount rateMode onBehalfOf 0

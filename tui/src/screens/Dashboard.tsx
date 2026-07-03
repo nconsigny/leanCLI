@@ -13,7 +13,7 @@ import type { CreateKind } from "./CreateWalletPicker.js";
 import { newSessionKey, type Phase, type WalletBalance } from "./LlmChatFlow.js";
 import { useTerminalSize } from "../dashboard/useTerminalSize.js";
 import { useRpcConfig } from "../dashboard/rpcstatus.js";
-import { useNetFeed, useStatusSnapshot, type NetLogEvent } from "../dashboard/netfeed.js";
+import { useNetFeed, useStatusSnapshot, type NetLogEvent, type StatusSnapshot } from "../dashboard/netfeed.js";
 import { useLlamaStatus } from "../dashboard/llamamon.js";
 import { useLlmModels } from "../dashboard/llmcontrol.js";
 import { usePrivacyStatus } from "../dashboard/settingsdata.js";
@@ -349,7 +349,79 @@ export default function Dashboard({
     { isActive: !modalActive },
   );
 
+  // The active in-pane flow (chat-approved draft OR an app-injected
+  // sub-flow such as the SPHINCS hub → SendRawFlow), if any. Extracted so
+  // the same element can be rendered both inside the dashboard chrome
+  // (renderMain, below) and full-viewport when the terminal is under the
+  // dashboard minimum — see the size gate. Both cases share
+  // EmbeddedContext=true so KoiFrame drops the koi to fit the slot.
+  const renderActiveFlow = (w: number, h: number): React.ReactElement | null => {
+    // A chat-approved draft takes over the main slot: the full pre-sign
+    // pipeline (decode → simulate → ConfirmGate → sign) renders here as a
+    // focused modal. `overflow="hidden"` clips the (narrower → taller)
+    // confirm card to the pane rather than letting it scroll the buffer.
+    // onDone returns to chat and surfaces the broadcast result there.
+    if (pendingSend) {
+      return (
+        <Box width={w} height={h} flexDirection="column" overflow="hidden">
+          <EmbeddedContext.Provider value={true}>
+            <SendRawFlow
+              tx={pendingSend.tx}
+              chainId={pendingSend.chainId}
+              wallet={pendingSend.wallet}
+              onDone={(success, result) => {
+                onChatBroadcastResult(success, result);
+                setPendingSend(null);
+              }}
+            />
+          </EmbeddedContext.Provider>
+        </Box>
+      );
+    }
+    // App-injected sub-flow (wallet hub action, SPHINCS hub, CREATE, More
+    // commands, …) renders here, over whatever pane is in the main slot,
+    // keeping the dashboard shell + side panes visible. The flow owns
+    // input; its own esc/back pops the sub-stack and returns to the pane
+    // root.
+    if (mainOverlay) {
+      return (
+        <Box width={w} height={h} flexDirection="column" overflow="hidden">
+          <EmbeddedContext.Provider value={true}>
+            {mainOverlay}
+          </EmbeddedContext.Provider>
+        </Box>
+      );
+    }
+    return null;
+  };
+
   if (columns < 96 || rows < 32) {
+    // A resize that drops the terminal below the dashboard minimum must
+    // NOT tear down an in-flight flow: unmounting SendRawFlow here resets
+    // its `phase`, so the pre-sign pipeline restarts (re-simulate →
+    // re-propose the send) on every resize — a double-send footgun,
+    // especially costly on the SPHINCS UserOp path. Keep the flow mounted
+    // by rendering it full-viewport; it's a simple vertical Layout that
+    // fits far smaller terminals than the multi-pane dashboard. The size
+    // notice only shows when no flow is active.
+    const flow = renderActiveFlow(columns, Math.max(1, rows - 1));
+    if (flow) {
+      // Wrap the flow in the SAME column→row skeleton the full dashboard
+      // uses below (`return (<Box column><Box row>{renderMain()}…`). React
+      // preserves component state only across renders that keep an element
+      // at the same tree position: matching the skeleton means crossing the
+      // 96×32 threshold on resize reconciles SendRawFlow (props update)
+      // rather than remounting it, so its `phase` (and the completed
+      // simulation) survive. Returning `flow` bare would place it at a
+      // different position and remount — re-running the pre-sign pipeline.
+      return (
+        <Box flexDirection="column" width={columns}>
+          <Box flexDirection="row" width={columns} height={Math.max(1, rows - 1)}>
+            {flow}
+          </Box>
+        </Box>
+      );
+    }
     return (
       <Box flexDirection="column" paddingX={1}>
         <Text color={theme.warn} bold>
@@ -378,11 +450,11 @@ export default function Dashboard({
   // network SCALES with the viewport. It's the best at-a-glance pane
   // (chain · provider · light-client · verified · egress · live request
   // tail), so it stays compact on a small terminal (≈11 rows — wallet was
-  // getting starved otherwise) but grows toward 20 in full screen, where
+  // getting starved otherwise) but grows toward 30 in full screen, where
   // the extra rows surface more of the request tail instead of whitespace.
   // The flexible pane(s) — wallet and/or chat — take the remainder, so a
   // taller network trims the top pane by the same amount.
-  const networkH = Math.max(11, Math.min(20, Math.floor(H * 0.34)));
+  const networkH = Math.max(11, Math.min(30, Math.floor(H * 0.34)));
   const FIXED: Partial<Record<PaneId, number>> = { network: networkH, llm: 9, settings: 6 };
   const sidePanes = PANES.filter((p) => p !== mainPane);
   const fixedTotal = sidePanes.reduce((a, p) => a + (FIXED[p] ?? 0), 0);
@@ -427,13 +499,13 @@ export default function Dashboard({
       case "wallet":
         return (
           <PaneFrame title="wallet" focused={activePane === "wallet"} width={w} height={h}>
-            <WalletBox data={wallet} snap={snap} budget={h - 3} />
+            <WalletBox data={wallet} snap={snap} budget={h - 3} width={w - 4} />
           </PaneFrame>
         );
       case "network":
         return (
           <PaneFrame title="network / status" focused={activePane === "network"} width={w} height={h}>
-            <NetworkBox cfg={cfg} pending={actions.pending} feed={feed} snap={snap} budget={h - 3} />
+            <NetworkBox cfg={cfg} pending={actions.pending} feed={feed} snap={snap} budget={h - 3} width={w - 4} />
           </PaneFrame>
         );
       case "llm":
@@ -453,46 +525,14 @@ export default function Dashboard({
 
   // --- expanded (main-slot) view; non-chat panes are focused modals ------
   const renderMain = () => {
-    // A chat-approved draft takes over the main slot: the full pre-sign
-    // pipeline (decode → simulate → ConfirmGate → sign) renders here as a
-    // focused modal. `overflow="hidden"` clips the (narrower → taller)
-    // confirm card to the pane rather than letting it scroll the buffer.
-    // onDone returns to chat and surfaces the broadcast result there.
-    if (pendingSend) {
-      return (
-        <Box width={chatW} height={H} flexDirection="column" overflow="hidden">
-          <EmbeddedContext.Provider value={true}>
-            <SendRawFlow
-              tx={pendingSend.tx}
-              chainId={pendingSend.chainId}
-              wallet={pendingSend.wallet}
-              onDone={(success, result) => {
-                onChatBroadcastResult(success, result);
-                setPendingSend(null);
-              }}
-            />
-          </EmbeddedContext.Provider>
-        </Box>
-      );
-    }
-    // App-injected sub-flow (wallet hub action, CREATE, More commands, …)
-    // renders here, over whatever pane is in the main slot, keeping the
-    // dashboard shell + side panes visible. The flow owns input; its own
-    // esc/back pops the sub-stack and returns to the pane root.
-    if (mainOverlay) {
-      return (
-        <Box width={chatW} height={H} flexDirection="column" overflow="hidden">
-          {/* Injected sub-flows (wallet hub action, SPHINCS hub, CREATE,
-              More commands, …) render "embedded": KoiFrame (→ Layout /
-              RpcRunner) drops the 24-col koi so the squeezed-in flow fits
-              the ~58%-width slot. The static panes (wallet hub, Status)
-              keep their koi — they have room. */}
-          <EmbeddedContext.Provider value={true}>
-            {mainOverlay}
-          </EmbeddedContext.Provider>
-        </Box>
-      );
-    }
+    // In-flight flow (chat-approved draft or app-injected sub-flow) owns
+    // the main slot. Rendered via the shared helper so the size gate above
+    // can reuse the exact same element full-viewport without duplicating
+    // the SendRawFlow wiring. KoiFrame renders "embedded" (no 24-col koi)
+    // so the squeezed-in flow fits the ~58%-width slot; the static panes
+    // (wallet hub, Status) keep their koi — they have room.
+    const flow = renderActiveFlow(chatW, H);
+    if (flow) return flow;
     switch (mainPane) {
       case "chat":
         return renderChat(chatW, H, true);
@@ -597,6 +637,7 @@ export default function Dashboard({
         </Text>
       ) : (
         <Text wrap="truncate-end" color={theme.dim}>
+          <BuildBadge versions={snap?.versions} />
           {" tab panes · esc menu · ctrl+n chain · "}
           <Text color={theme.highlight}>{activePane}</Text>
           {" ▸ "}
@@ -663,29 +704,54 @@ function formatUnits(b: bigint, decimals: number): string {
   return centi === 0n ? `${whole}` : `${whole}.${centi.toString().padStart(2, "0")}`;
 }
 
-function formatTokenUnits(b: bigint, decimals: number, maxFrac = 6): string {
-  const base = 10n ** BigInt(decimals);
-  const whole = b / base;
-  const frac = b % base;
-  if (frac === 0n || maxFrac <= 0) return whole.toString();
-  const scale = 10n ** BigInt(Math.min(decimals, maxFrac));
-  const shown = (frac * scale) / base;
-  if (shown === 0n) return `${whole}.<${"0".repeat(Math.min(decimals, maxFrac) - 1)}1`;
-  const trimmed = shown.toString().padStart(Math.min(decimals, maxFrac), "0").replace(/0+$/, "");
-  return `${whole}.${trimmed}`;
+/** `value*10` → a one-decimal string with a trailing `.0` trimmed. */
+function withOneDecimal(scaledTimes10: bigint): string {
+  const w = scaledTimes10 / 10n;
+  const d = scaledTimes10 % 10n;
+  return d === 0n ? w.toString() : `${w}.${d}`;
 }
 
-function joinAaveTokens(
-  reserves: NonNullable<ReturnType<typeof useWalletData>["rows"][number]["defiAave"]>["reserves"],
-  side: "supplied" | "borrowed",
-): string {
-  const parts = reserves
-    .map((r) => {
-      const amount = side === "supplied" ? r.supplied : r.borrowed;
-      return amount > 0n ? `${formatTokenUnits(amount, r.decimals)} ${r.symbol}` : null;
-    })
-    .filter((x): x is string => !!x);
-  return parts.length > 0 ? parts.join(" · ") : "0";
+/** Compact token amount for the dense wallet pane. Unlike a plain 2-dp
+ *  format, a *positive* balance that would round to "0" renders as "<0.01"
+ *  so a real (if tiny) holding is never shown as nothing, and large
+ *  balances get a K/M suffix to keep the row narrow (10000 → "10K"). */
+function formatTokenAmount(b: bigint, decimals: number): string {
+  if (b <= 0n) return "0";
+  const base = 10n ** BigInt(decimals);
+  const whole = b / base;
+  if (whole >= 1_000_000n) return `${withOneDecimal((whole * 10n) / 1_000_000n)}M`;
+  if (whole >= 10_000n) return `${withOneDecimal((whole * 10n) / 1_000n)}K`;
+  const frac = b % base;
+  if (frac === 0n) return whole.toString();
+  const centi = (frac * 100n) / base;
+  if (centi === 0n) return "<0.01";
+  return `${whole}.${centi.toString().padStart(2, "0").replace(/0+$/, "")}`;
+}
+
+/** Pack `chips` into up to `maxRows` lines, each no wider than `width`,
+ *  breaking only on chip boundaries so nothing is cut mid-token. Only when
+ *  the chips overflow the *last* allowed row do the leftovers collapse into
+ *  a trailing " +N" — with enough rows there is no "+N" at all. Chips are
+ *  assumed pre-ordered by importance. */
+function packChipRows(chips: string[], width: number, maxRows: number): string[] {
+  const rows: string[] = [];
+  let i = 0;
+  while (i < chips.length && rows.length < maxRows) {
+    const isLast = rows.length === maxRows - 1;
+    let line = chips[i]!;
+    i++;
+    while (i < chips.length) {
+      const candidate = `${line} · ${chips[i]}`;
+      const leftoverAfter = chips.length - (i + 1);
+      const reserve = isLast && leftoverAfter > 0 ? ` +${leftoverAfter}`.length : 0;
+      if (candidate.length + reserve > width) break;
+      line = candidate;
+      i++;
+    }
+    if (isLast && i < chips.length) line = `${line} +${chips.length - i}`;
+    rows.push(line);
+  }
+  return rows;
 }
 
 /** `$` amount from a base-currency uint256 (Aave base ccy = USD, 8 dp). */
@@ -704,12 +770,22 @@ function WalletBox({
   data,
   snap,
   budget,
+  width,
 }: {
   data: ReturnType<typeof useWalletData>;
   snap: { wallet: { masterUnlocked: boolean; unlockedSlotCount: number } } | null;
   budget: number;
+  width: number;
 }) {
-  const lines: React.ReactElement[] = [];
+  // Each entry is one physical row; `token` marks the per-wallet ERC-20
+  // line as the FIRST casualty when the pane is short — dropped bottom-up
+  // before the final slice, so a cramped pane keeps addresses + shielded
+  // status instead of losing whatever happened to be last.
+  const entries: Array<{ el: React.ReactElement; token?: boolean }> = [];
+  const lines = {
+    push: (el: React.ReactElement) => entries.push({ el }),
+    pushToken: (el: React.ReactElement) => entries.push({ el, token: true }),
+  };
   lines.push(
     <Line key="master" color={theme.dim}>
       master{" "}
@@ -743,12 +819,19 @@ function WalletBox({
       );
     }
     if (r.tokens && r.tokens.length > 0) {
-      lines.push(
-        <Line key={`${r.kind}:${r.name}:t`} color={theme.accent}>
-          {"  "}
-          {r.tokens.slice(0, 4).map((t) => `${t.symbol} ${formatUnits(t.balance, t.decimals)}`).join(" · ")}
-          {r.tokens.length > 4 ? ` +${r.tokens.length - 4}` : ""}
-        </Line>,
+      // Wrap holdings across up to 3 indented rows instead of a one-line
+      // "+N" stub — there is usually vertical room in this pane, and a real
+      // "AAVE 60 · DAI 10K" list reads far better than a truncated tail.
+      // Each row is a `token` line so a *cramped* pane still sheds them
+      // bottom-up. `formatTokenAmount` keeps a tiny balance visible as
+      // "<0.01" rather than a misleading "0".
+      const chips = r.tokens.map((t) => `${t.symbol} ${formatTokenAmount(t.balance, t.decimals)}`);
+      packChipRows(chips, Math.max(8, width - 2), 3).forEach((row, i) =>
+        lines.pushToken(
+          <Line key={`${r.kind}:${r.name}:t${i}`} color={theme.accent}>
+            {"  "}{row}
+          </Line>,
+        ),
       );
     }
     // DeFi: only render when there's an open Aave position, to keep the
@@ -756,18 +839,43 @@ function WalletBox({
     // "coming soon" and intentionally not shown on the dashboard.
     if (r.defiAave) {
       const d = r.defiAave;
-      const supplied = d.reserves.length > 0
-        ? joinAaveTokens(d.reserves, "supplied")
-        : formatUsdBase(d.collateralBase, d.baseDecimals);
-      const borrowed = d.reserves.length > 0
-        ? joinAaveTokens(d.reserves, "borrowed")
-        : formatUsdBase(d.debtBase, d.baseDecimals);
+      // Header: HF + the aggregate USD debt (the authoritative totals behind
+      // the health factor). "supplied"/"borrowed" then read on their own
+      // labelled rows — clearer than one arrow-packed line, and plain ASCII
+      // so `.length`-packing stays exact (the ↑/↓ arrows were ambiguous-width
+      // and spilled the border). Detail rows are droppable on a cramped pane.
+      const debt = d.debtBase > 0n ? ` · debt ${formatUsdBase(d.debtBase, d.baseDecimals)}` : "";
       lines.push(
         <Line key={`${r.kind}:${r.name}:defi`} color={theme.koiCream}>
-          {"  ⚓ Aave "}
-          supplied {supplied} · borrowed {borrowed} · HF {formatHf(d.healthFactor, d.debtBase)}
+          {"  ⚓ Aave · HF "}{formatHf(d.healthFactor, d.debtBase)}
+          <Text color={theme.dim}>{debt}</Text>
         </Line>,
       );
+      const supplied: string[] = [];
+      const borrowed: string[] = [];
+      if (d.reserves.length > 0) {
+        for (const rv of d.reserves) {
+          if (rv.supplied > 0n) supplied.push(`${formatTokenAmount(rv.supplied, rv.decimals)} ${rv.symbol}`);
+          if (rv.borrowed > 0n) borrowed.push(`${formatTokenAmount(rv.borrowed, rv.decimals)} ${rv.symbol}`);
+        }
+      } else {
+        if (d.collateralBase > 0n) supplied.push(formatUsdBase(d.collateralBase, d.baseDecimals));
+        if (d.debtBase > 0n) borrowed.push(formatUsdBase(d.debtBase, d.baseDecimals));
+      }
+      const sides: Array<[string, string[]]> = [["supplied", supplied], ["borrowed", borrowed]];
+      for (const [label, chips] of sides) {
+        if (chips.length === 0) continue;
+        const avail = Math.max(8, width - 5 - (label.length + 1));
+        packChipRows(chips, avail, 2).forEach((row, i) =>
+          lines.pushToken(
+            <Line key={`${r.kind}:${r.name}:${label}:${i}`} color={theme.koiCream}>
+              {"     "}
+              <Text color={theme.dim}>{i === 0 ? `${label} ` : "".padStart(label.length + 1)}</Text>
+              {row}
+            </Line>,
+          ),
+        );
+      }
     }
   }
   if (data.droppedRows > 0) {
@@ -812,7 +920,20 @@ function WalletBox({
       );
     }
   }
-  return <Box flexDirection="column">{lines.slice(0, Math.max(1, budget))}</Box>;
+  // Over budget: shed token lines from the bottom up until it fits (or none
+  // are left), THEN hard-slice — tokens are "when there is space" content.
+  let excess = entries.length - Math.max(1, budget);
+  for (let i = entries.length - 1; i >= 0 && excess > 0; i--) {
+    if (entries[i]?.token) {
+      entries.splice(i, 1);
+      excess--;
+    }
+  }
+  return (
+    <Box flexDirection="column" width={width}>
+      {entries.slice(0, Math.max(1, budget)).map((e) => e.el)}
+    </Box>
+  );
 }
 
 function WalletHead({ r }: { r: WalletRow }) {
@@ -845,24 +966,78 @@ function onOff(s: { running: boolean } | null, pendingThis: boolean): React.Reac
   return s.running ? <Text color={theme.ok}>● on</Text> : <Text color={theme.dim}>○ off</Text>;
 }
 
-function RpcBox({
-  cfg,
-  pending,
-  budget,
-}: {
-  cfg: ReturnType<typeof useRpcConfig>["cfg"];
-  pending: string | null;
-  budget: number;
-}) {
+/** Footer build/staleness indicator. Shows the running daemon's short
+ *  git sha + build time; flips to a loud red badge the moment a newer
+ *  daemon binary exists on disk than the running process — i.e. you
+ *  rebuilt but never bounced the daemon (or a `daemon restart` whose
+ *  build step failed). The whole point: know at a glance you're stale. */
+function BuildBadge({ versions }: { versions?: StatusSnapshot["versions"] }) {
+  if (!versions) return null;
+  const ver = versions.buildVersion || "?";
+  if (versions.stale) {
+    return (
+      <Text color={theme.err} bold>
+        {`⚠ STALE BUILD (running ${ver}) — restart daemon · `}
+      </Text>
+    );
+  }
+  const sha = versions.buildSha || (versions.gitHead ? versions.gitHead.slice(0, 7) : "?");
+  const t = versions.runningBinMtimeMs
+    ? new Date(versions.runningBinMtimeMs).toLocaleTimeString([], {
+        hour: "2-digit",
+        minute: "2-digit",
+      })
+    : "?";
+  return <Text color={theme.ok}>{`build ${ver} ${sha} ${t} · `}</Text>;
+}
+
+/** Wrap `label value` into whole terminal rows instead of truncating: the
+ *  value continues on "  "-indented rows, up to maxRows (the last row still
+ *  truncates with an ellipsis). Every returned element is exactly ONE
+ *  physical row, so callers can count them against a fixed pane height —
+ *  free-form Ink wrapping would make row usage unpredictable and overflow
+ *  the alternate-screen budget. */
+function wrapValueRows(
+  key: string,
+  label: string,
+  value: string,
+  width: number,
+  opts: { valueColor?: string; labelColor?: string; maxRows?: number } = {},
+): React.ReactElement[] {
+  const maxRows = Math.max(1, opts.maxRows ?? 2);
+  const firstW = Math.max(8, width - label.length - 1);
+  const contW = Math.max(8, width - 2);
+  const rows: React.ReactElement[] = [];
+  let rest = value;
+  for (let i = 0; i < maxRows && (i === 0 || rest.length > 0); i++) {
+    const chunk = rest.slice(0, i === 0 ? firstW : contW);
+    rest = rest.slice(chunk.length);
+    const truncated = i === maxRows - 1 && rest.length > 0;
+    rows.push(
+      <Line key={`${key}${i === 0 ? "" : `+${i}`}`} color={opts.labelColor ?? theme.dim}>
+        {i === 0 ? `${label} ` : "  "}
+        <Text color={opts.valueColor}>{truncated ? `${chunk.slice(0, -1)}…` : chunk}</Text>
+      </Line>,
+    );
+  }
+  return rows;
+}
+
+/** The rpc/light-client summary as a flat list of single-row elements so
+ *  NetworkBox can count exactly how many rows it consumed. Long values
+ *  (rpc/ens URLs, errors) wrap onto continuation rows via wrapValueRows. */
+function buildRpcRows(
+  cfg: ReturnType<typeof useRpcConfig>["cfg"],
+  pending: string | null,
+  width: number,
+): React.ReactElement[] {
   const lines: React.ReactElement[] = [
     <Line key="chain" color={theme.dim}>
       chain <Text color={theme.koiCream}>{cfg.chainName ?? "?"}</Text>
       {cfg.chainId !== null ? ` (${cfg.chainId})` : ""} · policy{" "}
       <Text color={theme.koiCream}>{cfg.policy ?? "?"}</Text>
     </Line>,
-    <Line key="rpc" color={theme.dim}>
-      rpc <Text color={theme.primary}>{cfg.rpcUrl ?? "…"}</Text>
-    </Line>,
+    ...wrapValueRows("rpc", "rpc", cfg.rpcUrl ?? "…", width, { valueColor: theme.primary }),
     <Line key="backend" color={theme.dim}>
       provider{" "}
       <Text color={theme.highlight} bold>
@@ -905,21 +1080,24 @@ function RpcBox({
         </Line>
       );
     })(),
-    cfg.oramProxyUrl ? (
-      <Line key="oram" color={theme.ok}>⛨ reads exec via ORAM proxy {cfg.oramProxyUrl}</Line>
-    ) : cfg.safeNode?.running && cfg.safeNode.attestation ? (
-      <Line key="oram" color={theme.dim}>
-        ⛨ tee {cfg.safeNode.attestation.teeType ?? "?"} · pin{" "}
-        {(cfg.safeNode.attestation.pin ?? "").slice(0, 12)}…
-      </Line>
-    ) : (
-      <Line key="oram" color={theme.dim}>ens {cfg.ensUrl ?? "—"}</Line>
-    ),
+    ...(cfg.oramProxyUrl
+      ? wrapValueRows("oram", "⛨ reads exec via ORAM proxy", cfg.oramProxyUrl, width, {
+          labelColor: theme.ok,
+          valueColor: theme.ok,
+        })
+      : cfg.safeNode?.running && cfg.safeNode.attestation
+        ? [
+            <Line key="oram" color={theme.dim}>
+              ⛨ tee {cfg.safeNode.attestation.teeType ?? "?"} · pin{" "}
+              {(cfg.safeNode.attestation.pin ?? "").slice(0, 12)}…
+            </Line>,
+          ]
+        : wrapValueRows("ens", "ens", cfg.ensUrl ?? "—", width, { valueColor: theme.primary })),
   ];
   if (cfg.error) {
-    lines.push(<Line key="err" color={theme.err}>✗ {cfg.error}</Line>);
+    lines.push(...wrapValueRows("err", "✗", cfg.error, width, { labelColor: theme.err, valueColor: theme.err, maxRows: 3 }));
   }
-  return <Box flexDirection="column">{lines.slice(0, Math.max(1, budget))}</Box>;
+  return lines;
 }
 
 /* ---------- network / status box (merged rpc + net summary) ---------- */
@@ -935,40 +1113,59 @@ function NetworkBox({
   feed,
   snap,
   budget,
+  width,
 }: {
   cfg: ReturnType<typeof useRpcConfig>["cfg"];
   pending: string | null;
   feed: ReturnType<typeof useNetFeed>;
   snap: { network: { rpc: { ip: string; egressSrc: string; egressDev: string; host: string } } } | null;
   budget: number;
+  width: number;
 }) {
   const s = feed.stats;
+  const egressIp = snap?.network.rpc.egressSrc || "…";
+  // Egress + counters: one row when it fits, otherwise split at the ip so
+  // the counters stay whole instead of truncating mid-number.
+  const counters = (key: string) => (
+    <Line key={key} color={theme.dim}>
+      {key === "egress" ? <>egress <Text color={theme.koiCream}>{egressIp}</Text>{" · "}</> : "  "}
+      {"req "}<Text color={theme.primary}>{s.requests}</Text>
+      {" · ok "}<Text color={theme.ok}>{s.ok}</Text>
+      {" · err "}<Text color={theme.err}>{s.errors}</Text>
+      {" · denied "}<Text color={theme.warn}>{s.denied}</Text>
+    </Line>
+  );
+  const egressPlain = `egress ${egressIp} · req ${s.requests} · ok ${s.ok} · err ${s.errors} · denied ${s.denied}`;
+  const egressRows: React.ReactElement[] =
+    egressPlain.length <= width
+      ? [counters("egress")]
+      : [
+          <Line key="egress" color={theme.dim}>
+            egress <Text color={theme.koiCream}>{egressIp}</Text>
+          </Line>,
+          counters("egress2"),
+        ];
   // Vertical budget split: the rpc/light-client summary keeps priority (it's
-  // the "am I verified" headline), one line for egress + totals, then the
-  // live request tail. The tail grows with the pane — 0 rows when cramped,
-  // up to 5 in full screen — so a tall network pane shows real traffic
-  // instead of whitespace, and a short one degrades to just the summary.
-  const egressLines = 1;
-  const tailRows = Math.max(0, Math.min(5, budget - 5 - egressLines - 1)); // -1: tail header
-  const rpcBudget = Math.max(3, budget - egressLines - (tailRows > 0 ? tailRows + 1 : 0));
+  // the "am I verified" headline), then egress + totals, then the live
+  // request tail fills EVERY remaining row — a tall network pane shows real
+  // traffic instead of whitespace, a short one degrades to just the summary
+  // (keeping at least one tail row once the pane has ~8 content rows).
+  const summaryAll = [...buildRpcRows(cfg, pending, width), ...egressRows];
+  const wantTail =
+    budget >= 8 ? Math.max(1, budget - summaryAll.length - 1) : Math.max(0, budget - summaryAll.length - 1);
+  const tailRows = Math.min(wantTail, Math.max(0, budget - 2));
+  const summary = summaryAll.slice(0, budget - (tailRows > 0 ? tailRows + 1 : 0));
   const tail = tailRows > 0 ? feed.recent.slice(-tailRows) : [];
   return (
     <Box flexDirection="column">
-      <RpcBox cfg={cfg} pending={pending} budget={rpcBudget} />
-      <Line color={theme.dim}>
-        egress <Text color={theme.koiCream}>{snap?.network.rpc.egressSrc || "…"}</Text>
-        {" · req "}<Text color={theme.primary}>{s.requests}</Text>
-        {" · ok "}<Text color={theme.ok}>{s.ok}</Text>
-        {" · err "}<Text color={theme.err}>{s.errors}</Text>
-        {" · denied "}<Text color={theme.warn}>{s.denied}</Text>
-      </Line>
+      {summary}
       {tailRows > 0 && (
         <>
-          <Line color={theme.dim}>recent ▾ last {tailRows}{feed.error ? ` · ${feed.error}` : ""}</Line>
+          <Line color={theme.dim}>recent ▾ last {Math.min(tailRows, feed.recent.length) || tailRows}{feed.error ? ` · ${feed.error}` : ""}</Line>
           {tail.length === 0 ? (
             <Line color={theme.dim}>{"  · no traffic yet"}</Line>
           ) : (
-            tail.map((e, i) => <NetEventLine key={`${e.ts_ms}-${i}`} e={e} />)
+            tail.map((e, i) => <NetEventLine key={`${e.ts_ms}-${i}`} e={e} width={width} />)
           )}
         </>
       )}
@@ -976,10 +1173,12 @@ function NetworkBox({
   );
 }
 
-/** One truncated line per network event in the dashboard's request tail —
- *  a condensed cousin of NetworkMonitor's EventRow (glyph · method · host/
- *  backend · ms). Errors/denials show the error text in place of the host. */
-function NetEventLine({ e }: { e: NetLogEvent }) {
+/** One line per network event in the dashboard's request tail — a condensed
+ *  cousin of NetworkMonitor's EventRow (glyph · method · host/backend · ms).
+ *  Errors/denials show the error text in place of the host. Stays a single
+ *  physical row (the tail's row accounting depends on it); the detail is
+ *  clamped to the pane width so the trailing latency survives truncation. */
+function NetEventLine({ e, width }: { e: NetLogEvent; width: number }) {
   const isErr = e.kind === "rpc-error" || e.kind === "exception" || e.kind === "parse-error" || e.kind === "malformed";
   const glyph = e.kind === "request" ? "→" : e.kind === "response" ? "←" : isErr ? "✗" : e.kind === "denied" ? "⊘" : "·";
   const color = e.kind === "response" ? theme.ok : isErr ? theme.err : e.kind === "denied" ? theme.warn : theme.dim;
@@ -992,11 +1191,14 @@ function NetEventLine({ e }: { e: NetLogEvent }) {
           : e.kind
       : e.host ?? e.backend ?? "";
   const ms = e.ms !== undefined ? ` ${e.ms}ms` : "";
+  const method = e.method || "?";
+  const avail = Math.max(4, width - 2 - method.length - ms.length - 1);
+  const shown = detail.length > avail ? `${detail.slice(0, avail - 1)}…` : detail;
   return (
     <Line>
       <Text color={color}>{glyph} </Text>
-      <Text color={theme.primary}>{e.method || "?"}</Text>
-      <Text color={theme.dim}>{detail ? ` ${detail}` : ""}{ms}</Text>
+      <Text color={theme.primary}>{method}</Text>
+      <Text color={theme.dim}>{shown ? ` ${shown}` : ""}{ms}</Text>
     </Line>
   );
 }
@@ -1305,15 +1507,20 @@ function LlmBox({
         {sys.llamaCpuPct !== null && (
           <>
             {" · proc "}
-            {/* >100% = more than one core busy → the model is on CPU. */}
-            <Text color={sys.llamaCpuPct > 100 ? theme.warn : theme.primary}>
+            {/* Machine share (0–100, same scale as cpu below). Half the
+                machine busy on llama-server ⇒ inference is on CPU. */}
+            <Text color={sys.llamaCpuPct >= 50 ? theme.warn : theme.primary}>
               {sys.llamaCpuPct}%
             </Text>
           </>
         )}
       </Line>
+      {/* cpu + gpu utilization side by side, same highlight, same 0–100
+          scale — the at-a-glance "where is the work happening" line. */}
       <Line color={theme.dim}>
         cpu <Text color={theme.primary}>{sys.cpuPct === null ? "…" : `${sys.cpuPct}%`}</Text>
+        {" · gpu "}
+        <Text color={theme.primary}>{gpu?.utilPct !== undefined ? `${gpu.utilPct}%` : "n/a"}</Text>
         {" · load "}
         {sys.load1 === null ? "n/a" : `${sys.load1.toFixed(2)}/${sys.cores}`}
         {" · mem "}
@@ -1321,7 +1528,7 @@ function LlmBox({
       </Line>
       {gpu ? (
         <Line color={theme.dim}>
-          {`gpu ${gpu.name}${gpu.utilPct !== undefined ? ` ${gpu.utilPct}%` : ""}${
+          {`gpu ${gpu.name}${
             gpu.vramUsedMb !== undefined && gpu.vramTotalMb !== undefined
               ? ` · vram ${(gpu.vramUsedMb / 1024).toFixed(1)}/${(gpu.vramTotalMb / 1024).toFixed(0)}G`
               : ""

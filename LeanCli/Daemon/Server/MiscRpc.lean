@@ -202,7 +202,20 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                               ("available", .bool false),
                               ("note",      .str "Aave V3 Pool not deployed on this chain")]
                         | some pool =>
-                            let via? ← verifiedReadVia state chainId.toNat ep
+                            -- Read the WHOLE Aave position over DIRECT RPC, NOT the
+                            -- verified provider. `defi.positions` is render-only (it
+                            -- never signs — see the header note), and helios/colibri
+                            -- mis-compute `VariableDebtToken.balanceOf`: that view is
+                            -- `scaledBalance × normalizedVariableDebt`, whose Pool
+                            -- callback touches reserve-index storage the light client
+                            -- does not resolve, so a real GHO debt collapses to dust
+                            -- while the aToken (supplied) read in the same batch stays
+                            -- correct. The aggregate `getUserAccountData` reads fine
+                            -- verified, but we keep every leg on ONE source at the same
+                            -- block so the headline debt and the per-reserve rows
+                            -- reconcile. ConfirmGate on the actual borrow/repay remains
+                            -- the trust anchor; this dashboard read is not trusted.
+                            let via? : Option LeanCli.RPC.Outbound.VerifyVia := none
                             let calldata := LeanCli.Aave.Read.encodeGetUserAccountData address
                             match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep pool calldata "latest" via? with
                             | .error e =>
@@ -294,7 +307,7 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                                             pure ()
                                           else do
                                             let meta? ← LeanCli.Daemon.TokenMeta.lookupOrFetch
-                                              state cfg.policy ep chainId.toNat asset
+                                              state cfg.policy ep chainId.toNat asset (direct := true)
                                             let (sym, dec) :=
                                               match meta? with
                                               | some m => (m.symbol, m.decimals)

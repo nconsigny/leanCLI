@@ -79,6 +79,16 @@ def ReadBackend.parse? (s : String) : Option ReadBackend :=
 a circular import. -/
 abbrev TokenMetaEntry := Nat × String
 
+/-- Approvals deep-scan progress for one `(chainId, owner)` (see the
+    `approvalScans` field). Pairs are `((contract, counterparty),
+    lastSeenBlock)` — the same shape `Preflight.upsertLatest` maintains. -/
+structure ApprovalScan where
+  scannedFrom : Nat := 0
+  scannedTo : Nat
+  erc20   : List ((String × String) × Nat) := []
+  nft     : List ((String × String) × Nat) := []
+  permit2 : List ((String × String) × Nat) := []
+
 structure DaemonState where
   startedAtMs : Nat
   shuttingDown : Bool := false
@@ -119,6 +129,15 @@ structure DaemonState where
   `heliosRespawn` parity with Colibri; not yet exercised because the
   initial helios surface does not auto-substitute into verified reads. -/
   heliosSocket : Option String := none
+  /-- Dedicated SECOND connection to the same helios sidecar, reserved for
+  long-running `tx.simulate` round-trips and serialized by `simLock`.
+  Keeping simulations off the shared connection means (a) they cannot
+  interleave frames with concurrent `verifyLock`-guarded reads (the wire
+  has no request-id matching — an unlocked round-trip on the shared conn
+  can swap responses), and (b) small metadata/preflight reads no longer
+  queue behind a multi-second REVM simulation. Opened lazily on first
+  use; cleared on transport death / disable / respawn. -/
+  heliosSim : Option LeanCli.Helios.Persistent.Client := none
   /-- Long-running safenode sidecar (TDX-attested ORAM proxy). `none`
   when safenode is off (the default — only spawned when
   `LEANCLI_SAFE_NODE_URL` is set in the env). When present, helios
@@ -148,6 +167,16 @@ structure DaemonState where
   restart. Per-call `chain:` params still win; this only moves the
   default. Read/endpoint plumbing only — no signing impact. -/
   activeChainId : Option Nat := none
+  /-- Per-`(chainId, owner)` approvals deep-scan progress: the head block
+  already swept for Approval / ApprovalForAll / Permit2 logs plus the
+  deduped `(contract, counterparty) → lastSeenBlock` pairs discovered so
+  far, one list per surface. Lets a repeat audit scan ONLY the blocks
+  mined since the last run (an incremental top-up instead of a full
+  from-first-activity chunk walk). Discovery data only — the audit
+  ALWAYS re-reads live allowance state through the verified backend
+  before rendering, so a stale cache can never show a revoked grant.
+  Process-scoped: a daemon restart pays one full rescan. -/
+  approvalScans : List (String × ApprovalScan) := []
   /-- Serializes access to the single-connection verified-read clients
   (helios / colibri `Persistent.call`). The daemon answers TUI polls
   CONCURRENTLY, but each light client holds ONE UDS connection — without
@@ -157,12 +186,29 @@ structure DaemonState where
   `buildHeliosVia` / `buildColibriVia`, so verified reads queue safely
   instead of colliding. -/
   verifyLock : Std.BaseMutex
+  /-- Serializes `tx.simulate` round-trips on the dedicated `heliosSim`
+  connection, exactly as `verifyLock` serializes the shared one. Separate
+  lock so a simulation and a verified read proceed in parallel on their
+  own connections. -/
+  simLock : Std.BaseMutex
 
 abbrev Shared := IO.Ref DaemonState
 
 def new : IO Shared := do
   let verifyLock ← Std.BaseMutex.new
-  IO.mkRef { startedAtMs := ← IO.monoMsNow, verifyLock }
+  let simLock ← Std.BaseMutex.new
+  IO.mkRef { startedAtMs := ← IO.monoMsNow, verifyLock, simLock }
+
+/-- Cached approvals deep-scan progress for `key` (`"{chainId}:{owner}"`,
+    owner lowercased). -/
+def getApprovalScan (state : Shared) (key : String) : IO (Option ApprovalScan) := do
+  pure <| ((← state.get).approvalScans.find? (fun (k, _) => k == key)).map Prod.snd
+
+/-- Insert/overwrite the approvals deep-scan progress for `key`. -/
+def putApprovalScan (state : Shared) (key : String) (scan : ApprovalScan) : IO Unit :=
+  state.modify (fun s =>
+    { s with approvalScans :=
+        (key, scan) :: s.approvalScans.filter (fun (k, _) => k != key) })
 
 /-- Reset the scan-cancellation flag at the start of a new scan. -/
 def beginScan (state : Shared) : IO Unit := do
@@ -342,14 +388,19 @@ def heliosEnable (state : Shared) (socketPath : String) : IO LeanCli.Helios.Pers
       state.modify (fun s => { s with helios := some c, heliosSocket := some socketPath })
       pure c
 
-/-- Tear down the persistent Helios client. Idempotent. -/
+/-- Tear down the persistent Helios client (and the dedicated simulate
+    connection riding on the same sidecar). Idempotent. -/
 def heliosDisable (state : Shared) : IO Unit := do
   let s ← state.get
-  match s.helios with
+  match s.heliosSim with
+  | some c => try LeanCli.Helios.Persistent.close c catch _ => pure ()
   | none => pure ()
+  match s.helios with
+  | none => state.modify (fun s => { s with heliosSim := none })
   | some c =>
       try LeanCli.Helios.Persistent.close c catch _ => pure ()
-      state.modify (fun s => { s with helios := none, heliosSocket := none })
+      state.modify (fun s =>
+        { s with helios := none, heliosSocket := none, heliosSim := none })
 
 /-- Read the current Helios client without spawning. -/
 def heliosClient? (state : Shared) : IO (Option LeanCli.Helios.Persistent.Client) := do
@@ -599,12 +650,17 @@ def heliosRespawn (state : Shared) : IO (Option LeanCli.Helios.Persistent.Client
       match s.helios with
       | some c => try LeanCli.Helios.Persistent.close c catch _ => pure ()
       | none => pure ()
+      -- The dedicated simulate connection died with the old sidecar; drop
+      -- it so the next `heliosSimCall` reconnects to the fresh one.
+      match s.heliosSim with
+      | some c => try LeanCli.Helios.Persistent.close c catch _ => pure ()
+      | none => pure ()
       try
         let c ← LeanCli.Helios.Persistent.start socketPath
-        state.modify (fun s => { s with helios := some c })
+        state.modify (fun s => { s with helios := some c, heliosSim := none })
         pure (some c)
       catch _ =>
-        state.modify (fun s => { s with helios := none })
+        state.modify (fun s => { s with helios := none, heliosSim := none })
         pure none
 
 /-- Cascade a verified read from a dead helios to colibri (the degradation
@@ -654,9 +710,17 @@ def buildHeliosVia (state : Shared) (chainId : Nat) (executionRpc : String) :
           match ← runHeliosOnce client chainId executionRpc method params with
           | .ok j => pure (.ok j)
           | .rpcError m =>
-              -- Helios is alive but can't serve this read (e.g. unverifiable
-              -- `pending`, or a revert) → cascade to colibri, keep helios up.
-              heliosCascadeColibri state chainId method params m false
+              -- A revert is a DETERMINISTIC, consensus-verified outcome —
+              -- helios executed the call and it reverted. Cascading would
+              -- re-execute the same reverting call on colibri and then
+              -- direct (observed as ~30s multi-backend crawls for a 1s
+              -- verified revert). Surface it; cascade only on errors that
+              -- mean "helios couldn't serve this read" (unverifiable
+              -- `pending`, proof failures, unsupported method).
+              if (m.toLower.splitOn "revert").length > 1 then
+                pure (.rpcError m)
+              else
+                heliosCascadeColibri state chainId method params m false
           | .transportDead reason =>
               -- Helios conn dead → respawn the sidecar once and retry (keep
               -- helios alive across transient drops). If it's still dead,
@@ -697,5 +761,59 @@ def buildVerifiedReadVia (state : Shared) (chainId : Nat) (executionRpc : String
       | some v => pure (some v)
       | none   => buildColibriVia state chainId
   | .rpc     => pure none
+
+/-- Run one round-trip on a SHARED single-connection persistent client
+    under `verifyLock`. The daemon handles connections concurrently, and
+    the newline-JSON wire has no request-id matching Lean-side — an
+    unlocked `Persistent.call` on the shared conn interleaves frames with
+    concurrent verified reads (observed as swapped responses, rpc-errors
+    and hangs). Every direct shared-client round-trip outside
+    `buildHeliosVia` / `buildColibriVia` must go through this. -/
+def withVerifyLock {α : Type} (state : Shared) (act : IO α) : IO α := do
+  let lock := (← state.get).verifyLock
+  lock.lock
+  try act finally lock.unlock
+
+/-- One `tx.simulate`-class round-trip on the DEDICATED helios simulate
+    connection, serialized by `simLock` (not `verifyLock` — that's the
+    point: a multi-second REVM simulation proceeds in parallel with the
+    small verified reads on the shared connection instead of queueing
+    against them). Lazily opens the extra connection to the sidecar
+    spawned by `heliosEnable`; the lock covers the connect so two
+    concurrent simulations can't double-connect. Returns `none` when
+    helios is down, the extra connection can't be opened, or the wire
+    dies mid-call (the cached conn is dropped for reconnect) — callers
+    fall back to the shared connection under `withVerifyLock`, whose
+    respawn tier owns sidecar recovery. -/
+def heliosSimCall (state : Shared) (method : String)
+    (params : LeanCli.Encoding.Json.Json) :
+    IO (Option LeanCli.Helios.Persistent.Response) := do
+  let lock := (← state.get).simLock
+  lock.lock
+  try
+    let client? ← do
+      let s ← state.get
+      match s.heliosSim with
+      | some c => pure (some c)
+      | none =>
+          match s.helios, s.heliosSocket with
+          | some _, some socketPath =>
+              try
+                let c ← LeanCli.Helios.Persistent.connectExisting socketPath
+                state.modify (fun st => { st with heliosSim := some c })
+                pure (some c)
+              catch _ => pure none
+          | _, _ => pure none
+    match client? with
+    | none => pure none
+    | some c =>
+        match ← LeanCli.Helios.Persistent.call c method params with
+        | .transportCrash _ =>
+            try LeanCli.Helios.Persistent.close c catch _ => pure ()
+            state.modify (fun st => { st with heliosSim := none })
+            pure none
+        | resp => pure (some resp)
+  finally
+    lock.unlock
 
 end LeanCli.Daemon.State

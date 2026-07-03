@@ -430,7 +430,7 @@ pinned-and-lazy plugin load model.
 | `helios` | `Helios/{Bridge,Persistent}.lean` | `@a16z/helios` light client + REVM; consensus-verified state | sim outcomes used as confirmation UI | calldata bytes / signing |
 | `colibri` | `Colibri/{Bridge,Persistent}.lean` | Colibri stateless light client (WASM EVM + committee proofs) | sim outcomes used as confirmation UI | calldata bytes / signing |
 | `rpc` | `RPC/Outbound.lean` | Direct configured RPC endpoint | sim outcomes used as confirmation UI | calldata bytes / signing |
-| `safenode` | `SafeNode/Persistent.lean` (+ helios) | Helios behind a TDX-attested ORAM proxy (`LEANCLI_SAFE_NODE_URL`) | sim outcomes used as confirmation UI | calldata bytes / signing |
+| `safenode` | `SafeNode/Persistent.lean` (+ helios) | Helios behind a TEE-attested ORAM proxy (`LEANCLI_SAFE_NODE_URL`; GCP Confidential Space or Phala TDX attestation) | sim outcomes used as confirmation UI | calldata bytes / signing |
 
 **Privacy plugins** (shielded flows, multi-select via `LEANCLI_PRIVACY`,
 default none) + the other sidecars:
