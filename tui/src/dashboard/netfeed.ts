@@ -140,30 +140,47 @@ export function useNetFeed(logPath: string | null | undefined): NetFeed {
     }
     childRef.current = child;
     child.stdout.setEncoding("utf8");
+    // Debounced flush: a chatty egress stream (helios light-client sync
+    // emits many lines per second) must not repaint the dashboard once
+    // per tail chunk — every setState here re-renders the WHOLE Ink
+    // frame. Buffer parsed events and flush at most every FLUSH_MS; a
+    // sub-half-second delay is invisible on a log feed, while the
+    // repaint rate drops from per-event to a bounded cadence.
+    const FLUSH_MS = 400;
+    let pending: NetLogEvent[] = [];
+    let flushTimer: NodeJS.Timeout | null = null;
+    const flush = () => {
+      flushTimer = null;
+      if (pending.length === 0) return;
+      const fresh = pending;
+      pending = [];
+      setStats((s) => foldEvents(s, fresh));
+      setRecent((prev) => {
+        const merged = prev.concat(fresh);
+        return merged.length > RECENT_CAP ? merged.slice(merged.length - RECENT_CAP) : merged;
+      });
+    };
     child.stdout.on("data", (chunk: string) => {
       buffer += chunk;
       let nl;
-      const fresh: NetLogEvent[] = [];
       while ((nl = buffer.indexOf("\n")) !== -1) {
         const line = buffer.slice(0, nl).trim();
         buffer = buffer.slice(nl + 1);
         if (!line) continue;
         try {
           const parsed = JSON.parse(line);
-          if (parsed && typeof parsed === "object") fresh.push(parsed as NetLogEvent);
+          if (parsed && typeof parsed === "object") pending.push(parsed as NetLogEvent);
         } catch {
           // partial/garbled line — skip
         }
       }
-      if (fresh.length === 0) return;
-      setStats((s) => foldEvents(s, fresh));
-      setRecent((prev) => {
-        const merged = prev.concat(fresh);
-        return merged.length > RECENT_CAP ? merged.slice(merged.length - RECENT_CAP) : merged;
-      });
+      if (pending.length > 0 && flushTimer === null) {
+        flushTimer = setTimeout(flush, FLUSH_MS);
+      }
     });
     child.on("error", (err) => setError(`tail error: ${err.message}`));
     return () => {
+      if (flushTimer !== null) clearTimeout(flushTimer);
       try {
         child.kill("SIGTERM");
       } catch {}

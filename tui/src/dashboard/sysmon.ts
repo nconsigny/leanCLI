@@ -322,7 +322,7 @@ export function useSystemStats(intervalMs: number): SystemStats {
       } catch {
         load1 = null;
       }
-      setStats({
+      const next: SystemStats = {
         cpuPct,
         load1,
         cores: CORE_COUNT,
@@ -331,7 +331,22 @@ export function useSystemStats(intervalMs: number): SystemStats {
         gpus: gpuRef.current,
         gpuError: gpuErrRef.current,
         llamaCpuPct,
-      });
+      };
+      // Keep the previous object identity when nothing changed so React
+      // skips the re-render (every dashboard state change repaints the
+      // whole Ink frame). gpus is compared by reference: gpuRef only
+      // gets a new array on the slow GPU sub-cadence.
+      setStats((prev) =>
+        prev.cpuPct === next.cpuPct &&
+        prev.load1 === next.load1 &&
+        prev.memUsedKb === next.memUsedKb &&
+        prev.memTotalKb === next.memTotalKb &&
+        prev.gpus === next.gpus &&
+        prev.gpuError === next.gpuError &&
+        prev.llamaCpuPct === next.llamaCpuPct
+          ? prev
+          : next,
+      );
     },
     intervalMs,
     [],
