@@ -429,6 +429,23 @@ def getCode (policy : Policy) (endpoint : Endpoint)
     (via? : Option VerifyVia := none) : IO (Except String Json) :=
   call policy endpoint .getCode (.arr #[.str address, .str block]) via?
 
+/-- `eth_getProof(address, slots, block)` — Merkle-Patricia account +
+    storage proofs. Deliberately fetched over the DIRECT configured RPC
+    (`via? := none` at call sites): the proof is verified in Lean against
+    a consensus-verified state root, so the serving RPC is untrusted by
+    construction — it can withhold, but not lie. -/
+def getProof (policy : Policy) (endpoint : Endpoint)
+    (address : String) (slots : Array Json) (block : String)
+    (via? : Option VerifyVia := none) : IO (Except String Json) :=
+  call policy endpoint .getProof (.arr #[.str address, .arr slots, .str block]) via?
+
+/-- `eth_getBlockByNumber(block, fullTxs)`. Used by the StateVault head
+    capture fallback when no light client is running (tier `rpc`). -/
+def getBlockByNumber (policy : Policy) (endpoint : Endpoint)
+    (block : String) (fullTxs : Bool := false)
+    (via? : Option VerifyVia := none) : IO (Except String Json) :=
+  call policy endpoint .getBlockByNumber (.arr #[.str block, .bool fullTxs]) via?
+
 def sendRawTransaction (policy : Policy) (endpoint : Endpoint)
     (rawTx : String) : IO (Except String Json) :=
   -- Writes never proofable; never accepts via?.

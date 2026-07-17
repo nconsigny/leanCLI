@@ -131,6 +131,18 @@ lean_exe agent_session_test where
   supportInterpreter := true
 
 /--
+StateVault + MPT verifier smoke test: SQLite roundtrip (schema, tier
+no-downgrade), RLP decoder roundtrips/canonicality, and self-consistent
+Merkle-Patricia proof fixtures (keccak via the HACL helper; that section
+SKIPs when native helpers are not built). Build with
+`lake build vault_test`, run `.lake/build/bin/vault_test` — exits
+non-zero on any regression. `ops/tests/vault_smoke.sh` wraps it.
+-/
+lean_exe vault_test where
+  root := `LeanCli.App.VaultTestMain
+  supportInterpreter := true
+
+/--
 Long-running persistent agent daemon (Phase 1a). Listens on
 `$XDG_RUNTIME_DIR/leancli/agent.sock` and serves session-scoped
 chat turns backed by `LeanCli/Agent/Session.lean`. Mode resolution

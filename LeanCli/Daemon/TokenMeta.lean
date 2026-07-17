@@ -82,22 +82,45 @@ def decodeSymbolReturn (hex : String) : Option String := do
         |>.toByteArray
       String.fromUTF8? trimmed
 
-/-- Cache lookup. Returns `none` if not yet fetched. -/
-def lookup (state : LeanCli.Daemon.State.Shared) (chainId : Nat) (address : String) :
-    IO (Option TokenMeta) := do
-  let key := metaKey chainId address
-  let s ← state.get
-  pure <| (s.tokenMeta.find? (fun (k, _) => k == key)).map
-    (fun (_, (d, sym)) => { decimals := d, symbol := sym })
-
-/-- Insert/overwrite a cache entry. -/
-def setMeta (state : LeanCli.Daemon.State.Shared) (chainId : Nat) (address : String)
-    (m : TokenMeta) : IO Unit := do
+/-- In-memory-only insert (no vault write). Used to hydrate the process
+    cache from a vault hit without re-recording provenance. -/
+private def setMetaMemory (state : LeanCli.Daemon.State.Shared) (chainId : Nat)
+    (address : String) (m : TokenMeta) : IO Unit := do
   let key := metaKey chainId address
   let entry : LeanCli.Daemon.State.TokenMetaEntry := (m.decimals, m.symbol)
   state.modify (fun s =>
     let filtered := s.tokenMeta.filter (fun (k, _) => k != key)
     { s with tokenMeta := filtered ++ [(key, entry)] })
+
+/-- Cache lookup: process memory first, then the persistent StateVault
+    (hydrating memory on a vault hit so the disk read is paid once per
+    daemon lifetime). Returns `none` if never fetched. -/
+def lookup (state : LeanCli.Daemon.State.Shared) (chainId : Nat) (address : String) :
+    IO (Option TokenMeta) := do
+  let key := metaKey chainId address
+  let s ← state.get
+  match (s.tokenMeta.find? (fun (k, _) => k == key)).map
+      (fun (_, (d, sym)) => ({ decimals := d, symbol := sym } : TokenMeta)) with
+  | some m => pure (some m)
+  | none =>
+      match ← LeanCli.Daemon.State.withVault state
+          (fun h => LeanCli.Daemon.StateVault.getTokenMeta h chainId address) with
+      | some (some (d, sym, _tier)) =>
+          let m : TokenMeta := { decimals := d, symbol := sym }
+          setMetaMemory state chainId address m
+          pure (some m)
+      | _ => pure none
+
+/-- Insert/overwrite a cache entry, recording provenance in the vault.
+    `tier` is the trust tier of the read that produced `m` (see
+    `StateVault.tierOfVia`); the vault applies its no-downgrade rule. -/
+def setMeta (state : LeanCli.Daemon.State.Shared) (chainId : Nat) (address : String)
+    (m : TokenMeta) (tier : LeanCli.Daemon.StateVault.Tier) : IO Unit := do
+  setMetaMemory state chainId address m
+  let _ ← LeanCli.Daemon.State.withVault state
+    (fun h => LeanCli.Daemon.StateVault.putTokenMeta h chainId address
+      m.decimals m.symbol tier)
+  pure ()
 
 /-- Fetch decimals + symbol for `address` via `eth_call`, cache, return.
     On any failure (RPC error, decode failure, policy denial) returns `none`
@@ -127,17 +150,27 @@ def fetchAndCache
       match decodeDecimalsReturn decHex, decodeSymbolReturn symHex with
       | some decimals, some symbol =>
           let m : TokenMeta := { decimals, symbol }
-          setMeta state chainId address m
+          setMeta state chainId address m (LeanCli.Daemon.StateVault.tierOfVia via?)
           pure (some m)
       | _, _ => pure none
   | _, _ => pure none
 
 /-- Negative-cache lookup: has `address` already been observed to have no
-    contract code on `chainId`? -/
+    contract code on `chainId`? Memory first, then the vault (hydrating
+    memory on a hit). -/
 def isKnownNoCode (state : LeanCli.Daemon.State.Shared) (chainId : Nat)
     (address : String) : IO Bool := do
   let key := metaKey chainId address
-  pure <| (← state.get).noCodeAddrs.contains key
+  if (← state.get).noCodeAddrs.contains key then
+    return true
+  match ← LeanCli.Daemon.State.withVault state
+      (fun h => LeanCli.Daemon.StateVault.isNoCode h chainId address) with
+  | some true =>
+      state.modify (fun s =>
+        if s.noCodeAddrs.contains key then s
+        else { s with noCodeAddrs := key :: s.noCodeAddrs })
+      pure true
+  | _ => pure false
 
 /-- Record that `address` has no contract code, so future decodes skip it. -/
 def markNoCode (state : LeanCli.Daemon.State.Shared) (chainId : Nat)
@@ -146,6 +179,9 @@ def markNoCode (state : LeanCli.Daemon.State.Shared) (chainId : Nat)
   state.modify (fun s =>
     if s.noCodeAddrs.contains key then s
     else { s with noCodeAddrs := key :: s.noCodeAddrs })
+  let _ ← LeanCli.Daemon.State.withVault state
+    (fun h => LeanCli.Daemon.StateVault.putNoCode h chainId address)
+  pure ()
 
 /-- Batched cache-or-fetch for *speculative* candidates (addresses scanned
     out of calldata by `scanCalldataAddresses`, many of which are misaligned
@@ -212,7 +248,7 @@ def lookupOrFetchBatch
                       (if symOk then decodeSymbolReturn symHex else none) with
                 | some d, some s =>
                     let m : TokenMeta := { decimals := d, symbol := s }
-                    setMeta state chainId addr m
+                    setMeta state chainId addr m (LeanCli.Daemon.StateVault.tierOfVia via?)
                     out := out.push (addr, some m)
                 | _, _ =>
                     -- Reverted or non-ERC-20 shaped: known non-token.

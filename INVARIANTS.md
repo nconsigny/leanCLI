@@ -812,6 +812,87 @@ compromised helper defeats every higher-level invariant.
 
 ---
 
+## Category 16 — StateVault provenance (partial state node)
+
+The StateVault (`LeanCli/Daemon/StateVault.lean`, served by the
+`vault.*` RPC family) persists chain state the wallet has touched —
+token metadata, contract code, verified block headers/state roots,
+account balances/nonces, storage slots — so repeated reads stop
+depending on third parties. Every row carries a provenance `Tier`:
+`rpcUnverified` < `consensusVerified` (light-client-served) <
+`leanProven` (Merkle-Patricia proof verified in Lean —
+`LeanCli/Ethereum/Mpt.lean` — against a consensus-verified state root).
+
+### 16.1 Provenance classification is honest
+
+A direct read can only ever be recorded as `rpcUnverified`; a
+light-client read as `consensusVerified`; no network read can claim
+`leanProven` — that tier is reachable only through the MPT pin path,
+and a pin against an unverified root stays `rpcUnverified` (internal
+consistency is not trust).
+
+**Props:**
+- `tierOfVia none = .rpcUnverified`, `tierOfVia (some v) = .consensusVerified`, `tierOfVia o ≠ .leanProven`
+- `pinTier .rpcUnverified = .rpcUnverified`; `pinTier` monotone in the root tier
+
+**Status:** ✅ proved — `LeanCli/Invariants/StateVault.lean::tierOfVia_none_unverified`, `::tierOfVia_some_consensus`, `::tierOfVia_never_leanProven`, `::pinTier_unverified_root`, `::pinTier_verified_root`, `::pinTier_monotone`
+
+### 16.2 No-downgrade replacement
+
+An immutable row (token metadata, code) is overwritten only by an
+observation of at least its stored tier, and the on-disk tier tag is
+fail-safe downward: only the exact tags `"consensus"`/`"lean"` parse
+back to elevated tiers — a corrupt or unknown tag reads as
+`rpcUnverified`. `Tier.le` is a total order.
+
+**Props:**
+- `shouldReplace stored incoming = true ↔ stored.le incoming`
+- `shouldReplace .leanProven incoming → incoming = .leanProven`
+- `Tier.ofString t.asString = t`; `Tier.ofString s = .consensusVerified → s = "consensus"` (same for `"lean"`)
+
+**Status:** ✅ proved — `LeanCli/Invariants/StateVault.lean::shouldReplace_iff_le`, `::leanProven_only_replaced_by_leanProven`, `::tier_tag_roundtrip`, `::ofString_consensus_only`, `::ofString_leanProven_only`, `::tier_le_{refl,trans,antisymm,total}`
+
+### 16.3 Staleness honesty is structural
+
+Mutable state (accounts, storage) is keyed by the block it was proven
+at, and every JSON the daemon serves for it carries that block number
+and its tier — there is no render path that presents vault state as
+head state (`vault.get` additionally stamps `"stale": true`).
+
+**Props:**
+- `getField "block" e.toJson = some (.num e.blockNumber)` and `getField "tier" e.toJson = some (.str e.tier.asString)` for `AccountEntry`, `StorageEntry`, `HeaderEntry`
+
+**Status:** ✅ proved — `LeanCli/Invariants/StateVault.lean::{account,storage,header}Entry_json_has_{block,tier}`
+
+### 16.4 MPT proof-verifier soundness
+
+If `Mpt.verify root keyHash proof = .ok r` then, assuming keccak-256
+collision resistance (Cat 13 boundary) and that each supplied
+`(node, hash)` pair satisfies `hash = keccak(node)`, `r = some v`
+implies the trie rooted at `root` binds `keyHash` to `v`, and
+`r = none` implies it binds `keyHash` to nothing. (Verification errors
+prove nothing and are treated by every caller exactly like a failed
+network read.)
+
+**Status:** 📝 stated — requires a formal MPT semantics; the verifier
+is exercised operationally by `vault_test` fixtures and validated
+against live mainnet `eth_getProof` responses.
+
+### 16.5 Signing independence (structural, import-graph)
+
+Nothing read from the vault gates a signature. The pre-sign pipeline
+(`tx.decodeIntent → tx.simulate → ConfirmGate → eoa.send /
+sphincs.account.send`) reads fresh state through the selected provider
+exactly as before; the vault is a display/offline/prefetch tier. Like
+5.3, this is enforced by the import graph: no signing or key-material
+module imports `Daemon.StateVault`, and `Daemon.StateVault` imports
+only `Encoding.Json` plus its private SQLite shim.
+
+**Status:** 🔒 structural (import-graph argument, reviewed at the
+module boundary like 5.3)
+
+---
+
 ## How we extend this file
 
 1. New invariant idea arises during implementation or review.

@@ -1779,6 +1779,31 @@ def run (args : List String) : IO UInt32 := do
       eoaSignTx name txJson path? accountIdx?
   | .walletSignTypedData name json path? =>
       eoaSignTypedData name json path? accountIdx?
+  | .vaultStatus =>
+      DaemonClient.printCall "vault.status"
+  | .vaultHead chain? =>
+      DaemonClient.printCall "vault.captureHead"
+        (match chain? with
+         | some c => .obj #[("chain", .str c)]
+         | none => .obj #[])
+  | .vaultPin address slots =>
+      let fields : Array (String × LeanCli.Encoding.Json.Json) :=
+        #[("address", .str address)] ++
+        (if slots.isEmpty then #[]
+         else #[("slots", .arr (slots.toArray.map LeanCli.Encoding.Json.Json.str))])
+      DaemonClient.printCall "vault.pin" (.obj fields)
+  | .vaultGet address chain? =>
+      let fields : Array (String × LeanCli.Encoding.Json.Json) :=
+        #[("address", .str address)] ++
+        (match chain? with
+         | some c => #[("chain", .str c)]
+         | none => #[])
+      DaemonClient.printCall "vault.get" (.obj fields)
+  | .vaultTokens chain? =>
+      DaemonClient.printCall "vault.tokens"
+        (match chain? with
+         | some c => .obj #[("chain", .str c)]
+         | none => .obj #[])
   | .networkShow =>
       IO.println (← NetworkConfig.humanReport)
       return 0

@@ -258,6 +258,11 @@ inductive Command where
   | networkUnsetRpcChain (chain : String)
   | networkSetChain (chain : String)
   | networkMonitor
+  | vaultStatus
+  | vaultHead (chain? : Option String)
+  | vaultPin (address : String) (slots : List String)
+  | vaultGet (address : String) (chain? : Option String)
+  | vaultTokens (chain? : Option String)
   | doctor
   | policyCheck (policy peer purpose transport : String)
   | rpcCheck (policy backend transport method : String)
@@ -630,6 +635,15 @@ def parse : List String → Command
   | ["network", "unset-rpc-chain", chain]               => .networkUnsetRpcChain chain
   | ["network", "set-chain", chain]                     => .networkSetChain chain
   | ["network", "monitor"]                 => .networkMonitor
+  | ["vault"]                              => .vaultStatus
+  | ["vault", "status"]                    => .vaultStatus
+  | ["vault", "head"]                      => .vaultHead none
+  | ["vault", "head", chain]               => .vaultHead (some chain)
+  | ["vault", "get", addr]                 => .vaultGet addr none
+  | ["vault", "get", addr, chain]          => .vaultGet addr (some chain)
+  | ["vault", "tokens"]                    => .vaultTokens none
+  | ["vault", "tokens", chain]             => .vaultTokens (some chain)
+  | "vault" :: "pin" :: addr :: rest       => .vaultPin addr rest
   | ["doctor"]            => .doctor
   | ["daemon", "help"] => .daemonHelp none
   | ["daemon", "ping"] => .daemonPing
@@ -1109,6 +1123,14 @@ def helpText : String :=
      network unset-rpc-chain <chain>\n\
      network set-chain <chain>          Set the daemon's default chain (name or numeric id).\n\
      network monitor\n\n\
+   STATE VAULT (partial state node):\n\
+     vault [status]                      Row counts + DB path of the local state vault.\n\
+     vault head [chain]                  Pin the current verified head (block + stateRoot).\n\
+     vault pin <addr> [slot ...]         Prove account (+ slots) via eth_getProof, verified\n\
+                                         in Lean against the pinned state root; store at\n\
+                                         that exact block (tier: lean).\n\
+     vault get <addr> [chain]            Serve stored state, explicitly \"as of block N\".\n\
+     vault tokens [chain]                Stored token metadata + provenance tier.\n\n\
    DAEMON / DOCS:\n\
      daemon                              Start the daemon (foreground or via systemd).\n\
      daemon start | stop | restart       Lifecycle control (systemd-aware when installed).\n\

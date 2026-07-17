@@ -30,6 +30,7 @@ Artifacts land in `.lake/build/bin/`. The `lean_exe` targets in `lakefile.lean`:
 | `leancli-railgun-snapshot` | — | Railgun on-disk snapshot maintenance helper. |
 | `leancli-sphincs-test` | — | SPHINCS+ shim roundtrip test. |
 | `agent_session_test` | — | SQLite session-store smoke test (Phase 1a prereq). |
+| `vault_test` | — | StateVault + RLP decoder + MPT proof-verifier smoke test. |
 
 Build a single module while iterating on proofs: `lake build LeanCli.Invariants.Wallet`.
 
@@ -43,7 +44,7 @@ Four layers; dependency flows downward. `Invariants/` is the spec root.
 
 1. **Primitives** — `LeanCli/Crypto/` (Hex, Secp256k1 scaffolding, Hacl FFI). Pure, no IO.
 2. **Domain** — `LeanCli/Ethereum/`, `LeanCli/Wallet/`, `LeanCli/Keystore/`, `LeanCli/Contract/`, `LeanCli/Sphincs/` (post-quantum hybrid 4337 userOp). Runtime TPM2 integration (master-KEK custody, not an account kind) is isolated in `Keystore/Tpm2Runtime.lean`. Privacy / Clearsign / Helios / Colibri / SafeNode / LlmAgent sidecar wrappers live here too (one Lean module per sidecar boundary).
-3. **Surfaces** — `LeanCli/RPC/`, `LeanCli/Daemon/`, `LeanCli/Cli/`, executable roots under `LeanCli/App/`. Wallet daemon serves the CLI/TUI; the agent daemon (below) is a sibling surface.
+3. **Surfaces** — `LeanCli/RPC/`, `LeanCli/Daemon/`, `LeanCli/Cli/`, executable roots under `LeanCli/App/`. Wallet daemon serves the CLI/TUI; the agent daemon (below) is a sibling surface. Includes the **StateVault** partial state node (`Daemon/StateVault.lean` + `Server/VaultRpc.lean` + `Ethereum/Mpt.lean`): a persistent, provenance-tagged store of chain state the wallet touches (token meta, code, verified headers/state roots, proven accounts/slots), served via `vault.*` RPCs / `leancli vault …`. Tiers `rpc < consensus < lean`, where `lean` = an `eth_getProof` MPT proof verified in Lean against a consensus-verified state root. Display/offline tier only — never a signing input. See [`docs/PARTIAL_STATE.md`](docs/PARTIAL_STATE.md); invariants are Cat 16.
 4. **Agent** — `LeanCli/Agent/` (Loop, Registry, Persona, Prompt, Tools, ToolDefs/, Llm OpenAI-compatible client, Http, Session, Skills, Memory, MemoryPrompts, Compression, DaemonClient). Hosts the LLM loop; talks to the wallet daemon over UDS for chain reads, never for signing decisions.
 
 `LeanCli.lean` re-exports the lib so downstream code writes `import LeanCli`.
@@ -162,7 +163,7 @@ Loopback FFI for capabilities Lean can't do directly. Wallet logic stays FFI-fre
 3. Real proof before merge; no `sorry` lands.
 4. Flip to ✅ with the theorem name + module path.
 
-Currently proved (✅): Cat 0 verified-core (`no_key_exfiltration`, `no_silent_7702_delegation`, the `verified_*`/`signEOA_*` family in `Invariants/Core.lean`); **1.1** (`subChecked_preserves_total`) and **1.2** (`apply_some_affordable`, `apply_sender_debited`, `apply_non_sender_balance`); account policy (4.3), JSON destructors (4.4); the bridge policy-classification + runtime gate (**5.7** — `gateDecision_denied_when_policy_denies`, `callGated_denied_when_policy_denies`, `callGated_allowed_proceeds` in `Invariants/Bridge.lean`) and 5.8–5.11; network/provider policy (Cat 6/7); keystore (Cat 8, EOA + SPHINCS hybrid, no R1); swap (Cat 11); SPHINCS hybrid account (Cat 12); LLM address resolution (Cat 14). **2.1**/**2.3** are `wellFormed`-by-definition in `Invariants/TxWellFormed.lean`. Cat 13 is 🔒 axiomatized crypto. The R1/P-256 account path and its invariants (former Cat 9/10, 8.4, 3.3) were removed — EOA + SPHINCS hybrid remain.
+Currently proved (✅): Cat 0 verified-core (`no_key_exfiltration`, `no_silent_7702_delegation`, the `verified_*`/`signEOA_*` family in `Invariants/Core.lean`); **1.1** (`subChecked_preserves_total`) and **1.2** (`apply_some_affordable`, `apply_sender_debited`, `apply_non_sender_balance`); account policy (4.3), JSON destructors (4.4); the bridge policy-classification + runtime gate (**5.7** — `gateDecision_denied_when_policy_denies`, `callGated_denied_when_policy_denies`, `callGated_allowed_proceeds` in `Invariants/Bridge.lean`) and 5.8–5.11; network/provider policy (Cat 6/7); keystore (Cat 8, EOA + SPHINCS hybrid, no R1); swap (Cat 11); SPHINCS hybrid account (Cat 12); LLM address resolution (Cat 14); StateVault provenance 16.1–16.3 (16.4 MPT soundness 📝 stated, 16.5 structural). **2.1**/**2.3** are `wellFormed`-by-definition in `Invariants/TxWellFormed.lean`. Cat 13 is 🔒 axiomatized crypto. The R1/P-256 account path and its invariants (former Cat 9/10, 8.4, 3.3) were removed — EOA + SPHINCS hybrid remain.
 
 The `Invariants/Wallet.lean` abstract wallet is deliberately thin (`AccountId : String`, balances `Nat`, no crypto). Operational types in `LeanCli/Wallet/` and `LeanCli/Ethereum/` will refine these later. Keep the separation: the abstract model exists to make proofs tractable.
 

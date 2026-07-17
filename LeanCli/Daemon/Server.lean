@@ -15,6 +15,7 @@ import LeanCli.Daemon.Server.ChainRpc
 import LeanCli.Daemon.Server.ShieldedRpc
 import LeanCli.Daemon.Server.EoaRpc
 import LeanCli.Daemon.Server.DaemonRpc
+import LeanCli.Daemon.Server.VaultRpc
 import LeanCli.Daemon.AddressBook
 import LeanCli.Daemon.LlmServer
 import LeanCli.Daemon.Log
@@ -135,6 +136,8 @@ def methodHandler (cfg : Config) (state : LeanCli.Daemon.State.Shared)
     return ← ChainRpc.dispatch cfg state notify req
   if req.method.startsWith "shielded." then
     return ← ShieldedRpc.dispatch cfg state notify req
+  if req.method.startsWith "vault." then
+    return ← VaultRpc.dispatch cfg state notify req
   if req.method.startsWith "eoa." then
     return ← EoaRpc.dispatch cfg state notify req
   -- Light-client / read-backend controls (`daemon.helios.*`,
@@ -297,6 +300,23 @@ def run (cfg : Config) : IO Unit := do
         LeanCli.Daemon.Uds.bind cfg.socketPath
   let state ← LeanCli.Daemon.State.new
   IO.eprintln s!"leancli-daemon: listening on {cfg.socketPath}"
+  -- Partial-state vault (`statevault.db`): persistent provenance-tagged
+  -- store of chain state this wallet has touched. Best-effort — a failed
+  -- open logs and leaves the vault off; every read path behaves exactly
+  -- as before. `LEANCLI_VAULT=0` disables persistence entirely.
+  let vaultOff :=
+    match ← IO.getEnv "LEANCLI_VAULT" with
+    | some "0" | some "off" | some "false" | some "no" => true
+    | _ => false
+  if vaultOff then
+    IO.eprintln "leancli-daemon: statevault disabled (LEANCLI_VAULT=0)"
+  else
+    try
+      let h ← LeanCli.Daemon.StateVault.openDefault
+      LeanCli.Daemon.State.setVault state h
+      IO.eprintln s!"leancli-daemon: statevault at {← LeanCli.Daemon.StateVault.defaultPath}"
+    catch e =>
+      IO.eprintln s!"leancli-daemon: statevault unavailable ({e.toString}); continuing without it"
   -- Provider selection — SINGLE-SELECT (CLAUDE.md: helios/colibri are
   -- mutually exclusive). We resolve the active read backend FIRST, then
   -- auto-start ONLY that provider's light client. This is the fix for the
