@@ -21,6 +21,37 @@ const ALT_ENTER = "\x1B[?1049h\x1B[H";
 const ALT_LEAVE = "\x1B[?1049l";
 process.stdout.write(ALT_ENTER);
 
+// Synchronized output (DEC private mode 2026). Ink repaints a frame as
+// erase-previous-lines + rewrite, and on a full-viewport dashboard the
+// terminal is free to paint mid-rewrite — the bottom rows sit blank the
+// longest, which reads as flicker in the lower half of the screen.
+// Bracketing every write in BSU/ESU tells the terminal to composite the
+// whole update atomically. Terminals without 2026 support (it's a
+// private mode) ignore the sequences, so this is safe to emit
+// unconditionally. Ink only sees the proxied stream via its `stdout`
+// option; our own ALT_ENTER/ALT_LEAVE writes above bypass it on purpose.
+const BSU = "\x1B[?2026h";
+const ESU = "\x1B[?2026l";
+const syncStdout = new Proxy(process.stdout, {
+  get(target, prop) {
+    if (prop === "write") {
+      return (
+        chunk: string | Uint8Array,
+        ...rest: unknown[]
+      ): boolean =>
+        typeof chunk === "string"
+          ? (target.write as (...a: unknown[]) => boolean)(BSU + chunk + ESU, ...rest)
+          : (target.write as (...a: unknown[]) => boolean)(chunk, ...rest);
+    }
+    // Read with the real stream as receiver so internal-slot getters
+    // (columns/rows) don't observe the proxy as `this`.
+    const value = Reflect.get(target, prop, target);
+    // EventEmitter methods (on/off/…) and write-adjacent helpers must run
+    // with the real stream as `this`.
+    return typeof value === "function" ? value.bind(target) : value;
+  },
+});
+
 const restore = () => {
   try { process.stdout.write(ALT_LEAVE); } catch {}
 };
@@ -37,4 +68,4 @@ process.on("uncaughtException", (e) => {
   process.exit(1);
 });
 
-render(<App />);
+render(<App />, { stdout: syncStdout });
