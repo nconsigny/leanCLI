@@ -454,22 +454,27 @@ def prepareSupply
         pure <| attachAllowance action current amount
           ctx.assetAddr ctx.pool chainId summary
 
-/-- Native ETH supply for smart accounts: wrap ETH to WETH, optionally
-    approve the Pool, then supply WETH, all inside one atomic
-    `executeBatch` targeted at the smart account. Plain EOAs should wrap
-    first and then call `prepareSupply` with `asset = "WETH"` because
-    this `PrepareResult` shape intentionally returns one signing frame. -/
-def prepareNativeEthSupplySmart
+/-- Raw legs for a native-ETH smart-account supply: `WETH.deposit`
+    (carrying the ETH value), an optional `WETH.approve(Pool, max)`, and
+    `Pool.supply` — WITHOUT the `executeBatch` collapse. Callers that
+    compose several actions into one batch (the two-leg `chat.draft`
+    path) must splice these legs directly: the account contract's
+    `executeBatch` entry is EntryPoint-only, so a pre-collapsed frame
+    nested as a batch leg would self-call it with
+    `msg.sender == address(this)` and revert the whole batch on-chain.
+    The error branch is always a `PrepareResult.err`. -/
+def prepareNativeEthSupplySmartLegs
     (chainId : Nat) (sender onBehalfOf : String) (amount : Nat)
-    (shim : ChainEthCallShim) : IO PrepareResult := do
+    (shim : ChainEthCallShim) :
+    IO (Except PrepareResult (List TxFrame × String)) := do
   match resolveContext chainId sender onBehalfOf "WETH" with
-  | .error r => pure r
+  | .error r => pure (.error r)
   | .ok ctx =>
     match ← ensureReserveSupported shim chainId ctx with
-    | .error r => pure r
+    | .error r => pure (.error r)
     | .ok () =>
       match ← readAllowance shim chainId ctx.assetAddr sender ctx.pool with
-      | .error r => pure r
+      | .error r => pure (.error r)
       | .ok current =>
         let wrap : TxFrame :=
           { to := ctx.assetAddr, value := amount, data := encodeWethDeposit,
@@ -489,13 +494,6 @@ def prepareNativeEthSupplySmart
         let frames := match approve? with
           | some approve => [wrap, approve, supply]
           | none         => [wrap, supply]
-        let calls : List LeanCli.Wallet.ExecuteBatch.Call :=
-          frames.map (fun f =>
-            { target := f.to, value := f.value, data := f.data })
-        let totalValue := frames.foldl (fun acc f => acc + f.value) 0
-        let batched : TxFrame :=
-          { to := sender, value := totalValue,
-            data := encodeExecuteBatch calls, chainId := chainId }
         let amountStr := fmtAmount amount 18
         let onBehalfNote :=
           if onBehalfOf.toLower = sender.toLower then ""
@@ -503,8 +501,31 @@ def prepareNativeEthSupplySmart
         let approvalNote :=
           if approve?.isSome then " with WETH approval" else ""
         let summary :=
-          s!"Aave V3 wrap and supply {amountStr} ETH as WETH → Pool{onBehalfNote}{approvalNote} [batched via executeBatch on SPHINCS- hybrid account]"
-        pure (.ready batched summary)
+          s!"Aave V3 wrap and supply {amountStr} ETH as WETH → Pool{onBehalfNote}{approvalNote}"
+        pure (.ok (frames, summary))
+
+/-- Native ETH supply for smart accounts: wrap ETH to WETH, optionally
+    approve the Pool, then supply WETH, all inside one atomic
+    `executeBatch` targeted at the smart account. Plain EOAs should wrap
+    first and then call `prepareSupply` with `asset = "WETH"` because
+    this `PrepareResult` shape intentionally returns one signing frame.
+    This frame must be the UserOp callData itself, never a leg of an
+    outer batch — use `prepareNativeEthSupplySmartLegs` for that. -/
+def prepareNativeEthSupplySmart
+    (chainId : Nat) (sender onBehalfOf : String) (amount : Nat)
+    (shim : ChainEthCallShim) : IO PrepareResult := do
+  match ← prepareNativeEthSupplySmartLegs chainId sender onBehalfOf amount shim with
+  | .error r => pure r
+  | .ok (frames, summary) =>
+      let calls : List LeanCli.Wallet.ExecuteBatch.Call :=
+        frames.map (fun f =>
+          { target := f.to, value := f.value, data := f.data })
+      let totalValue := frames.foldl (fun acc f => acc + f.value) 0
+      let batched : TxFrame :=
+        { to := sender, value := totalValue,
+          data := encodeExecuteBatch calls, chainId := chainId }
+      pure (.ready batched
+        (summary ++ " [batched via executeBatch on SPHINCS- hybrid account]"))
 
 /-! ## Action: withdraw -/
 
