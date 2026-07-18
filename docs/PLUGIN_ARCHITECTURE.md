@@ -54,7 +54,7 @@ Privacy plugins are the shielded flows hosted by `sidecars/kohaku/bridge.mjs`:
 |---|---|---|
 | `railgun` | `@kohaku-eth/railgun` | `shielded.railgun.*` |
 | `privacy-pools` | `@kohaku-eth/privacy-pools` | `shielded.*` (non-railgun, non-tornado) |
-| `tornado` | (sidecar-native, decode-only today) | `shielded.tornado.*` |
+| `tornado` | `@kohaku-eth/tornado-cash` | `shielded.tornado.*` |
 
 Enable plugins at daemon boot with **`LEANCLI_PRIVACY`**, a comma list:
 
@@ -86,10 +86,45 @@ and the enabled privacy plugins:
   "protocols": [
     { "name": "privacy-pools", "status": "live", "chains": [11155111, 1], "enabled": false },
     { "name": "railgun",       "status": "live", "chains": [11155111, 1], "enabled": true },
-    { "name": "tornado-cash",  "status": "scaffolded", "chains": [1],    "enabled": false }
+    { "name": "tornado-cash",  "status": "live", "chains": [1, 11155111], "enabled": false }
   ]
 }
 ```
+
+### Tornado Cash sidecar (`sidecars/kohaku/tornado.mjs`)
+
+Tornado is live via `@kohaku-eth/tornado-cash@0.0.2-alpha.15`. Because that
+package requires `@kohaku-eth/plugins@0.0.1-alpha.11` (whose `Host` interface is
+**async**) while Railgun/Privacy Pools still pin `@kohaku-eth/plugins@0.0.1-alpha.8`
+(sync), the tornado dep tree is deliberately **nested** under
+`node_modules/@kohaku-eth/tornado-cash/node_modules/` — Railgun/PP are untouched.
+All tornado logic lives in its own lazily-imported module (`tornado.mjs`, with
+`tornado-external-sync.mjs` and `tornado-paymaster-gas.mjs`) so it builds its own
+async `Host` without disturbing the sync-host plugins.
+
+The plugin runs comlink **worker threads** (state-manager / merkle-tree / msm)
+and, on first withdraw, downloads groth16 proving artifacts. Because Node ignores
+the SDK's `stateManagerWorkerUrl`, `ensureTornadoPaymasterGasPatched()` rewrites
+the bundled worker gas limits (`preVerificationGas 80000n→85000n`,
+`paymasterPostOpGasLimit 10000n→100000n`) in the installed dependency on disk —
+idempotent and best-effort; it means the installed worker no longer byte-matches
+the npm artifact.
+
+Env surface (set by the daemon's `tornadoBridgeCall`, never Sepolia-pinned —
+tornado runs on the caller-selected chain, mainnet or Sepolia):
+
+| Env var | Meaning |
+|---|---|
+| `LEANCLI_TC_SEED_HEX` | EOA master seed (hex) — the tornado keystore source; the SDK derives note secrets at disjoint BIP-32 paths (`m/29795'/1'`). Default source. |
+| `LEANCLI_TC_MNEMONIC` | Alternative dedicated mnemonic (compromise-isolation); `LEANCLI_TC_SEED_HEX` wins. |
+| `LEANCLI_TC_STORAGE_PATH` | Per-chain indexer state file (commitments, merkle leaves, our deposit indices). |
+| `LEANCLI_TC_BUNDLER_URL` | Optional Pimlico bundler override; default `https://public.pimlico.io/v2/<chainId>/rpc`. |
+| `LEANCLI_TC_EXTERNAL_SYNC_DISABLE` | Set to `1` to skip the saga-CDN cold-sync provider (chain-only sync). |
+
+Tornado deposits return UNSIGNED calldata (classified `shieldedRead`); withdraw
+quote/execute (`shielded.tornado.quoteWithdraw` / `executeWithdraw`) are
+classified `shieldedBroadcast`, so strict-mainnet policy denies them exactly like
+Privacy Pools / Railgun.
 
 `listProtocols` is kept working (it returns the full static catalogue,
 regardless of enablement) so existing callers do not break.

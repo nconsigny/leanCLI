@@ -14,7 +14,7 @@ logic stays FFI-free; these are concentrated at runtime boundaries. Two integrat
 |---|---|---|---|---|
 | `lean_uds/` | in-tree C (no external dep) | Unix-domain-socket primitives | wallet + agent daemons | `extern_lib liblean_uds` |
 | `lean_http/` | in-tree C over system **libcurl** | loopback HTTP POST | `Agent/Http.lean` (LLM I/O), ENS provider HTTP | `extern_lib liblean_http` |
-| `lean_sqlite/` | in-tree C over system **libsqlite3** (FTS5) | SQLite session store | `Agent/Session.lean` | `extern_lib liblean_sqlite` |
+| `lean_sqlite/` | in-tree C over system **libsqlite3** (FTS5) | SQLite session store + StateVault | `Agent/Session.lean`, `Daemon/StateVault.lean` | `extern_lib liblean_sqlite` |
 | `hacl_helpers/` | **HACL\*** `cryspen/hacl-packages` @ `05c3d8fb…` | Keccak-256, SHA-256, HMAC-SHA-512, PBKDF2-HMAC-SHA-512, ChaCha20-Poly1305 | see CRYPTO_POLICY map | helper exes (`setup_hacl.sh`) |
 | `secp256k1_helpers/` | **bitcoin-core/secp256k1** @ `1a53f496…` | ECDSA sign/pubkey/recover/verify | EOA signing | helper exes (`setup_secp256k1.sh`) |
 | `rustcrypto_helpers/` | **RustCrypto `ripemd`** `0.1.3` | RIPEMD-160 (BIP-32 HASH160) | `Wallet/HDKey.lean` | helper exe (built within `setup_hacl.sh`) |

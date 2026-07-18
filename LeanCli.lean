@@ -30,6 +30,7 @@ import LeanCli.Ethereum.IntentCanonical
 import LeanCli.Ethereum.Multicall3
 import LeanCli.Ethereum.IntentEncode
 import LeanCli.Ethereum.IntentJson
+import LeanCli.Ethereum.Mpt
 import LeanCli.Ethereum.Ownership
 import LeanCli.Ethereum.Tx
 
@@ -84,6 +85,7 @@ import LeanCli.Daemon.Log
 import LeanCli.Daemon.Server
 import LeanCli.Daemon.SkillsStore
 import LeanCli.Daemon.State
+import LeanCli.Daemon.StateVault
 import LeanCli.Daemon.TokenMeta
 import LeanCli.Daemon.TxJournal
 import LeanCli.Daemon.Uds
@@ -118,5 +120,6 @@ import LeanCli.Invariants.Mainnet
 import LeanCli.Invariants.Nonce
 import LeanCli.Invariants.Network
 import LeanCli.Invariants.SphincsAccount
+import LeanCli.Invariants.StateVault
 import LeanCli.Invariants.TxWellFormed
 import LeanCli.Invariants.Wallet

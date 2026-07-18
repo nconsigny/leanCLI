@@ -24,6 +24,13 @@
 //   eth.proxy   { chainId, executionRpc, method, params } -> raw RPC result
 //   tx.simulate { chainId, executionRpc, from, to, value, data, block? }
 //                 -> { gasUsed, returnValue, revertReason? }
+//   head.info   { chainId, executionRpc, consensusRpc?, checkpoint? }
+//                 -> { number, hash, stateRoot, timestamp }
+//               The helios-verified head header. This is the anchor the
+//               daemon's StateVault pins: the Lean side verifies
+//               eth_getProof Merkle-Patricia proofs against this
+//               stateRoot, so third-party RPCs only ever supply proofs,
+//               never trusted values.
 //
 // SECURITY: This process executes EVM locally with state validated by the
 // consensus sync committee. The Lean side treats the output as UNTRUSTED
@@ -379,6 +386,45 @@ async function dispatch(method, params, id) {
         return ok(id, { gasUsed, returnValue, revertReason, provenAtBlock });
       } catch (e) {
         return err(id, -32603, `simulate failed: ${e?.message ?? e}`, {
+          stack: String(e?.stack ?? ""),
+        });
+      }
+    }
+
+    case "head.info": {
+      if (!params || typeof params !== "object") {
+        return err(id, -32602, "params must be an object");
+      }
+      const chainId = Number(params.chainId);
+      if (!Number.isFinite(chainId) || chainId <= 0) {
+        return err(id, -32602, "params.chainId must be a positive integer");
+      }
+      if (!CHAIN_TO_NET.has(chainId)) {
+        return err(id, -32602, `params.chainId=${chainId} unsupported (known: ${[...CHAIN_TO_NET.keys()].join(", ")})`);
+      }
+      if (typeof params.executionRpc !== "string" || !params.executionRpc.length) {
+        return err(id, -32602, "params.executionRpc must be a non-empty string");
+      }
+      try {
+        const { provider } = await getClient(chainId, params.executionRpc, params.consensusRpc, params.checkpoint);
+        // Served from helios's verified header store: the block helios
+        // has proven against the sync-committee-attested consensus, not
+        // whatever the executionRpc claims. `false` = no tx bodies.
+        const block = await provider.request({
+          method: "eth_getBlockByNumber",
+          params: ["latest", false],
+        });
+        if (!block || typeof block !== "object") {
+          return err(id, -32603, "head.info: helios returned no block");
+        }
+        return ok(id, {
+          number: block.number ?? null,
+          hash: block.hash ?? null,
+          stateRoot: block.stateRoot ?? null,
+          timestamp: block.timestamp ?? null,
+        });
+      } catch (e) {
+        return err(id, -32603, `head.info failed: ${e?.message ?? e}`, {
           stack: String(e?.stack ?? ""),
         });
       }

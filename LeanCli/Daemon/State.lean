@@ -3,6 +3,7 @@ import LeanCli.Colibri.Persistent
 import LeanCli.Helios.Persistent
 import LeanCli.SafeNode.Persistent
 import LeanCli.RPC.Outbound
+import LeanCli.Daemon.StateVault
 
 /-!
 # Daemon state
@@ -191,13 +192,24 @@ structure DaemonState where
   lock so a simulation and a verified read proceed in parallel on their
   own connections. -/
   simLock : Std.BaseMutex
+  /-- Persistent partial-state store (`statevault.db`). `none` when the
+  vault is disabled (`LEANCLI_VAULT=0`) or failed to open — every vault
+  interaction is strictly best-effort and read paths behave exactly as
+  before when it is absent. Display/offline tier only; never consulted
+  by a signing decision. -/
+  vault : Option LeanCli.Daemon.StateVault.Handle := none
+  /-- Serializes vault DB access: daemon handlers run concurrently and
+  the SQLite handle is a single connection. Held only around individual
+  statement batches in `withVault`. -/
+  vaultLock : Std.BaseMutex
 
 abbrev Shared := IO.Ref DaemonState
 
 def new : IO Shared := do
   let verifyLock ← Std.BaseMutex.new
   let simLock ← Std.BaseMutex.new
-  IO.mkRef { startedAtMs := ← IO.monoMsNow, verifyLock, simLock }
+  let vaultLock ← Std.BaseMutex.new
+  IO.mkRef { startedAtMs := ← IO.monoMsNow, verifyLock, simLock, vaultLock }
 
 /-- Cached approvals deep-scan progress for `key` (`"{chainId}:{owner}"`,
     owner lowercased). -/
@@ -461,6 +473,28 @@ def getReadBackend (state : Shared) : IO ReadBackend := do
 /-- Set the daemon's default read backend. -/
 def setReadBackend (state : Shared) (b : ReadBackend) : IO Unit := do
   state.modify (fun s => { s with readBackend := b })
+
+/-- Install the opened vault handle (daemon startup only). -/
+def setVault (state : Shared) (h : LeanCli.Daemon.StateVault.Handle) : IO Unit := do
+  state.modify (fun s => { s with vault := some h })
+
+/-- Run `f` against the vault under `vaultLock`, if the vault is open.
+    STRICTLY BEST-EFFORT: any IO error is swallowed (logged) and reported
+    as `none`, so a broken vault DB can never take down a read path. -/
+def withVault {α : Type} (state : Shared)
+    (f : LeanCli.Daemon.StateVault.Handle → IO α) : IO (Option α) := do
+  let s ← state.get
+  match s.vault with
+  | none => pure none
+  | some h =>
+      s.vaultLock.lock
+      try
+        pure (some (← f h))
+      catch e =>
+        IO.eprintln s!"leancli-daemon: statevault error (ignored): {e.toString}"
+        pure none
+      finally
+        s.vaultLock.unlock
 
 /-- Override the daemon's active/default chain at runtime (`network.use`). -/
 def setActiveChain (state : Shared) (chainId : Nat) : IO Unit := do

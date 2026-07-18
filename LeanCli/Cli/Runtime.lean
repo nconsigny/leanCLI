@@ -1779,6 +1779,38 @@ def run (args : List String) : IO UInt32 := do
       eoaSignTx name txJson path? accountIdx?
   | .walletSignTypedData name json path? =>
       eoaSignTypedData name json path? accountIdx?
+  | .vaultStatus =>
+      DaemonClient.printCall "vault.status"
+  | .vaultHead chain? =>
+      DaemonClient.printCall "vault.captureHead"
+        (match chain? with
+         | some c => .obj #[("chain", .str c)]
+         | none => .obj #[])
+  | .vaultPinAll =>
+      DaemonClient.printCall "vault.pinAccounts"
+  | .vaultRebuild chain? =>
+      DaemonClient.printCall "vault.rebuild"
+        (match chain? with
+         | some c => .obj #[("chain", .str c)]
+         | none => .obj #[])
+  | .vaultPin address slots =>
+      let fields : Array (String × LeanCli.Encoding.Json.Json) :=
+        #[("address", .str address)] ++
+        (if slots.isEmpty then #[]
+         else #[("slots", .arr (slots.toArray.map LeanCli.Encoding.Json.Json.str))])
+      DaemonClient.printCall "vault.pin" (.obj fields)
+  | .vaultGet address chain? =>
+      let fields : Array (String × LeanCli.Encoding.Json.Json) :=
+        #[("address", .str address)] ++
+        (match chain? with
+         | some c => #[("chain", .str c)]
+         | none => #[])
+      DaemonClient.printCall "vault.get" (.obj fields)
+  | .vaultTokens chain? =>
+      DaemonClient.printCall "vault.tokens"
+        (match chain? with
+         | some c => .obj #[("chain", .str c)]
+         | none => .obj #[])
   | .networkShow =>
       IO.println (← NetworkConfig.humanReport)
       return 0
@@ -2610,6 +2642,60 @@ def run (args : List String) : IO UInt32 := do
         (.obj #[("address", .str address)])
   | .shieldedListDestinations =>
       DaemonClient.printCall "daemon.ppDestinations.list" (.obj #[])
+  | .tornadoBalance chainId =>
+      match chainId.toNat? with
+      | none =>
+          IO.eprintln s!"invalid chainId: '{chainId}' (use 1 or 11155111)"
+          pure 2
+      | some cid =>
+          -- Uses the default unlocked wallet's seed to derive tornado notes.
+          -- Unlock a wallet first (`leancli wallet unlock <name>`).
+          DaemonClient.printCall "shielded.tornado.balance"
+            (.obj #[("chainId", .num (Int.ofNat cid))])
+  | .tornadoDeposit walletName chainId amountEth =>
+      match chainId.toNat? with
+      | none =>
+          IO.eprintln s!"invalid chainId: '{chainId}' (use 1 or 11155111)"
+          pure 2
+      | some cid =>
+          -- Headless one-shot: unlock the EOA, then prepare+sign+broadcast the
+          -- fixed-denomination deposit legs. Interactive surfaces use the
+          -- ConfirmGate path instead.
+          let eoaPass ← Passphrase.read s!"Passphrase for EOA '{walletName}': "
+          match ← DaemonClient.call "eoa.unlock"
+              (.obj #[("name", .str walletName), ("passphrase", .str eoaPass)]) with
+          | .error err =>
+              IO.eprintln s!"🔒 EOA unlock failed for '{walletName}': {err.message}"
+              pure 2
+          | .ok _ =>
+              DaemonClient.printCall "shielded.tornado.deposit"
+                (.obj #[
+                  ("name", .str walletName),
+                  ("chainId", .num (Int.ofNat cid)),
+                  ("amountEth", .str amountEth)
+                ])
+  | .tornadoWithdraw chainId toRaw amountEth mode =>
+      match chainId.toNat? with
+      | none =>
+          IO.eprintln s!"invalid chainId: '{chainId}' (use 1 or 11155111)"
+          pure 2
+      | some cid =>
+          let toResult ← resolveAddressOrName toRaw
+          let to := match toResult with | .ok addr => addr | .error _ => toRaw
+          if !validAddressString to then
+            IO.eprintln s!"error: '{toRaw}' is not a 0x-prefixed 20-byte address or resolvable ENS name"
+            pure 2
+          else
+            -- Withdraw carries no EOA signature (groth16 proof + relayer/
+            -- paymaster). Uses the default unlocked wallet's seed to find
+            -- spendable notes; `mode` is paymaster (default) or relayer.
+            DaemonClient.printCall "shielded.tornado.executeWithdraw"
+              (.obj #[
+                ("chainId", .num (Int.ofNat cid)),
+                ("recipient", .str to),
+                ("amountEth", .str amountEth),
+                ("mode", .str mode)
+              ])
   | .sphincsCreate name paramSet walletName ecdsaKind accountIndexOrPath chainOverride? backend? =>
       -- Why one prompt UX: per CLAUDE.md the CLI is a printer. We prompt
       -- for one passphrase (`slot`) and optionally a wallet-unlock pass

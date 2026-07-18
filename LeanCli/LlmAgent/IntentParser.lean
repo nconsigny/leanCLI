@@ -199,12 +199,13 @@ def securityChecks (raw : Json) (expectedChainId : Nat) (intent : Intent) :
         .ok ()
       else
         throw s!"shielded.tornado.deposit: denominationWei {denominationWei} is not a Tornado pool denomination (must be exactly 0.1, 1, 10, or 100 ETH in wei)"
-  | .tornadoWithdraw _ denominationWei _ note =>
-      -- Same denomination gate as deposit; you cannot withdraw an
-      -- amount that doesn't correspond to a real pool. Also reject
-      -- malformed notes — the bridge sidecar will fail on a bad note
-      -- but a cheap prefix check here makes the error message
-      -- actionable instead of getting a generic snarkjs stacktrace.
+  | .tornadoWithdraw _ denominationWei _ noteRef =>
+      -- Same denomination gate as deposit; you cannot withdraw an amount
+      -- that doesn't correspond to a real pool. `noteRef` is NOT a secret
+      -- string — the SDK derives note secrets deterministically from the
+      -- wallet seed, so a withdraw needs no saved note. `noteRef` is an
+      -- optional deposit-index selector: empty ⇒ auto-select the oldest
+      -- spendable note of that denomination; otherwise a decimal index.
       let d01  : Nat :=     100_000_000_000_000_000
       let d1   : Nat :=   1_000_000_000_000_000_000
       let d10  : Nat :=  10_000_000_000_000_000_000
@@ -214,10 +215,8 @@ def securityChecks (raw : Json) (expectedChainId : Nat) (intent : Intent) :
           ∨ denominationWei = d10 ∨ denominationWei = d100
       if !validDenom then
         throw s!"shielded.tornado.withdraw: denominationWei {denominationWei} is not a Tornado pool denomination"
-      else if !(note.startsWith "tornado-note-") then
-        throw "shielded.tornado.withdraw: note must start with \"tornado-note-\" (saved value from a prior deposit's prepare response)"
-      else if note.length < 32 then
-        throw s!"shielded.tornado.withdraw: note is too short ({note.length} chars) — a real Tornado note encodes 62 bytes of secret + nullifier"
+      else if noteRef ≠ "" ∧ !(noteRef.all Char.isDigit) then
+        throw s!"shielded.tornado.withdraw: noteRef must be empty (auto-select) or a decimal deposit index, got \"{noteRef}\""
       else .ok ()
   | .approvalsAudit _ _ =>
       -- Read-only action; no signing, no chain side-effects to gate.

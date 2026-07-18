@@ -258,6 +258,13 @@ inductive Command where
   | networkUnsetRpcChain (chain : String)
   | networkSetChain (chain : String)
   | networkMonitor
+  | vaultStatus
+  | vaultHead (chain? : Option String)
+  | vaultPin (address : String) (slots : List String)
+  | vaultPinAll
+  | vaultRebuild (chain? : Option String)
+  | vaultGet (address : String) (chain? : Option String)
+  | vaultTokens (chain? : Option String)
   | doctor
   | policyCheck (policy peer purpose transport : String)
   | rpcCheck (policy backend transport method : String)
@@ -295,6 +302,12 @@ inductive Command where
   | shieldedBalance
   | shieldedDeposit (walletName : String) (amountEth : String)
   | shieldedWithdraw (recipient amountEth : String)
+  -- Tornado Cash (fixed-denomination mixer; mainnet + Sepolia). chainId is
+  -- explicit because tornado, unlike Privacy Pools, is not Sepolia-pinned.
+  | tornadoBalance (chainId : String)
+  | tornadoDeposit (walletName : String) (chainId : String) (amountEth : String)
+  | tornadoWithdraw (chainId : String) (recipient : String) (amountEth : String)
+      (mode : String)
   | shieldedReveal
   | shieldedImport (mnemonic : String)
   | shieldedDelete
@@ -630,6 +643,18 @@ def parse : List String → Command
   | ["network", "unset-rpc-chain", chain]               => .networkUnsetRpcChain chain
   | ["network", "set-chain", chain]                     => .networkSetChain chain
   | ["network", "monitor"]                 => .networkMonitor
+  | ["vault"]                              => .vaultStatus
+  | ["vault", "status"]                    => .vaultStatus
+  | ["vault", "head"]                      => .vaultHead none
+  | ["vault", "head", chain]               => .vaultHead (some chain)
+  | ["vault", "get", addr]                 => .vaultGet addr none
+  | ["vault", "get", addr, chain]          => .vaultGet addr (some chain)
+  | ["vault", "tokens"]                    => .vaultTokens none
+  | ["vault", "tokens", chain]             => .vaultTokens (some chain)
+  | ["vault", "pin"]                       => .vaultPinAll
+  | ["vault", "rebuild"]                   => .vaultRebuild none
+  | ["vault", "rebuild", chain]            => .vaultRebuild (some chain)
+  | "vault" :: "pin" :: addr :: rest       => .vaultPin addr rest
   | ["doctor"]            => .doctor
   | ["daemon", "help"] => .daemonHelp none
   | ["daemon", "ping"] => .daemonPing
@@ -693,6 +718,15 @@ def parse : List String → Command
   | ["shield", "import", mnemonic] => .shieldedImport mnemonic
   | ["shield", "mark-destination", address] => .shieldedMarkDestination address
   | ["shield", "list-destinations"] => .shieldedListDestinations
+  -- Tornado subcommands must precede the generic `shield <wallet> <amount>`
+  -- so "tornado" isn't parsed as a wallet name.
+  | ["shield", "tornado", "balance", chainId] => .tornadoBalance chainId
+  | ["shield", "tornado", walletName, chainId, amountEth] =>
+      .tornadoDeposit walletName chainId amountEth
+  | ["unshield", "tornado", chainId, to, amountEth] =>
+      .tornadoWithdraw chainId to amountEth "paymaster"
+  | ["unshield", "tornado", chainId, to, amountEth, mode] =>
+      .tornadoWithdraw chainId to amountEth mode
   | ["shield", walletName, amountEth] => .shieldedDeposit walletName amountEth
   | ["unshield", to, amountEth] => .shieldedWithdraw to amountEth
   | "swap" :: "quote" :: rest =>
@@ -1109,6 +1143,18 @@ def helpText : String :=
      network unset-rpc-chain <chain>\n\
      network set-chain <chain>          Set the daemon's default chain (name or numeric id).\n\
      network monitor\n\n\
+   STATE VAULT (partial state node):\n\
+     vault [status]                      Row counts + DB path of the local state vault.\n\
+     vault head [chain]                  Pin the current verified head (block + stateRoot).\n\
+     vault pin [addr] [slot ...]         Prove account (+ slots) via eth_getProof, verified\n\
+                                         in Lean against the pinned state root; store at\n\
+                                         that exact block (tier: lean). With no address,\n\
+                                         pins EVERY wallet-owned account.\n\
+     vault rebuild [chain]               Restore-from-seed helper: pin owned accounts, then\n\
+                                         rediscover the touched-token set from the wallet's\n\
+                                         own on-chain log footprint (newest-first, resumable).\n\
+     vault get <addr> [chain]            Serve stored state, explicitly \"as of block N\".\n\
+     vault tokens [chain]                Stored token metadata + provenance tier.\n\n\
    DAEMON / DOCS:\n\
      daemon                              Start the daemon (foreground or via systemd).\n\
      daemon start | stop | restart       Lifecycle control (systemd-aware when installed).\n\

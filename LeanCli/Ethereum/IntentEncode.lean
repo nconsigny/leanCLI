@@ -156,7 +156,7 @@ def encode : Intent → Except String EncodedTx
   | .tornadoDeposit _ _ =>
       .error "shielded.tornado.deposit: not leaf-encodable; route via daemon RPC shielded.tornado.prepareDeposit (sidecar generates the Pedersen-hashed commitment)"
   | .tornadoWithdraw _ _ _ _ =>
-      .error "shielded.tornado.withdraw: not leaf-encodable; route via daemon RPC shielded.tornado.prepareWithdraw (sidecar generates the ZK proof from the user's saved note + current merkle state)"
+      .error "shielded.tornado.withdraw: not leaf-encodable; route via daemon RPC shielded.tornado.quoteWithdraw then shielded.tornado.executeWithdraw (sidecar generates the groth16 proof from seed-derived notes + current merkle state)"
   | .approvalsAudit _ _ =>
       .error "approvals.audit: read-only action; no encoded tx"
   | .ensRegister _ _ _ _ =>

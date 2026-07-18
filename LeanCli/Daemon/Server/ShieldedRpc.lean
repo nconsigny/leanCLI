@@ -409,6 +409,76 @@ private def rgSeedHexFromDefault
               message := "no default wallet set and multiple slots are unlocked — pick one with `leancli wallet use <name>` or pass `name` explicitly to the RPC",
               data := none }
 
+/-- Tornado on-disk state dir (per chain). Tornado has NO separate secret —
+    its keystore is the EOA seed derived at disjoint BIP-32 paths (m/29795'/1'),
+    so only chain-indexer state (commitments, merkle leaves, which deposit
+    indices are ours) lives here. -/
+private def tornadoStoreDir : IO System.FilePath := do
+  pure ((← LeanCli.Wallet.EoaStore.dataHome) / "leancli" / "tc")
+
+/-- Resolve the tornado chainId: explicit `chainId` param, else the daemon
+    default. Tornado Cash is deployed on mainnet (1) and Sepolia (11155111). -/
+private def resolveTornadoChain (cfg : Config) (params : Json) : Except RpcError Nat :=
+  let cid := ((getField "chainId" params) >>= asNat).getD cfg.chainId
+  if cid = 1 || cid = 11155111 then .ok cid
+  else .error
+    { code := -32602,
+      message := s!"tornado cash is not deployed on chainId {cid} (supported: 1, 11155111)",
+      data := none }
+
+/-- Resolve the EOA seed hex backing the tornado keystore. Optional `name`
+    param selects a specific unlocked slot; otherwise the default wallet. The
+    seed is chain-independent; the SDK derives tornado-specific keys under its
+    own BIP-32 root, disjoint from BIP-44 and from Railgun's paths. -/
+private def tornadoSeedHex (state : LeanCli.Daemon.State.Shared) (params : Json) :
+    IO (Except RpcError String) := do
+  match getField "name" params >>= asString with
+  | some n =>
+      match ← unlockedSlot state n with
+      | .error err => pure (.error err)
+      | .ok slot => pure (.ok (rgSeedHexFromSlot slot))
+  | none => rgSeedHexFromDefault state
+
+/-- Forward a `shielded.tornado.*` method to the bridge. Unlike Privacy Pools
+    (Sepolia-pinned), tornado runs on the caller-selected chain: the RPC
+    endpoint, the LEANCLI_CHAIN_ID env, and the policy chainId all track
+    `chainId`. The keystore is the EOA seed (`tcSeedHex`); state persists per
+    chain under `tornadoStoreDir`. Routes through `callGated` (invariant 5.7):
+    tornado withdrawals are classified `shieldedBroadcast`, so strict policy
+    denies them on mainnet exactly like PP/railgun (mainnet needs tor/permissive). -/
+private def tornadoBridgeCall (cfg : Config) (method : String) (params : Json)
+    (chainId : Nat) (tcSeedHex : String) (_req : Request) :
+    IO (Except RpcError Json) := do
+  let bridgeReq : LeanCli.Privacy.Bridge.Request :=
+    { method := method, params := params, id := 0 }
+  let ep := chainEndpointFor cfg params chainId
+  let tcDir ← tornadoStoreDir
+  try IO.FS.createDirAll tcDir catch _ => pure ()
+  let storagePath := (tcDir / s!"storage-{chainId}.json").toString
+  let baseEnv : Array (String × Option String) := #[
+    ("LEANCLI_RPC_URL", some ep.url),
+    ("LEANCLI_CHAIN_ID", some (toString chainId)),
+    ("LEANCLI_TC_STORAGE_PATH", some storagePath),
+    ("LEANCLI_TC_SEED_HEX", some tcSeedHex)
+  ]
+  let env : Array (String × Option String) ←
+    (match ← IO.getEnv "LEANCLI_TC_BUNDLER_URL" with
+     | some u => pure (baseEnv ++ #[("LEANCLI_TC_BUNDLER_URL", some u)])
+     | none   => pure baseEnv)
+  let resp ← LeanCli.Privacy.Bridge.callGated cfg.policy bridgeReq env (some chainId)
+  match resp with
+  | .ok j => pure (.ok j)
+  | .err code msg data =>
+      pure <| .error { code := code, message := msg, data := data }
+  | .crash stderr exitCode =>
+      pure <| .error
+        { code := -32603,
+          message := s!"tornado bridge crashed (exit {exitCode})",
+          data := some (.obj #[
+            ("stderr", .str stderr),
+            ("exitCode", .num (Int.ofNat exitCode.toNat))
+          ]) }
+
 private def unlockOrCreateRgSecret
     (state : LeanCli.Daemon.State.Shared) (passphrase? : Option String) :
     IO (Except RpcError String) := do
@@ -525,6 +595,47 @@ private def signAndBroadcastBridgeTxns
 
 
 
+/-- C2 gate. The composite `shielded.*` deposit/shield arms (`shielded.deposit`,
+    `shielded.tornado.deposit`, `shielded.railgun.shield`) call the untrusted
+    sidecar's `prepare*`, then sign and broadcast the returned `{to,value,data}`
+    with NO decode / simulate / ConfirmGate and NO re-derivation of `value` or
+    allow-listing of `to`. A malicious sidecar can therefore return
+    `{to: attacker, value: <whole balance>}` and have it signed. These arms
+    exist only for the headless CLI; every interactive/agent surface must use
+    the `prepare*` arms and route each unsigned leg through the per-leg pre-sign
+    gate. Require an explicit operator opt-in so a caller on the daemon socket
+    (the TUI, the LLM agent, any UDS client) cannot reach the un-confirmed
+    broadcast path by default. -/
+private def ungatedShieldAllowed : IO Bool := do
+  match ← IO.getEnv "LEANCLI_ALLOW_UNGATED_SHIELD" with
+  | some v => pure (v.trimAscii.toString == "1")
+  | none   => pure false
+
+private def ungatedShieldDenied : RpcError :=
+  { code := -32040,
+    message := "ungated one-shot shield/deposit is disabled: it signs sidecar-returned calldata with no decode/simulate/confirm. Use the interactive prepare→confirm flow, or set LEANCLI_ALLOW_UNGATED_SHIELD=1 in the daemon env to allow the headless composite.",
+    data := none }
+
+/-- C3 gate. `shielded.railgun.unshield` / `shielded.railgun.transfer` are the
+    ONLY signing surfaces that hand the raw EOA private key to an untrusted
+    sidecar (`LEANCLI_RG_DELEGATING_KEY`), which then signs and broadcasts the
+    4337 UserOp itself with no daemon re-verification — a malicious plugin
+    could sign an attacker-controlled 7702 delegation or a full-balance
+    transfer, and the pre-RPC TUI confirm of the display terms cannot constrain
+    the bytes a key-holding sidecar actually signs. The proper fix requires the
+    upstream SDK to expose an unsigned UserOp + hash for in-core signing (see
+    the TODO in the arm). Until then, require an explicit operator opt-in so
+    the raw key is never exported by default. -/
+private def railgunInSidecarSigningAllowed : IO Bool := do
+  match ← IO.getEnv "LEANCLI_ALLOW_RAILGUN_INSIDECAR_SIGNING" with
+  | some v => pure (v.trimAscii.toString == "1")
+  | none   => pure false
+
+private def railgunInSidecarSigningDenied : RpcError :=
+  { code := -32041,
+    message := "railgun unshield/transfer is disabled: unlike every other signing surface it hands the raw EOA private key to the untrusted sidecar, which signs and broadcasts the 4337 UserOp itself with no daemon re-verification. Set LEANCLI_ALLOW_RAILGUN_INSIDECAR_SIGNING=1 in the daemon env to accept this risk.",
+    data := none }
+
 /-- Handle every `shielded.*` JSON-RPC method. -/
 def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
     (notify : LeanCli.Keystore.Tpm2Runtime.Notifier)
@@ -626,7 +737,8 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   | none   => #[])
               shieldedBridgeCall cfg "shielded.railgun.prepareShield" bridgeParams none req
                 (rgSeedHex? := some seedHex)
-  | "shielded.railgun.shield" =>
+  | "shielded.railgun.shield" => do
+      unless (← ungatedShieldAllowed) do return .error ungatedShieldDenied
       -- ⚠ UNGATED one-shot (see `shielded.deposit`): prepare + EOA-sign +
       -- broadcast in one RPC, no daemon-side decode/simulate/ConfirmGate.
       -- Retained for the headless CLI only. Interactive surfaces use
@@ -701,7 +813,8 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                                     ("sent", .arr sent)
                                   ]
       | _, _ => pure (.error invalidParams)
-  | "shielded.railgun.unshield" =>
+  | "shielded.railgun.unshield" => do
+      unless (← railgunInSidecarSigningAllowed) do return .error railgunInSidecarSigningDenied
       -- Builds + relays the private op via an ERC-4337 bundler using an
       -- EIP-7702 delegated EOA. Native ETH is supported in alpha-21
       -- (unshield-as-WETH + withdraw tail call). The Railgun secret only
@@ -798,7 +911,8 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                             (rgDelegatingKeyHex? := some delegatingKeyHex)
                             (rgSeedHex? := some seedHex)
       | _, _, _ => pure (.error invalidParams)
-  | "shielded.railgun.transfer" =>
+  | "shielded.railgun.transfer" => do
+      unless (← railgunInSidecarSigningAllowed) do return .error railgunInSidecarSigningDenied
       -- Railgun-internal transfer (0zk → 0zk). ERC20-only at SDK level
       -- (tokenGuard). Bundler + 7702 details: see shielded.railgun.unshield.
       match paramName req.params, paramString req.params "recipient",
@@ -839,37 +953,158 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                         (rgDelegatingKeyHex? := some delegatingKeyHex)
                         (rgSeedHex? := some seedHex)
       | _, _, _, _ => pure (.error invalidParams)
-  | "shielded.tornado.prepareDeposit" =>
-      -- Tornado Cash deposit drafting (PR 2). The bridge sidecar
-      -- generates the user's spending note + Pedersen-hashed
-      -- commitment and returns `deposit(commitment)` calldata for
-      -- the pool contract that matches `amountEth`. Fixed-denomination
-      -- enforcement happens both here (sidecar validates) and at the
-      -- Intent layer (`IntentParser.tornadoDeposit`). PR 2 ships a
-      -- bridge stub that returns a structured "SDK not yet wired"
-      -- error until the snarkjs + Baby Jubjub Pedersen layer lands.
-      match paramString req.params "amountEth" with
+  | "shielded.tornado.balance" =>
+      -- Read-only tornado balance for the selected chain. Keystore is the
+      -- EOA seed (disjoint BIP-32 paths); optional `name` selects a slot.
+      -- First call is slow (pool sync via saga CDN + chain tail); cached
+      -- state persists per chain.
+      match resolveTornadoChain cfg req.params with
       | .error err => pure (.error err)
-      | .ok amountEth =>
-          shieldedBridgeCall cfg "shielded.tornado.prepareDeposit"
-            (.obj #[("amountEth", .str amountEth)]) none req
-  | "shielded.tornado.prepareWithdraw" =>
-      -- Tornado Cash withdraw drafting. Bridge sidecar consumes the
-      -- user's saved deposit note + current pool merkle state and
-      -- emits `withdraw(proof, root, nullifierHash, recipient,
-      -- relayer, fee, refund)` calldata. Note + recipient are
-      -- required; the bridge stub returns the same "not yet wired"
-      -- error pending sidecar implementation.
-      match paramString req.params "amountEth",
-            paramString req.params "recipient",
-            paramString req.params "note" with
-      | .ok amountEth, .ok recipient, .ok note =>
-          shieldedBridgeCall cfg "shielded.tornado.prepareWithdraw"
-            (.obj #[
-              ("amountEth", .str amountEth),
-              ("recipient", .str recipient),
-              ("note",      .str note)
-            ]) none req
+      | .ok cid =>
+          match ← tornadoSeedHex state req.params with
+          | .error err => pure (.error err)
+          | .ok seedHex =>
+              tornadoBridgeCall cfg "shielded.tornado.balance"
+                (.obj #[("chainId", .num (Int.ofNat cid))]) cid seedHex req
+  | "shielded.tornado.notes" =>
+      -- Per-note detail (pool, denomination, depositIndex, spendable/spent).
+      -- Notes are identified by (pool, depositIndex) and recovered from the
+      -- wallet seed — there are no note strings.
+      match resolveTornadoChain cfg req.params with
+      | .error err => pure (.error err)
+      | .ok cid =>
+          let includeSpent := ((getField "includeSpent" req.params) >>= asBool).getD false
+          match ← tornadoSeedHex state req.params with
+          | .error err => pure (.error err)
+          | .ok seedHex =>
+              tornadoBridgeCall cfg "shielded.tornado.notes"
+                (.obj #[
+                  ("chainId", .num (Int.ofNat cid)),
+                  ("includeSpent", .bool includeSpent)
+                ]) cid seedHex req
+  | "shielded.tornado.prepareDeposit" =>
+      -- Tornado Cash deposit. The bridge derives the spending note secrets
+      -- deterministically from the seed, Pedersen-hashes the commitment, and
+      -- returns UNSIGNED `deposit(commitment)` legs (an N×0.1-ETH amount
+      -- becomes N fixed-denomination legs). The TUI routes each leg through
+      -- decode → simulate → ConfirmGate → eoa.send — no note string to save,
+      -- the wallet seed recovers every note.
+      match resolveTornadoChain cfg req.params, paramString req.params "amountEth" with
+      | .error err, _ => pure (.error err)
+      | _, .error err => pure (.error err)
+      | .ok cid, .ok amountEth =>
+          match ← tornadoSeedHex state req.params with
+          | .error err => pure (.error err)
+          | .ok seedHex =>
+              tornadoBridgeCall cfg "shielded.tornado.prepareDeposit"
+                (.obj #[
+                  ("chainId", .num (Int.ofNat cid)),
+                  ("amountEth", .str amountEth)
+                ]) cid seedHex req
+  | "shielded.tornado.quoteWithdraw" =>
+      -- Quote a withdrawal WITHOUT broadcasting: returns the paymaster fee +
+      -- net amount (paymaster mode) or note context (relayer mode) for the
+      -- ConfirmGate. A tornado withdraw carries NO EOA signature — a groth16
+      -- proof authorizes the spend and a relayer/paymaster submits it — so
+      -- confirming the quoted terms IS the pre-broadcast gate (mirrors PP
+      -- quoteUnshield). `mode` defaults to "paymaster"; "relayer" is optional.
+      match resolveTornadoChain cfg req.params,
+            paramString req.params "amountEth",
+            paramString req.params "recipient" with
+      | .ok cid, .ok amountEth, .ok recipient =>
+          let mode := ((getField "mode" req.params) >>= asString).getD "paymaster"
+          match ← tornadoSeedHex state req.params with
+          | .error err => pure (.error err)
+          | .ok seedHex =>
+              tornadoBridgeCall cfg "shielded.tornado.quoteWithdraw"
+                (.obj #[
+                  ("chainId", .num (Int.ofNat cid)),
+                  ("amountEth", .str amountEth),
+                  ("recipient", .str recipient),
+                  ("mode", .str mode)
+                ]) cid seedHex req
+      | _, _, _ => pure (.error invalidParams)
+  | "shielded.tornado.executeWithdraw" =>
+      -- Build the withdrawal proof and broadcast it (paymaster default, or
+      -- relayer). Classified `shieldedBroadcast` (invariant 5.7), so strict
+      -- policy denies it on mainnet. Runs after the ConfirmGate accepted the
+      -- quoteWithdraw terms.
+      match resolveTornadoChain cfg req.params,
+            paramString req.params "amountEth",
+            paramString req.params "recipient" with
+      | .ok cid, .ok amountEth, .ok recipient =>
+          let mode := ((getField "mode" req.params) >>= asString).getD "paymaster"
+          match ← tornadoSeedHex state req.params with
+          | .error err => pure (.error err)
+          | .ok seedHex =>
+              -- H2: forward the user-confirmed fee ceiling (the quoted
+              -- paymasterFeeWei) so the sidecar aborts rather than paying an
+              -- inflated fee out of the recipient's proceeds. Optional and
+              -- backward-compatible: absent ⇒ no ceiling (legacy behaviour).
+              let maxFeeWei? := getField "maxFeeWei" req.params >>= asString
+              tornadoBridgeCall cfg "shielded.tornado.executeWithdraw"
+                (.obj (#[
+                  ("chainId", .num (Int.ofNat cid)),
+                  ("amountEth", .str amountEth),
+                  ("recipient", .str recipient),
+                  ("mode", .str mode)
+                ] ++ (match maxFeeWei? with
+                      | some w => #[("maxFeeWei", .str w)]
+                      | none   => #[]))) cid seedHex req
+      | _, _, _ => pure (.error invalidParams)
+  | "shielded.tornado.deposit" => do
+      unless (← ungatedShieldAllowed) do return .error ungatedShieldDenied
+      -- ⚠ UNGATED one-shot headless composite (`leancli shield tornado …`):
+      -- prepares the unsigned deposit legs, then EOA-signs + broadcasts each on
+      -- the selected chain WITHOUT the interactive decode → simulate →
+      -- ConfirmGate. Retained ONLY for the headless CLI (no confirm surface);
+      -- interactive surfaces MUST use `shielded.tornado.prepareDeposit` and
+      -- route each unsigned leg through the standard pre-sign gate. The
+      -- signing wallet's seed also derives the tornado note secrets, so the
+      -- notes are recoverable from the same wallet.
+      match resolveTornadoChain cfg req.params, paramName req.params,
+            paramString req.params "amountEth" with
+      | .ok cid, .ok name, .ok amountEth =>
+          IO.eprintln s!"[shield-tc] deposit: wallet={name} chain={cid} amountEth={amountEth}"
+          match ← unlockedSlot state name with
+          | .error err => pure (.error err)
+          | .ok slot =>
+              match ← derivePrivateKeyFromSeed slot.seed slot.derivationPath with
+              | .error err =>
+                  pure <| .error { invalidParams with data := some (.str err) }
+              | .ok privateKey =>
+                  let seedHex := rgSeedHexFromSlot slot
+                  IO.eprintln "[shield-tc] calling bridge shielded.tornado.prepareDeposit (loads the SDK + syncs pool state; may take a while on first run)"
+                  match ← tornadoBridgeCall cfg "shielded.tornado.prepareDeposit"
+                            (.obj #[
+                              ("chainId", .num (Int.ofNat cid)),
+                              ("amountEth", .str amountEth)
+                            ]) cid seedHex req with
+                  | .error err =>
+                      IO.eprintln s!"[shield-tc] bridge prepare failed: {err.message}"
+                      pure (.error err)
+                  | .ok prepared =>
+                      let resultField := (getField "result" prepared).getD prepared
+                      match getField "txns" resultField >>= asArray with
+                      | none =>
+                          pure <| .error
+                            { code := -32020,
+                              message := "tornado bridge returned no txns",
+                              data := some prepared }
+                      | some txns =>
+                          IO.eprintln s!"[shield-tc] signing and broadcasting {txns.size} tx(s) on chain {cid}"
+                          let cfgTc : Config :=
+                            let ep := chainEndpointFor cfg req.params cid
+                            { cfg with rpcEndpoint := ep, chainId := cid }
+                          match ← signAndBroadcastBridgeTxns cfgTc slot privateKey txns (some notify) with
+                          | .error err =>
+                              IO.eprintln s!"[shield-tc] broadcast failed: {err.message}"
+                              pure (.error err)
+                          | .ok sent =>
+                              pure <| .ok <| .obj #[
+                                ("prepared", prepared),
+                                ("sent", .arr sent)
+                              ]
       | _, _, _ => pure (.error invalidParams)
   | "shielded.prepareDeposit" =>
       -- Gated shield entry: returns UNSIGNED deposit txns for the TUI to
@@ -886,7 +1121,8 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
           | .ok mnemonic =>
               shieldedBridgeCall cfg "shielded.prepareDeposit"
                 (.obj #[("amountEth", .str amountEth)]) (some mnemonic) req
-  | "shielded.deposit" =>
+  | "shielded.deposit" => do
+      unless (← ungatedShieldAllowed) do return .error ungatedShieldDenied
       -- ⚠ UNGATED one-shot: prepares + EOA-signs + broadcasts in a single
       -- RPC, WITHOUT the daemon running decode → simulate → ConfirmGate.
       -- Retained ONLY for the headless CLI forwarder (`leancli shield`),

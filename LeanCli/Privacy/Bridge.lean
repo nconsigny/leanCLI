@@ -90,7 +90,13 @@ def methodPurpose (method : String) : Purpose :=
       -- shielded.prepareWithdraw. Classify as broadcast so the policy gate
       -- denies them under strict-mainnet.
       || method = "shielded.railgun.unshield"
-      || method = "shielded.railgun.transfer" then
+      || method = "shielded.railgun.transfer"
+      -- Tornado withdraw: quoteWithdraw reads a paymaster/relayer fee (egress
+      -- reveals recipient + denomination) and executeWithdraw builds a groth16
+      -- proof and broadcasts it via the bundler/relayer. Both are classified
+      -- as shielded broadcast so strict-mainnet denies them, exactly like PP.
+      || method = "shielded.tornado.quoteWithdraw"
+      || method = "shielded.tornado.executeWithdraw" then
     -- Why: prepareWithdraw POSTs the withdrawal to the relayer, which counts
     -- as a shielded broadcast for policy classification.
     Purpose.shieldedBroadcast

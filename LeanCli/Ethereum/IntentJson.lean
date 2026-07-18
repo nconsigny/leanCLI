@@ -230,14 +230,15 @@ def parseIntent (j : Json) : Except String Intent := do
       let denominationWei ← natField j "denominationWei"
       .ok (.tornadoDeposit chainId denominationWei)
   | "shielded.tornado.withdraw" =>
-      -- Tornado withdraw: (chainId, denominationWei, recipient, note).
-      -- The note is the user's saved spending secret — the JSON
-      -- structural parser passes it through verbatim. IntentParser
-      -- validates the "tornado-note-" prefix.
+      -- Tornado withdraw: (chainId, denominationWei, recipient, noteRef).
+      -- `noteRef` is NOT a secret — the SDK derives note secrets from the
+      -- wallet seed. It is an OPTIONAL deposit-index selector: omit ⇒
+      -- auto-select the oldest spendable note of that denomination; else a
+      -- decimal index. IntentParser validates it's empty-or-digits.
       let denominationWei ← natField j "denominationWei"
       let recipient ← addrField j "recipient"
-      let note ← strField j "note"
-      .ok (.tornadoWithdraw chainId denominationWei recipient note)
+      let noteRef := (getField "note" j >>= asString).getD ""
+      .ok (.tornadoWithdraw chainId denominationWei recipient noteRef)
   | "approvals.audit" =>
       -- `wallet` is optional — daemon defaults to the user's default
       -- wallet when omitted.

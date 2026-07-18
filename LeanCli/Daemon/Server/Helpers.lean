@@ -545,6 +545,30 @@ def broadcastTimeoutSecs : IO Nat := do
     Server.lean def for the threshold rationale (1 gwei). -/
 def minPriorityFeeWei : Nat := 1_000_000_000
 
+/-- Absolute ceilings on the EIP-1559 fee fields that get baked into a signed
+    transaction (finding H1). The fee is read fresh from the (untrusted)
+    provider *after* the ConfirmGate, which anchors only `{to,value,data}` and
+    never displays a fee. Without a ceiling, a malicious or compromised fee
+    read (e.g. an inflated `eth_maxPriorityFeePerGas`) produces a validly
+    signed tx whose tip is paid in full to the block producer — draining ETH
+    up to the account balance. These defaults sit far above any realistic
+    mainnet fee (base fee has never sustained anywhere near 5000 gwei) so they
+    never fire in normal operation, while blocking the attack (which needs
+    ~100_000 gwei to be profitable). Overridable via env for exotic conditions;
+    a `0` override disables the corresponding cap. -/
+def defaultMaxFeePerGasCapWei : Nat := 5_000_000_000_000          -- 5000 gwei
+def defaultMaxPriorityFeePerGasCapWei : Nat := 500_000_000_000    -- 500 gwei
+
+/-- Read a wei ceiling from `envVar`, falling back to `dflt`. A syntactically
+    valid `0` disables the cap; anything unparseable falls back to `dflt`. -/
+def feeCapWei (envVar : String) (dflt : Nat) : IO Nat := do
+  match ← IO.getEnv envVar with
+  | some s => pure ((s.trimAscii.toString.toNat?).getD dflt)
+  | none   => pure dflt
+
+/-- True when `v` exceeds a non-zero `cap` (a `0` cap means "no cap"). -/
+def feeExceedsCap (cap v : Nat) : Bool := cap != 0 && decide (v > cap)
+
 /-- Poll `eth_getTransactionReceipt` until mined or the timeout elapses.
     Emits `tx-pending` notifications every poll while the receipt is null. -/
 partial def waitForReceiptShared
@@ -660,6 +684,18 @@ def buildSignBroadcastTx
       | none   => Nat.max rpcPriorityFee minPriorityFeeWei
     let gasPrice ← jsonHexNatIO gasPriceJson "gasPrice"
     let maxFeePerGas := 2 * gasPrice + maxPriorityFeePerGas
+    -- H1: fee fields are read from the untrusted provider *after* the
+    -- ConfirmGate and are never shown to the user. Refuse to sign a tx whose
+    -- fee exceeds the (generous, env-overridable) ceiling, so a manipulated
+    -- gas-price read cannot drain the account as tip to the block producer.
+    let maxFeeCap ← feeCapWei "LEANCLI_MAX_FEE_PER_GAS_WEI" defaultMaxFeePerGasCapWei
+    let maxPrioCap ← feeCapWei "LEANCLI_MAX_PRIORITY_FEE_PER_GAS_WEI" defaultMaxPriorityFeePerGasCapWei
+    if feeExceedsCap maxFeeCap maxFeePerGas then
+      let msg := s!"refusing to sign: maxFeePerGas {maxFeePerGas} wei exceeds the {maxFeeCap} wei ceiling (the fee provider may be returning an inflated gas price; raise or disable via LEANCLI_MAX_FEE_PER_GAS_WEI)"
+      return .error { code := -32021, message := msg, data := none }
+    if feeExceedsCap maxPrioCap maxPriorityFeePerGas then
+      let msg := s!"refusing to sign: maxPriorityFeePerGas {maxPriorityFeePerGas} wei exceeds the {maxPrioCap} wei ceiling (override via LEANCLI_MAX_PRIORITY_FEE_PER_GAS_WEI)"
+      return .error { code := -32021, message := msg, data := none }
     let estimateRequest := estimateTxJson slot.address to value data
     let gasJson ← expectExcept <| (← LeanCli.RPC.Outbound.estimateGas cfg.policy cfg.rpcEndpoint estimateRequest "latest" none)
     let gasLimit ← jsonHexNatIO gasJson "gasLimit"

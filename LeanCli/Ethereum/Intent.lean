@@ -211,30 +211,30 @@ inductive Intent where
   The IntentParser rejects denominations outside that set; passing
   `denominationWei = 0.5 ETH` would silently mis-route to the
   wrong pool. The chat-path handler routes this to
-  `shielded.tornado.prepareDeposit` (which uses snarkjs + Baby
-  Jubjub Pedersen-hashing to generate the note + commitment in the
-  bridge sidecar) and surfaces the resulting deposit note for the
-  user to save. The prepared tx still flows through `tx.simulate` +
+  `shielded.tornado.prepareDeposit`, which (via `@kohaku-eth/tornado-cash`)
+  derives the note secrets deterministically from the wallet seed,
+  Pedersen-hashes the commitment, and returns UNSIGNED `deposit(commitment)`
+  calldata. There is no note string to save — the wallet seed recovers
+  every note. The prepared tx still flows through `tx.simulate` +
   ConfirmGate before signing. -/
   | tornadoDeposit
       (chainId : ChainId)
       (denominationWei : Amount)
   /-- Tornado Cash withdraw. Spends a previously-deposited note for a
-  fresh recipient address. Withdrawal requires the user's saved
-  deposit `note` (the secret + nullifier the bridge handed back at
-  deposit time) plus current merkle-tree state from the pool's
-  on-chain logs. The bridge sidecar generates the ZK proof and
-  returns the `withdraw(...)` calldata.
+  fresh recipient address. The SDK derives note secrets from the wallet
+  seed, so NO saved note is required; the bridge syncs the pool's
+  on-chain state, generates the groth16 proof, and submits it via a
+  relayer or ERC-4337 paymaster (`shielded.tornado.quoteWithdraw` then
+  `executeWithdraw`).
 
-  `note` is an opaque ASCII string (canonical form
-  `tornado-note-<chain>-<denomination>-<base58>`). Treated as a
-  secret — the canonical render elides the middle so screenshots
-  don't leak the spending key. -/
+  `noteRef` is NOT a secret — it is an optional deposit-index selector:
+  empty ⇒ auto-select the oldest spendable note of that denomination;
+  otherwise a decimal deposit index. -/
   | tornadoWithdraw
       (chainId : ChainId)
       (denominationWei : Amount)
       (recipient : Address)
-      (note : String)
+      (noteRef : String)
   /-- Read-only listing of outgoing ERC-20 allowances for `wallet` (or
   the default wallet when omitted). The chat-path handler walks
   `chain.scanTransfers` for `Approval` events over a configurable

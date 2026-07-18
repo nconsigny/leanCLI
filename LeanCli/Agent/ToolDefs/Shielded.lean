@@ -20,13 +20,14 @@ chat path has a structured surface instead of free-forming
 | `prepare_railgun_shield`          | `shielded.railgun.prepareShield`    | Returns prepared txns; no broadcast.   |
 | `prepare_railgun_unshield`        | `shielded.railgun.unshield`         | Bundler path: signs + broadcasts via SDK. |
 | `prepare_railgun_transfer`        | `shielded.railgun.transfer`         | 0zk → 0zk internal; ERC-20 only.      |
-| `prepare_tornado_deposit`         | `shielded.tornado.prepareDeposit`   | Fixed denominations; bridge stub.     |
-| `prepare_tornado_withdraw`        | `shielded.tornado.prepareWithdraw`  | Needs user's saved deposit note.      |
+| `prepare_tornado_deposit`         | `shielded.tornado.prepareDeposit`   | Fixed denominations; returns unsigned txns. |
+| `prepare_tornado_withdraw`        | `shielded.tornado.quoteWithdraw`    | Quotes fee/net; no broadcast. Seed-derived notes. |
 
-PR 2 lands the Tornado wrappers + daemon RPCs + chat.draft envelope.
-The bridge SDK integration (snarkjs + Baby Jubjub Pedersen) is a
-follow-up; the typed tools surface a clear `daemon_error` until the
-sidecar implementation lands.
+Tornado is live via `@kohaku-eth/tornado-cash`: deposits return unsigned
+fixed-denomination `deposit(commitment)` legs (confirmed + signed by the
+TUI), and withdrawals derive notes deterministically from the wallet seed
+(no note string to save), quote a paymaster/relayer fee, then execute via
+`shielded.tornado.executeWithdraw` after confirmation.
 
 ## Trust model
 
@@ -114,10 +115,10 @@ private def tokenAddressProp : Json := .obj #[
   ("description",
     .str "Optional ERC-20 token address. Omit for native ETH (the bridge will wrap internally for Railgun).")
 ]
-private def tornadoNoteProp : Json := .obj #[
+private def tornadoModeProp : Json := .obj #[
   ("type", .str "string"),
   ("description",
-    .str "The user's saved Tornado deposit note. Canonical form `tornado-note-eth-<denom>-<base58>` — the value the prepare_tornado_deposit tool handed back at deposit time. NEVER fabricate one; if the user hasn't supplied a note, ask for it before calling.")
+    .str "Withdrawal transport: \"paymaster\" (default — gas is paid out of the note via an ERC-4337 paymaster and the net is forwarded to the recipient) or \"relayer\" (a classic ENS relayer submits the proof). Omit for paymaster.")
 ]
 private def tornadoDenominationEthProp : Json := .obj #[
   ("type", .str "string"),
@@ -306,19 +307,19 @@ def prepareRailgunUnshield : ToolDecl := {
 }
 
 /-- Tornado Cash deposit. Fixed-denomination mixer; the bridge sidecar
-    generates the spending note + Pedersen-hashed commitment and
-    returns `deposit(commitment)` calldata. PR 2 ships a bridge stub
-    until the snarkjs + Baby Jubjub Pedersen layer lands; users see a
-    clear "not yet implemented" `daemon_error` in that interim. -/
+    derives the spending note deterministically from the wallet seed,
+    Pedersen-hashes the commitment, and returns UNSIGNED
+    `deposit(commitment)` calldata for the TUI to confirm and sign. -/
 def prepareTornadoDeposit : ToolDecl := {
   name := "prepare_tornado_deposit",
   description :=
-    "Prepare an unsigned Tornado Cash deposit of native ETH into one \
-     of the fixed-denomination pools (0.1 / 1 / 10 / 100 ETH). The \
-     bridge sidecar generates and returns the spending note — the user \
-     MUST save it; the wallet cannot reconstruct the note from the \
-     on-chain commitment alone. Any amountEth outside the canonical \
-     set is rejected.",
+    "Prepare an unsigned Tornado Cash deposit of native ETH into the \
+     fixed-denomination pools (0.1 / 1 / 10 / 100 ETH; an amount that is \
+     a multiple of 0.1 becomes several fixed-denomination deposits). The \
+     note secrets are derived deterministically from the wallet seed, so \
+     there is NO note string to save — the wallet recovers every note \
+     from the seed. Any amountEth that is not a positive multiple of 0.1 \
+     is rejected. Pass chainId (1 = mainnet, 11155111 = sepolia).",
   paramSchema := .obj #[
     ("type", .str "object"),
     ("required", .arr #[.str "chainId", .str "amountEth"]),
@@ -332,33 +333,39 @@ def prepareTornadoDeposit : ToolDecl := {
     match requireString "prepare_tornado_deposit" "amountEth" args with
     | .error e => pure e
     | .ok amountEth =>
-        let params : Json := .obj #[("amountEth", .str amountEth)]
+        let params : Json := .obj <|
+          #[("amountEth", .str amountEth)]
+            ++ (match getField "chainId" args with
+                | some c => #[("chainId", c)]
+                | none   => #[])
         callDaemon cfg "prepare_tornado_deposit"
           "shielded.tornado.prepareDeposit" params
 }
 
-/-- Tornado Cash withdraw. Consumes the user's saved deposit note and
-    builds withdraw calldata with a ZK proof against the pool's
-    current merkle tree. The bridge sidecar owns the proof generation;
-    PR 2's stub returns a `daemon_error` pending implementation. -/
+/-- Tornado Cash withdraw quote. Builds the fee terms (paymaster net, or
+    relayer context) WITHOUT broadcasting, so the user can confirm before
+    the proof is submitted. Notes are recovered from the wallet seed —
+    there is no note string to supply. -/
 def prepareTornadoWithdraw : ToolDecl := {
   name := "prepare_tornado_withdraw",
   description :=
-    "Prepare an unsigned Tornado Cash withdrawal. Requires the user's \
-     saved deposit `note` from a prior prepare_tornado_deposit call \
-     (the bridge cannot recover a note from the chain — only the user \
-     has it). Recipient should be a FRESH address with no on-chain \
-     link to the deposit source; otherwise the mix is defeated.",
+    "Quote a Tornado Cash withdrawal of one fixed denomination (0.1 / 1 / \
+     10 / 100 ETH) to `recipient`, WITHOUT broadcasting. Returns the \
+     paymaster fee and net amount (paymaster mode) or note context \
+     (relayer mode) for the user to confirm; the actual withdrawal is a \
+     separate confirmed step. No deposit note is needed — the wallet \
+     re-derives spendable notes from its seed. Recipient MUST be a FRESH \
+     address with no on-chain link to the deposit source, or the mix is \
+     defeated. Pass chainId; `mode` defaults to paymaster.",
   paramSchema := .obj #[
     ("type", .str "object"),
     ("required",
-      .arr #[.str "chainId", .str "amountEth",
-             .str "recipient", .str "note"]),
+      .arr #[.str "chainId", .str "amountEth", .str "recipient"]),
     ("properties", .obj #[
       ("chainId",   chainIdProp),
       ("amountEth", tornadoDenominationEthProp),
       ("recipient", recipientProp),
-      ("note",      tornadoNoteProp)
+      ("mode",      tornadoModeProp)
     ])
   ],
   classify := .read,
@@ -369,16 +376,17 @@ def prepareTornadoWithdraw : ToolDecl := {
         match requireString "prepare_tornado_withdraw" "recipient" args with
         | .error e => pure e
         | .ok recipient =>
-            match requireString "prepare_tornado_withdraw" "note" args with
-            | .error e => pure e
-            | .ok note =>
-                let params : Json := .obj #[
-                  ("amountEth", .str amountEth),
-                  ("recipient", .str recipient),
-                  ("note",      .str note)
-                ]
-                callDaemon cfg "prepare_tornado_withdraw"
-                  "shielded.tornado.prepareWithdraw" params
+            let params : Json := .obj <|
+              #[("amountEth", .str amountEth),
+                ("recipient", .str recipient)]
+                ++ (match optString args "mode" with
+                    | some m => #[("mode", .str m)]
+                    | none   => #[])
+                ++ (match getField "chainId" args with
+                    | some c => #[("chainId", c)]
+                    | none   => #[])
+            callDaemon cfg "prepare_tornado_withdraw"
+              "shielded.tornado.quoteWithdraw" params
 }
 
 /-- Railgun internal transfer (0zk → 0zk). ERC-20 only at the SDK

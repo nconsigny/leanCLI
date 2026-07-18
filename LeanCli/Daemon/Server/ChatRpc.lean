@@ -400,11 +400,10 @@ private def chatDraftIntentResponse
       ]
   | .tornadoDeposit _ denominationWei =>
       -- Tornado deposit: route to `shielded.tornado.prepareDeposit`.
-      -- The bridge sidecar generates the spending note + Pedersen-
-      -- hashed commitment and returns deposit calldata. PR 2 ships
-      -- the sidecar as a stub; the user sees a clear "Tornado SDK
-      -- not yet integrated" error in the TUI until snarkjs + Baby
-      -- Jubjub Pedersen lands.
+      -- The bridge derives the note secrets from the wallet seed,
+      -- Pedersen-hashes the commitment, and returns UNSIGNED deposit
+      -- calldata (multiple legs for a multi-denomination amount) that the
+      -- TUI confirms and signs. No note to save — the seed recovers it.
       let amountEth := LeanCli.Util.Units.formatUnits denominationWei 18
       .obj <| commonFields ++ #[
         ("prepare", .obj #[
@@ -415,20 +414,21 @@ private def chatDraftIntentResponse
           ])
         ])
       ]
-  | .tornadoWithdraw _ denominationWei recipient note =>
-      -- Tornado withdraw: route to `shielded.tornado.prepareWithdraw`.
-      -- The bridge sidecar consumes the saved deposit note, fetches
-      -- the pool's current merkle state, generates the ZK proof, and
-      -- returns withdraw calldata. Same stub status as deposit until
-      -- the sidecar lands.
+  | .tornadoWithdraw _ denominationWei recipient _noteRef =>
+      -- Tornado withdraw: route to `shielded.tornado.quoteWithdraw` (the
+      -- pre-broadcast quote step). The bridge syncs the pool's merkle
+      -- state, and — after the ConfirmGate accepts the quoted fee/net —
+      -- `executeWithdraw` builds the groth16 proof and submits it via the
+      -- paymaster (default) or a relayer. No saved note is required; the
+      -- wallet re-derives spendable notes from its seed.
       let amountEth := LeanCli.Util.Units.formatUnits denominationWei 18
       .obj <| commonFields ++ #[
         ("prepare", .obj #[
-          ("rpc",    .str "shielded.tornado.prepareWithdraw"),
+          ("rpc",    .str "shielded.tornado.quoteWithdraw"),
           ("params", .obj #[
             ("amountEth", .str amountEth),
             ("recipient", addrJson recipient),
-            ("note",      .str note),
+            ("mode",      .str "paymaster"),
             ("chainId",   .num (Int.ofNat chainId))
           ])
         ])
@@ -638,35 +638,6 @@ private def aaveDecimalsForAsset (chainId : Nat) (asset : String) : Option Nat :
   | some t => some t.decimals
   | none => some 18
 
-private def prepareAaveBatchLeg
-    (chainId : Nat) (sender : String) (shim : LeanCli.Aave.Prepare.ChainEthCallShim)
-    (leg : AaveBatchLeg) : IO LeanCli.Aave.Prepare.PrepareResult := do
-  let some decimals := aaveDecimalsForAsset chainId leg.asset
-    | pure (.err "unknown_asset" s!"asset {leg.asset} is not known to the Aave market on chainId {chainId}")
-  let some amountBase := LeanCli.Util.Units.parseUnits leg.amount decimals
-    | pure (.err "bad_amount" s!"could not parseUnits {leg.amount} with decimals {decimals}")
-  match leg.verb with
-  | "supply" =>
-      if LeanCli.Aave.Prepare.isNativeEthInput leg.asset then
-        LeanCli.Aave.Prepare.prepareNativeEthSupplySmart
-          chainId sender sender amountBase shim
-      else
-        LeanCli.Aave.Prepare.prepareSupply
-          chainId sender sender leg.asset amountBase shim
-  | "withdraw" =>
-      LeanCli.Aave.Prepare.prepareWithdraw
-        chainId sender sender leg.asset amountBase shim
-  | "borrow" =>
-      LeanCli.Aave.Prepare.prepareBorrow
-        chainId sender sender leg.asset amountBase
-        LeanCli.Aave.V3Pool.InterestRateMode.variable shim
-  | "repay" =>
-      LeanCli.Aave.Prepare.prepareRepay
-        chainId sender sender leg.asset amountBase
-        LeanCli.Aave.V3Pool.InterestRateMode.variable shim
-  | _ =>
-      pure (.err "unsupported_batch_leg" s!"Aave batch leg is not supported yet: {leg.verb}")
-
 private def readyFrameOrError
     (result : LeanCli.Aave.Prepare.PrepareResult) :
     Except (String × String) (LeanCli.Aave.Prepare.TxFrame × String) :=
@@ -675,6 +646,62 @@ private def readyFrameOrError
   | .needsApproval _ _ _ _ summary =>
       .error ("approval_required", s!"Aave batch leg needs an approval first: {summary}")
   | .err kind msg => .error (kind, msg)
+
+/-- Map the error branch of `prepareNativeEthSupplySmartLegs` (always a
+    `PrepareResult.err`) to the batch path's `(kind, msg)` pair. The
+    other constructors cannot occur there; surfaced as a stable
+    protocol error rather than a panic if they ever do. -/
+private def prepareErrPair
+    (r : LeanCli.Aave.Prepare.PrepareResult) : String × String :=
+  match r with
+  | .err kind msg => (kind, msg)
+  | .needsApproval _ _ _ _ summary =>
+      ("approval_required", s!"Aave batch leg needs an approval first: {summary}")
+  | .ready _ _ => ("protocol_error", "unexpected ready result in error branch")
+
+/-- Prepare one conjunction leg as RAW frames — never a self-directed
+    `executeBatch`. The two-leg batch path composes every leg into ONE
+    outer `executeBatch`, and the account contract's `executeBatch`
+    entry is EntryPoint-only: a leg that is itself
+    `executeBatch(self, …)` self-calls with `msg.sender ==
+    address(this)` and reverts the whole batch on-chain. Native-ETH
+    supply therefore expands to its wrap / approve / supply legs here
+    instead of the pre-collapsed single frame
+    `prepareNativeEthSupplySmart` returns. -/
+private def prepareAaveBatchLegFrames
+    (chainId : Nat) (sender : String) (shim : LeanCli.Aave.Prepare.ChainEthCallShim)
+    (leg : AaveBatchLeg) :
+    IO (Except (String × String) (List LeanCli.Aave.Prepare.TxFrame × String)) := do
+  let some decimals := aaveDecimalsForAsset chainId leg.asset
+    | pure (.error ("unknown_asset", s!"asset {leg.asset} is not known to the Aave market on chainId {chainId}"))
+  let some amountBase := LeanCli.Util.Units.parseUnits leg.amount decimals
+    | pure (.error ("bad_amount", s!"could not parseUnits {leg.amount} with decimals {decimals}"))
+  if leg.verb == "supply" && LeanCli.Aave.Prepare.isNativeEthInput leg.asset then
+    match ← LeanCli.Aave.Prepare.prepareNativeEthSupplySmartLegs
+        chainId sender sender amountBase shim with
+    | .error r => pure (.error (prepareErrPair r))
+    | .ok (frames, summary) => pure (.ok (frames, summary))
+  else
+    let result ← match leg.verb with
+      | "supply" =>
+          LeanCli.Aave.Prepare.prepareSupply
+            chainId sender sender leg.asset amountBase shim
+      | "withdraw" =>
+          LeanCli.Aave.Prepare.prepareWithdraw
+            chainId sender sender leg.asset amountBase shim
+      | "borrow" =>
+          LeanCli.Aave.Prepare.prepareBorrow
+            chainId sender sender leg.asset amountBase
+            LeanCli.Aave.V3Pool.InterestRateMode.variable shim
+      | "repay" =>
+          LeanCli.Aave.Prepare.prepareRepay
+            chainId sender sender leg.asset amountBase
+            LeanCli.Aave.V3Pool.InterestRateMode.variable shim
+      | _ =>
+          pure (.err "unsupported_batch_leg" s!"Aave batch leg is not supported yet: {leg.verb}")
+    match readyFrameOrError result with
+    | .error e => pure (.error e)
+    | .ok (frame, summary) => pure (.ok ([frame], summary))
 
 /-- Handle every `chat.*` JSON-RPC method. -/
 def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
@@ -1330,13 +1357,20 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                                   | some hex => pure (.ok hex)
                                   | none     => pure (.error "non-string return from eth_call")
                               | .error e => pure (.error e)
-                          let resultA ← prepareAaveBatchLeg chainId sender shim legA
-                          let resultB ← prepareAaveBatchLeg chainId sender shim legB
-                          match readyFrameOrError resultA, readyFrameOrError resultB with
-                          | .ok (frameA, summaryA), .ok (frameB, summaryB) =>
+                          -- Each leg arrives as RAW frames (native-ETH
+                          -- supply is wrap/approve/supply, not a
+                          -- pre-collapsed executeBatch), so the single
+                          -- batchTxFrames below produces a FLAT
+                          -- executeBatch. A nested self-directed
+                          -- executeBatch leg would revert on-chain:
+                          -- that entry is EntryPoint-only.
+                          let resultA ← prepareAaveBatchLegFrames chainId sender shim legA
+                          let resultB ← prepareAaveBatchLegFrames chainId sender shim legB
+                          match resultA, resultB with
+                          | .ok (framesA, summaryA), .ok (framesB, summaryB) =>
                               let batched :=
                                 LeanCli.Aave.Prepare.batchTxFrames
-                                  sender chainId [frameA, frameB]
+                                  sender chainId (framesA ++ framesB)
                               let summary :=
                                 s!"Aave V3 atomic batch via SPHINCS executeBatch: 1) {summaryA}; 2) {summaryB}"
                               pure <| some <| .obj #[

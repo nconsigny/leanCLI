@@ -32,6 +32,12 @@ inductive RpcMethod where
   | getTransactionReceipt
   | getLogs
   | debugTraceCall
+  /-- `eth_getProof`: Merkle-Patricia account/storage proof. Fetched from
+      an UNTRUSTED source by design — the StateVault pin path verifies the
+      proof in Lean (`LeanCli.Ethereum.Mpt`) against a consensus-verified
+      state root, so the server can only fail to serve, never lie. -/
+  | getProof
+  | getBlockByNumber
   deriving DecidableEq, Repr
 
 def RpcMethod.asString : RpcMethod → String
@@ -48,6 +54,8 @@ def RpcMethod.asString : RpcMethod → String
   | .getTransactionReceipt => "eth_getTransactionReceipt"
   | .getLogs => "eth_getLogs"
   | .debugTraceCall => "debug_traceCall"
+  | .getProof => "eth_getProof"
+  | .getBlockByNumber => "eth_getBlockByNumber"
 
 def Backend.asString : Backend → String
   | .localNode => "local"
@@ -112,6 +120,8 @@ def parseRpcMethod : String → Option RpcMethod
   | "eth_getTransactionReceipt" => some .getTransactionReceipt
   | "eth_getLogs" => some .getLogs
   | "debug_traceCall" => some .debugTraceCall
+  | "eth_getProof" => some .getProof
+  | "eth_getBlockByNumber" => some .getBlockByNumber
   | _ => none
 
 def backendNames : List String := ["local", "light", "configured"]
@@ -120,6 +130,7 @@ def rpcMethodNames : List String :=
   ["eth_chainId", "eth_blockNumber", "eth_getBalance", "eth_getTransactionCount",
     "eth_getCode", "eth_call", "eth_estimateGas", "eth_gasPrice",
     "eth_maxPriorityFeePerGas", "eth_sendRawTransaction",
-    "eth_getTransactionReceipt", "eth_getLogs", "debug_traceCall"]
+    "eth_getTransactionReceipt", "eth_getLogs", "debug_traceCall",
+    "eth_getProof", "eth_getBlockByNumber"]
 
 end LeanCli.Network.Provider
