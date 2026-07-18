@@ -357,6 +357,19 @@ async function tornadoExecuteWithdraw(env, params) {
       await import("./tornado-paymaster-gas.mjs");
     const maxFeePerGas = await fetchTornadoMaxFeePerGas(bundlerUrl);
     const feeWei = estimateTornadoPaymasterFee(maxFeePerGas);
+    // H2: the fee is recomputed here from a fresh (untrusted) bundler gas
+    // price, decoupled from the quote the user confirmed. Enforce the
+    // confirmed ceiling so a gas spike — or a bundler reporting an inflated
+    // price — cannot silently shrink the recipient's `forwardValue` (the
+    // difference is kept by the paymaster). The caller passes the quoted
+    // paymasterFeeWei (optionally with headroom) as `maxFeeWei`.
+    const maxFeeWei = params?.maxFeeWei != null ? BigInt(params.maxFeeWei) : null;
+    if (maxFeeWei !== null && feeWei > maxFeeWei) {
+      throw new Error(
+        `tornado paymaster fee ${feeWei} wei exceeds the confirmed ceiling ${maxFeeWei} wei ` +
+        `(gas price rose since the quote) — re-quote and confirm before withdrawing`,
+      );
+    }
     const forwardValue = amountWei - feeWei;
     if (forwardValue <= 0n) {
       throw new Error(`withdrawal amount too small to cover the tornado paymaster fee (~${feeWei} wei)`);

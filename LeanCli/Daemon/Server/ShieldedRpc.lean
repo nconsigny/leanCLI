@@ -595,6 +595,47 @@ private def signAndBroadcastBridgeTxns
 
 
 
+/-- C2 gate. The composite `shielded.*` deposit/shield arms (`shielded.deposit`,
+    `shielded.tornado.deposit`, `shielded.railgun.shield`) call the untrusted
+    sidecar's `prepare*`, then sign and broadcast the returned `{to,value,data}`
+    with NO decode / simulate / ConfirmGate and NO re-derivation of `value` or
+    allow-listing of `to`. A malicious sidecar can therefore return
+    `{to: attacker, value: <whole balance>}` and have it signed. These arms
+    exist only for the headless CLI; every interactive/agent surface must use
+    the `prepare*` arms and route each unsigned leg through the per-leg pre-sign
+    gate. Require an explicit operator opt-in so a caller on the daemon socket
+    (the TUI, the LLM agent, any UDS client) cannot reach the un-confirmed
+    broadcast path by default. -/
+private def ungatedShieldAllowed : IO Bool := do
+  match ← IO.getEnv "LEANCLI_ALLOW_UNGATED_SHIELD" with
+  | some v => pure (v.trimAscii.toString == "1")
+  | none   => pure false
+
+private def ungatedShieldDenied : RpcError :=
+  { code := -32040,
+    message := "ungated one-shot shield/deposit is disabled: it signs sidecar-returned calldata with no decode/simulate/confirm. Use the interactive prepare→confirm flow, or set LEANCLI_ALLOW_UNGATED_SHIELD=1 in the daemon env to allow the headless composite.",
+    data := none }
+
+/-- C3 gate. `shielded.railgun.unshield` / `shielded.railgun.transfer` are the
+    ONLY signing surfaces that hand the raw EOA private key to an untrusted
+    sidecar (`LEANCLI_RG_DELEGATING_KEY`), which then signs and broadcasts the
+    4337 UserOp itself with no daemon re-verification — a malicious plugin
+    could sign an attacker-controlled 7702 delegation or a full-balance
+    transfer, and the pre-RPC TUI confirm of the display terms cannot constrain
+    the bytes a key-holding sidecar actually signs. The proper fix requires the
+    upstream SDK to expose an unsigned UserOp + hash for in-core signing (see
+    the TODO in the arm). Until then, require an explicit operator opt-in so
+    the raw key is never exported by default. -/
+private def railgunInSidecarSigningAllowed : IO Bool := do
+  match ← IO.getEnv "LEANCLI_ALLOW_RAILGUN_INSIDECAR_SIGNING" with
+  | some v => pure (v.trimAscii.toString == "1")
+  | none   => pure false
+
+private def railgunInSidecarSigningDenied : RpcError :=
+  { code := -32041,
+    message := "railgun unshield/transfer is disabled: unlike every other signing surface it hands the raw EOA private key to the untrusted sidecar, which signs and broadcasts the 4337 UserOp itself with no daemon re-verification. Set LEANCLI_ALLOW_RAILGUN_INSIDECAR_SIGNING=1 in the daemon env to accept this risk.",
+    data := none }
+
 /-- Handle every `shielded.*` JSON-RPC method. -/
 def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
     (notify : LeanCli.Keystore.Tpm2Runtime.Notifier)
@@ -696,7 +737,8 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   | none   => #[])
               shieldedBridgeCall cfg "shielded.railgun.prepareShield" bridgeParams none req
                 (rgSeedHex? := some seedHex)
-  | "shielded.railgun.shield" =>
+  | "shielded.railgun.shield" => do
+      unless (← ungatedShieldAllowed) do return .error ungatedShieldDenied
       -- ⚠ UNGATED one-shot (see `shielded.deposit`): prepare + EOA-sign +
       -- broadcast in one RPC, no daemon-side decode/simulate/ConfirmGate.
       -- Retained for the headless CLI only. Interactive surfaces use
@@ -771,7 +813,8 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                                     ("sent", .arr sent)
                                   ]
       | _, _ => pure (.error invalidParams)
-  | "shielded.railgun.unshield" =>
+  | "shielded.railgun.unshield" => do
+      unless (← railgunInSidecarSigningAllowed) do return .error railgunInSidecarSigningDenied
       -- Builds + relays the private op via an ERC-4337 bundler using an
       -- EIP-7702 delegated EOA. Native ETH is supported in alpha-21
       -- (unshield-as-WETH + withdraw tail call). The Railgun secret only
@@ -868,7 +911,8 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                             (rgDelegatingKeyHex? := some delegatingKeyHex)
                             (rgSeedHex? := some seedHex)
       | _, _, _ => pure (.error invalidParams)
-  | "shielded.railgun.transfer" =>
+  | "shielded.railgun.transfer" => do
+      unless (← railgunInSidecarSigningAllowed) do return .error railgunInSidecarSigningDenied
       -- Railgun-internal transfer (0zk → 0zk). ERC20-only at SDK level
       -- (tokenGuard). Bundler + 7702 details: see shielded.railgun.unshield.
       match paramName req.params, paramString req.params "recipient",
@@ -993,15 +1037,23 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
           match ← tornadoSeedHex state req.params with
           | .error err => pure (.error err)
           | .ok seedHex =>
+              -- H2: forward the user-confirmed fee ceiling (the quoted
+              -- paymasterFeeWei) so the sidecar aborts rather than paying an
+              -- inflated fee out of the recipient's proceeds. Optional and
+              -- backward-compatible: absent ⇒ no ceiling (legacy behaviour).
+              let maxFeeWei? := getField "maxFeeWei" req.params >>= asString
               tornadoBridgeCall cfg "shielded.tornado.executeWithdraw"
-                (.obj #[
+                (.obj (#[
                   ("chainId", .num (Int.ofNat cid)),
                   ("amountEth", .str amountEth),
                   ("recipient", .str recipient),
                   ("mode", .str mode)
-                ]) cid seedHex req
+                ] ++ (match maxFeeWei? with
+                      | some w => #[("maxFeeWei", .str w)]
+                      | none   => #[]))) cid seedHex req
       | _, _, _ => pure (.error invalidParams)
-  | "shielded.tornado.deposit" =>
+  | "shielded.tornado.deposit" => do
+      unless (← ungatedShieldAllowed) do return .error ungatedShieldDenied
       -- ⚠ UNGATED one-shot headless composite (`leancli shield tornado …`):
       -- prepares the unsigned deposit legs, then EOA-signs + broadcasts each on
       -- the selected chain WITHOUT the interactive decode → simulate →
@@ -1069,7 +1121,8 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
           | .ok mnemonic =>
               shieldedBridgeCall cfg "shielded.prepareDeposit"
                 (.obj #[("amountEth", .str amountEth)]) (some mnemonic) req
-  | "shielded.deposit" =>
+  | "shielded.deposit" => do
+      unless (← ungatedShieldAllowed) do return .error ungatedShieldDenied
       -- ⚠ UNGATED one-shot: prepares + EOA-signs + broadcasts in a single
       -- RPC, WITHOUT the daemon running decode → simulate → ConfirmGate.
       -- Retained ONLY for the headless CLI forwarder (`leancli shield`),
