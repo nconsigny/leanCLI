@@ -68,8 +68,9 @@ private def padTo32 (b : ByteArray) : ByteArray :=
     let zeros := ByteArray.mk (Array.replicate (32 - b.size) 0)
     zeros ++ b
 
+-- NB: `Hex.encode` already emits the `0x` prefix.
 private def bytesToHex0x (b : ByteArray) : String :=
-  "0x" ++ LeanCli.Crypto.Hex.encode b
+  LeanCli.Crypto.Hex.encode b
 
 /-- Read the current head header through the verified backend with NO
     silent downgrade: a light-client hit is `consensusVerified`, anything
