@@ -42,7 +42,7 @@ run_expect_code() {
   shift
   local code
   set +e
-  LEANCLI_SOCKET="$SOCK" XDG_DATA_HOME="$DATA" "$ROOT/.lake/build/bin/leancli" "$@" >/tmp/leancli-m6-check-out 2>&1
+  LEANCLI_SOCKET="$SOCK" XDG_DATA_HOME="$DATA" LEANCLI_PASSPHRASE='m6-pass' "$ROOT/.lake/build/bin/leancli" "$@" </dev/null >/tmp/leancli-m6-check-out 2>&1
   code="$?"
   set -e
   if [[ "$code" != "$expected" ]]; then
@@ -52,18 +52,22 @@ run_expect_code() {
   fi
 }
 
-run_expect_code 0 wallet list sepolia
-run_expect_code 1 wallet create sepolia 'bad/key'
-run_expect_code 1 wallet sign sepolia 'bad/key' 0000000000000000000000000000000000000000000000000000000000000000
-run_expect_code 1 wallet send sepolia 'bad/key' 0x0000000000000000000000000000000000000000 1
+# Verify the thin CLI forwards keystore operations to the daemon over
+# JSON-RPC (the daemon-log method assertions below confirm the routing).
+# The R1/P-256 + TPM-Sepolia surface these checks used to exercise was
+# removed; the current keystore surface is EOA import/unlock/list.
+ANVIL_MNEMONIC='test test test test test test test test test test test junk'
+run_expect_code 0 wallet list
+run_expect_code 0 wallet import anvil "$ANVIL_MNEMONIC"
+run_expect_code 0 wallet unlock anvil
+run_expect_code 2 wallet create eoa
 
 LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" daemon stop >/dev/null
 wait "$daemon_pid" >/dev/null 2>&1 || true
 unset daemon_pid
 
-grep -q '"method":"tpm.listSepolia"' "$LOG"
-grep -q '"method":"tpm.createSepolia"' "$LOG"
-grep -q '"method":"tpm.signSepolia"' "$LOG"
-grep -q '"method":"r1.sendSepolia"' "$LOG"
+grep -q '"method":"eoa.list"' "$LOG"
+grep -q '"method":"eoa.import"' "$LOG"
+grep -q '"method":"eoa.unlock"' "$LOG"
 
 printf 'M6 keystore daemon checks passed\n'
