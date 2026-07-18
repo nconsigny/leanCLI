@@ -886,9 +886,12 @@ function WalletBox({
     );
   }
   // StateVault (partial state node) summary. Omitted entirely when the
-  // daemon predates the vault.* family (data.vault === null). Head tier
-  // is color-coded by provenance: lean (Lean-verified MPT proof) >
-  // consensus (light-client) > rpc (unverified direct read).
+  // daemon predates the vault.* family (data.vault === null). Two
+  // physical lines (counts + head) because `Line` truncates by design —
+  // the pane budget counts rows, so long content splits instead of
+  // wrapping, same as the wallet address rows. Head tier is color-coded
+  // by provenance: lean (Lean-verified MPT proof) > consensus
+  // (light-client) > rpc (unverified direct read).
   if (data.vault !== null) {
     if (!data.vault.enabled) {
       lines.push(
@@ -904,16 +907,20 @@ function WalletBox({
         : theme.warn;
       lines.push(
         <Line key="vault" color={theme.koiCream}>
-          ▦ vault: {v.tokens} token(s) · {v.accounts} pin(s) · {v.slots} slot(s)
-          {v.head ? (
-            <>
-              {" · head #"}{v.head.block}{" "}
-              <Text color={tierColor}>{v.head.tier}</Text>
-            </>
-          ) : (
-            <Text color={theme.dim}> · no head pinned — try `leancli vault head`</Text>
-          )}
+          ▦ vault: {v.tokens} token · {v.accounts} pin · {v.slots} slot
         </Line>,
+      );
+      lines.push(
+        v.head ? (
+          <Line key="vault-head" color={theme.dim}>
+            {"  head #"}{v.head.block}{" "}
+            <Text color={tierColor}>{v.head.tier}</Text>
+          </Line>
+        ) : (
+          <Line key="vault-head" color={theme.dim}>
+            {"  no head pinned — `leancli vault head`"}
+          </Line>
+        ),
       );
     }
   }
