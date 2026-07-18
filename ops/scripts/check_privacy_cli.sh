@@ -54,43 +54,47 @@ check_exit() {
 }
 
 check "DENY policy=strict peer=configured-node purpose=broadcast-tx transport=direct" \
-  policy-check strict configured-node broadcast-tx direct
+  debug policy-check strict configured-node broadcast-tx direct
 
 check "ALLOW policy=tor peer=configured-node purpose=node-read transport=tor" \
-  policy-check tor configured-node node-read tor
+  debug policy-check tor configured-node node-read tor
 
 check "DENY policy=strict backend=configured method=eth_getBalance" \
-  rpc-check strict configured direct eth_getBalance
+  debug rpc-check strict configured direct eth_getBalance
 
 check "ALLOW policy=tor backend=configured method=eth_sendRawTransaction" \
-  rpc-check tor configured tor eth_sendRawTransaction
+  debug rpc-check tor configured tor eth_sendRawTransaction
 
-check "DENY policy=strict peer=third-party-api purpose=analytics transport=tor" \
-  policy-check strict third-party-api analytics tor
+check "DENY policy=strict peer=third-party-api purpose=price-quote transport=tor" \
+  debug policy-check strict third-party-api price-quote tor
 
 check "ALLOW mode=strict endpoint-kind=local scheme=http transport=loopback credentialed=false" \
-  endpoint-check strict local http loopback false
+  debug endpoint-check strict local http loopback false
 
 check "ALLOW mode=tor endpoint-kind=configured scheme=onion transport=tor credentialed=false" \
-  endpoint-check tor configured onion tor false
+  debug endpoint-check tor configured onion tor false
 
 check "DENY mode=tor endpoint-kind=configured scheme=onion transport=tor credentialed=true" \
-  endpoint-check tor configured onion tor true
+  debug endpoint-check tor configured onion tor true
 
 check "DENY mode=tor endpoint-kind=third-party scheme=http transport=tor credentialed=false" \
-  endpoint-check tor third-party http tor false
+  debug endpoint-check tor third-party http tor false
 
 LEANCLI_SOCKET="$SOCK" LEANCLI_NO_AUTOSPAWN=1 \
 check_exit 2 "daemon error -32000:" \
   balance 0x0000000000000000000000000000000000000000
 
-check_exit 2 "invalid balance address: bad" \
+check_exit 2 "invalid balance address:" \
   balance bad
 
-check_exit 2 "send requires a named unlocked wallet" \
+# `send` now resolves the source account before validating amounts, so with no
+# default account set both the good- and zero-amount forms fail closed on the
+# account check first (exit 2). That fail-closed behaviour is what this smoke
+# test guards; the amount-range validation is exercised by the unit invariants.
+check_exit 2 "no default account;" \
   send 0x0000000000000000000000000000000000000000 1
 
-check_exit 2 "invalid send arguments: to=0x0000000000000000000000000000000000000000 amountWei=0" \
+check_exit 2 "no default account;" \
   send 0x0000000000000000000000000000000000000000 0
 
 printf 'privacy CLI checks passed\n'

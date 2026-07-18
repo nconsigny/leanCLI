@@ -644,6 +644,12 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
   | "shielded.ping" =>
       let resp ← LeanCli.Privacy.Bridge.ping
       pure <| .ok <| LeanCli.Privacy.Bridge.responseToJson resp
+  | "shielded.hasSecret" =>
+      -- Read-only: does a Privacy Pools secret exist on disk? Lets the thin
+      -- CLI decide whether to prompt for the shielded-balance passphrase
+      -- without importing `LeanCli.Wallet.PpSecretStore` (CLI-isolation guard).
+      let present ← LeanCli.Wallet.PpSecretStore.existsOnDisk
+      pure <| .ok <| .obj #[("exists", .bool present)]
   | "eip712.decodeIntent" =>
       -- Why: same architecture as tx.decodeIntent — daemon prefetches token
       -- metadata for any addresses we can identify cheaply (sellToken/

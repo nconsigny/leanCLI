@@ -4,10 +4,8 @@ import LeanCli.Cli.DaemonClient
 import LeanCli.Cli.MemoryCmd
 import LeanCli.Cli.NetworkConfig
 import LeanCli.Cli.Passphrase
-import LeanCli.Keystore.Tpm2Runtime
 import LeanCli.Encoding.Json
 import LeanCli.Invariants.EthAmount
-import LeanCli.Wallet.PpSecretStore
 import LeanCli.Swap.Tokens
 import LeanCli.Swap.UniV3
 import LeanCli.Invariants.Swap
@@ -1583,8 +1581,8 @@ def run (args : List String) : IO UInt32 := do
           let first ← Pin.read "  TPM PIN (Enter to skip): "
           if first.isEmpty then pure withTimeout
           else
-            if first.length < LeanCli.Keystore.Tpm2Runtime.minPinLength then
-              IO.eprintln s!"error: TPM PIN must be at least {LeanCli.Keystore.Tpm2Runtime.minPinLength} characters"
+            if first.length < LeanCli.minPinLength then
+              IO.eprintln s!"error: TPM PIN must be at least {LeanCli.minPinLength} characters"
               return 2
             let again ← Pin.read "  Confirm TPM PIN: "
             if first != again then
@@ -1609,7 +1607,7 @@ def run (args : List String) : IO UInt32 := do
       -- — TPM dictionary-attack lockout means a forgotten/mistyped PIN
       -- can permanently brick the TPM envelope until reset.
       let pin ← match ← Pin.readConfirmed
-          LeanCli.Keystore.Tpm2Runtime.minPinLength with
+          LeanCli.minPinLength with
         | .ok p => pure p
         | .error e =>
             IO.eprintln s!"error: {e}"
@@ -2232,8 +2230,17 @@ def run (args : List String) : IO UInt32 := do
       let publicTotal := totalEoa
       IO.println s!"  Public total:    {formatEth publicTotal}"
       IO.println ""
-      -- Why: only prompt for the PP passphrase if a secret is on disk.
-      if ← LeanCli.Wallet.PpSecretStore.existsOnDisk then
+      -- Why: only prompt for the PP passphrase if a secret is on disk. Ask
+      -- the daemon (thin CLI must not import LeanCli.Wallet.*); default to
+      -- "no secret" if the query fails so we never prompt spuriously.
+      let ppSecretPresent ← do
+        match ← DaemonClient.call "shielded.hasSecret" (.obj #[]) with
+        | .ok j =>
+            match LeanCli.Encoding.Json.getField "exists" j with
+            | some (.bool b) => pure b
+            | _ => pure false
+        | .error _ => pure false
+      if ppSecretPresent then
         IO.println "Shielded balance (Privacy Pools v1):"
         let passphrase ← Passphrase.read "Passphrase for shielded balance: "
         match ← DaemonClient.call "shielded.balance"
