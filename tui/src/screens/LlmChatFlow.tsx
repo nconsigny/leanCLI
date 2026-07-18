@@ -1290,10 +1290,10 @@ function ChatBody({
               {"  "}<Text color={theme.primary}>send 0.001 ETH to niard.eth</Text>
             </Text>
             <Text color={theme.dim}>
-              {"  "}<Text color={theme.primary}>approve 100 USDC for vitalik.eth</Text>
+              {"  "}<Text color={theme.primary}>approve 100 fxUSD for vitalik.eth</Text>
             </Text>
             <Text color={theme.dim}>
-              {"  "}<Text color={theme.primary}>revoke USDC for 0xC0deDeAD...</Text>
+              {"  "}<Text color={theme.primary}>revoke fxUSD for 0xC0deDeAD...</Text>
             </Text>
           </Box>
         ) : (
