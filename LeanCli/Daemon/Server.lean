@@ -422,6 +422,27 @@ def run (cfg : Config) : IO Unit := do
             IO.eprintln "leancli-daemon: helios warmup skipped (sim connection unavailable); first read pays the sync"
     catch e =>
       IO.eprintln s!"leancli-daemon: helios auto-enable failed ({e}); use daemon.helios.toggle to retry"
+  -- Auto-pin every wallet-owned account (stored EOAs + SPHINCS smart
+  -- accounts with a computed address) into the StateVault shortly after
+  -- startup — the state the user has should be state the wallet has
+  -- proven. Detached task, delayed past the helios warmup so the head
+  -- capture rides an already-synced client; strictly best-effort (a
+  -- failure logs and changes nothing). Disable with
+  -- `LEANCLI_VAULT_AUTOPIN=0`; implied off when the vault itself is off.
+  let autopinOff :=
+    match ← IO.getEnv "LEANCLI_VAULT_AUTOPIN" with
+    | some "0" | some "off" | some "false" | some "no" => true
+    | _ => false
+  if !vaultOff && !autopinOff then
+    discard <| IO.asTask do
+      IO.sleep 30000
+      try
+        let summary ← VaultRpc.pinAllAccounts cfg state
+        let pinned := (getField "pinned" summary >>= asNat).getD 0
+        let total := (getField "total" summary >>= asNat).getD 0
+        IO.eprintln s!"leancli-daemon: vault auto-pin proved {pinned}/{total} owned account(s)"
+      catch e =>
+        IO.eprintln s!"leancli-daemon: vault auto-pin failed ({e.toString})"
   -- Opt-in safenode (TDX-attested ORAM proxy). Only spawned when the
   -- operator opts in via `LEANCLI_SAFE_NODE_URL`; failure to attest is
   -- non-fatal — the daemon keeps serving with helios reading directly

@@ -261,6 +261,7 @@ inductive Command where
   | vaultStatus
   | vaultHead (chain? : Option String)
   | vaultPin (address : String) (slots : List String)
+  | vaultPinAll
   | vaultGet (address : String) (chain? : Option String)
   | vaultTokens (chain? : Option String)
   | doctor
@@ -643,6 +644,7 @@ def parse : List String → Command
   | ["vault", "get", addr, chain]          => .vaultGet addr (some chain)
   | ["vault", "tokens"]                    => .vaultTokens none
   | ["vault", "tokens", chain]             => .vaultTokens (some chain)
+  | ["vault", "pin"]                       => .vaultPinAll
   | "vault" :: "pin" :: addr :: rest       => .vaultPin addr rest
   | ["doctor"]            => .doctor
   | ["daemon", "help"] => .daemonHelp none
@@ -1126,9 +1128,10 @@ def helpText : String :=
    STATE VAULT (partial state node):\n\
      vault [status]                      Row counts + DB path of the local state vault.\n\
      vault head [chain]                  Pin the current verified head (block + stateRoot).\n\
-     vault pin <addr> [slot ...]         Prove account (+ slots) via eth_getProof, verified\n\
+     vault pin [addr] [slot ...]         Prove account (+ slots) via eth_getProof, verified\n\
                                          in Lean against the pinned state root; store at\n\
-                                         that exact block (tier: lean).\n\
+                                         that exact block (tier: lean). With no address,\n\
+                                         pins EVERY wallet-owned account.\n\
      vault get <addr> [chain]            Serve stored state, explicitly \"as of block N\".\n\
      vault tokens [chain]                Stored token metadata + provenance tier.\n\n\
    DAEMON / DOCS:\n\

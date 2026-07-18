@@ -500,6 +500,25 @@ export function useWalletData(
     [activeChain, refreshKey, enabled],
   );
 
+  // Owned-account re-pin: ask the daemon to re-prove every wallet-owned
+  // account at the current verified head (`vault.pinAccounts`). The
+  // daemon already auto-pins at startup; this keeps the "as of block N"
+  // pins fresh while the dashboard is open. Each tick costs one head
+  // capture per chain + one eth_getProof per account — real network
+  // reads — so it sits on the SLOWEST tier (15 min) and is paused with
+  // `enabled`. Fire-and-forget: results land in the vault and the 120s
+  // status poll above surfaces them; errors (including a pre-vault
+  // daemon) are ignored.
+  usePoll(
+    async (isCancelled) => {
+      if (!enabled) return;
+      const r = await call("vault.pinAccounts", {}, { timeoutMs: 180_000 });
+      if (isCancelled() || !r.ok) return;
+    },
+    900_000,
+    [refreshKey, enabled],
+  );
+
   const syncShielded = () => {
     if (shieldedBusy) return;
     setShieldedBusy(true);
