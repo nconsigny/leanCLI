@@ -64,6 +64,23 @@ export type WalletRow = {
   defiAave?: AaveSummary | null;
 };
 
+/** StateVault (partial state node) summary for the wallet pane's vault
+ *  line, from `vault.status`. A LOCAL-ONLY read (SQLite behind the
+ *  daemon socket, no network round-trip), so it can ride a poll loop
+ *  without fighting the verified-read budget. `null` = daemon has no
+ *  vault.* family yet (older daemon) or the read failed — the pane
+ *  simply omits the line. */
+export type VaultSummary = {
+  enabled: boolean;
+  tokens: number;
+  accounts: number;
+  slots: number;
+  headers: number;
+  /** Latest pinned head for the active chain; null until first
+   *  `vault head` / `vault pin`. */
+  head: { block: number; tier: string } | null;
+};
+
 export type ShieldedState =
   | { kind: "idle" }
   | { kind: "syncing" }
@@ -79,6 +96,8 @@ export type WalletData = {
   droppedRows: number;
   enumErr: string | null;
   shielded: ShieldedState;
+  /** Partial-state-node summary; null until loaded / when unsupported. */
+  vault: VaultSummary | null;
   refresh: () => void;
   syncShielded: () => void;
 };
@@ -184,6 +203,7 @@ export function useWalletData(
   const [droppedRows, setDroppedRows] = useState(0);
   const [enumErr, setEnumErr] = useState<string | null>(null);
   const [shielded, setShielded] = useState<ShieldedState>({ kind: "idle" });
+  const [vault, setVault] = useState<VaultSummary | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [shieldedBusy, setShieldedBusy] = useState(false);
   // Live mirror of `rows` so the balance poll can iterate the current
@@ -447,6 +467,39 @@ export function useWalletData(
     [activeChain, refreshKey, enabled, rowsKey],
   );
 
+  // StateVault summary: one `vault.status` per tick. Purely local
+  // (daemon-side SQLite row counts + one indexed header lookup — no
+  // network, no verifier), so 120s is generous; it rides the manual `r`
+  // refresh too. Fail-soft: an error (including "method not found" from
+  // a pre-vault daemon) leaves `vault` as-is / null and the pane omits
+  // the line. Display-only, like everything in this cache.
+  usePoll(
+    async (isCancelled) => {
+      if (!enabled || !activeChain) return;
+      const r = await call<{
+        enabled: boolean;
+        counts?: Record<string, number>;
+        head?: { block?: number; tier?: string } | null;
+      }>("vault.status", { chain: activeChain });
+      if (isCancelled() || !r.ok) return;
+      const counts = r.result?.counts ?? {};
+      const head =
+        r.result?.head && typeof r.result.head.block === "number"
+          ? { block: r.result.head.block, tier: r.result.head.tier ?? "rpc" }
+          : null;
+      setVault({
+        enabled: r.result?.enabled === true,
+        tokens: counts.token_meta ?? 0,
+        accounts: counts.accounts ?? 0,
+        slots: counts.storage ?? 0,
+        headers: counts.headers ?? 0,
+        head,
+      });
+    },
+    120_000,
+    [activeChain, refreshKey, enabled],
+  );
+
   const syncShielded = () => {
     if (shieldedBusy) return;
     setShieldedBusy(true);
@@ -475,6 +528,7 @@ export function useWalletData(
     droppedRows,
     enumErr,
     shielded,
+    vault,
     refresh: () => {
       // Manual refresh re-runs every read tier (usePoll fires on dep
       // change), INCLUDING the ERC-20 registry fan-out — so 'r' is the

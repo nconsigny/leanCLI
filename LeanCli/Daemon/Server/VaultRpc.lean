@@ -136,10 +136,26 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
         match counts? with
         | some counts => counts.map (fun (t, n) => (t, Json.num (Int.ofNat n)))
         | none => #[]
+      -- Latest pinned head for the requested (or default) chain, so the
+      -- TUI's vault tile can render "head #N (tier)" from one cheap
+      -- local read. `.null` when nothing is pinned yet.
+      let chain? := getField "chain" req.params >>= asString
+      let chainId :=
+        match endpointForChain cfg chain? with
+        | .ok ep => ep.chainId.getD cfg.chainId
+        | .error _ => cfg.chainId
+      let head? ← LeanCli.Daemon.State.withVault state
+        (fun h => LeanCli.Daemon.StateVault.latestHeader h chainId)
+      let headJson : Json :=
+        match head? with
+        | some (some hd) => hd.toJson
+        | _ => .null
       pure <| .ok <| .obj #[
         ("enabled", .bool enabled),
         ("path", .str (← LeanCli.Daemon.StateVault.defaultPath)),
         ("backend", .str (← LeanCli.Daemon.State.getReadBackend state).asString),
+        ("chainId", .num (Int.ofNat chainId)),
+        ("head", headJson),
         ("counts", .obj countsJson)
       ]
 

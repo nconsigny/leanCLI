@@ -885,6 +885,38 @@ function WalletBox({
       </Line>,
     );
   }
+  // StateVault (partial state node) summary. Omitted entirely when the
+  // daemon predates the vault.* family (data.vault === null). Head tier
+  // is color-coded by provenance: lean (Lean-verified MPT proof) >
+  // consensus (light-client) > rpc (unverified direct read).
+  if (data.vault !== null) {
+    if (!data.vault.enabled) {
+      lines.push(
+        <Line key="vault" color={theme.dim}>
+          ▦ vault: off (LEANCLI_VAULT=0)
+        </Line>,
+      );
+    } else {
+      const v = data.vault;
+      const tierColor =
+        v.head?.tier === "lean" ? theme.ok
+        : v.head?.tier === "consensus" ? theme.accent
+        : theme.warn;
+      lines.push(
+        <Line key="vault" color={theme.koiCream}>
+          ▦ vault: {v.tokens} token(s) · {v.accounts} pin(s) · {v.slots} slot(s)
+          {v.head ? (
+            <>
+              {" · head #"}{v.head.block}{" "}
+              <Text color={tierColor}>{v.head.tier}</Text>
+            </>
+          ) : (
+            <Text color={theme.dim}> · no head pinned — try `leancli vault head`</Text>
+          )}
+        </Line>,
+      );
+    }
+  }
   // shielded section
   if (data.shielded.kind === "idle") {
     lines.push(
