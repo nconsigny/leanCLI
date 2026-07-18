@@ -17,9 +17,21 @@
       "version": "0.0.2-alpha.9",
       "integrity": "sha512-wey5qyVqslZdAYdiRfpwX8HXoREGH0IJNys2J6izIFeSR/NRDY/ar4rBNAfhcg7yri1nEL0pA6NiF7iKpemBug==",
       "note": "Privacy Pools shielded flow; dynamic-imported only on shielded.* (non-railgun)"
+    },
+    "@kohaku-eth/tornado-cash": {
+      "version": "0.0.2-alpha.15",
+      "integrity": "sha512-Fa/A8pkya7yFNG0i+eXiH2AJgylynMhtShrNxuxHnLEnllZUpt3qSvR0hgcQ6glOpI7g8AOudTjPMEAc67mwKg==",
+      "note": "Tornado Cash shielded flow; dynamic-imported only on shielded.tornado.*. Requires @kohaku-eth/plugins@0.0.1-alpha.11 (async Host) — nested privately under this package so railgun/PP keep plugins@0.0.1-alpha.8 (sync Host). See tornado-plugins-version-split note in docs/PLUGIN_ARCHITECTURE.md."
     }
   },
   "transitive": {
+    "@kohaku-eth/mimc-tree": [
+      {
+        "version": "0.0.3",
+        "integrity": "sha512-urm468CIC9bgLJqTCxZl+2sw56p9JdX5FZUqPvhFic5jLbNR5E2rZgUY/+tM3cT3T83NXCdySiELRZWd9fhNYw==",
+        "note": "MiMC merkle tree used by tornado-cash; requires Node >=22.13 (bumps sidecars/kohaku engines floor)"
+      }
+    ],
     "@kohaku-eth/provider": [
       {
         "version": "0.1.0-alpha.7",
@@ -37,6 +49,11 @@
         "version": "0.0.1-alpha.7",
         "integrity": "sha512-zVpnqOr8g8Otx+gUQvHsjQRlYCve+NtHUqKZLyqg6Fp2YIIRJtqvQqqhfoxyz/zBEnYzGlxcqeSF+Zk5TrbATg==",
         "note": "older plugins build pinned transitively under @kohaku-eth/privacy-pools"
+      },
+      {
+        "version": "0.0.1-alpha.11",
+        "integrity": "sha512-mMNO+L1SbrvWjx6lSOrNJHWZWHEobshZLLscsjBqfB7ACszmYD5T7Ur3WdVPXcK2sCJ8yzihz+TA1tYC8YHZgQ==",
+        "note": "async-Host plugins build; nested under @kohaku-eth/tornado-cash only. Do NOT hoist to top level without migrating the railgun/PP sync hosts in bridge.mjs to async."
       }
     ]
   }

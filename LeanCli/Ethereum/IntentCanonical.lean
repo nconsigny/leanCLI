@@ -160,24 +160,21 @@ def toCanonicalString : Intent → String
         "action:     shielded.tornado.deposit",
         s!"chain:      {chainId}",
         s!"denomWei:   {denominationWei}",
-        "note:       fixed-denomination mixer (0.1 / 1 / 10 / 100 ETH); the bridge sidecar returns your spending note — SAVE IT, the wallet cannot recover from this commitment alone"
+        "note:       fixed-denomination mixer (0.1 / 1 / 10 / 100 ETH); note secrets are derived from your wallet seed — nothing to save, the seed recovers every note"
       ]
-  | .tornadoWithdraw chainId denominationWei recipient note =>
-      -- The deposit note is the spending secret. Show only the
-      -- format-prefix (`tornado-note-eth-<denom>-`) so a screenshot of
-      -- ConfirmGate doesn't leak the secret bytes. The user supplied
-      -- the note themselves and knows what's behind the elision.
-      -- Char-list slicing avoids the v4.29.1 `String.Slice` churn from
-      -- the new `String.take` API.
-      let elidedNote : String :=
-        if note.length ≤ 16 then "<note elided>"
-        else String.ofList (note.toList.take 16) ++ "…<elided>"
+  | .tornadoWithdraw chainId denominationWei recipient noteRef =>
+      -- `noteRef` is an optional deposit-index selector, NOT a secret:
+      -- the SDK derives note secrets from the wallet seed. Show it plainly
+      -- (or "(auto-select)" when empty) — there is nothing sensitive to elide.
+      let noteLine : String :=
+        if noteRef = "" then "(auto-select oldest spendable note)"
+        else s!"deposit #{noteRef}"
       String.intercalate "\n" [
         "action:     shielded.tornado.withdraw",
         s!"chain:      {chainId}",
         s!"denomWei:   {denominationWei}",
         s!"recipient:  {addrHex recipient}",
-        s!"note:       {elidedNote}",
+        s!"note:       {noteLine}",
         "note:       recipient should be a FRESH address with no deposit-side link; this is the only chance to break anonymity if you mis-pick"
       ]
   | .approvalsAudit chainId wallet =>

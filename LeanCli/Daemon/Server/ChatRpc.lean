@@ -400,11 +400,10 @@ private def chatDraftIntentResponse
       ]
   | .tornadoDeposit _ denominationWei =>
       -- Tornado deposit: route to `shielded.tornado.prepareDeposit`.
-      -- The bridge sidecar generates the spending note + Pedersen-
-      -- hashed commitment and returns deposit calldata. PR 2 ships
-      -- the sidecar as a stub; the user sees a clear "Tornado SDK
-      -- not yet integrated" error in the TUI until snarkjs + Baby
-      -- Jubjub Pedersen lands.
+      -- The bridge derives the note secrets from the wallet seed,
+      -- Pedersen-hashes the commitment, and returns UNSIGNED deposit
+      -- calldata (multiple legs for a multi-denomination amount) that the
+      -- TUI confirms and signs. No note to save — the seed recovers it.
       let amountEth := LeanCli.Util.Units.formatUnits denominationWei 18
       .obj <| commonFields ++ #[
         ("prepare", .obj #[
@@ -415,20 +414,21 @@ private def chatDraftIntentResponse
           ])
         ])
       ]
-  | .tornadoWithdraw _ denominationWei recipient note =>
-      -- Tornado withdraw: route to `shielded.tornado.prepareWithdraw`.
-      -- The bridge sidecar consumes the saved deposit note, fetches
-      -- the pool's current merkle state, generates the ZK proof, and
-      -- returns withdraw calldata. Same stub status as deposit until
-      -- the sidecar lands.
+  | .tornadoWithdraw _ denominationWei recipient _noteRef =>
+      -- Tornado withdraw: route to `shielded.tornado.quoteWithdraw` (the
+      -- pre-broadcast quote step). The bridge syncs the pool's merkle
+      -- state, and — after the ConfirmGate accepts the quoted fee/net —
+      -- `executeWithdraw` builds the groth16 proof and submits it via the
+      -- paymaster (default) or a relayer. No saved note is required; the
+      -- wallet re-derives spendable notes from its seed.
       let amountEth := LeanCli.Util.Units.formatUnits denominationWei 18
       .obj <| commonFields ++ #[
         ("prepare", .obj #[
-          ("rpc",    .str "shielded.tornado.prepareWithdraw"),
+          ("rpc",    .str "shielded.tornado.quoteWithdraw"),
           ("params", .obj #[
             ("amountEth", .str amountEth),
             ("recipient", addrJson recipient),
-            ("note",      .str note),
+            ("mode",      .str "paymaster"),
             ("chainId",   .num (Int.ofNat chainId))
           ])
         ])

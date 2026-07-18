@@ -302,6 +302,12 @@ inductive Command where
   | shieldedBalance
   | shieldedDeposit (walletName : String) (amountEth : String)
   | shieldedWithdraw (recipient amountEth : String)
+  -- Tornado Cash (fixed-denomination mixer; mainnet + Sepolia). chainId is
+  -- explicit because tornado, unlike Privacy Pools, is not Sepolia-pinned.
+  | tornadoBalance (chainId : String)
+  | tornadoDeposit (walletName : String) (chainId : String) (amountEth : String)
+  | tornadoWithdraw (chainId : String) (recipient : String) (amountEth : String)
+      (mode : String)
   | shieldedReveal
   | shieldedImport (mnemonic : String)
   | shieldedDelete
@@ -712,6 +718,15 @@ def parse : List String → Command
   | ["shield", "import", mnemonic] => .shieldedImport mnemonic
   | ["shield", "mark-destination", address] => .shieldedMarkDestination address
   | ["shield", "list-destinations"] => .shieldedListDestinations
+  -- Tornado subcommands must precede the generic `shield <wallet> <amount>`
+  -- so "tornado" isn't parsed as a wallet name.
+  | ["shield", "tornado", "balance", chainId] => .tornadoBalance chainId
+  | ["shield", "tornado", walletName, chainId, amountEth] =>
+      .tornadoDeposit walletName chainId amountEth
+  | ["unshield", "tornado", chainId, to, amountEth] =>
+      .tornadoWithdraw chainId to amountEth "paymaster"
+  | ["unshield", "tornado", chainId, to, amountEth, mode] =>
+      .tornadoWithdraw chainId to amountEth mode
   | ["shield", walletName, amountEth] => .shieldedDeposit walletName amountEth
   | ["unshield", to, amountEth] => .shieldedWithdraw to amountEth
   | "swap" :: "quote" :: rest =>

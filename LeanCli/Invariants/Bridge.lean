@@ -50,6 +50,21 @@ theorem methodPurpose_broadcast :
 theorem methodPurpose_signAndBroadcast :
     methodPurpose "shielded.signAndBroadcast" = Purpose.shieldedBroadcast := rfl
 
+/-- Tornado withdrawals (quote reads a relayer/paymaster fee; execute builds a
+groth16 proof and broadcasts it) are shielded egress, so strict-mainnet denies
+them like every other shielded broadcast. -/
+theorem methodPurpose_tornadoQuoteWithdraw :
+    methodPurpose "shielded.tornado.quoteWithdraw" = Purpose.shieldedBroadcast := rfl
+
+theorem methodPurpose_tornadoExecuteWithdraw :
+    methodPurpose "shielded.tornado.executeWithdraw" = Purpose.shieldedBroadcast := rfl
+
+/-- A tornado deposit returns UNSIGNED calldata that the daemon re-decodes and
+broadcasts through its own eth-broadcast path — the sidecar never broadcasts it
+— so it is classified as read traffic, not shielded broadcast. -/
+theorem methodPurpose_tornadoPrepareDeposit :
+    methodPurpose "shielded.tornado.prepareDeposit" = Purpose.shieldedRead := rfl
+
 /-- Anything not explicitly recognized as broadcast or local introspection
 is treated as shielded read traffic. The daemon thus *cannot* accidentally
 reclassify a future bridge method as `nodeRead` or `daemonControl`. -/

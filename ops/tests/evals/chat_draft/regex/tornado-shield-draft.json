@@ -1,0 +1,11 @@
+{
+  "name": "tornado-shield-draft-sepolia",
+  "prompt": "shield 0.1 ETH with tornado cash",
+  "chainId": 11155111,
+  "expect": {
+    "backend": "wallet-direct",
+    "intent": "shielded.tornado.deposit",
+    "maxToolCalls": 0
+  },
+  "notes": "Tornado Cash is live via @kohaku-eth/tornado-cash. RuleParser resolves the canonical shield+tornado phrasing to .tornadoDeposit deterministically (LLM never fires), and chat.draft emits a prepare envelope routing to shielded.tornado.prepareDeposit. The prepared deposit legs still flow through decode -> simulate -> ConfirmGate before signing."
+}

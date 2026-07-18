@@ -70,7 +70,7 @@ Untrusted sidecars hosted under the Kohaku plugin model. Each Lean wrapper is th
 |---|---|---|
 | `railgun` | `@kohaku-eth/railgun` | Witness generation; **not** tx structure |
 | `privacy-pools` | `@kohaku-eth/privacy-pools` | Witness generation; **not** tx structure |
-| `tornado` | sidecar-native (decode-only today) | Intent decode; **not** tx structure |
+| `tornado` | `@kohaku-eth/tornado-cash` | Witness/proof generation; **not** tx structure |
 
 A `shielded.*` method for a plugin not in the enabled list returns `{ok:false,error:"plugin not enabled: <name>"}` **before** lazy-importing it — disabled plugin code is never loaded.
 
@@ -110,7 +110,7 @@ On-disk, per-skill directories (`SKILL.md` + supporting JSON/ABI/markdown). Load
 Current entries:
 - Meta: `leancli-wallet`, `web3-security`.
 - DeFi: `aave`, `morpho`, `uniswap`, `cowswap`, `bold-liquity`, `fxusd`.
-- Privacy: `railgun`, `privacy-pool`, `tornado-cash` (last is decode-only today; SDK and drafting coming soon).
+- Privacy: `railgun`, `privacy-pool`, `tornado-cash` (all three live; tornado shield = fixed-denomination deposits, unshield = groth16 proof via paymaster (default) or relayer, mainnet + Sepolia, seed-derived notes with no note string).
 - Worked ops: `approve-erc20`, `audit-approvals`, `fresh-address`, `revoke-approval`, `send-erc20`, `send-native`, `shield-eth`, `swap-uniswap-v3`, `unshield-eth`.
 
 Adding a new protocol: drop a skill directory (use `uniswap` as the worked template), declare triggers in its `SKILL.md`, point `Agent/ToolDefs/Protocols.lean` at the new directory if a new selector handler is needed. No daemon RPC change required for read-only operations — they go through `chain.ethCall` like every other policy-gated read.
