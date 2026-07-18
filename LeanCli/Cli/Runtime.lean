@@ -1788,6 +1788,11 @@ def run (args : List String) : IO UInt32 := do
          | none => .obj #[])
   | .vaultPinAll =>
       DaemonClient.printCall "vault.pinAccounts"
+  | .vaultRebuild chain? =>
+      DaemonClient.printCall "vault.rebuild"
+        (match chain? with
+         | some c => .obj #[("chain", .str c)]
+         | none => .obj #[])
   | .vaultPin address slots =>
       let fields : Array (String × LeanCli.Encoding.Json.Json) :=
         #[("address", .str address)] ++

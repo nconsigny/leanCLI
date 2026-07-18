@@ -271,6 +271,89 @@ def ownedAccounts : IO (Array (String × Option String)) := do
   catch _ => pure ()
   pure out
 
+/-- ERC-20 `Transfer(address,address,uint256)` topic0. -/
+private def transferTopic : String :=
+  "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+/-- ERC-20 `Approval(address,address,uint256)` topic0. -/
+private def approvalTopic : String :=
+  "0x8c5be1e5ebec7d5bd14f71427d1e84f3dd0314c0f7b2291e5b200ac8c7c3b925"
+
+private def padTopicAddr (a : String) : String :=
+  let raw := (stripHexPrefix a).toLower
+  "0x" ++ String.ofList (List.replicate (64 - raw.length) '0') ++ raw
+
+/-- Phase-A restore: rediscover the token set this wallet has touched
+    from its ON-CHAIN footprint — no manifest needed. Walks
+    `eth_getLogs` BACKWARD from head (most recent activity lands first,
+    the right order when a restore is time-boxed) collecting the
+    emitting contract of every `Transfer` where an owned address is
+    sender (topic1) or recipient (topic2), and every `Approval` where it
+    is the owner (topic1). Returns `(tokenAddrs, scannedDownTo,
+    timedOut|cancelled)`; a rerun with `toBlock := scannedDownTo - 1`
+    resumes deeper. Discovery is a HINT — every discovered token then
+    goes through `TokenMeta.lookupOrFetchBatch`, whose reads carry their
+    own provenance tier and whose junk self-selects into the negative
+    cache. Cancellable via `chain.cancel` (shared scan flag). -/
+def discoverTokens (cfg : Config) (state : LeanCli.Daemon.State.Shared)
+    (ep : LeanCli.RPC.Outbound.Endpoint) (chainId : Nat)
+    (addresses : Array String) (fromBlock toBlock chunkSize maxMs : Nat) :
+    IO (Array String × Nat × Bool) := do
+  let viaLogs? ← verifiedLogsVia state chainId ep
+    (if toBlock ≥ fromBlock then toBlock - fromBlock else 0)
+  let span := if chunkSize == 0 then 5000 else chunkSize
+  let started ← IO.monoMsNow
+  LeanCli.Daemon.State.beginScan state
+  let mut tokens : Array String := #[]
+  let mut cur := toBlock
+  let mut stopped := false
+  let mut fuel := 5000
+  while !stopped && fuel > 0 do
+    fuel := fuel - 1
+    let chunkFrom :=
+      if cur ≥ span && cur - span > fromBlock then cur - span else fromBlock
+    let fromHex := natQuantityHex chunkFrom
+    let toHex := natQuantityHex cur
+    for addr in addresses do
+      if stopped then pure ()
+      else
+        let t := padTopicAddr addr
+        -- Transfer out (topic1) / Transfer in (topic2) / Approval owner.
+        let queries : List (Array Json) := [
+          #[.str transferTopic, .str t, .null],
+          #[.str transferTopic, .null, .str t],
+          #[.str approvalTopic, .str t, .null]
+        ]
+        for topicsArr in queries do
+          if stopped then pure ()
+          else if (← LeanCli.Daemon.State.isScanCancelled state)
+              || (← IO.monoMsNow) - started > maxMs then
+            stopped := true
+          else
+            match ← LeanCli.RPC.Outbound.call cfg.policy ep .getLogs
+                (.arr #[.obj #[
+                  ("fromBlock", .str fromHex),
+                  ("toBlock", .str toHex),
+                  ("topics", .arr topicsArr)
+                ]]) viaLogs? with
+            | .error _ => pure ()  -- fail-soft: a bad chunk skips, scan continues
+            | .ok logsJson =>
+                match asArray logsJson with
+                | none => pure ()
+                | some logs =>
+                    for log in logs do
+                      match getField "address" log >>= asString with
+                      | some a =>
+                          let lo := a.toLower
+                          if !tokens.contains lo then tokens := tokens.push lo
+                      | none => pure ()
+    if chunkFrom ≤ fromBlock || chunkFrom == 0 then
+      stopped := true
+      cur := chunkFrom
+    else if !stopped then
+      cur := chunkFrom - 1
+  pure (tokens, cur, fuel == 0 || (← IO.monoMsNow) - started > maxMs)
+
 /-- Pin every owned account at the current verified head (one head
     capture per chain, reused across that chain's accounts). "The state
     the user has should be state the wallet has proven" — called by the
@@ -407,6 +490,84 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       if (← state.get).vault.isNone then
         return .error vaultDisabled
       pure (.ok (← pinAllAccounts cfg state))
+
+  | "vault.rebuild" =>
+      -- Phase-A restore: on a fresh device the seed recovers the KEYS;
+      -- this recovers the vault's INDEX from the chain itself — pin
+      -- owned accounts, then walk the wallet's own log footprint
+      -- (newest-first) to rediscover the token set. Everything found is
+      -- a hint that then re-earns its provenance through the normal
+      -- verified read / proof paths.
+      if (← state.get).vault.isNone then
+        return .error vaultDisabled
+      let chain? := getField "chain" req.params >>= asString
+      match endpointForChain cfg chain? with
+      | .error err =>
+          pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
+      | .ok ep =>
+          let chainId := ep.chainId.getD cfg.chainId
+          -- 1. Re-pin every owned account (all chains).
+          let pinSummary ← pinAllAccounts cfg state
+          -- 2. Owned addresses on THIS chain drive log discovery.
+          let owned ← ownedAccounts
+          let addrs : Array String := owned.filterMap (fun (a, c?) =>
+            let cid := match c? with
+              | some "mainnet" => 1
+              | some "sepolia" => 11155111
+              | some _ => 0
+              | none => cfg.chainId
+            if cid == chainId then some a else none)
+          if addrs.isEmpty then
+            return .ok <| .obj #[
+              ("accounts", pinSummary),
+              ("tokensDiscovered", .num 0),
+              ("note", .str "no owned accounts on this chain")]
+          let toBlock ← do
+            match getField "toBlock" req.params >>= asNat with
+            | some n => pure n
+            | none =>
+                -- The auto-pin above just captured a head; reuse it.
+                match ← LeanCli.Daemon.State.withVault state
+                    (fun h => LeanCli.Daemon.StateVault.latestHeader h chainId) with
+                | some (some hd) => pure hd.blockNumber
+                | _ =>
+                    let via? ← verifiedReadVia state chainId ep
+                    match ← LeanCli.RPC.Outbound.blockNumber cfg.policy ep via? with
+                    | .ok j => pure ((asString j >>= parseHexQuantity).getD 0)
+                    | .error _ => pure 0
+          let fromBlock := ((getField "fromBlock" req.params >>= asNat).getD 0)
+          let chunkSize ← do
+            match getField "chunkSize" req.params >>= asNat with
+            | some n => pure n
+            | none =>
+                match ← IO.getEnv "LEANCLI_GETLOGS_MAX_BLOCK_SPAN" with
+                | some s => pure (s.toNat?.getD 5000)
+                | none => pure 5000
+          let maxMs := ((getField "maxMs" req.params >>= asNat).getD 300000)
+          if toBlock == 0 then
+            return .error (vaultFailed "rebuild failed" "could not resolve head block")
+          let (tokens, scannedDownTo, partialScan) ←
+            discoverTokens cfg state ep chainId addrs fromBlock toBlock chunkSize maxMs
+          -- 3. Fetch + persist metadata; write-through carries the read's
+          -- provenance tier, junk self-selects into the negative cache.
+          let metas ← LeanCli.Daemon.TokenMeta.lookupOrFetchBatch
+            state cfg.policy ep chainId tokens
+          let cached := metas.foldl
+            (fun n (_, m?) => if m?.isSome then n + 1 else n) 0
+          pure <| .ok <| .obj #[
+            ("accounts", pinSummary),
+            ("chainId", .num (Int.ofNat chainId)),
+            ("window", .obj #[
+              ("fromBlock", .num (Int.ofNat fromBlock)),
+              ("toBlock", .num (Int.ofNat toBlock)),
+              ("scannedDownTo", .num (Int.ofNat scannedDownTo))]),
+            ("partial", .bool partialScan),
+            ("tokensDiscovered", .num (Int.ofNat tokens.size)),
+            ("tokensCached", .num (Int.ofNat cached)),
+            ("resumeHint", if partialScan && scannedDownTo > 0 then
+                .str s!"rerun with toBlock={scannedDownTo - 1} to continue deeper"
+              else .null)
+          ]
 
   | "vault.get" =>
       if (← state.get).vault.isNone then

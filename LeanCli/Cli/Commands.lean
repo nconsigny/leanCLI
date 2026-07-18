@@ -262,6 +262,7 @@ inductive Command where
   | vaultHead (chain? : Option String)
   | vaultPin (address : String) (slots : List String)
   | vaultPinAll
+  | vaultRebuild (chain? : Option String)
   | vaultGet (address : String) (chain? : Option String)
   | vaultTokens (chain? : Option String)
   | doctor
@@ -645,6 +646,8 @@ def parse : List String → Command
   | ["vault", "tokens"]                    => .vaultTokens none
   | ["vault", "tokens", chain]             => .vaultTokens (some chain)
   | ["vault", "pin"]                       => .vaultPinAll
+  | ["vault", "rebuild"]                   => .vaultRebuild none
+  | ["vault", "rebuild", chain]            => .vaultRebuild (some chain)
   | "vault" :: "pin" :: addr :: rest       => .vaultPin addr rest
   | ["doctor"]            => .doctor
   | ["daemon", "help"] => .daemonHelp none
@@ -1132,6 +1135,9 @@ def helpText : String :=
                                          in Lean against the pinned state root; store at\n\
                                          that exact block (tier: lean). With no address,\n\
                                          pins EVERY wallet-owned account.\n\
+     vault rebuild [chain]               Restore-from-seed helper: pin owned accounts, then\n\
+                                         rediscover the touched-token set from the wallet's\n\
+                                         own on-chain log footprint (newest-first, resumable).\n\
      vault get <addr> [chain]            Serve stored state, explicitly \"as of block N\".\n\
      vault tokens [chain]                Stored token metadata + provenance tier.\n\n\
    DAEMON / DOCS:\n\

@@ -78,6 +78,36 @@ every other hash.
 - The helios sidecar additionally exposes `head.info` (verified head
   header incl. stateRoot) for external callers.
 
+## Restore on a new device (Phase A)
+
+The vault is device-local; a seed restore recovers keys but not the
+vault's *index* (which tokens/contracts/slots you cared about). Values
+never need backup — everything is re-provable — so restore is a
+*rediscovery* problem, and the wallet's own transaction history is
+already an on-chain journal of what it touched:
+
+```
+leancli vault rebuild [chain]     # or RPC vault.rebuild
+  1. pin every owned account (seed-derived EOAs + SPHINCS slots)
+  2. walk eth_getLogs BACKWARD from head: Transfer where an owned
+     address is sender/recipient + Approval where it is owner
+     → the emitting contracts are the touched-token set
+  3. TokenMeta batch-fetch persists metadata with provenance;
+     junk self-selects into the negative cache
+```
+
+Newest-first so a time-boxed scan (default 5 min, `maxMs`) recovers
+recent state first; a partial run reports `scannedDownTo` and a
+`resumeHint` (`toBlock=<n-1>`) to continue deeper. Cancellable via
+`chain.cancel`. Discovery output is a HINT, never a trust input — every
+discovered item re-earns its tier through the normal verified-read /
+MPT-proof paths, so a lying RPC during rebuild can cause omissions,
+not wrong values.
+
+Not yet covered (needs the Phase-B encrypted on-chain manifest, see
+below): watched third-party addresses and manually pinned storage
+slots — state with no on-chain trace of your interest.
+
 ## Trust posture
 
 Nothing served from the vault gates a signature. The pre-sign pipeline
@@ -102,6 +132,12 @@ account + storage slot, EOA, and deep 10-node proofs).
 
 ## Not yet
 
+- **Phase B — encrypted on-chain manifest**: serialize the vault index
+  (addresses, slots, token list), encrypt with a key derived at a
+  dedicated BIP-32 path, anchor via an ENS text record or a self-send
+  calldata journal. Restore = derive key → find anchor → decrypt hints
+  → re-prove everything. Hint-only by construction (same trust shape as
+  16.5), covering what log rediscovery can't see.
 - Offline simulation (`eth_call` against accreted state) needs an EVM
   fed by the vault; helios's embedded REVM state provider is not
   pluggable from the NAPI surface. Out of scope for now.
