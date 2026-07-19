@@ -1,3 +1,4 @@
+import LeanCli.Basic
 import LeanCli.Keystore.Enclave
 import LeanCli.Crypto.Hex
 import LeanCli.Wallet.Account
@@ -49,8 +50,10 @@ def stderrNotifier : Notifier := fun event params =>
 
 /-- Minimum acceptable PIN length, in characters. Below this we reject
     the request before touching the TPM, so an obvious mistype doesn't
-    burn a slot in the dictionary-attack counter. -/
-def minPinLength : Nat := 4
+    burn a slot in the dictionary-attack counter. Single source of truth is
+    `LeanCli.minPinLength` (in `LeanCli.Basic`) so the thin CLI can share it
+    without importing this keystore module. -/
+def minPinLength : Nat := LeanCli.minPinLength
 
 def validPin (pin : String) : Bool :=
   decide (pin.length ≥ minPinLength)

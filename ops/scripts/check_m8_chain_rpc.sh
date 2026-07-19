@@ -67,26 +67,28 @@ fi
 LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" balance "$ANVIL_ACCOUNT" >/tmp/leancli-m8-check-out
 grep -q '"balance":"0x' /tmp/leancli-m8-check-out
 
-LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" nonce "$ANVIL_ACCOUNT" >/tmp/leancli-m8-check-out
+LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" chain nonce "$ANVIL_ACCOUNT" >/tmp/leancli-m8-check-out
 grep -q '"nonce":"0x' /tmp/leancli-m8-check-out
 
 LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" \
-  token-balance 0x0000000000000000000000000000000000000000 "$ANVIL_ACCOUNT" >/tmp/leancli-m8-check-out
+  chain token-balance 0x0000000000000000000000000000000000000000 "$ANVIL_ACCOUNT" >/tmp/leancli-m8-check-out
 grep -q '"balance":"0x' /tmp/leancli-m8-check-out
 
-LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" gas-price >/tmp/leancli-m8-check-out
-grep -q '"gasPrice":"0x' /tmp/leancli-m8-check-out
+# `chain gas-price` / `chain priority-fee` pretty-print the fee as
+# "<gwei>  (<wei> wei, 0x<hex>)" rather than raw JSON, so assert on that hex tail.
+LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" chain gas-price >/tmp/leancli-m8-check-out
+grep -q 'wei, 0x' /tmp/leancli-m8-check-out
 
-LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" priority-fee >/tmp/leancli-m8-check-out
-grep -q '"maxPriorityFeePerGas":"0x' /tmp/leancli-m8-check-out
+LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" chain priority-fee >/tmp/leancli-m8-check-out
+grep -q 'wei, 0x' /tmp/leancli-m8-check-out
 
 LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" \
-  estimate-gas '{"from":"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266","to":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8","value":"0x1"}' \
+  chain estimate-gas '{"from":"0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266","to":"0x70997970C51812dc3A010C7d01b50e0d17dc79C8","value":"0x1"}' \
   >/tmp/leancli-m8-check-out
 grep -q '"gas":"0x' /tmp/leancli-m8-check-out
 
 set +e
-LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" broadcast 0x01 >/tmp/leancli-m8-check-out 2>&1
+LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" chain broadcast 0x01 >/tmp/leancli-m8-check-out 2>&1
 broadcast_code="$?"
 set -e
 if [[ "$broadcast_code" != 2 ]]; then
@@ -96,17 +98,20 @@ if [[ "$broadcast_code" != 2 ]]; then
 fi
 grep -q 'chain RPC failed' /tmp/leancli-m8-check-out
 
+# EOA operations moved under the `wallet` namespace; sending from a specific
+# wallet uses `from <wallet> send <to> <amount>`.
 LEANCLI_SOCKET="$SOCK" XDG_DATA_HOME="$DATA" LEANCLI_PASSPHRASE='m8-pass' \
-  "$ROOT/.lake/build/bin/leancli" eoa import anvil "$ANVIL_MNEMONIC" >/tmp/leancli-m8-check-out
+  "$ROOT/.lake/build/bin/leancli" wallet import anvil "$ANVIL_MNEMONIC" >/tmp/leancli-m8-check-out
 grep -q "$ANVIL_ACCOUNT" /tmp/leancli-m8-check-out
 
 LEANCLI_SOCKET="$SOCK" XDG_DATA_HOME="$DATA" LEANCLI_PASSPHRASE='m8-pass' \
-  "$ROOT/.lake/build/bin/leancli" eoa unlock anvil >/tmp/leancli-m8-check-out
+  "$ROOT/.lake/build/bin/leancli" wallet unlock anvil >/tmp/leancli-m8-check-out
 grep -q '"locked":false' /tmp/leancli-m8-check-out
 
 LEANCLI_SOCKET="$SOCK" XDG_DATA_HOME="$DATA" \
-  "$ROOT/.lake/build/bin/leancli" eoa send anvil "$ANVIL_RECIPIENT" 1 >/tmp/leancli-m8-check-out
-grep -q '"txHash":"0x' /tmp/leancli-m8-check-out
+  "$ROOT/.lake/build/bin/leancli" from anvil send "$ANVIL_RECIPIENT" 1 </dev/null >/tmp/leancli-m8-check-out
+# `send` pretty-prints the result ("hash:    0x<64 hex>") rather than raw JSON.
+grep -qE '0x[0-9a-fA-F]{64}' /tmp/leancli-m8-check-out
 
 LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" daemon stop >/dev/null
 wait "$daemon_pid" >/dev/null 2>&1 || true
