@@ -1,0 +1,44 @@
+name: Nix flake
+
+# Builds the Nix packaging end-to-end in the sandbox: exact pinned Lean
+# toolchain (lean4-nix), hacl-packages + secp256k1 native helpers from
+# locked flake inputs, and the full leancli package. This is the CI
+# guard for NixOS users (docs/NIXOS.md) — the lean_action_ci workflow
+# covers the elan/apt path.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  flake-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+      - uses: DeterminateSystems/nix-installer-action@v16
+
+      - name: Flake checks (eval only)
+        run: nix flake check --no-build
+
+      - name: Build native crypto helpers
+        run: nix build -L .#native-helpers
+
+      - name: Build leancli (CLI + daemons + helpers)
+        run: nix build -L .#leancli
+
+      - name: Smoke-check installed binaries
+        run: |
+          ./result/bin/leancli completion bash > /dev/null
+          test -x ./result/bin/leancli-daemon
+          test -x ./result/bin/leancli-agent
+          test -x ./result/bin/leancli-agentd
+          # helper vectors, same as ops/scripts/check_native_helpers.sh
+          [ "$(./result/bin/leancli-hacl-sha256 abcd)" = \
+            "0x123d4c7ef2d1600a1b3a0f6addc60a10f05a3495c9409f2ecbf4cc095d000a6b" ]
+          ./result/bin/leancli-hacl-ripemd160 00 | grep -Eq '^0x[0-9a-f]{40}$'
+          [ "$(./result/bin/leancli-secp256k1-pubkey \
+            0000000000000000000000000000000000000000000000000000000000000001 compressed)" = \
+            "0x0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" ]
+          test -d ./result/share/leancli/skills

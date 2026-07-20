@@ -44,13 +44,22 @@ package "leanCLI" where
   -- Untested on macOS — neither the author nor the runtime CI has a
   -- Mac at the time of writing. If `lake build` fails on macOS the
   -- failure is almost certainly here.
+  --
+  -- Distros without /usr/lib (NixOS: libraries live in per-package
+  -- store paths) override the whole Linux link line with
+  --   lake -KsysLibs="-L<dir> -lcurl -lsqlite3 …" build
+  -- (space-separated, substituted at lakefile elaboration time). The
+  -- Nix build in nix/package.nix passes store-path -L flags this way;
+  -- the defaults below are unchanged for everyone else.
   weakLinkArgs :=
     if System.Platform.isOSX then
       #["-lcurl", "-lsqlite3"]
-    else
-      #["/usr/lib/libcurl.so",
-        "/usr/lib/libsqlite3.so",
-        "-Wl,--allow-shlib-undefined"]
+    else match get_config? sysLibs with
+      | some args => ((args.splitOn " ").filter (· ≠ "")).toArray
+      | none =>
+        #["/usr/lib/libcurl.so",
+          "/usr/lib/libsqlite3.so",
+          "-Wl,--allow-shlib-undefined"]
 
 lean_lib LeanCli where
 
@@ -66,6 +75,20 @@ lean_lib LeanCliCore where
 lean_lib LeanCliSpec where
   roots := #[`LeanCli.Lib.Spec]
 
+/--
+Extra C include flags for the native shim `.c` files that consume system
+headers (`curl/curl.h`, `sqlite3.h`), from
+`lake -KsysIncludes="-I<dir> -I<dir>" build` (space-separated). Empty by
+default — most distros keep those headers on the compiler's default
+search path. NixOS does not, so nix/package.nix passes the curl/sqlite
+store include dirs here. Appended to the weak (non-trace) arg set for
+the same reason as `weakLinkArgs` above.
+-/
+def sysIncludeArgs : Array String :=
+  match get_config? sysIncludes with
+  | some args => ((args.splitOn " ").filter (· ≠ "")).toArray
+  | none => #[]
+
 extern_lib liblean_uds pkg := do
   let srcJob ← inputTextFile <| pkg.dir / "native" / "lean_uds" / "lean_uds.c"
   let lean ← getLeanInstall
@@ -80,9 +103,9 @@ extern_lib liblean_http pkg := do
   let srcJob ← inputTextFile <| pkg.dir / "native" / "lean_http" / "lean_http.c"
   let lean ← getLeanInstall
   let oJob ← buildO (pkg.buildDir / "native" / "lean_http.o") srcJob
-    #["-I", lean.includeDir.toString,
-      "-I", (pkg.dir / "native" / "lean_http").toString,
-      "-fPIC"] #[]
+    (#["-I", lean.includeDir.toString,
+       "-I", (pkg.dir / "native" / "lean_http").toString,
+       "-fPIC"] ++ sysIncludeArgs) #[]
   buildStaticLib (pkg.buildDir / "native" / "liblean_http.a") #[oJob]
 
 -- SQLite FFI shim consumed by LeanCli/Agent/Session.lean (Phase 1a
@@ -93,9 +116,9 @@ extern_lib liblean_sqlite pkg := do
   let srcJob ← inputTextFile <| pkg.dir / "native" / "lean_sqlite" / "lean_sqlite.c"
   let lean ← getLeanInstall
   let oJob ← buildO (pkg.buildDir / "native" / "lean_sqlite.o") srcJob
-    #["-I", lean.includeDir.toString,
-      "-I", (pkg.dir / "native" / "lean_sqlite").toString,
-      "-fPIC"] #[]
+    (#["-I", lean.includeDir.toString,
+       "-I", (pkg.dir / "native" / "lean_sqlite").toString,
+       "-fPIC"] ++ sysIncludeArgs) #[]
   buildStaticLib (pkg.buildDir / "native" / "liblean_sqlite.a") #[oJob]
 
 @[default_target]

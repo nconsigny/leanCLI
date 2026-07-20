@@ -43,3 +43,7 @@ code_*
 /sidecars/sphincs/vendor-slhvk-sha2-128-24/src/shaders/*.h
 /sidecars/sphincs/vendor-slhvk-sha2-128-24/slhdsa-sha2-128-24-gpu
 /sidecars/sphincs/vendor-slhvk-sha2-128-24/*.test
+
+# Nix build outputs
+/result
+/result-*

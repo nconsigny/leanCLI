@@ -88,10 +88,13 @@ export PATH="$PWD/.lake/build/bin:$PATH"
 # binaries are named `leancli` / `leancli-daemon` in this mode
 ```
 
-Nix scaffolding is available:
+Nix / NixOS is a first-class path — the flake builds the CLI, daemons,
+and all native crypto helpers sandboxed, with the exact pinned Lean
+toolchain, and ships a `services.leancli` NixOS module. See
+[`docs/NIXOS.md`](docs/NIXOS.md).
 
 ```bash
-nix build
+nix build          # or: nix run github:nconsigny/leanCLI
 nix develop
 ```
 
