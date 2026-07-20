@@ -5,6 +5,7 @@ import LeanCli.Cli.MemoryCmd
 import LeanCli.Cli.NetworkConfig
 import LeanCli.Cli.Passphrase
 import LeanCli.Encoding.Json
+import LeanCli.Ethereum.TornadoTailCalls
 import LeanCli.Invariants.EthAmount
 import LeanCli.Swap.Tokens
 import LeanCli.Swap.UniV3
@@ -2710,28 +2711,51 @@ def run (args : List String) : IO UInt32 := do
                   ("chainId", .num (Int.ofNat cid)),
                   ("amountEth", .str amountEth)
                 ])
-  | .tornadoWithdraw chainId toRaw amountEth mode =>
+  | .tornadoWithdraw chainId toRaw amountEth mode tailCallsSpec? =>
       match chainId.toNat? with
       | none =>
           IO.eprintln s!"invalid chainId: '{chainId}' (use 1 or 11155111)"
           pure 2
       | some cid =>
-          let toResult ← resolveAddressOrName toRaw
-          let to := match toResult with | .ok addr => addr | .error _ => toRaw
-          if !validAddressString to then
-            IO.eprintln s!"error: '{toRaw}' is not a 0x-prefixed 20-byte address or resolvable ENS name"
-            pure 2
-          else
-            -- Withdraw carries no EOA signature (groth16 proof + relayer/
-            -- paymaster). Uses the default unlocked wallet's seed to find
-            -- spendable notes; `mode` is paymaster (default) or relayer.
-            DaemonClient.printCall "shielded.tornado.executeWithdraw"
-              (.obj #[
-                ("chainId", .num (Int.ofNat cid)),
-                ("recipient", .str to),
-                ("amountEth", .str amountEth),
-                ("mode", .str mode)
-              ])
+          -- Tail calls are parsed and validated in the verified core before
+          -- anything reaches the daemon; the daemon re-validates the JSON.
+          let tailCallsE : Except String (Array LeanCli.Ethereum.TornadoTailCalls.TailCall) :=
+            match tailCallsSpec? with
+            | none => .ok #[]
+            | some spec => LeanCli.Ethereum.TornadoTailCalls.parseSpec spec
+          match tailCallsE with
+          | .error err =>
+              IO.eprintln s!"invalid --tail-calls: {err}"
+              IO.eprintln "expected: --tail-calls 0xTARGET:0xCALLDATA[:VALUE_WEI],... (VALUE decimal or 0x-hex, default 0)"
+              pure 2
+          | .ok tailCalls =>
+              if !tailCalls.isEmpty && mode != "paymaster" then
+                IO.eprintln "--tail-calls is only supported in paymaster mode"
+                pure 2
+              else do
+              let toResult ← resolveAddressOrName toRaw
+              let to := match toResult with | .ok addr => addr | .error _ => toRaw
+              if !validAddressString to then
+                IO.eprintln s!"error: '{toRaw}' is not a 0x-prefixed 20-byte address or resolvable ENS name"
+                pure 2
+              else
+                -- Withdraw carries no EOA signature (groth16 proof + relayer/
+                -- paymaster). Uses the default unlocked wallet's seed to find
+                -- spendable notes; `mode` is paymaster (default) or relayer.
+                let tailCallsJson : Array LeanCli.Encoding.Json.Json :=
+                  tailCalls.map fun c => .obj #[
+                    ("to", .str c.to),
+                    ("data", .str c.data),
+                    ("valueWei", .str (toString c.valueWei))
+                  ]
+                DaemonClient.printCall "shielded.tornado.executeWithdraw"
+                  (.obj (#[
+                    ("chainId", .num (Int.ofNat cid)),
+                    ("recipient", .str to),
+                    ("amountEth", .str amountEth),
+                    ("mode", .str mode)
+                  ] ++ (if tailCalls.isEmpty then #[]
+                        else #[("tailCalls", .arr tailCallsJson)])))
   | .sphincsCreate name paramSet walletName ecdsaKind accountIndexOrPath chainOverride? backend? =>
       -- Why one prompt UX: per CLAUDE.md the CLI is a printer. We prompt
       -- for one passphrase (`slot`) and optionally a wallet-unlock pass

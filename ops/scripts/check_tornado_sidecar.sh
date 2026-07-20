@@ -82,7 +82,19 @@ want 'recipientDerivationPath must be a canonical Ethereum BIP-44 path' \
      run '{"jsonrpc":"2.0","id":9,"method":"shielded.tornado.quoteWithdraw","params":{"amountEth":"0.1","recipient":"0x1111111111111111111111111111111111111111"}}')" \
   "withdraw requires deterministic delegation path"
 
-# 8. unit tests (note selection, denomination gates, 7702 delegation options).
+# 8. tail calls are validated before any plugin/state work (offline reject)
+want 'invalid tail call target' \
+  "$(LEANCLI_PRIVACY=tornado LEANCLI_CHAIN_ID=1 LEANCLI_RPC_URL=http://127.0.0.1:1 \
+     run '{"jsonrpc":"2.0","id":10,"method":"shielded.tornado.quoteWithdraw","params":{"amountEth":"0.1","recipient":"0x1111111111111111111111111111111111111111","recipientDerivationPath":"m/44\u0027/60\u0027/0\u0027/0/0","tailCalls":[{"to":"nope","data":"0x"}]}}')" \
+  "quote rejects malformed tail call target"
+
+# 8b. tail calls are paymaster-only
+want 'only supported in paymaster mode' \
+  "$(LEANCLI_PRIVACY=tornado LEANCLI_CHAIN_ID=1 LEANCLI_RPC_URL=http://127.0.0.1:1 \
+     run '{"jsonrpc":"2.0","id":11,"method":"shielded.tornado.quoteWithdraw","params":{"amountEth":"0.1","recipient":"0x1111111111111111111111111111111111111111","recipientDerivationPath":"m/44\u0027/60\u0027/0\u0027/0/0","mode":"relayer","tailCalls":[{"to":"0x2222222222222222222222222222222222222222","data":"0x1234"}]}}')" \
+  "relayer mode rejects tail calls"
+
+# 9. unit tests (note selection, denomination gates, 7702 delegation options).
 #    Run under the same ESM loader bridge.mjs re-execs itself with, matching
 #    how these modules load in production.
 if node --no-warnings --experimental-loader "$SIDE/loader.mjs" --test \

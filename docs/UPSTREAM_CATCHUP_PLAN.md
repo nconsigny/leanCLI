@@ -1,9 +1,9 @@
 # Upstream Catch-up Plan — kohaku-cli
 
 **Upstream:** https://github.com/kassandraoftroy/kohaku-cli (local clone: `../kohaku-cli`)
-**Last reviewed upstream SHA:** `611898f` ("feat: presentable v0.0.1", 2026-07-19)
-**Reviewed on:** 2026-07-19
-**leanCLI baseline at review:** branch `tornado-cash-shield-unshield`, HEAD `29cc3d5`
+**Last reviewed upstream SHA:** `d84bf57` ("chore: comment userop gas logs", 2026-07-19)
+**Reviewed on:** 2026-07-20
+**leanCLI baseline at review:** branch `tornado-cash-shield-unshield`, HEAD `0533694`
 
 This document tracks feature/plugin parity with upstream kohaku-cli and defines the
 recurring process for catching up on new upstream releases. Update the
@@ -20,6 +20,13 @@ recurring process for catching up on new upstream releases. Update the
 | `8a06f85` | README rewrite documenting the v0.0.1 surface (docs only) |
 | `f4c78b4` | Tornado EIP-7702 delegation fix: bump `@kohaku-eth/tornado-cash` alpha.15 → alpha.16, deterministic delegator derived from the wallet BIP-32 path, recipient must be a wallet-derived account, per-withdrawal paymaster fee |
 | `611898f` | v0.0.1 polish: tornado single-note unshield assertion, tornado `max` = largest spendable note, `--tail-calls` flag, tornado shield amount validation, `tui` subcommand disabled |
+
+Second review (2026-07-20), `611898f..d84bf57`:
+
+| Commit | What it does |
+|---|---|
+| `0df25ce` | Tail call clean up: `--tail-calls` entries gain an optional `msg.value` third field paid out of the withdrawal after the paymaster fee (payout call dropped at 0, hard error when tail values exceed the after-fee amount); UserOp `callGasLimit` becomes a calldata heuristic (`80k + 1.5×Σ`, clamp [300k, 5M], no `eth_estimateGas`) patched into the SDK worker pre-spawn and fed into the fee formula — **ported, see WS-5.3** |
+| `d84bf57` | Comments out userop gas debug logs — no port needed |
 
 Upstream repo facts (verified 2026-07-19): no tags/releases, no open PRs, no unmerged
 branches; sole contributor pushes bursts directly to `main` (last burst 07-18/19).
@@ -150,6 +157,21 @@ Decision owner: project. Until decided, listed as **deferred**, not missing.
    `LeanCli/Registry/KnownProtocols.lean` (currently sidecar-only). *(S)*
 3. `--tail-calls` user-supplied extras: mechanism (payout-first `tailCalls` closure) is
    already ported; expose optional user extras only if a use-case appears. **Optional.** *(M)*
+
+   **Status: completed 2026-07-20** (upstream promoted this to a full feature in
+   `0df25ce` "fix: tail call clean up", ported same day). Surface:
+   `leancli unshield tornado <chainId> <to> <eth|max> [mode] --tail-calls
+   TARGET:CALLDATA[:VALUE],...`. Entries are parsed/validated in the verified core
+   (`LeanCli/Ethereum/TornadoTailCalls.lean`, native_decide-checked examples), the
+   daemon re-validates the JSON and rejects tail calls outside paymaster mode
+   before unlocking a slot, and the sidecar re-validates again (defense in depth).
+   Fee math per upstream: `forwardValue = amount − fee − Σ(tail values)`, hard
+   error when tail values exceed the after-fee amount, payout call omitted at 0.
+   The UserOp `callGasLimit` is a calldata heuristic (`80k + 1.5×Σ(per-call)`,
+   clamped to [300k, 5M], no `eth_estimateGas` — the delegated account is unfunded
+   pre-unshield) written into the SDK worker before it spawns; the paymaster fee
+   uses the same dynamic limit, and the quote returns
+   `callGasLimit`/`tailCallCount`/`tailValueWei` for the ConfirmGate.
 
 ## 4. Won't-port (deliberate divergences)
 - **`tui` subcommand disabled upstream (611898f):** upstream disabled its immature TUI

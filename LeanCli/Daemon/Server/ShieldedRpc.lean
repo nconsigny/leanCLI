@@ -12,6 +12,7 @@ import LeanCli.Ethereum.Address
 import LeanCli.Ethereum.Tx
 import LeanCli.Keystore.Tpm2Runtime
 import LeanCli.Privacy.Bridge
+import LeanCli.Ethereum.TornadoTailCalls
 import LeanCli.RPC.Outbound
 import LeanCli.RPC.Server
 import LeanCli.Util.Units
@@ -480,6 +481,52 @@ private def tornadoRecipientDerivationPath
                   { code := -32602,
                     message := "stored tornado recipient does not match its wallet derivation path",
                     data := some (.str recipient) }
+
+/-- Validate one `tailCalls` entry ({to, data, valueWei}) with the same
+    predicates the CLI's `--tail-calls` parser used — the daemon does not
+    trust its callers — and return the sanitized object to forward. -/
+private def tornadoTailCallJson (i : Nat) (entry : Json) : Except RpcError Json :=
+  let bad (msg : String) : Except RpcError Json :=
+    .error { code := -32602, message := s!"invalid tailCalls[{i}]: {msg}", data := none }
+  match getField "to" entry >>= asString with
+  | none => bad "missing target address"
+  | some to =>
+      if !LeanCli.Ethereum.TornadoTailCalls.isHexAddress to then
+        bad s!"target must be a 0x 20-byte address ({to})"
+      else
+        let data := (getField "data" entry >>= asString).getD "0x"
+        if !LeanCli.Ethereum.TornadoTailCalls.isHexBytes data then
+          bad "calldata must be 0x-prefixed byte-aligned hex"
+        else
+          let valueRaw := (getField "valueWei" entry >>= asString).getD "0"
+          match LeanCli.Ethereum.TornadoTailCalls.parseValueWei valueRaw with
+          | none => bad s!"valueWei must be decimal or 0x-hex wei ({valueRaw})"
+          | some v =>
+              .ok (.obj #[
+                ("to", .str to),
+                ("data", .str data),
+                ("valueWei", .str (toString v))
+              ])
+
+/-- Validate the optional `tailCalls` request param (paymaster withdrawals:
+    user calls appended after the payout call). Returns the sanitized array;
+    absent param ⇒ empty. -/
+private def tornadoTailCallsParam (params : Json) : Except RpcError (Array Json) :=
+  match getField "tailCalls" params with
+  | none => .ok #[]
+  | some j =>
+      match asArray j with
+      | none => .error { code := -32602, message := "tailCalls must be an array", data := none }
+      | some entries =>
+          let rec go (i : Nat) (rest : List Json) (acc : Array Json) :
+              Except RpcError (Array Json) :=
+            match rest with
+            | [] => .ok acc
+            | e :: rest =>
+                match tornadoTailCallJson i e with
+                | .error err => .error err
+                | .ok v => go (i + 1) rest (acc.push v)
+          go 0 entries.toList #[]
 
 /-- Forward a `shielded.tornado.*` method to the bridge. Unlike Privacy Pools
     (Sepolia-pinned), tornado runs on the caller-selected chain: the RPC
@@ -1114,20 +1161,34 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
             paramString req.params "recipient" with
       | .ok cid, .ok amountEth, .ok recipient =>
           let mode := ((getField "mode" req.params) >>= asString).getD "paymaster"
-          match ← tornadoSlot state req.params with
+          -- Fail fast (before unlocking a slot or spawning the sidecar) on
+          -- malformed tail calls; only the paymaster UserOp can carry them.
+          match tornadoTailCallsParam req.params with
           | .error err => pure (.error err)
-          | .ok slot =>
-              match ← tornadoRecipientDerivationPath slot recipient with
+          | .ok tailCalls =>
+              if mode != "paymaster" && !tailCalls.isEmpty then
+                pure <| .error {
+                  code := -32602
+                  message := "tailCalls are only supported in paymaster mode"
+                  data := none
+                }
+              else
+              match ← tornadoSlot state req.params with
               | .error err => pure (.error err)
-              | .ok recipientPath =>
-                  tornadoBridgeCall cfg "shielded.tornado.quoteWithdraw"
-                    (.obj #[
-                      ("chainId", .num (Int.ofNat cid)),
-                      ("amountEth", .str amountEth),
-                      ("recipient", .str recipient),
-                      ("recipientDerivationPath", .str recipientPath),
-                      ("mode", .str mode)
-                    ]) cid (rgSeedHexFromSlot slot) req
+              | .ok slot =>
+                  match ← tornadoRecipientDerivationPath slot recipient with
+                  | .error err => pure (.error err)
+                  | .ok recipientPath =>
+                      tornadoBridgeCall cfg "shielded.tornado.quoteWithdraw"
+                        (.obj (#[
+                          ("chainId", .num (Int.ofNat cid)),
+                          ("amountEth", .str amountEth),
+                          ("recipient", .str recipient),
+                          ("recipientDerivationPath", .str recipientPath),
+                          ("mode", .str mode)
+                        ] ++ (if tailCalls.isEmpty then #[]
+                              else #[("tailCalls", .arr tailCalls)])))
+                        cid (rgSeedHexFromSlot slot) req
       | _, _, _ => pure (.error invalidParams)
   | "shielded.tornado.executeWithdraw" =>
       -- Build the withdrawal proof and broadcast it (paymaster default, or
@@ -1142,24 +1203,37 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
           match ← tornadoSlot state req.params with
           | .error err => pure (.error err)
           | .ok slot =>
-              match ← tornadoRecipientDerivationPath slot recipient with
+              match tornadoTailCallsParam req.params with
               | .error err => pure (.error err)
-              | .ok recipientPath =>
-                  -- H2: forward the user-confirmed fee ceiling (the quoted
-                  -- paymasterFeeWei) so the sidecar aborts rather than paying an
-                  -- inflated fee out of the recipient's proceeds. Optional and
-                  -- backward-compatible: absent ⇒ no ceiling (legacy behaviour).
-                  let maxFeeWei? := getField "maxFeeWei" req.params >>= asString
-                  tornadoBridgeCall cfg "shielded.tornado.executeWithdraw"
-                    (.obj (#[
-                      ("chainId", .num (Int.ofNat cid)),
-                      ("amountEth", .str amountEth),
-                      ("recipient", .str recipient),
-                      ("recipientDerivationPath", .str recipientPath),
-                      ("mode", .str mode)
-                    ] ++ (match maxFeeWei? with
-                          | some w => #[("maxFeeWei", .str w)]
-                          | none   => #[]))) cid (rgSeedHexFromSlot slot) req
+              | .ok tailCalls =>
+                  if mode != "paymaster" && !tailCalls.isEmpty then
+                    pure <| .error {
+                      code := -32602
+                      message := "tailCalls are only supported in paymaster mode"
+                      data := none
+                    }
+                  else
+                  match ← tornadoRecipientDerivationPath slot recipient with
+                  | .error err => pure (.error err)
+                  | .ok recipientPath =>
+                      -- H2: forward the user-confirmed fee ceiling (the quoted
+                      -- paymasterFeeWei) so the sidecar aborts rather than paying an
+                      -- inflated fee out of the recipient's proceeds. Optional and
+                      -- backward-compatible: absent ⇒ no ceiling (legacy behaviour).
+                      let maxFeeWei? := getField "maxFeeWei" req.params >>= asString
+                      tornadoBridgeCall cfg "shielded.tornado.executeWithdraw"
+                        (.obj (#[
+                          ("chainId", .num (Int.ofNat cid)),
+                          ("amountEth", .str amountEth),
+                          ("recipient", .str recipient),
+                          ("recipientDerivationPath", .str recipientPath),
+                          ("mode", .str mode)
+                        ] ++ (match maxFeeWei? with
+                              | some w => #[("maxFeeWei", .str w)]
+                              | none   => #[])
+                          ++ (if tailCalls.isEmpty then #[]
+                              else #[("tailCalls", .arr tailCalls)])))
+                        cid (rgSeedHexFromSlot slot) req
       | _, _, _ => pure (.error invalidParams)
   | "shielded.tornado.deposit" => do
       unless (← ungatedShieldAllowed) do return .error ungatedShieldDenied

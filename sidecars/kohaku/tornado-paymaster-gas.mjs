@@ -17,16 +17,63 @@ export const TORNADO_PRE_VERIFICATION_GAS_LIMIT = 85_000n;
 /** SDK default is 10k; TornadoFeeAdapter postOp needs more on Sepolia. */
 export const TORNADO_PAYMASTER_POST_OP_GAS_LIMIT = 100_000n;
 
+/** SDK default callGasLimit when tailCalls are set. */
+export const TORNADO_BASE_CALL_GAS_LIMIT = 300_000n;
+
+const TORNADO_EXECUTE_BATCH_OVERHEAD = 80_000n;
+const TORNADO_EMPTY_CALL_GAS = 30_000n;
+const TORNADO_NONEMPTY_CALL_FALLBACK_GAS = 350_000n;
+const TORNADO_CALL_GAS_SAFETY_NUM = 15n;
+const TORNADO_CALL_GAS_SAFETY_DEN = 10n; // 1.5x
+const TORNADO_CALL_GAS_CAP = 5_000_000n;
+
 /** Mirrors @kohaku-eth/tornado-cash `reasonableGasUnits` when tailCalls are set. */
 export const TORNADO_PAYMASTER_GAS_UNITS = {
   preVerificationGas: TORNADO_PRE_VERIFICATION_GAS_LIMIT,
   verificationGasLimit: 50_000n,
-  callGasLimit: 300_000n,
+  callGasLimit: TORNADO_BASE_CALL_GAS_LIMIT,
   paymasterVerificationGasLimit: 350_000n,
   paymasterPostOpGasLimit: TORNADO_PAYMASTER_POST_OP_GAS_LIMIT,
 };
 
 const ERC20_TRANSFER_GAS = 100_000n;
+
+function calldataByteLength(data) {
+  if (!data || data === "0x") return 0;
+  return Math.max(0, Math.floor((data.length - 2) / 2));
+}
+
+function heuristicCallGas(call) {
+  const bytes = calldataByteLength(call.data);
+  if (bytes === 0) return TORNADO_EMPTY_CALL_GAS;
+  // Rough calldata floor + room for a Uniswap-style swap / router call.
+  const calldataGas = BigInt(bytes) * 16n;
+  const estimated = 150_000n + calldataGas;
+  return estimated > TORNADO_NONEMPTY_CALL_FALLBACK_GAS
+    ? estimated
+    : TORNADO_NONEMPTY_CALL_FALLBACK_GAS;
+}
+
+/**
+ * Heuristic UserOperation callGasLimit for Tornado execute/executeBatch.
+ * Deliberately does NOT call eth_estimateGas — the delegated account has no
+ * funds until the unshield UserOp itself runs, so RPC estimation would fail
+ * with insufficient funds. Ported from kohaku-cli 0df25ce.
+ */
+export function estimateTornadoCallGasLimit(calls) {
+  let callsGas = 0n;
+  for (const call of calls) {
+    callsGas += heuristicCallGas(call);
+  }
+
+  let callGasLimit =
+    TORNADO_EXECUTE_BATCH_OVERHEAD +
+    (callsGas * TORNADO_CALL_GAS_SAFETY_NUM) / TORNADO_CALL_GAS_SAFETY_DEN;
+
+  if (callGasLimit < TORNADO_BASE_CALL_GAS_LIMIT) callGasLimit = TORNADO_BASE_CALL_GAS_LIMIT;
+  if (callGasLimit > TORNADO_CALL_GAS_CAP) callGasLimit = TORNADO_CALL_GAS_CAP;
+  return callGasLimit;
+}
 
 const WORKER_GAS_PATCHES = [
   { old: "preVerificationGas: 80000n", new: "preVerificationGas: 85000n", label: "preVerificationGas" },
@@ -39,7 +86,9 @@ export function estimateTornadoPaymasterFee(maxFeePerGas, opts) {
   const isERC20 = opts?.isERC20 ?? false;
   const units = {
     ...TORNADO_PAYMASTER_GAS_UNITS,
-    callGasLimit: hasTailCalls ? TORNADO_PAYMASTER_GAS_UNITS.callGasLimit : 0n,
+    callGasLimit: hasTailCalls
+      ? (opts?.callGasLimit ?? TORNADO_PAYMASTER_GAS_UNITS.callGasLimit)
+      : 0n,
     paymasterVerificationGasLimit: isERC20
       ? TORNADO_PAYMASTER_GAS_UNITS.paymasterVerificationGasLimit + ERC20_TRANSFER_GAS
       : TORNADO_PAYMASTER_GAS_UNITS.paymasterVerificationGasLimit,
@@ -75,7 +124,7 @@ export async function fetchTornadoMaxFeePerGas(bundlerUrl) {
   return BigInt(hex);
 }
 
-let patched = false;
+let basePatched = false;
 
 function tornadoWorkerFiles() {
   const require = createRequire(import.meta.url);
@@ -86,7 +135,7 @@ function tornadoWorkerFiles() {
   ];
 }
 
-function patchWorkerGasLimits(file) {
+function patchWorkerBaseGasLimits(file) {
   let source;
   try {
     source = readFileSync(file, "utf8");
@@ -109,15 +158,51 @@ function patchWorkerGasLimits(file) {
 }
 
 /**
- * Bump @kohaku-eth/tornado-cash worker gas limits (idempotent, best-effort).
+ * Force the SDK worker's baseGasUnits.callGasLimit. Must run before the worker
+ * is spawned (i.e. before createTCPlugin / first Tornado sync). Ported from
+ * kohaku-cli 0df25ce; best-effort like the base patches.
+ */
+function patchWorkerCallGasLimit(file, callGasLimit) {
+  let source;
+  try {
+    source = readFileSync(file, "utf8");
+  } catch (e) {
+    console.error(`[bridge] tornado callGasLimit patch skipped (unreadable ${file}): ${e?.message ?? e}`);
+    return;
+  }
+  const next = `callGasLimit: ${callGasLimit.toString()}n`;
+  // Match the baseGasUnits field specifically (verificationGasLimit precedes it).
+  const re = /(verificationGasLimit:\s*\d+n,\s*)callGasLimit:\s*\d+n/;
+  if (!re.test(source)) {
+    console.error(`[bridge] tornado callGasLimit patch skipped (pattern missing in ${file})`);
+    return;
+  }
+  const updated = source.replace(re, `$1${next}`);
+  if (updated !== source) {
+    writeFileSync(file, updated);
+    console.error(`[bridge] patched tornado callGasLimit to ${callGasLimit} in ${file}`);
+  }
+}
+
+/**
+ * Bump @kohaku-eth/tornado-cash worker gas limits (idempotent for the base
+ * patches, best-effort). When `opts.callGasLimit` is provided it is always
+ * written (must happen before the worker spawns); otherwise the default is
+ * applied only on the first call so a prior override is preserved.
  * Node ignores `stateManagerWorkerUrl`, so we patch the bundled worker on disk.
  * A failure here is non-fatal: the withdraw may under-estimate gas and revert,
  * which surfaces as a broadcast error, not a silent loss.
  */
-export function ensureTornadoPaymasterGasPatched() {
-  if (patched) return;
+export function ensureTornadoPaymasterGasPatched(opts) {
   for (const file of tornadoWorkerFiles()) {
-    patchWorkerGasLimits(file);
+    if (!basePatched) {
+      patchWorkerBaseGasLimits(file);
+    }
+    if (opts?.callGasLimit != null) {
+      patchWorkerCallGasLimit(file, opts.callGasLimit);
+    } else if (!basePatched) {
+      patchWorkerCallGasLimit(file, TORNADO_BASE_CALL_GAS_LIMIT);
+    }
   }
-  patched = true;
+  basePatched = true;
 }

@@ -307,7 +307,7 @@ inductive Command where
   | tornadoBalance (chainId : String)
   | tornadoDeposit (walletName : String) (chainId : String) (amountEth : String)
   | tornadoWithdraw (chainId : String) (recipient : String) (amountEth : String)
-      (mode : String)
+      (mode : String) (tailCalls : Option String)
   | shieldedReveal
   | shieldedImport (mnemonic : String)
   | shieldedDelete
@@ -723,10 +723,17 @@ def parse : List String → Command
   | ["shield", "tornado", "balance", chainId] => .tornadoBalance chainId
   | ["shield", "tornado", walletName, chainId, amountEth] =>
       .tornadoDeposit walletName chainId amountEth
-  | ["unshield", "tornado", chainId, to, amountEth] =>
-      .tornadoWithdraw chainId to amountEth "paymaster"
-  | ["unshield", "tornado", chainId, to, amountEth, mode] =>
-      .tornadoWithdraw chainId to amountEth mode
+  -- `--tail-calls TARGET:CALLDATA[:VALUE],...` appends user calls after the
+  -- payout call of a paymaster withdrawal (validated in Runtime via
+  -- LeanCli.Ethereum.TornadoTailCalls before the daemon is called).
+  | "unshield" :: "tornado" :: rest =>
+      let (rest, tailCalls?) := extractStringFlag "tail-calls" rest
+      match rest with
+      | [chainId, to, amountEth] =>
+          .tornadoWithdraw chainId to amountEth "paymaster" tailCalls?
+      | [chainId, to, amountEth, mode] =>
+          .tornadoWithdraw chainId to amountEth mode tailCalls?
+      | _ => .invalid ("unshield" :: "tornado" :: rest)
   | ["shield", walletName, amountEth] => .shieldedDeposit walletName amountEth
   | ["unshield", to, amountEth] => .shieldedWithdraw to amountEth
   | "swap" :: "quote" :: rest =>
