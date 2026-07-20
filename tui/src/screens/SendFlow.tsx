@@ -41,6 +41,7 @@ type EncodedTx = { to: string; value: string; data: string };
 type Phase =
   | { kind: "form" }
   | { kind: "resolving"; raw: string; amount: string }
+  | { kind: "resolving-max"; to: string }
   | {
       kind: "unlocking";
       to: string;
@@ -84,6 +85,16 @@ function toBaseUnits(amount: string, decimals: number): bigint {
   return BigInt(whole || "0") * 10n ** BigInt(decimals) + BigInt(fracPadded || "0");
 }
 
+function fromBaseUnits(amount: bigint, decimals: number): string {
+  const scale = 10n ** BigInt(decimals);
+  const whole = amount / scale;
+  const fraction = (amount % scale)
+    .toString()
+    .padStart(decimals, "0")
+    .replace(/0+$/, "");
+  return fraction.length > 0 ? `${whole}.${fraction}` : whole.toString();
+}
+
 /** Send ETH or an ERC-20 from an EOA wallet → eoa.send (passphrase
  *  prompt, handled by UnlockEoaStep). When `token` is set, calldata is
  *  built daemon-side via `tx.encodeIntent action=erc20Transfer` so
@@ -115,9 +126,9 @@ export default function SendFlow({ wallet, chain, token, colibriEnabled, onDone 
       {
         name: "amount",
         label: `Amount (${assetLabel})`,
-        placeholder: token ? "10" : "0.01",
+        placeholder: token ? "10 or max" : "0.01 or max",
         validate: (v) =>
-          /^[0-9]+(\.[0-9]+)?$/.test(v)
+          v.trim().toLowerCase() === "max" || /^[0-9]+(\.[0-9]+)?$/.test(v)
             ? null
             : `expected a decimal ${assetLabel} amount`,
       },
@@ -137,11 +148,11 @@ export default function SendFlow({ wallet, chain, token, colibriEnabled, onDone 
           onCancel={() => onDone(false)}
           onSubmit={(v) => {
             const raw = (v.to ?? "").trim();
-            const next = (to: string): Phase => ({
-              kind: "unlocking",
-              to,
-              amount: v.amount ?? "",
-            });
+            const enteredAmount = (v.amount ?? "").trim();
+            const next = (to: string): Phase =>
+              enteredAmount.toLowerCase() === "max"
+                ? { kind: "resolving-max", to }
+                : { kind: "unlocking", to, amount: enteredAmount };
             // If the user typed a 0x address, skip ENS resolution. Otherwise
             // resolve before dispatch — the daemon's send paths expect a
             // canonical 20-byte address and reject ENS literals.
@@ -187,6 +198,18 @@ export default function SendFlow({ wallet, chain, token, colibriEnabled, onDone 
         <Banner kind="err" text={phase.message} />
         <BackOnEsc onDone={() => onDone(false)} />
       </Layout>
+    );
+  }
+
+  if (phase.kind === "resolving-max") {
+    return (
+      <ResolveMaxSendStep
+        wallet={wallet}
+        chain={chain}
+        token={token}
+        onReady={(amount) => setPhase({ kind: "unlocking", to: phase.to, amount })}
+        onError={(message) => setPhase({ kind: "encodeError", message })}
+      />
     );
   }
 
@@ -321,6 +344,74 @@ export default function SendFlow({ wallet, chain, token, colibriEnabled, onDone 
       renderResult={(r) => <SendResult result={r} assetLabel={assetLabel} />}
       onDone={onDone}
     />
+  );
+}
+
+function ResolveMaxSendStep({
+  wallet,
+  chain,
+  token,
+  onReady,
+  onError,
+}: {
+  wallet: Wallet;
+  chain?: string;
+  token?: { symbol: string; address: string; decimals: number };
+  onReady: (amount: string) => void;
+  onError: (message: string) => void;
+}) {
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (token) {
+        const response = await call<{ balance?: string }>("chain.tokenBalance", {
+          token: token.address,
+          owner: wallet.address,
+          ...(chain ? { chain } : {}),
+        });
+        if (cancelled) return;
+        if (!response.ok) {
+          onError(`could not resolve max ${token.symbol}: ${response.error.message}`);
+          return;
+        }
+        const amount = hexToBigInt(response.result?.balance);
+        if (amount <= 0n) {
+          onError(`no spendable ${token.symbol} balance`);
+          return;
+        }
+        onReady(fromBaseUnits(amount, token.decimals));
+        return;
+      }
+      const params: Record<string, unknown> = { name: wallet.name };
+      if (chain) params.chain = chain;
+      if ((wallet.accountIndex ?? 0) > 0) params.account = wallet.accountIndex;
+      const response = await call<{ amountWei?: string }>("eoa.maxSendable", params);
+      if (cancelled) return;
+      if (!response.ok) {
+        onError(`could not resolve max ETH: ${response.error.message}`);
+        return;
+      }
+      const amount = BigInt(response.result?.amountWei ?? "0");
+      if (amount <= 0n) {
+        onError("no ETH is spendable after reserving transfer gas");
+        return;
+      }
+      onReady(fromBaseUnits(amount, 18));
+    })().catch((error) => {
+      if (!cancelled) onError(error instanceof Error ? error.message : String(error));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [wallet.name, wallet.address, wallet.accountIndex, chain, token?.address]);
+
+  return (
+    <Layout title="Resolving maximum send">
+      <Text>
+        <Text color={theme.primary}><Spinner type="dots" /></Text>{" "}
+        <Text color={theme.dim}>reading balance and fee reserve…</Text>
+      </Text>
+    </Layout>
   );
 }
 

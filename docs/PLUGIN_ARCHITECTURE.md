@@ -91,16 +91,28 @@ and the enabled privacy plugins:
 }
 ```
 
+### Maximum-amount quotes
+
+`max` is never a broadcast-time sentinel in the interactive UI. Native sends call
+Lean RPC `eoa.maxSendable`, which subtracts `21000 × capped maxFeePerGas × 1.2`
+from the selected EOA balance. Privacy Pools, Railgun, and Tornado expose
+`shielded.maxUnshield`, `shielded.railgun.maxUnshield`, and
+`shielded.tornado.maxUnshield`; their sidecar results are converted to a concrete
+amount before `ConfirmGate`.
+
+Privacy Pools selects the largest approved unspent note. Tornado selects the largest
+spendable fixed-denomination note. Railgun deducts a fixed conservative ERC-4337 gas
+budget priced through `pimlico_getUserOperationGasPrice`, then applies the chain's
+treasury fee BPS. Railgun recomputes and enforces that cap in the broadcast handler,
+so the untrusted quote cannot authorize an amount above the current spendable balance.
+
 ### Tornado Cash sidecar (`sidecars/kohaku/tornado.mjs`)
 
-Tornado is live via `@kohaku-eth/tornado-cash@0.0.2-alpha.15`. Because that
-package requires `@kohaku-eth/plugins@0.0.1-alpha.11` (whose `Host` interface is
-**async**) while Railgun/Privacy Pools still pin `@kohaku-eth/plugins@0.0.1-alpha.8`
-(sync), the tornado dep tree is deliberately **nested** under
-`node_modules/@kohaku-eth/tornado-cash/node_modules/` — Railgun/PP are untouched.
-All tornado logic lives in its own lazily-imported module (`tornado.mjs`, with
-`tornado-external-sync.mjs` and `tornado-paymaster-gas.mjs`) so it builds its own
-async `Host` without disturbing the sync-host plugins.
+Tornado is live via `@kohaku-eth/tornado-cash@0.0.2-alpha.16`. All privacy
+plugins now share `@kohaku-eth/plugins@0.0.1-alpha.11` and its async `Host`
+contract. Tornado logic remains in its own lazily-imported module (`tornado.mjs`,
+with `tornado-external-sync.mjs` and `tornado-paymaster-gas.mjs`) to isolate its
+worker threads, proving artifacts, and protocol-specific persisted state.
 
 The plugin runs comlink **worker threads** (state-manager / merkle-tree / msm)
 and, on first withdraw, downloads groth16 proving artifacts. Because Node ignores
@@ -146,10 +158,10 @@ Plugins are **pinned** and **lazy**:
 
   | Package | Version | Notes |
   |---|---|---|
-  | `@kohaku-eth/plugins` | 0.0.1-alpha.8 | top-level; also 0.0.1-alpha.7 nested under privacy-pools |
-  | `@kohaku-eth/railgun` | 0.0.1-alpha.21 | |
-  | `@kohaku-eth/privacy-pools` | 0.0.2-alpha.9 | |
-  | `@kohaku-eth/provider` | 0.1.0-alpha.7, 0.1.0-alpha.8 | transport wrapper (transitive) |
+  | `@kohaku-eth/plugins` | 0.0.1-alpha.11 | unified async Host + note capability API |
+  | `@kohaku-eth/railgun` | 0.0.1-alpha.28 | |
+  | `@kohaku-eth/privacy-pools` | 0.0.2-alpha.14 | |
+  | `@kohaku-eth/provider` | 0.1.0-alpha.8 | deduplicated transport wrapper (transitive) |
 
 * **Lazy.** Each plugin is `import()`-ed only inside its own handler in
   `bridge.mjs` (`loadRailgun` / `loadLeancli`), and only after the

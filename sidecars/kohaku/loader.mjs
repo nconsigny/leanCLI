@@ -1,7 +1,7 @@
 // Why we need a loader:
 // - @kohaku-eth/privacy-pools' bundled output imports `maci-crypto/build/ts/hashing`
 //   without a `.js` extension. Strict ESM rejects extension-less specifiers.
-// - @kohaku-eth/railgun (alpha-21) imports `"../pkg"` (a directory). Strict ESM
+// - @kohaku-eth/railgun imports `"../pkg"` (a directory). Strict ESM
 //   also rejects directory imports — the resolver doesn't auto-fall-back to
 //   pkg/index.js the way CJS does.
 // Both are patched here without touching package internals.

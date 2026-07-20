@@ -307,7 +307,7 @@ inductive Command where
   | tornadoBalance (chainId : String)
   | tornadoDeposit (walletName : String) (chainId : String) (amountEth : String)
   | tornadoWithdraw (chainId : String) (recipient : String) (amountEth : String)
-      (mode : String)
+      (mode : String) (tailCalls : Option String)
   | shieldedReveal
   | shieldedImport (mnemonic : String)
   | shieldedDelete
@@ -723,10 +723,17 @@ def parse : List String → Command
   | ["shield", "tornado", "balance", chainId] => .tornadoBalance chainId
   | ["shield", "tornado", walletName, chainId, amountEth] =>
       .tornadoDeposit walletName chainId amountEth
-  | ["unshield", "tornado", chainId, to, amountEth] =>
-      .tornadoWithdraw chainId to amountEth "paymaster"
-  | ["unshield", "tornado", chainId, to, amountEth, mode] =>
-      .tornadoWithdraw chainId to amountEth mode
+  -- `--tail-calls TARGET:CALLDATA[:VALUE],...` appends user calls after the
+  -- payout call of a paymaster withdrawal (validated in Runtime via
+  -- LeanCli.Ethereum.TornadoTailCalls before the daemon is called).
+  | "unshield" :: "tornado" :: rest =>
+      let (rest, tailCalls?) := extractStringFlag "tail-calls" rest
+      match rest with
+      | [chainId, to, amountEth] =>
+          .tornadoWithdraw chainId to amountEth "paymaster" tailCalls?
+      | [chainId, to, amountEth, mode] =>
+          .tornadoWithdraw chainId to amountEth mode tailCalls?
+      | _ => .invalid ("unshield" :: "tornado" :: rest)
   | ["shield", walletName, amountEth] => .shieldedDeposit walletName amountEth
   | ["unshield", to, amountEth] => .shieldedWithdraw to amountEth
   | "swap" :: "quote" :: rest =>
@@ -1056,7 +1063,7 @@ def helpText : String :=
    MAIN COMMANDS:\n\
      send <to> <amount> [--account <wallet>]\n\
                                          Send ETH from the default wallet (set via 'wallet use').\n\
-                                         <to> is 0x... or ENS. <amount> is human ETH.\n\
+                                         <to> is 0x... or ENS. <amount> is human ETH or 'max'.\n\
      from <wallet> send <to> <amount>    Send ETH from a specific wallet,\n\
                                          bypassing the default. Tab-completes <wallet>.\n\
      balance | balance -a                Sum balances across all wallets (Sepolia).\n\
@@ -1127,7 +1134,7 @@ def helpText : String :=
      shield delete                       WARNING: removes the stored PP secret.\n\
      shield mark-destination <addr>      Backfill the PP-funded log (manual attestation).\n\
      shield list-destinations            Print every recorded PP-funded recipient.\n\
-     unshield <to> <eth>                 Privacy-Pools withdrawal via the relayer.\n\n\
+     unshield <to> <eth|max>             Privacy-Pools withdrawal via the relayer.\n\n\
    CHAIN UTILITIES (advanced):\n\
      chain balance <addr> | nonce <addr> | gas-price | priority-fee\n\
      chain token-balance <token> <owner>\n\

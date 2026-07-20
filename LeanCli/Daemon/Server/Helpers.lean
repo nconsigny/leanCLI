@@ -569,6 +569,52 @@ def feeCapWei (envVar : String) (dflt : Nat) : IO Nat := do
 /-- True when `v` exceeds a non-zero `cap` (a `0` cap means "no cap"). -/
 def feeExceedsCap (cap v : Nat) : Bool := cap != 0 && decide (v > cap)
 
+/-- Fee fields shared by max-send quoting and final EIP-1559 signing. -/
+structure CappedEip1559Fees where
+  maxPriorityFeePerGas : Nat
+  maxFeePerGas : Nat
+
+/-- Read the fee fields used for signing and enforce the signing ceilings.
+    Max-send quotes call this same function, so the reserved fee cannot be
+    based on a looser provider value than the eventual transaction. -/
+def readCappedEip1559Fees
+    (cfg : Config) (via? : Option LeanCli.RPC.Outbound.VerifyVia := none)
+    (priorityFeeOverride? : Option Nat := none) :
+    IO (Except RpcError CappedEip1559Fees) := do
+  try
+    let priorityJson ← expectExcept <|
+      (← LeanCli.RPC.Outbound.maxPriorityFeePerGas cfg.policy cfg.rpcEndpoint via?)
+    let gasPriceJson ← expectExcept <|
+      (← LeanCli.RPC.Outbound.gasPrice cfg.policy cfg.rpcEndpoint via?)
+    let rpcPriorityFee ← jsonHexNatIO priorityJson "maxPriorityFeePerGas"
+    let maxPriorityFeePerGas :=
+      match priorityFeeOverride? with
+      | some t => t
+      | none   => Nat.max rpcPriorityFee minPriorityFeeWei
+    let gasPrice ← jsonHexNatIO gasPriceJson "gasPrice"
+    let maxFeePerGas := 2 * gasPrice + maxPriorityFeePerGas
+    let maxFeeCap ← feeCapWei "LEANCLI_MAX_FEE_PER_GAS_WEI" defaultMaxFeePerGasCapWei
+    let maxPrioCap ← feeCapWei "LEANCLI_MAX_PRIORITY_FEE_PER_GAS_WEI" defaultMaxPriorityFeePerGasCapWei
+    if feeExceedsCap maxFeeCap maxFeePerGas then
+      return .error {
+        code := -32021
+        message := s!"refusing fee quote: maxFeePerGas {maxFeePerGas} wei exceeds the {maxFeeCap} wei signing ceiling (raise or disable via LEANCLI_MAX_FEE_PER_GAS_WEI)"
+        data := none
+      }
+    if feeExceedsCap maxPrioCap maxPriorityFeePerGas then
+      return .error {
+        code := -32021
+        message := s!"refusing fee quote: maxPriorityFeePerGas {maxPriorityFeePerGas} wei exceeds the {maxPrioCap} wei signing ceiling (override via LEANCLI_MAX_PRIORITY_FEE_PER_GAS_WEI)"
+        data := none
+      }
+    pure <| .ok { maxPriorityFeePerGas, maxFeePerGas }
+  catch e =>
+    pure <| .error {
+      code := -32020
+      message := "chain RPC failed while reading capped EIP-1559 fees"
+      data := some (.str e.toString)
+    }
+
 /-- Poll `eth_getTransactionReceipt` until mined or the timeout elapses.
     Emits `tx-pending` notifications every poll while the receipt is null. -/
 partial def waitForReceiptShared
@@ -675,27 +721,11 @@ def buildSignBroadcastTx
           -- neither light client can serve it.
           let nonceJson ← expectExcept <| (← LeanCli.RPC.Outbound.getTransactionCount cfg.policy cfg.rpcEndpoint slot.address "pending" via?)
           jsonHexNatIO nonceJson "nonce"
-    let priorityJson ← expectExcept <| (← LeanCli.RPC.Outbound.maxPriorityFeePerGas cfg.policy cfg.rpcEndpoint via?)
-    let gasPriceJson ← expectExcept <| (← LeanCli.RPC.Outbound.gasPrice cfg.policy cfg.rpcEndpoint via?)
-    let rpcPriorityFee ← jsonHexNatIO priorityJson "maxPriorityFeePerGas"
-    let maxPriorityFeePerGas :=
-      match priorityFeeOverride? with
-      | some t => t
-      | none   => Nat.max rpcPriorityFee minPriorityFeeWei
-    let gasPrice ← jsonHexNatIO gasPriceJson "gasPrice"
-    let maxFeePerGas := 2 * gasPrice + maxPriorityFeePerGas
-    -- H1: fee fields are read from the untrusted provider *after* the
-    -- ConfirmGate and are never shown to the user. Refuse to sign a tx whose
-    -- fee exceeds the (generous, env-overridable) ceiling, so a manipulated
-    -- gas-price read cannot drain the account as tip to the block producer.
-    let maxFeeCap ← feeCapWei "LEANCLI_MAX_FEE_PER_GAS_WEI" defaultMaxFeePerGasCapWei
-    let maxPrioCap ← feeCapWei "LEANCLI_MAX_PRIORITY_FEE_PER_GAS_WEI" defaultMaxPriorityFeePerGasCapWei
-    if feeExceedsCap maxFeeCap maxFeePerGas then
-      let msg := s!"refusing to sign: maxFeePerGas {maxFeePerGas} wei exceeds the {maxFeeCap} wei ceiling (the fee provider may be returning an inflated gas price; raise or disable via LEANCLI_MAX_FEE_PER_GAS_WEI)"
-      return .error { code := -32021, message := msg, data := none }
-    if feeExceedsCap maxPrioCap maxPriorityFeePerGas then
-      let msg := s!"refusing to sign: maxPriorityFeePerGas {maxPriorityFeePerGas} wei exceeds the {maxPrioCap} wei ceiling (override via LEANCLI_MAX_PRIORITY_FEE_PER_GAS_WEI)"
-      return .error { code := -32021, message := msg, data := none }
+    let feesE ← readCappedEip1559Fees cfg via? priorityFeeOverride?
+    if let .error err := feesE then return .error err
+    let .ok fees := feesE | return .error invalidParams
+    let maxPriorityFeePerGas := fees.maxPriorityFeePerGas
+    let maxFeePerGas := fees.maxFeePerGas
     let estimateRequest := estimateTxJson slot.address to value data
     let gasJson ← expectExcept <| (← LeanCli.RPC.Outbound.estimateGas cfg.policy cfg.rpcEndpoint estimateRequest "latest" none)
     let gasLimit ← jsonHexNatIO gasJson "gasLimit"

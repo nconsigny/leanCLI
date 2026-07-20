@@ -2,15 +2,17 @@
 //
 // Lazily imported by bridge.mjs only on `shielded.tornado.*` methods, after the
 // LEANCLI_PRIVACY enablement gate. Kept in its own module so bridge.mjs stays
-// lean and so tornado's async-host plumbing (plugins alpha.11) is isolated from
-// the sync-host PP/railgun code (plugins alpha.8).
+// lean and so Tornado's worker/state plumbing stays isolated from the shared
+// async Host used by Privacy Pools and Railgun.
 //
 // SECURITY: this process is UNTRUSTED for transaction structure. Deposit
 // handlers return UNSIGNED calldata that the Lean daemon re-decodes and signs
 // through its own TPM-rooted path (decode → simulate → ConfirmGate → eoa.send).
-// Withdraw handlers carry NO EOA signature — a groth16 proof authorizes
-// spending the note and a relayer/paymaster submits it — so confirming the
-// quoted terms IS the pre-broadcast gate, exactly like Privacy Pools unshield.
+// A groth16 proof authorizes spending the note and a relayer/paymaster submits
+// it. Paymaster tail calls also need an EIP-7702 authorization from the
+// recipient EOA; the Lean daemon resolves that recipient's BIP-44 path from
+// the selected wallet and re-derives the address before this sidecar sees it.
+// Confirming the quoted terms remains the pre-broadcast gate.
 //
 // Note model: unlike classic Tornado, this SDK derives note secrets
 // deterministically from the wallet keystore (BIP-32 under m/29795'/1', bound
@@ -43,8 +45,8 @@ function ethDenominationsWei(chainId) {
 
 // Lazy import: @kohaku-eth/tornado-cash spins up comlink worker threads and
 // (on first withdraw) downloads groth16 proving artifacts, so we only pay that
-// on a tornado method. provider/viem alpha.7 and alpha.8 share an identical
-// interface, so the top-level provider works for the alpha.11-hosted plugin.
+// on a tornado method. All privacy plugins share the top-level provider
+// alpha.8 transport.
 async function loadTornado() {
   const tc = await import("@kohaku-eth/tornado-cash");
   const provider = await import("@kohaku-eth/provider/viem");
@@ -217,6 +219,14 @@ function requireRecipient(params) {
   return recipient;
 }
 
+function requireRecipientDerivationPath(params) {
+  const path = params?.recipientDerivationPath;
+  if (typeof path !== "string" || !/^m\/44'\/60'\/[0-9]+'\/[01]\/[0-9]+$/.test(path)) {
+    throw new Error("recipientDerivationPath must be a canonical Ethereum BIP-44 path");
+  }
+  return path;
+}
+
 function amountWeiOf(params) {
   return params?.amountWei ? BigInt(params.amountWei) : parseEther(String(params?.amountEth ?? "0"));
 }
@@ -236,6 +246,78 @@ function assertWithdrawDenomination(amountWei, chainId) {
       `multi-note drains are performed one denomination per call`,
     );
   }
+}
+
+export function hasSpendableMatchingNote(notes, amountWei) {
+  return notes.some(
+    (note) => BigInt(note.balance ?? 0) > 0n && BigInt(note.amount) === amountWei,
+  );
+}
+
+export function largestTornadoSpendableDenomination(notes) {
+  let largest = 0n;
+  for (const note of notes ?? []) {
+    if (BigInt(note.balance ?? 0) <= 0n) continue;
+    const denomination = BigInt(note.amount ?? 0);
+    if (denomination > largest) largest = denomination;
+  }
+  return largest;
+}
+
+function withdrawAmountWei(params, notes) {
+  if (params?.amountMax === true || String(params?.amountEth).toLowerCase() === "max") {
+    return largestTornadoSpendableDenomination(notes);
+  }
+  return amountWeiOf(params);
+}
+
+function isMaxWithdrawAmount(params) {
+  return params?.amountMax === true || String(params?.amountEth).toLowerCase() === "max";
+}
+
+// User-supplied tail calls, validated by the Lean daemon and re-validated
+// here (defense in depth). Wire shape: [{to, data, valueWei}] with valueWei a
+// decimal string; values are paid out of the withdrawal after the fee.
+export function parseTailCallsParam(params) {
+  const raw = params?.tailCalls;
+  if (raw == null) return [];
+  if (!Array.isArray(raw)) throw new Error("tailCalls must be an array");
+  return raw.map((entry, index) => {
+    const to = String(entry?.to ?? "");
+    const data = String(entry?.data ?? "0x");
+    const valueRaw = entry?.valueWei ?? entry?.value ?? 0;
+    if (!/^0x[0-9a-fA-F]{40}$/.test(to)) {
+      throw new Error(`invalid tail call target at index ${index}: ${to}`);
+    }
+    if (!/^0x(?:[0-9a-fA-F]{2})*$/.test(data)) {
+      throw new Error(`invalid tail call calldata at index ${index}: expected 0x-prefixed byte-aligned hex`);
+    }
+    let value;
+    try {
+      value = BigInt(valueRaw);
+    } catch {
+      throw new Error(`invalid tail call value at index ${index}: ${valueRaw}`);
+    }
+    if (value < 0n) throw new Error(`invalid tail call value at index ${index}: must be >= 0`);
+    return { to, data, value };
+  });
+}
+
+export function totalTailCallValue(tailCalls) {
+  return tailCalls.reduce((sum, call) => sum + call.value, 0n);
+}
+
+export function tornadoPaymasterUnshieldOptions(recipient, recipientDerivationPath, forwardValue, tailCalls = []) {
+  return {
+    mode: "paymaster",
+    delegation: { mode: "deterministic", path: recipientDerivationPath },
+    // Payout first (omitted when fee + tail values consume the amount), then
+    // the user's calls in order — mirrors kohaku-cli tornadoUnshieldOptions.
+    tailCalls: async () => [
+      ...(forwardValue > 0n ? [{ to: recipient, data: "0x", value: forwardValue }] : []),
+      ...tailCalls.map((call) => ({ to: call.to, data: call.data, value: call.value })),
+    ],
+  };
 }
 
 // ---- Handlers -------------------------------------------------------------
@@ -300,13 +382,34 @@ async function tornadoPrepareDeposit(env, params) {
 // relayer fee is applied by the relayer at execute time.
 async function tornadoQuoteWithdraw(env, params) {
   const recipient = requireRecipient(params);
-  const amountWei = amountWeiOf(params);
-  assertWithdrawDenomination(amountWei, BigInt(env.LEANCLI_CHAIN_ID));
+  requireRecipientDerivationPath(params);
+  const explicitAmountWei = isMaxWithdrawAmount(params) ? null : amountWeiOf(params);
+  if (explicitAmountWei !== null) {
+    assertWithdrawDenomination(explicitAmountWei, BigInt(env.LEANCLI_CHAIN_ID));
+  }
   const mode = params?.mode === "relayer" ? "relayer" : "paymaster";
+  const tailCalls = parseTailCallsParam(params);
+  if (mode !== "paymaster" && tailCalls.length > 0) {
+    throw new Error("tail calls are only supported in paymaster mode");
+  }
+  let callGasLimit;
+  if (mode === "paymaster") {
+    // Patch the worker callGasLimit BEFORE the Tornado worker is spawned
+    // (buildTornadoPlugin); the payout call is part of the batch.
+    const { estimateTornadoCallGasLimit, ensureTornadoPaymasterGasPatched } =
+      await import("./tornado-paymaster-gas.mjs");
+    callGasLimit = estimateTornadoCallGasLimit([
+      { to: recipient, data: "0x", value: 0n },
+      ...tailCalls,
+    ]);
+    ensureTornadoPaymasterGasPatched({ callGasLimit });
+  }
   const plugin = await buildTornadoPlugin(env);
   const tc = plugin.__tc;
   if (plugin.sync) await plugin.sync();
   const notes = await plugin.notes([tornadoEthAsset(tc)]);
+  const amountWei = explicitAmountWei ?? withdrawAmountWei(params, notes);
+  assertWithdrawDenomination(amountWei, BigInt(env.LEANCLI_CHAIN_ID));
   const spendable = notes.filter((n) => BigInt(n.balance ?? 0) > 0n);
   const spendableTotal = spendable.reduce((s, n) => s + BigInt(n.balance), 0n);
   const matching = spendable.filter((n) => BigInt(n.amount) === amountWei).length;
@@ -330,25 +433,67 @@ async function tornadoQuoteWithdraw(env, params) {
     const { estimateTornadoPaymasterFee, fetchTornadoMaxFeePerGas } =
       await import("./tornado-paymaster-gas.mjs");
     const maxFeePerGas = await fetchTornadoMaxFeePerGas(bundlerUrl);
-    const feeWei = estimateTornadoPaymasterFee(maxFeePerGas);
-    const netWei = amountWei - feeWei;
-    if (netWei <= 0n) {
+    const feeWei = estimateTornadoPaymasterFee(maxFeePerGas, { hasTailCalls: true, callGasLimit });
+    const afterFeeWei = amountWei - feeWei;
+    if (afterFeeWei <= 0n) {
       throw new Error(`withdrawal amount too small to cover the tornado paymaster fee (~${feeWei} wei)`);
     }
-    return { ...base, paymasterFeeWei: feeWei, netWei, maxFeePerGasWei: maxFeePerGas };
+    const tailValueWei = totalTailCallValue(tailCalls);
+    if (tailValueWei > afterFeeWei) {
+      throw new Error(
+        `tail call value total (${tailValueWei} wei) exceeds the amount remaining after the tornado paymaster fee (${afterFeeWei} wei)`,
+      );
+    }
+    const netWei = afterFeeWei - tailValueWei;
+    return {
+      ...base,
+      paymasterFeeWei: feeWei,
+      netWei,
+      maxFeePerGasWei: maxFeePerGas,
+      callGasLimit,
+      tailCallCount: tailCalls.length,
+      tailValueWei,
+    };
   }
   return base;
 }
 
 async function tornadoExecuteWithdraw(env, params) {
   const recipient = requireRecipient(params);
-  const amountWei = amountWeiOf(params);
-  assertWithdrawDenomination(amountWei, BigInt(env.LEANCLI_CHAIN_ID));
+  const recipientDerivationPath = requireRecipientDerivationPath(params);
+  const explicitAmountWei = isMaxWithdrawAmount(params) ? null : amountWeiOf(params);
+  if (explicitAmountWei !== null) {
+    assertWithdrawDenomination(explicitAmountWei, BigInt(env.LEANCLI_CHAIN_ID));
+  }
   const mode = params?.mode === "relayer" ? "relayer" : "paymaster";
+  const tailCalls = parseTailCallsParam(params);
+  if (mode !== "paymaster" && tailCalls.length > 0) {
+    throw new Error("tail calls are only supported in paymaster mode");
+  }
+  let callGasLimit;
+  if (mode === "paymaster") {
+    // Patch the worker callGasLimit BEFORE the Tornado worker is spawned
+    // (buildTornadoPlugin); the payout call is part of the batch.
+    const { estimateTornadoCallGasLimit, ensureTornadoPaymasterGasPatched } =
+      await import("./tornado-paymaster-gas.mjs");
+    callGasLimit = estimateTornadoCallGasLimit([
+      { to: recipient, data: "0x", value: 0n },
+      ...tailCalls,
+    ]);
+    ensureTornadoPaymasterGasPatched({ callGasLimit });
+  }
   const plugin = await buildTornadoPlugin(env);
   const tc = plugin.__tc;
   if (plugin.sync) await plugin.sync();
+  const notes = await plugin.notes([tornadoEthAsset(tc)]);
+  const amountWei = explicitAmountWei ?? withdrawAmountWei(params, notes);
+  assertWithdrawDenomination(amountWei, BigInt(env.LEANCLI_CHAIN_ID));
   const asset = { asset: tornadoEthAsset(tc), amount: amountWei };
+  if (!hasSpendableMatchingNote(notes, amountWei)) {
+    throw new Error(
+      `no spendable ${params?.amountEth ?? amountWei} note available at execution time; re-quote before withdrawing`,
+    );
+  }
 
   let op;
   if (mode === "paymaster") {
@@ -356,7 +501,7 @@ async function tornadoExecuteWithdraw(env, params) {
     const { estimateTornadoPaymasterFee, fetchTornadoMaxFeePerGas } =
       await import("./tornado-paymaster-gas.mjs");
     const maxFeePerGas = await fetchTornadoMaxFeePerGas(bundlerUrl);
-    const feeWei = estimateTornadoPaymasterFee(maxFeePerGas);
+    const feeWei = estimateTornadoPaymasterFee(maxFeePerGas, { hasTailCalls: true, callGasLimit });
     // H2: the fee is recomputed here from a fresh (untrusted) bundler gas
     // price, decoupled from the quote the user confirmed. Enforce the
     // confirmed ceiling so a gas spike — or a bundler reporting an inflated
@@ -370,15 +515,23 @@ async function tornadoExecuteWithdraw(env, params) {
         `(gas price rose since the quote) — re-quote and confirm before withdrawing`,
       );
     }
-    const forwardValue = amountWei - feeWei;
-    if (forwardValue <= 0n) {
+    const afterFeeWei = amountWei - feeWei;
+    if (afterFeeWei <= 0n) {
       throw new Error(`withdrawal amount too small to cover the tornado paymaster fee (~${feeWei} wei)`);
     }
-    console.error(`[bridge] tornado: prepareUnshield paymaster to=${recipient} forward=${forwardValue}`);
-    op = await plugin.prepareUnshield(asset, recipient, {
-      mode: "paymaster",
-      tailCalls: async () => [{ to: recipient, data: "0x", value: forwardValue }],
-    });
+    const tailValueWei = totalTailCallValue(tailCalls);
+    if (tailValueWei > afterFeeWei) {
+      throw new Error(
+        `tail call value total (${tailValueWei} wei) exceeds the amount remaining after the tornado paymaster fee (${afterFeeWei} wei)`,
+      );
+    }
+    const forwardValue = afterFeeWei - tailValueWei;
+    console.error(`[bridge] tornado: prepareUnshield paymaster to=${recipient} forward=${forwardValue} tails=${tailCalls.length}`);
+    op = await plugin.prepareUnshield(
+      asset,
+      recipient,
+      tornadoPaymasterUnshieldOptions(recipient, recipientDerivationPath, forwardValue, tailCalls),
+    );
   } else {
     const ens = Array.isArray(params?.preferredRelayersEns) ? params.preferredRelayersEns : undefined;
     console.error(`[bridge] tornado: prepareUnshield relayer to=${recipient}`);
@@ -404,6 +557,17 @@ export async function dispatchTornado(method, env, params) {
   switch (method) {
     case "shielded.tornado.balance": return await tornadoBalance(env);
     case "shielded.tornado.notes": return await tornadoNotes(env, params);
+    case "shielded.tornado.maxUnshield": {
+      const plugin = await buildTornadoPlugin(env);
+      const tc = plugin.__tc;
+      if (plugin.sync) await plugin.sync();
+      const notes = await plugin.notes([tornadoEthAsset(tc)]);
+      return {
+        chainId: env.LEANCLI_CHAIN_ID,
+        amountWei: largestTornadoSpendableDenomination(notes),
+        scope: "largest-spendable-note",
+      };
+    }
     case "shielded.tornado.prepareDeposit": return await tornadoPrepareDeposit(env, params);
     case "shielded.tornado.quoteWithdraw": return await tornadoQuoteWithdraw(env, params);
     case "shielded.tornado.executeWithdraw": return await tornadoExecuteWithdraw(env, params);
@@ -414,6 +578,7 @@ export async function dispatchTornado(method, env, params) {
 export const TORNADO_METHODS = new Set([
   "shielded.tornado.balance",
   "shielded.tornado.notes",
+  "shielded.tornado.maxUnshield",
   "shielded.tornado.prepareDeposit",
   "shielded.tornado.quoteWithdraw",
   "shielded.tornado.executeWithdraw",

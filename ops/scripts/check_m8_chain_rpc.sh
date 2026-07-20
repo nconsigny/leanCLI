@@ -113,6 +113,13 @@ LEANCLI_SOCKET="$SOCK" XDG_DATA_HOME="$DATA" \
 # `send` pretty-prints the result ("hash:    0x<64 hex>") rather than raw JSON.
 grep -qE '0x[0-9a-fA-F]{64}' /tmp/leancli-m8-check-out
 
+# `max` is resolved daemon-side to balance minus a capped 21k-gas reserve,
+# then passed as a concrete wei amount through the normal signing path.
+LEANCLI_SOCKET="$SOCK" XDG_DATA_HOME="$DATA" \
+  "$ROOT/.lake/build/bin/leancli" from anvil send "$ANVIL_RECIPIENT" max </dev/null >/tmp/leancli-m8-check-out
+grep -q 'Resolved max send:' /tmp/leancli-m8-check-out
+grep -qE '0x[0-9a-fA-F]{64}' /tmp/leancli-m8-check-out
+
 LEANCLI_SOCKET="$SOCK" "$ROOT/.lake/build/bin/leancli" daemon stop >/dev/null
 wait "$daemon_pid" >/dev/null 2>&1 || true
 unset daemon_pid
@@ -125,6 +132,7 @@ grep -q '"method":"chain.maxPriorityFeePerGas"' "$DAEMON_LOG"
 grep -q '"method":"chain.estimateGas"' "$DAEMON_LOG"
 grep -q '"method":"chain.sendRawTransaction"' "$DAEMON_LOG"
 grep -q '"method":"eoa.send"' "$DAEMON_LOG"
+grep -q '"method":"eoa.maxSendable"' "$DAEMON_LOG"
 grep -q 'eth_getBalance' "$ANVIL_LOG"
 grep -q 'eth_getTransactionCount' "$ANVIL_LOG"
 grep -q 'eth_call' "$ANVIL_LOG"

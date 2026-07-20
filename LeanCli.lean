@@ -33,6 +33,8 @@ import LeanCli.Ethereum.IntentJson
 import LeanCli.Ethereum.Mpt
 import LeanCli.Ethereum.Ownership
 import LeanCli.Ethereum.Tx
+import LeanCli.Ethereum.TransferMax
+import LeanCli.Ethereum.TornadoTailCalls
 
 import LeanCli.Network.Policy
 import LeanCli.Privacy.Bridge
