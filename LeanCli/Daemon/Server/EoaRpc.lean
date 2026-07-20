@@ -8,6 +8,7 @@ import LeanCli.Daemon.State
 import LeanCli.Encoding.Json
 import LeanCli.Ethereum.Address
 import LeanCli.Ethereum.Eip712
+import LeanCli.Ethereum.TransferMax
 import LeanCli.Ethereum.Tx
 import LeanCli.Keystore.MasterKey
 import LeanCli.Keystore.MasterPassphrase
@@ -29,7 +30,7 @@ the full EOA surface:
   Lifecycle: eoa.list / show / address / import / create / delete
              eoa.revealMnemonic / unlock / lock / derive
   Signing:   eoa.signDigest / signMessage / signTx / signTypedData
-  Send:      eoa.send / dropNonce (replace-by-fee)
+  Send:      eoa.maxSendable / send / dropNonce (replace-by-fee)
   Multi-account: eoa.account.list / findByAddress / add / rm
   HSM attestation: eoa.attestation.status / bootstrap / unlockAll
 -/
@@ -336,6 +337,66 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                                 ("primaryType", .str d.primaryType),
                                 ("recoveredAddress", .str addr),
                                 ("rsv", signatureJson sig)
+                              ]
+  | "eoa.maxSendable" =>
+      match paramName req.params with
+      | .error err => pure (.error err)
+      | .ok name =>
+          match ← loadRecord name with
+          | .error err => pure (.error err)
+          | .ok record =>
+              let addressE : Except RpcError String :=
+                match getField "account" req.params >>= asNat with
+                | none => .ok record.address
+                | some idx =>
+                    match (recordAccounts record).find? (fun a => a.index = idx) with
+                    | some account => .ok account.address
+                    | none => .error {
+                        code := -32014
+                        message := s!"account index {idx} not found in slot"
+                        data := none
+                      }
+              match addressE with
+              | .error err => pure (.error err)
+              | .ok address =>
+                  let chainName? := getField "chain" req.params >>= asString
+                  let cfgEff : Config :=
+                    match chainName? with
+                    | none => cfg
+                    | some chainName =>
+                        match endpointForChain cfg (some chainName) with
+                        | .error _ => cfg
+                        | .ok ep =>
+                            let cid := (LeanCli.RPC.Outbound.chainNameToId chainName).getD cfg.chainId
+                            { cfg with rpcEndpoint := ep, chainId := cid }
+                  let via? ← verifiedReadVia state cfgEff.chainId cfgEff.rpcEndpoint
+                  match ← LeanCli.RPC.Outbound.getBalance
+                      cfgEff.policy cfgEff.rpcEndpoint address "latest" via? with
+                  | .error err => pure <| .error {
+                      code := -32020
+                      message := "chain RPC failed while reading send balance"
+                      data := some (.str err)
+                    }
+                  | .ok balanceJson =>
+                      match jsonHexNat balanceJson with
+                      | .error err => pure (.error err)
+                      | .ok balance =>
+                          match ← readCappedEip1559Fees cfgEff via? with
+                          | .error err => pure (.error err)
+                          | .ok fees =>
+                              let gasLimit : Nat := 21_000
+                              let reserve := gasLimit * fees.maxFeePerGas * 12 / 10
+                              let amount :=
+                                LeanCli.Ethereum.TransferMax.transferMaxAmountFromBalance
+                                  balance reserve
+                              pure <| .ok <| .obj #[
+                                ("address", .str address),
+                                ("balanceWei", .str (toString balance)),
+                                ("reserveWei", .str (toString reserve)),
+                                ("amountWei", .str (toString amount)),
+                                ("gasLimit", .num (Int.ofNat gasLimit)),
+                                ("maxFeePerGas", .str (toString fees.maxFeePerGas)),
+                                ("chainId", .num (Int.ofNat cfgEff.chainId))
                               ]
   | "eoa.send" =>
       match paramName req.params with

@@ -311,17 +311,22 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
           | some _, some ownerAddr =>
               let block := paramStringD req.params "block" "latest"
               let data := erc20BalanceOfData ownerAddr
-              let via? ← verifiedReadVia state cfg.chainId cfg.rpcEndpoint
-              match ← LeanCli.RPC.Outbound.ethCall cfg.policy cfg.rpcEndpoint token data block via? with
-              | .ok balance =>
-                  pure <| .ok <| .obj #[
-                    ("token", .str token),
-                    ("owner", .str owner),
-                    ("block", .str block),
-                    ("balance", balance)
-                  ]
+              let chain? := getField "chain" req.params >>= asString
+              match endpointForChain cfg chain? with
               | .error err =>
-                  pure <| .error { code := -32020, message := "chain RPC failed", data := some (.str err) }
+                  pure <| .error { code := -32021, message := "unknown chain", data := some (.str err) }
+              | .ok ep =>
+                  let via? ← verifiedReadVia state (ep.chainId.getD cfg.chainId) ep
+                  match ← LeanCli.RPC.Outbound.ethCall cfg.policy ep token data block via? with
+                  | .ok balance =>
+                      pure <| .ok <| .obj #[
+                        ("token", .str token),
+                        ("owner", .str owner),
+                        ("block", .str block),
+                        ("balance", balance)
+                      ]
+                  | .error err =>
+                      pure <| .error { code := -32020, message := "chain RPC failed", data := some (.str err) }
           | _, _ => pure (.error invalidParams)
       | _, _ => pure (.error invalidParams)
   | "chain.sendRawTransaction" =>

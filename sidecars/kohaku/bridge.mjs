@@ -42,6 +42,12 @@ import { mnemonicToSeedSync } from "@scure/bip39";
 import { withChunkedGetLogs } from "./chunked-get-logs.mjs";
 import * as fsSync from "node:fs";
 import * as pathMod from "node:path";
+import {
+  estimateRailgunBundlerFeeWei,
+  fetchPimlicoMaxFeePerGas,
+  largestSpendableNote,
+  railgunMaxReceivableFromBalance,
+} from "./max-amount.mjs";
 
 // Why: @kohaku-eth/privacy-pools transitively imports `maci-crypto/...` with
 // bare specifiers that Node ESM cannot resolve without an explicit loader.
@@ -156,8 +162,8 @@ function fileStorage(storagePath) {
   }
   return {
     _brand: "Storage",
-    get(key) { return key in store ? store[key] : null; },
-    set(key, value) { store[key] = value; flush(); },
+    async get(key) { return key in store ? store[key] : null; },
+    async set(key, value) { store[key] = value; flush(); },
   };
 }
 
@@ -172,6 +178,62 @@ function chainFromId(id) {
     case 1: return mainnet;
     case 11155111: return sepolia;
     default: throw new Error(`unsupported chainId: ${id}`);
+  }
+}
+
+function blockNumberHex(value) {
+  return `0x${value.toString(16)}`;
+}
+
+// Adapts Kohaku's EthereumProvider to the EIP-1193-like interface expected by
+// Railgun's SimpleSmartAccount. This mirrors kohaku-cli's target-version
+// RailgunEthereumProviderAdapter.
+class RailgunEthereumProviderAdapter {
+  constructor(provider) {
+    this.provider = provider;
+  }
+
+  async getChainId() { return await this.provider.getChainId(); }
+  async getBlockNumber() { return await this.provider.getBlockNumber(); }
+
+  async getLogs(address, eventSignature, fromBlock, toBlock) {
+    const filter = { address };
+    if (fromBlock !== undefined) filter.fromBlock = blockNumberHex(fromBlock);
+    if (toBlock !== undefined) filter.toBlock = blockNumberHex(toBlock);
+    if (eventSignature) filter.topics = [eventSignature];
+    const logs = await this.provider.request({ method: "eth_getLogs", params: [filter] });
+    return logs.map((log) => {
+      if (!log.transactionHash?.startsWith("0x")) {
+        throw new Error("railgun eth_getLogs entry missing transactionHash");
+      }
+      return {
+        blockNumber: log.blockNumber != null ? Number(BigInt(log.blockNumber)) : null,
+        blockTimestamp: null,
+        transactionHash: log.transactionHash,
+        address: log.address ?? address,
+        topics: log.topics ?? [],
+        data: log.data ?? "0x",
+      };
+    });
+  }
+
+  async ethCall(to, data) {
+    return (await this.provider.call({ to, input: data })) ?? "0x";
+  }
+
+  async estimateGas(to, from, data) {
+    return await this.provider.estimateGas({ to, from, input: data });
+  }
+
+  async getGasPrice() { return await this.provider.getGasPrice(); }
+
+  async getTransactionCount(address, block) {
+    const blockTag = block !== undefined ? blockNumberHex(block) : "latest";
+    const count = await this.provider.request({
+      method: "eth_getTransactionCount",
+      params: [address, blockTag],
+    });
+    return BigInt(count);
   }
 }
 
@@ -210,7 +272,7 @@ function keystoreFromSeedHex(seedHex) {
 function keystoreFromSeedBytes(seed) {
   const master = HDKey.fromMasterSeed(seed);
   return {
-    deriveAt(path) {
+    async deriveAt(path) {
       const child = master.derive(path);
       if (!child.privateKey) throw new Error("keystore: no private key at " + path);
       return "0x" + Buffer.from(child.privateKey).toString("hex");
@@ -226,7 +288,9 @@ function buildHost({ rpcUrl, chainId, mnemonic, viemProvider, storagePath }) {
   const client = createPublicClient({ chain, transport: http(rpcUrl) });
   return {
     network: inMemoryNetwork(),
-    storage: storagePath ? fileStorage(storagePath) : { _brand: "Storage", get: () => null, set: () => {} },
+    storage: storagePath
+      ? fileStorage(storagePath)
+      : { _brand: "Storage", async get() { return null; }, async set() {} },
     keystore: keystoreFromMnemonic(mnemonic),
     provider: withChunkedGetLogs(viemProvider(client)),
   };
@@ -323,7 +387,7 @@ async function buildPlugin(env) {
     entrypoint,
     broadcasterUrl,
     ...aspParams,
-    ...(initialState ? { initialState } : {}),
+    ...(initialState ? { initialState: async () => initialState } : {}),
   });
   plugin.__host = host;
   plugin.__pp = pp;
@@ -331,7 +395,7 @@ async function buildPlugin(env) {
   return plugin;
 }
 
-// Build a Railgun plugin for alpha-21. Same host shape as PP plugin
+// Build a Railgun plugin for the unified async Host API. Same host shape as PP plugin
 // ({ network, storage, keystore, provider }); separate env vars + storage
 // file so PP and Railgun never clobber each other's persisted state.
 //
@@ -396,7 +460,7 @@ async function buildRailgunPlugin(env, { needBundler = false } = {}) {
   // so the SDK starts from an already-synced state instead of from the
   // Railgun smart-wallet deployment block. The snapshot file contains
   // only chain-wide indexer state (UTXO commitments, merkle tree,
-  // POI metadata) — no per-user keys, since alpha-21 derives signers
+  // POI metadata) — no per-user keys, since the SDK derives signers
   // fresh from host.keystore each call. Skipping the cold-sync turns
   // first-balance latency from minutes into seconds.
   // Set LEANCLI_RG_SNAPSHOT_DISABLE=1 to opt out (e.g. when
@@ -433,8 +497,7 @@ async function buildRailgunPlugin(env, { needBundler = false } = {}) {
     provider: withChunkedGetLogs(provider.viem(client)),
   };
 
-  let bundler;
-  let delegating_account;
+  let delegatingKey;
   if (needBundler) {
     if (!env.LEANCLI_RG_BUNDLER_URL) {
       throw new Error("LEANCLI_RG_BUNDLER_URL is required for railgun unshield/transfer (4337 bundler URL, e.g. Pimlico)");
@@ -442,21 +505,30 @@ async function buildRailgunPlugin(env, { needBundler = false } = {}) {
     if (!env.LEANCLI_RG_DELEGATING_KEY) {
       throw new Error("LEANCLI_RG_DELEGATING_KEY is required for railgun unshield/transfer (hex private key of the EIP-7702 delegating EOA)");
     }
-    bundler = rg.Bundler.pimlico(env.LEANCLI_RG_BUNDLER_URL);
-    const key = env.LEANCLI_RG_DELEGATING_KEY.startsWith("0x")
+    delegatingKey = env.LEANCLI_RG_DELEGATING_KEY.startsWith("0x")
       ? env.LEANCLI_RG_DELEGATING_KEY
       : "0x" + env.LEANCLI_RG_DELEGATING_KEY;
-    delegating_account = rg.Signer.privateKey(key);
   }
 
   const plugin = await rg.createRailgunPlugin(host, {
     keyIndex: 0,
-    // POI defaults to true. The alpha-21 wasm has the working
+    // POI defaults to true. The pinned wasm has the working
     // ppoi.fdi.network/ endpoint baked in, so this works on both
     // mainnet and Sepolia. Set to false only for debugging.
     poi: true,
-    ...(needBundler ? { bundler: { bundler, delegating_account } } : {}),
   });
+  if (needBundler) {
+    // alpha.28 initializes WASM inside createRailgunPlugin, so Signer must be
+    // constructed after plugin creation. Configure 4337/7702 through setters.
+    const signer = rg.Signer.privateKey(delegatingKey);
+    const smartAccount = new rg.SimpleSmartAccount(
+      signer.address,
+      chainId,
+      new RailgunEthereumProviderAdapter(host.provider),
+    );
+    plugin.setBundler(rg.Bundler.pimlico(env.LEANCLI_RG_BUNDLER_URL));
+    plugin.setSmartAccount(smartAccount, signer);
+  }
   plugin.__rg = rg;
   plugin.__chain = chain;
   return plugin;
@@ -474,6 +546,56 @@ async function shieldedRailgunBalance(env) {
   };
 }
 
+function assetAddressLower(asset) {
+  if (!asset || asset.__type !== "erc20") return null;
+  if (typeof asset.contract === "bigint") {
+    return `0x${asset.contract.toString(16).padStart(40, "0")}`.toLowerCase();
+  }
+  return String(asset.contract ?? "").toLowerCase();
+}
+
+async function railgunMaxUnshield(env, params, { strictGas = false, plugin: pluginOverride } = {}) {
+  const plugin = pluginOverride ?? await buildRailgunPlugin(env);
+  const chainId = BigInt(env.LEANCLI_CHAIN_ID);
+  const chain = plugin.__rg.chainConfig(chainId);
+  if (!chain) throw new Error(`Railgun is not supported on chainId ${chainId}`);
+  const native = !params?.tokenAddress;
+  const wrappedBaseToken = chain.wrappedBaseToken.toLowerCase();
+  const target = (native ? wrappedBaseToken : params.tokenAddress).toLowerCase();
+  const paysGasFromBalance = target === wrappedBaseToken;
+  const balances = await plugin.balance(undefined);
+  const balanceWei = balances.reduce((sum, row) => {
+    if (row?.tag === "pending" || assetAddressLower(row?.asset) !== target) return sum;
+    return sum + BigInt(row?.amount ?? 0);
+  }, 0n);
+  let estimatedGasFeeWei = 0n;
+  let gasEstimateFailed = false;
+  if (paysGasFromBalance) {
+    try {
+      if (!env.LEANCLI_RG_BUNDLER_URL) throw new Error("LEANCLI_RG_BUNDLER_URL is required");
+      const maxFeePerGas = await fetchPimlicoMaxFeePerGas(env.LEANCLI_RG_BUNDLER_URL);
+      estimatedGasFeeWei = estimateRailgunBundlerFeeWei(maxFeePerGas, { nativeUnwrap: native });
+    } catch (error) {
+      if (strictGas) throw new Error(`could not price Railgun max unshield: ${error?.message ?? error}`);
+      gasEstimateFailed = true;
+    }
+  }
+  const amountWei = railgunMaxReceivableFromBalance(
+    balanceWei,
+    chain.unshieldFeeBps,
+    estimatedGasFeeWei,
+  );
+  return {
+    chainId,
+    balanceWei,
+    amountWei,
+    estimatedGasFeeWei,
+    unshieldFeeBps: chain.unshieldFeeBps,
+    paysGasFromBalance,
+    gasEstimateFailed,
+  };
+}
+
 // Build a Railgun asset for shield. tokenAddress=null → native ETH
 // (plugin wraps to WETH inside the shield op via shieldNative).
 function railgunShieldAsset(tokenAddress) {
@@ -486,7 +608,7 @@ function railgunShieldAsset(tokenAddress) {
   return { __type: "erc20", contract: tokenAddress };
 }
 
-// Build a Railgun asset for unshield. In alpha-21 native ETH is supported:
+// Build a Railgun asset for unshield. Native ETH is supported:
 // the plugin unshields as WETH and appends a `withdraw` tail call.
 function railgunUnshieldAsset(tokenAddress) {
   if (!tokenAddress || tokenAddress === "") {
@@ -534,12 +656,18 @@ async function shieldedRailgunUnshield(env, params) {
   if (!recipient || !/^0x[0-9a-fA-F]{40}$/.test(recipient)) {
     throw new Error("recipient must be a 0x-prefixed 20-byte address");
   }
-  const amountWei = params?.amountWei
-    ? BigInt(params.amountWei)
-    : parseEther(String(params?.amountEth ?? "0"));
-  if (amountWei <= 0n) throw new Error("amount must be > 0");
-  const asset = railgunUnshieldAsset(params?.tokenAddress);
   const plugin = await buildRailgunPlugin(env, { needBundler: true });
+  const quotedMax = await railgunMaxUnshield(env, params, { strictGas: true, plugin });
+  const amountWei = params?.amountMax === true || String(params?.amountEth).toLowerCase() === "max"
+    ? quotedMax.amountWei
+    : params?.amountWei
+      ? BigInt(params.amountWei)
+      : parseEther(String(params?.amountEth ?? "0"));
+  if (amountWei <= 0n) throw new Error("amount must be > 0");
+  if (amountWei > quotedMax.amountWei) {
+    throw new Error(`amount exceeds current Railgun max after fees (${quotedMax.amountWei} wei)`);
+  }
+  const asset = railgunUnshieldAsset(params?.tokenAddress);
   console.error(`[bridge] railgun: prepareUnshield amount=${amountWei} to=${recipient} asset=${JSON.stringify(asset)}`);
   const op = await plugin.prepareUnshield({ asset, amount: amountWei }, recipient);
   console.error(`[bridge] railgun: broadcasting unshield via 4337 bundler`);
@@ -685,12 +813,18 @@ async function shieldedUnshieldDrain(env, params) {
   if (!recipient || !/^0x[0-9a-fA-F]{40}$/.test(recipient)) {
     throw new Error("recipient must be a 0x-prefixed 20-byte address");
   }
-  const target = params?.amountWei
-    ? BigInt(params.amountWei)
-    : parseEther(String(params?.amountEth ?? "0"));
-  if (target <= 0n) throw new Error("amount must be > 0");
   const plugin = await buildPlugin(env);
   if (plugin.sync) await plugin.sync();
+  const initialNotes = await plugin.notes([ethAsset()]);
+  const maxNoteWei = largestSpendableNote(
+    initialNotes.filter((n) => (n.approved ?? true)),
+  );
+  const target = params?.amountMax === true || String(params?.amountEth).toLowerCase() === "max"
+    ? maxNoteWei
+    : params?.amountWei
+      ? BigInt(params.amountWei)
+      : parseEther(String(params?.amountEth ?? "0"));
+  if (target <= 0n) throw new Error("amount must be > 0");
   const broadcaster = plugin.__pp.createPPv1Broadcaster(plugin.__host, {
     broadcasterUrl: plugin.__broadcasterUrl,
   });
@@ -773,10 +907,6 @@ async function shieldedQuoteUnshield(env, params) {
   if (!recipient || !/^0x[0-9a-fA-F]{40}$/.test(recipient)) {
     throw new Error("recipient must be a 0x-prefixed 20-byte address");
   }
-  const target = params?.amountWei
-    ? BigInt(params.amountWei)
-    : parseEther(String(params?.amountEth ?? "0"));
-  if (target <= 0n) throw new Error("amount must be > 0");
   const plugin = await buildPlugin(env);
   if (plugin.sync) await plugin.sync();
   // Largest single approved note tells us whether this is one relay or a
@@ -794,6 +924,12 @@ async function shieldedQuoteUnshield(env, params) {
       "awaiting OxBow ASP approval. Wait for ASP indexing and retry.",
     );
   }
+  const target = params?.amountMax === true || String(params?.amountEth).toLowerCase() === "max"
+    ? biggest
+    : params?.amountWei
+      ? BigInt(params.amountWei)
+      : parseEther(String(params?.amountEth ?? "0"));
+  if (target <= 0n) throw new Error("amount must be > 0");
   const chunk = target < biggest ? target : biggest;
   let op;
   try {
@@ -833,9 +969,9 @@ async function shieldedQuoteUnshield(env, params) {
 //
 // All tornado logic lives in ./tornado.mjs (lazily imported by the
 // dispatch arms below, only on shielded.tornado.* after the LEANCLI_PRIVACY
-// gate). It builds its own async Host (plugins alpha.11, nested under
-// tornado-cash's node_modules) so the sync-host PP/railgun code (plugins
-// alpha.8) is untouched.
+// gate). All privacy plugins now share the top-level async Host contract from
+// plugins alpha.11, while Tornado remains isolated here for worker loading and
+// protocol-specific state.
 //
 //   Deposit  (shielded.tornado.prepareDeposit): returns UNSIGNED N×0.1-ETH
 //            fixed-denomination deposit legs → Lean decode → simulate →
@@ -917,6 +1053,17 @@ async function dispatch(req) {
       return jsonifyResult(id, await shieldedPrepareDeposit(env, params));
     case "shielded.unshieldDrain":
       return jsonifyResult(id, await shieldedUnshieldDrain(env, params));
+    case "shielded.maxUnshield": {
+      const plugin = await buildPlugin(env);
+      if (plugin.sync) await plugin.sync();
+      const notes = await plugin.notes([ethAsset()]);
+      const amountWei = largestSpendableNote(notes.filter((n) => (n.approved ?? true)));
+      return jsonifyResult(id, {
+        chainId: env.LEANCLI_CHAIN_ID,
+        amountWei,
+        scope: "largest-approved-note",
+      });
+    }
     case "shielded.quoteUnshield":
       return jsonifyResult(id, await shieldedQuoteUnshield(env, params));
     case "shielded.prepareWithdraw":
@@ -927,10 +1074,16 @@ async function dispatch(req) {
       return jsonifyResult(id, await shieldedRailgunPrepareShield(env, params));
     case "shielded.railgun.unshield":
       return jsonifyResult(id, await shieldedRailgunUnshield(env, params));
+    case "shielded.railgun.maxUnshield":
+      return jsonifyResult(
+        id,
+        await railgunMaxUnshield(env, params, { strictGas: params?.strict === true }),
+      );
     case "shielded.railgun.transfer":
       return jsonifyResult(id, await shieldedRailgunTransfer(env, params));
     case "shielded.tornado.balance":
     case "shielded.tornado.notes":
+    case "shielded.tornado.maxUnshield":
     case "shielded.tornado.prepareDeposit":
     case "shielded.tornado.quoteWithdraw":
     case "shielded.tornado.executeWithdraw": {

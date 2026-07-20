@@ -567,7 +567,9 @@ export default function UnshieldFlow({ onDone }: Props) {
               name: "amountEth",
               label: "Amount (ETH)",
               validate: (v) =>
-                /^[0-9]+(\.[0-9]+)?$/.test(v) ? null : "decimal ETH amount",
+                v.trim().toLowerCase() === "max" || /^[0-9]+(\.[0-9]+)?$/.test(v)
+                  ? null
+                  : "decimal ETH amount or 'max'",
             },
             {
               name: "passphrase",
@@ -598,12 +600,12 @@ export default function UnshieldFlow({ onDone }: Props) {
         recipient={phase.recipient}
         amountEth={phase.amountEth}
         passphrase={phase.passphrase}
-        onReady={(quote) =>
+        onReady={(quote, resolvedAmountEth) =>
           setPhase({
             kind: "confirm",
             recipient: phase.recipient,
             source: phase.source,
-            amountEth: phase.amountEth,
+            amountEth: resolvedAmountEth,
             passphrase: phase.passphrase,
             quote,
           })

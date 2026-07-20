@@ -16,6 +16,7 @@ import LeanCli.RPC.Outbound
 import LeanCli.RPC.Server
 import LeanCli.Util.Units
 import LeanCli.Wallet.EOA
+import LeanCli.Wallet.Bip44
 import LeanCli.Wallet.EoaStore
 import LeanCli.Wallet.Entropy
 import LeanCli.Wallet.Mnemonic
@@ -377,8 +378,9 @@ private def rgSeedHexFromSlot
 
     Returns `-32013` if neither step yields a wallet, or `-32012`
     (slot locked) if the resolved name isn't in `state.unlocked`. -/
-private def rgSeedHexFromDefault
-    (state : LeanCli.Daemon.State.Shared) : IO (Except RpcError String) := do
+private def rgSlotFromDefault
+    (state : LeanCli.Daemon.State.Shared) :
+    IO (Except RpcError LeanCli.Daemon.State.UnlockedSlot) := do
   let defaultPath ← defaultAccountPathIO
   let defaultName? : Option String ← do
     if ← defaultPath.pathExists then
@@ -388,16 +390,14 @@ private def rgSeedHexFromDefault
     else pure none
   match defaultName? with
   | some name =>
-      match ← unlockedSlot state name with
-      | .error err => pure (.error err)
-      | .ok slot => pure (.ok (rgSeedHexFromSlot slot))
+      unlockedSlot state name
   | none =>
       -- No default configured. If exactly one slot is currently
       -- unlocked, use it — that's the user's intent in the
       -- single-wallet / master-KEK-unlock-then-balance flow.
       let unlocked := (← state.get).unlocked
       match unlocked with
-      | [slot] => pure (.ok (rgSeedHexFromSlot slot))
+      | [slot] => pure (.ok slot)
       | [] =>
           pure <| .error
             { code := -32013,
@@ -408,6 +408,12 @@ private def rgSeedHexFromDefault
             { code := -32013,
               message := "no default wallet set and multiple slots are unlocked — pick one with `leancli wallet use <name>` or pass `name` explicitly to the RPC",
               data := none }
+
+private def rgSeedHexFromDefault
+    (state : LeanCli.Daemon.State.Shared) : IO (Except RpcError String) := do
+  match ← rgSlotFromDefault state with
+  | .error err => pure (.error err)
+  | .ok slot => pure (.ok (rgSeedHexFromSlot slot))
 
 /-- Tornado on-disk state dir (per chain). Tornado has NO separate secret —
     its keystore is the EOA seed derived at disjoint BIP-32 paths (m/29795'/1'),
@@ -430,14 +436,50 @@ private def resolveTornadoChain (cfg : Config) (params : Json) : Except RpcError
     param selects a specific unlocked slot; otherwise the default wallet. The
     seed is chain-independent; the SDK derives tornado-specific keys under its
     own BIP-32 root, disjoint from BIP-44 and from Railgun's paths. -/
+private def tornadoSlot (state : LeanCli.Daemon.State.Shared) (params : Json) :
+    IO (Except RpcError LeanCli.Daemon.State.UnlockedSlot) := do
+  match getField "name" params >>= asString with
+  | some n => unlockedSlot state n
+  | none => rgSlotFromDefault state
+
 private def tornadoSeedHex (state : LeanCli.Daemon.State.Shared) (params : Json) :
     IO (Except RpcError String) := do
-  match getField "name" params >>= asString with
-  | some n =>
-      match ← unlockedSlot state n with
-      | .error err => pure (.error err)
-      | .ok slot => pure (.ok (rgSeedHexFromSlot slot))
-  | none => rgSeedHexFromDefault state
+  match ← tornadoSlot state params with
+  | .error err => pure (.error err)
+  | .ok slot => pure (.ok (rgSeedHexFromSlot slot))
+
+/-- Resolve a Tornado withdrawal recipient to a BIP-44 path owned by the
+    selected wallet. The request never supplies the path: the daemon reads it
+    from EoaStore, then re-derives the address from the unlocked seed before
+    allowing the sidecar to construct an EIP-7702 delegation. -/
+private def tornadoRecipientDerivationPath
+    (slot : LeanCli.Daemon.State.UnlockedSlot) (recipient : String) :
+    IO (Except RpcError String) := do
+  match ← loadRecord slot.name with
+  | .error err => pure (.error err)
+  | .ok record =>
+      let target := recipient.toLower
+      match (recordAccounts record).find? (fun account => account.address.toLower = target) with
+      | none =>
+          pure <| .error
+            { code := -32602,
+              message := "tornado withdrawal recipient must be an account derived from the selected wallet",
+              data := some (.str recipient) }
+      | some account =>
+          match ← deriveAddressFromSeed slot.seed account.path with
+          | .error err =>
+              pure <| .error
+                { code := -32602,
+                  message := "stored tornado recipient derivation path is invalid",
+                  data := some (.str err) }
+          | .ok derived =>
+              if derived.toLower = target then
+                pure (.ok account.path)
+              else
+                pure <| .error
+                  { code := -32602,
+                    message := "stored tornado recipient does not match its wallet derivation path",
+                    data := some (.str recipient) }
 
 /-- Forward a `shielded.tornado.*` method to the bridge. Unlike Privacy Pools
     (Sepolia-pinned), tornado runs on the caller-selected chain: the RPC
@@ -695,6 +737,12 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       | .error err => pure (.error err)
       | .ok mnemonic =>
           shieldedBridgeCall cfg "shielded.balance" (.obj #[]) (some mnemonic) req
+  | "shielded.maxUnshield" =>
+      let passphrase? : Option String := getField "passphrase" req.params >>= asString
+      match ← unlockPpSecretSmart state passphrase? with
+      | .error err => pure (.error err)
+      | .ok mnemonic =>
+          shieldedBridgeCall cfg "shielded.maxUnshield" (.obj #[]) (some mnemonic) req
   | "shielded.railgun.balance" =>
       -- Read-only Railgun balance. Railgun keystore is rooted at the
       -- default EOA's BIP-39 seed (Railgun derives at its own BIP-32
@@ -717,6 +765,43 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       | .ok seedHex =>
           shieldedBridgeCall cfg "shielded.railgun.balance" (.obj #[]) none req
             (rgSeedHex? := some seedHex)
+  | "shielded.railgun.maxUnshield" =>
+      let nameOverride? := getField "name" req.params >>= asString
+      let seedHexE ← do
+        match nameOverride? with
+        | some n =>
+            match ← unlockedSlot state n with
+            | .error err => pure (Except.error err)
+            | .ok slot => pure (Except.ok (rgSeedHexFromSlot slot))
+        | none => rgSeedHexFromDefault state
+      match seedHexE with
+      | .error err => pure (.error err)
+      | .ok seedHex =>
+          let bundlerUrl? ← do
+            match ← IO.getEnv "LEANCLI_RG_BUNDLER_URL" with
+            | some u => pure (some u)
+            | none =>
+                match ← IO.getEnv "CANDIDE_API_KEY" with
+                | some k => pure (some s!"https://api.candide.dev/bundler/v3/sepolia/{k}")
+                | none => pure none
+          match bundlerUrl? with
+          | none => pure <| .error {
+              code := -32024
+              message := "no 4337 bundler configured — cannot price Railgun max unshield"
+              data := none
+            }
+          | some bundlerUrl =>
+              let strict := ((getField "strict" req.params) >>= asBool).getD false
+              let tokenAddress? := getField "tokenAddress" req.params >>= asString
+              let bridgeParams : Json := .obj <|
+                #[ ("strict", .bool strict) ] ++
+                (match tokenAddress? with
+                  | some address => #[("tokenAddress", .str address)]
+                  | none => #[])
+              shieldedBridgeCall cfg "shielded.railgun.maxUnshield"
+                bridgeParams none req
+                (rgBundlerUrl? := some bundlerUrl)
+                (rgSeedHex? := some seedHex)
   | "shielded.railgun.prepareShield" =>
       -- Preview: build unsigned shield txns. tokenAddress optional;
       -- absence ⇒ native ETH (plugin wraps to WETH internally). Same
@@ -988,6 +1073,15 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   ("chainId", .num (Int.ofNat cid)),
                   ("includeSpent", .bool includeSpent)
                 ]) cid seedHex req
+  | "shielded.tornado.maxUnshield" =>
+      match resolveTornadoChain cfg req.params with
+      | .error err => pure (.error err)
+      | .ok cid =>
+          match ← tornadoSeedHex state req.params with
+          | .error err => pure (.error err)
+          | .ok seedHex =>
+              tornadoBridgeCall cfg "shielded.tornado.maxUnshield"
+                (.obj #[("chainId", .num (Int.ofNat cid))]) cid seedHex req
   | "shielded.tornado.prepareDeposit" =>
       -- Tornado Cash deposit. The bridge derives the spending note secrets
       -- deterministically from the seed, Pedersen-hashes the commitment, and
@@ -1010,25 +1104,30 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
   | "shielded.tornado.quoteWithdraw" =>
       -- Quote a withdrawal WITHOUT broadcasting: returns the paymaster fee +
       -- net amount (paymaster mode) or note context (relayer mode) for the
-      -- ConfirmGate. A tornado withdraw carries NO EOA signature — a groth16
-      -- proof authorizes the spend and a relayer/paymaster submits it — so
-      -- confirming the quoted terms IS the pre-broadcast gate (mirrors PP
-      -- quoteUnshield). `mode` defaults to "paymaster"; "relayer" is optional.
+      -- ConfirmGate. A groth16 proof authorizes the note spend; paymaster mode
+      -- also builds a deterministic EIP-7702 authorization from the verified
+      -- recipient path at execute time. Confirming the quoted terms is the
+      -- pre-broadcast gate (mirrors PP quoteUnshield). `mode` defaults to
+      -- "paymaster"; "relayer" is optional.
       match resolveTornadoChain cfg req.params,
             paramString req.params "amountEth",
             paramString req.params "recipient" with
       | .ok cid, .ok amountEth, .ok recipient =>
           let mode := ((getField "mode" req.params) >>= asString).getD "paymaster"
-          match ← tornadoSeedHex state req.params with
+          match ← tornadoSlot state req.params with
           | .error err => pure (.error err)
-          | .ok seedHex =>
-              tornadoBridgeCall cfg "shielded.tornado.quoteWithdraw"
-                (.obj #[
-                  ("chainId", .num (Int.ofNat cid)),
-                  ("amountEth", .str amountEth),
-                  ("recipient", .str recipient),
-                  ("mode", .str mode)
-                ]) cid seedHex req
+          | .ok slot =>
+              match ← tornadoRecipientDerivationPath slot recipient with
+              | .error err => pure (.error err)
+              | .ok recipientPath =>
+                  tornadoBridgeCall cfg "shielded.tornado.quoteWithdraw"
+                    (.obj #[
+                      ("chainId", .num (Int.ofNat cid)),
+                      ("amountEth", .str amountEth),
+                      ("recipient", .str recipient),
+                      ("recipientDerivationPath", .str recipientPath),
+                      ("mode", .str mode)
+                    ]) cid (rgSeedHexFromSlot slot) req
       | _, _, _ => pure (.error invalidParams)
   | "shielded.tornado.executeWithdraw" =>
       -- Build the withdrawal proof and broadcast it (paymaster default, or
@@ -1040,23 +1139,27 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
             paramString req.params "recipient" with
       | .ok cid, .ok amountEth, .ok recipient =>
           let mode := ((getField "mode" req.params) >>= asString).getD "paymaster"
-          match ← tornadoSeedHex state req.params with
+          match ← tornadoSlot state req.params with
           | .error err => pure (.error err)
-          | .ok seedHex =>
-              -- H2: forward the user-confirmed fee ceiling (the quoted
-              -- paymasterFeeWei) so the sidecar aborts rather than paying an
-              -- inflated fee out of the recipient's proceeds. Optional and
-              -- backward-compatible: absent ⇒ no ceiling (legacy behaviour).
-              let maxFeeWei? := getField "maxFeeWei" req.params >>= asString
-              tornadoBridgeCall cfg "shielded.tornado.executeWithdraw"
-                (.obj (#[
-                  ("chainId", .num (Int.ofNat cid)),
-                  ("amountEth", .str amountEth),
-                  ("recipient", .str recipient),
-                  ("mode", .str mode)
-                ] ++ (match maxFeeWei? with
-                      | some w => #[("maxFeeWei", .str w)]
-                      | none   => #[]))) cid seedHex req
+          | .ok slot =>
+              match ← tornadoRecipientDerivationPath slot recipient with
+              | .error err => pure (.error err)
+              | .ok recipientPath =>
+                  -- H2: forward the user-confirmed fee ceiling (the quoted
+                  -- paymasterFeeWei) so the sidecar aborts rather than paying an
+                  -- inflated fee out of the recipient's proceeds. Optional and
+                  -- backward-compatible: absent ⇒ no ceiling (legacy behaviour).
+                  let maxFeeWei? := getField "maxFeeWei" req.params >>= asString
+                  tornadoBridgeCall cfg "shielded.tornado.executeWithdraw"
+                    (.obj (#[
+                      ("chainId", .num (Int.ofNat cid)),
+                      ("amountEth", .str amountEth),
+                      ("recipient", .str recipient),
+                      ("recipientDerivationPath", .str recipientPath),
+                      ("mode", .str mode)
+                    ] ++ (match maxFeeWei? with
+                          | some w => #[("maxFeeWei", .str w)]
+                          | none   => #[]))) cid (rgSeedHexFromSlot slot) req
       | _, _, _ => pure (.error invalidParams)
   | "shielded.tornado.deposit" => do
       unless (← ungatedShieldAllowed) do return .error ungatedShieldDenied

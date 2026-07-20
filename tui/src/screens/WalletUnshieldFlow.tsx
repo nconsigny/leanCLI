@@ -34,6 +34,8 @@ export type UnshieldQuote = {
   relayTxCostWei?: string | null;
   relayFeeBps?: string | null;
   relayerId?: string | null;
+  estimatedGasFeeWei?: string | null;
+  unshieldFeeBps?: number | null;
 };
 
 type BookEntry = {
@@ -74,6 +76,11 @@ type Phase =
       recipient: string;
       source: RecipientSource;
       amountEth: string;
+    }
+  | {
+      kind: "railgun-max";
+      recipient: string;
+      source: RecipientSource;
     }
   /* PP: fetch a relayer fee quote (no broadcast) before the confirm gate */
   | {
@@ -125,6 +132,14 @@ function nextHardenedAccount(paths: string[]): number {
   const next = max + 1;
   // Skip m/44'/60'/0'/0/0 — that's the implicit primary.
   return next === 0 ? 1 : next;
+}
+
+function weiToEthInput(value: string): string {
+  const wei = hexToBigInt(value);
+  const scale = 10n ** 18n;
+  const whole = wei / scale;
+  const fraction = (wei % scale).toString().padStart(18, "0").replace(/0+$/, "");
+  return fraction.length > 0 ? `${whole}.${fraction}` : whole.toString();
 }
 
 /** Unshield from the wallet action menu. Mirrors ShieldFlow's protocol-
@@ -443,9 +458,11 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
       {
         name: "amountEth",
         label: "Amount (ETH)",
-        placeholder: "0.005",
+        placeholder: "0.005 or max",
         validate: (v) =>
-          /^[0-9]+(\.[0-9]+)?$/.test(v) ? null : "expected a decimal ETH amount",
+          v.trim().toLowerCase() === "max" || /^[0-9]+(\.[0-9]+)?$/.test(v)
+            ? null
+            : "expected a decimal ETH amount or 'max'",
       },
       ...(isRailgun
         ? []
@@ -500,18 +517,40 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
       <UnlockEoaStep
         wallet={wallet}
         onUnlocked={() =>
-          // Railgun has no daemon-local fee quote (the WASM signer builds +
-          // signs the UserOp internally), so we go straight to a disclosure
-          // confirm gate rather than a fee-bearing one.
+          setPhase(
+            phase.amountEth.toLowerCase() === "max"
+              ? { kind: "railgun-max", recipient: phase.recipient, source: phase.source }
+              : {
+                  kind: "confirm",
+                  protocol: "railgun",
+                  recipient: phase.recipient,
+                  source: phase.source,
+                  amountEth: phase.amountEth,
+                },
+          )
+        }
+        onCancel={() => onDone(false)}
+      />
+    );
+  }
+
+  if (phase.kind === "railgun-max") {
+    return (
+      <RailgunMaxStep
+        walletName={wallet.name}
+        onReady={(amountEth, quote) =>
           setPhase({
             kind: "confirm",
             protocol: "railgun",
             recipient: phase.recipient,
             source: phase.source,
-            amountEth: phase.amountEth,
+            amountEth,
+            quote,
           })
         }
-        onCancel={() => onDone(false)}
+        onError={(message) =>
+          setPhase({ kind: "quote-error", protocol: "railgun", message })
+        }
       />
     );
   }
@@ -523,13 +562,13 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
         recipient={phase.recipient}
         amountEth={phase.amountEth}
         passphrase={phase.passphrase}
-        onReady={(quote) =>
+        onReady={(quote, resolvedAmountEth) =>
           setPhase({
             kind: "confirm",
             protocol: "pp",
             recipient: phase.recipient,
             source: phase.source,
-            amountEth: phase.amountEth,
+            amountEth: resolvedAmountEth,
             passphrase: phase.passphrase,
             quote,
           })
@@ -673,7 +712,7 @@ export function QuoteUnshieldStep({
   recipient: string;
   amountEth: string;
   passphrase: string;
-  onReady: (quote: UnshieldQuote) => void;
+  onReady: (quote: UnshieldQuote, resolvedAmountEth: string) => void;
   onError: (message: string) => void;
 }) {
   useEffect(() => {
@@ -691,7 +730,10 @@ export function QuoteUnshieldStep({
         onError(`quote failed: ${resp.error.message}`);
         return;
       }
-      onReady(resp.result);
+      const resolvedAmountEth = amountEth.trim().toLowerCase() === "max"
+        ? weiToEthInput(resp.result.requestedWei)
+        : amountEth;
+      onReady(resp.result, resolvedAmountEth);
     })();
     return () => {
       cancelled = true;
@@ -707,6 +749,50 @@ export function QuoteUnshieldStep({
           building withdrawal proof + fetching relayer quote (no broadcast
           yet; first run syncs pool state)…
         </Text>
+      </Text>
+    </Layout>
+  );
+}
+
+function RailgunMaxStep({
+  walletName,
+  onReady,
+  onError,
+}: {
+  walletName: string;
+  onReady: (amountEth: string, quote: UnshieldQuote) => void;
+  onError: (message: string) => void;
+}) {
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const response = await call<{ amountWei?: string }>(
+        "shielded.railgun.maxUnshield",
+        { name: walletName, strict: true },
+        { timeoutMs: 20 * 60 * 1000 },
+      );
+      if (cancelled) return;
+      if (!response.ok) {
+        onError(`max quote failed: ${response.error.message}`);
+        return;
+      }
+      const amountWei = response.result?.amountWei ?? "0x0";
+      if (hexToBigInt(amountWei) <= 0n) {
+        onError("no Railgun balance remains after treasury and bundler fees");
+        return;
+      }
+      onReady(weiToEthInput(amountWei), response.result as UnshieldQuote);
+    })().catch((error) => {
+      if (!cancelled) onError(error instanceof Error ? error.message : String(error));
+    });
+    return () => { cancelled = true; };
+  }, [walletName]);
+
+  return (
+    <Layout title="Resolving Railgun maximum">
+      <Text>
+        <Text color={theme.primary}><Spinner type="dots" /></Text>{" "}
+        <Text color={theme.dim}>syncing balance and pricing 4337 gas…</Text>
       </Text>
     </Layout>
   );
@@ -788,6 +874,19 @@ export function UnshieldConfirmGate({
               relays, each charged its own fee. First relay ≈ {ethStr(quote.chunkWei)}.
             </Text>
           )}
+        </Box>
+      )}
+
+      {isRailgun && quote?.estimatedGasFeeWei && (
+        <Box flexDirection="column" marginBottom={1}>
+          <Text>
+            <Text color={theme.dim}>{"bundler reserve".padEnd(18)}</Text>{" "}
+            ~{ethStr(quote.estimatedGasFeeWei)}
+          </Text>
+          <Text>
+            <Text color={theme.dim}>{"treasury fee".padEnd(18)}</Text>{" "}
+            {((quote.unshieldFeeBps ?? 0) / 100).toFixed(2)}%
+          </Text>
         </Box>
       )}
 

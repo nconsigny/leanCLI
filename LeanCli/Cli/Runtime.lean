@@ -881,6 +881,29 @@ private def dispatchEoaSend (name to : String) (valueNat : Nat)
             IO.println (LeanCli.Encoding.Json.pretty result)
             pure 0
 
+/-- Resolve the `max` send sentinel through the daemon. The response is a
+    concrete decimal wei string so values above 2^53 remain exact. -/
+private def resolveEoaMaxSendable (name : String)
+    (accountIdx? : Option String := none) : IO (Except String Nat) := do
+  match withOptionalAccount #[("name", .str name)] accountIdx? with
+  | .error err => pure (.error err)
+  | .ok fields =>
+      match ← DaemonClient.call "eoa.maxSendable" (.obj fields) with
+      | .error err => pure (.error s!"daemon error {err.code}: {err.message}")
+      | .ok result =>
+          match LeanCli.Encoding.Json.getField "amountWei" result
+              >>= LeanCli.Encoding.Json.asString >>= String.toNat? with
+          | some amount =>
+              if amount = 0 then
+                pure (.error "no ETH is spendable after reserving transfer gas")
+              else
+                let reserve :=
+                  (LeanCli.Encoding.Json.getField "reserveWei" result
+                    >>= LeanCli.Encoding.Json.asString >>= String.toNat?).getD 0
+                IO.println s!"Resolved max send: {formatEth amount} (reserved {formatEth reserve} for gas)"
+                pure (.ok amount)
+          | none => pure (.error "eoa.maxSendable returned an invalid amountWei")
+
 /-! ## Pretty-printers for `wallet show` and `--all` aggregates -/
 
 -- Why: rendering Unix epoch seconds as ISO-8601 without Mathlib. Standard
@@ -2365,9 +2388,15 @@ def run (args : List String) : IO UInt32 := do
             | [s] => (s, none)
             | [s, i] => (s, some i)
             | _ => (walletId, none)
-          match LeanCli.Invariants.EthAmount.parseEthToWei amount with
+          let valueE ←
+            if amount.toLower = "max" then
+              resolveEoaMaxSendable slotName subIdx?
+            else
+              pure <| (LeanCli.Invariants.EthAmount.parseEthToWei amount).mapError
+                (fun err => s!"invalid send amount (expected ETH like 0.001 or 'max'): {err}")
+          match valueE with
           | .error err =>
-              IO.eprintln s!"invalid send amount (expected ETH like 0.001): {err}"
+              IO.eprintln err
               return 2
           | .ok valueNat =>
               match ← resolveSlotType slotName with
@@ -3054,7 +3083,7 @@ def run (args : List String) : IO UInt32 := do
           IO.eprintln ""
           IO.eprintln "Notes:"
           IO.eprintln "  • <to> is a 0x-prefixed 20-byte address or a resolvable ENS name."
-          IO.eprintln "  • <amount> is human-readable ETH (e.g. 0.01), not wei."
+          IO.eprintln "  • <amount> is human-readable ETH (e.g. 0.01), or 'max'."
           IO.eprintln "  • Without --account, the wallet set via 'leancli wallet use <name>' is used."
           return 2
       | _ =>
