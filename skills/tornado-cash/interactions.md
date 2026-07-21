@@ -1,9 +1,8 @@
 # tornado-cash — interactions
 
-Drafting Tornado Cash transactions through the agent is **coming soon**
-(waits on the `@kohaku-eth/tornado-cash` SDK). This file enumerates
-the decode flows the agent uses today plus the "coming soon" surface
-when the user asks for a draft.
+Drafting Tornado Cash transactions through the agent is **live** via the
+`@kohaku-eth/tornado-cash` SDK (mainnet + Sepolia). This file enumerates
+the decode flows plus the shield/unshield drafting recipes.
 
 ## Activation triggers
 
@@ -29,35 +28,42 @@ The skill activates when the user mentions "tornado cash", "tornado",
 
 1. Agent answers from `overview.md`:
    * Older-generation fixed-denomination zk-SNARK mixer.
-   * leanCLI integration is coming soon; the `@kohaku-eth/tornado-cash`
-     SDK is not yet shipped.
-   * For active shielding today, the user is steered to
-     `skills/privacy-pool/` (`@kohaku-eth/privacy-pools`) or
-     `skills/railgun/` (`@kohaku-eth/railgun`).
-2. Agent does not propose any transaction (yet).
+   * leanCLI integration is live via `@kohaku-eth/tornado-cash`
+     (mainnet + Sepolia).
+   * Sibling shielded options: `skills/privacy-pool/`
+     (`@kohaku-eth/privacy-pools`) or `skills/railgun/`
+     (`@kohaku-eth/railgun`).
+2. Agent does not propose any transaction unless the user asks to.
 
 ## Recipe 3 — "Draft me a Tornado Cash deposit / withdrawal"
 
-1. Agent responds: **coming soon**. The leanCLI Tornado Cash SDK is
-   not yet shipped; once it is, the chat path mirrors the existing
-   Privacy Pool / Railgun flow (witness in sidecar → decode →
-   simulate → ConfirmGate → broadcast).
-2. Agent points at the active alternatives for shielding ETH today:
-   `Privacy → Privacy Pool` or `Privacy → Railgun` from the wallet
-   menu, or the chat shortcut `shield X ETH with privacy pool`.
+1. The chat shortcut resolves deterministically in the RuleParser
+   (`matchShielded`), so the LLM never has to guess:
+   * `shield X ETH with tornado cash` → `.tornadoDeposit` (X a
+     positive multiple of 0.1 ETH → N fixed-denomination legs).
+   * `withdraw 0.1 ETH from tornado to <addr>` → `.tornadoWithdraw`
+     (one note per call; recipient must be a wallet-derived address).
+2. chat.draft emits a prepare envelope routing to
+   `shielded.tornado.prepareDeposit` / `quoteWithdraw` /
+   `executeWithdraw`. The witness/proof is built in the sidecar; the
+   prepared legs flow through decode → simulate → ConfirmGate before
+   any signature.
+3. Withdrawals can append tail calls for an atomic withdraw-and-swap
+   (paymaster mode only) — the swap executes inside the same 4337
+   UserOp as the payout; if it reverts, the withdrawal reverts.
 
 ## Recipe 4 — "Compare Tornado Cash to Privacy Pools and Railgun"
 
 1. Agent uses the comparison frame from `overview.md` plus the peer
    skills' overviews:
    * Tornado Cash: fixed denominations, no association-set
-     affordances. leanCLI integration coming soon.
+     affordances. Live via `@kohaku-eth/tornado-cash`.
    * Privacy Pools (`skills/privacy-pool/`): variable amounts, opt-in
      ASP for compliance affordances, `@kohaku-eth/privacy-pools` SDK,
      live in `bridge.mjs`.
    * Railgun (`skills/railgun/`): UTXO-style smart-wallet shielded
-     accounts, POI gating, `@kohaku-eth/railgun` SDK, listed as
-     `stub` in `bridge.mjs` (installed, not yet fully wired).
+     accounts, POI gating, `@kohaku-eth/railgun` SDK, live in
+     `bridge.mjs`.
 2. Agent recommends the live alternatives for use today, while
    continuing to answer research questions on Tornado Cash itself.
 

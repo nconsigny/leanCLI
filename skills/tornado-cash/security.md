@@ -2,14 +2,14 @@
 
 ## Status
 
-leanCLI does not yet ship a `@kohaku-eth/tornado-cash` SDK. Drafting
-Tornado Cash transactions through the agent is **coming soon**. Until
-then, this skill is loaded for **decode context only**: the agent
-recognizes Tornado Cash calldata and explains it through the standard
-ConfirmGate, but does not yet produce outgoing deposits / withdrawals.
+Tornado Cash drafting is **live** via `@kohaku-eth/tornado-cash`
+(mainnet + Sepolia). The agent produces both deposits and withdrawals,
+each flowing through the standard `decodeIntent → simulate → ConfirmGate`
+gate before any signature. This skill also still provides decode context
+for incoming Tornado Cash calldata.
 
-For shielded ETH today the agent uses Privacy Pool
-(`@kohaku-eth/privacy-pools`) or Railgun (`@kohaku-eth/railgun`).
+Sibling shielded backends: Privacy Pool (`@kohaku-eth/privacy-pools`)
+and Railgun (`@kohaku-eth/railgun`).
 
 ## What the agent does today
 
@@ -17,24 +17,23 @@ For shielded ETH today the agent uses Privacy Pool
 |---|---|
 | "What is Tornado Cash?" | Explain (see `overview.md`). |
 | "Decode this calldata, it might be Tornado." | Decode via `abi/ETHTornado.json` + 4byte fallback; render through ConfirmGate. |
-| "How does Tornado differ from Privacy Pools?" | Compare; suggest Privacy Pool / Railgun for active use today. |
-| "Draft a 1 ETH deposit." | Tell the user it is coming soon; suggest Privacy Pool or Railgun via the Privacy menu. |
-| "Generate a Tornado note for me." | Coming soon (waits on the SDK). |
-| "Submit my proof to a Tornado relayer." | Coming soon (relayer plumbing lands with the SDK). |
+| "How does Tornado differ from Privacy Pools?" | Compare (see `interactions.md` Recipe 4). |
+| "Draft a 1 ETH deposit." | Route `shield 1 ETH with tornado cash` → `.tornadoDeposit` → `shielded.tornado.prepareDeposit`; the prepared legs go through decode → simulate → ConfirmGate. |
+| "Withdraw 0.1 ETH from tornado to 0x…" | Route → `.tornadoWithdraw` → `shielded.tornado.quoteWithdraw`/`executeWithdraw` (recipient must be a wallet-derived address). |
+| "Withdraw and swap to DAI atomically." | Withdraw with appended tail calls (paymaster mode) — the swap runs inside the same 4337 UserOp as the payout. |
 
-## Engineering posture once the SDK lands
+## Engineering posture
 
-When `@kohaku-eth/tornado-cash` lands, the integration follows the same
-shape as Privacy Pool and Railgun:
+The integration follows the same shape as Privacy Pool and Railgun:
 
 * Witness / proof generation in the untrusted Node sidecar.
 * The Lean daemon never trusts the sidecar's output — every Tornado
   calldata blob flows through `decodeIntent → simulate → ConfirmGate`
   before any signature is produced.
-* Note material persists in an encrypted shielded-secret store modeled
-  on the existing PP and Railgun stores.
-* Relayer endpoints are user-configurable; the daemon's network policy
-  gates which endpoints the sidecar may reach.
+* Notes are derived deterministically from the wallet seed (no note
+  string to persist), disjoint from the BIP-44 and Railgun paths.
+* Relayer / bundler endpoints are user-configurable; the daemon's network
+  policy gates which endpoints the sidecar may reach (`shieldedBroadcast`).
 
 ## Decode-time behaviour
 
@@ -48,8 +47,10 @@ that references one of the pool addresses):
 3. Render the decoded view through ConfirmGate. The user approves at
    the gate as with any other tx.
 
-## "Coming soon" surface
+## Drafting surface
 
-The chat regex parser, the Privacy menu, and any agent response that
-encounters an outgoing Tornado Cash draft today say **"coming soon"**
-and point at Privacy Pool / Railgun as the active alternatives.
+The chat regex parser (`RuleParser.matchShielded`) resolves both
+`shield … with tornado cash` and `withdraw … from tornado …`
+deterministically — the LLM is not consulted — and the wallet Privacy
+menu offers Tornado alongside Privacy Pool and Railgun. Every drafted
+deposit/withdrawal terminates at ConfirmGate before signing.

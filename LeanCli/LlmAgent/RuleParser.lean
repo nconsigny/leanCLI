@@ -936,13 +936,19 @@ def matchShielded (toks : List String) : Option RegexDraft := do
   -- private wallet", "an anonymous donor") — they would hijack
   -- unrelated prompts. Require the adverb forms or specific Privacy-
   -- Pool nouns.
+  -- An explicitly named protocol (railgun / tornado / privacy pool) is a
+  -- strong enough signal to treat the aliased "deposit"/"withdraw" verbs
+  -- as shield/unshield — otherwise "deposit 0.2 ETH with tornado" fell
+  -- through to the LLM, which answered from the (stale) skill docs.
   let hasPrivacyHint : Bool :=
-    hasPrivacyPool ∨ toks.any (fun t =>
+    hasPrivacyPool ∨ hasRailgun ∨ hasTornado ∨ toks.any (fun t =>
       t = "shielded" ∨ t = "privately" ∨ t = "anonymously")
   let isCanonical := verb = "shield" ∨ verb = "unshield"
   let isAliasedShield := verb = "deposit" ∧ hasPrivacyHint
   let isAliasedUnshield := verb = "withdraw" ∧ hasPrivacyHint
-  if ¬ (isCanonical ∨ isAliasedShield ∨ isAliasedUnshield) then none
+  -- Any of these three means "route deterministically as a shielded op".
+  let isShieldish := isCanonical ∨ isAliasedShield ∨ isAliasedUnshield
+  if ¬ isShieldish then none
   let canonicalVerb : String :=
     if verb = "unshield" ∨ isAliasedUnshield then "unshield" else "shield"
   let amountRaw ← at? toks 1
@@ -959,15 +965,15 @@ def matchShielded (toks : List String) : Option RegexDraft := do
   -- Aliased verbs ("deposit X privately", "withdraw Y from the
   -- privacy pool") inherently imply Privacy Pool and skip these
   -- gates — they only match when hasPrivacyHint is set.
-  if isCanonical ∧ hasTornado then
-    -- Tornado chat shortcut (PR 2). Routes to .tornadoDeposit /
-    -- .tornadoWithdraw. Same recipient-extraction pattern as Railgun.
-    -- Note (PR 2 scope): the bridge sidecar's Tornado integration is
-    -- a stub today — the chat path is wired end-to-end, but the
-    -- sidecar returns "not yet implemented" until the snarkjs + Baby
-    -- Jubjub Pedersen layer lands. The user sees that error in the
-    -- TUI rather than an opaque "coming soon" clarification, so the
-    -- next-step is concrete.
+  if isShieldish ∧ hasTornado then
+    -- Tornado chat shortcut. Routes to .tornadoDeposit / .tornadoWithdraw
+    -- (chat.draft's prepare envelope then dispatches shielded.tornado.
+    -- prepareDeposit / executeWithdraw). Same recipient-extraction
+    -- pattern as Railgun. The bridge sidecar's Tornado integration is
+    -- LIVE (@kohaku-eth/tornado-cash) — deposits become N fixed-
+    -- denomination legs, withdrawals spend one note via the 4337
+    -- paymaster (or relayer), each flowing through decode → simulate →
+    -- ConfirmGate before signing.
     let isNoiseToken : String → Bool := fun s =>
       s = "the" ∨ s = "pool" ∨ s = "pools" ∨ s = "privacy"
         ∨ s = "shielded" ∨ s = "a" ∨ s = "an"
@@ -1000,7 +1006,7 @@ def matchShielded (toks : List String) : Option RegexDraft := do
           | some _ => .high
           | none   => .medium
     }
-  if isCanonical ∧ hasRailgun then
+  if isShieldish ∧ hasRailgun then
     -- Railgun chat shortcut is live (PR 1). Route to .railgunShield /
     -- .railgunUnshield so chat.draft's prepare envelope dispatches the
     -- correct daemon RPC. The unshield recipient is extracted by the
@@ -1082,6 +1088,24 @@ def matchShielded (toks : List String) : Option RegexDraft := do
         | some _ => .high
         | none   => .medium
   }
+
+-- Canonical verbs route by named protocol.
+example : (matchShielded (tokenize "shield 0.1 eth with tornado cash")).map (·.action)
+    = some .tornadoDeposit := by native_decide
+example : (matchShielded (tokenize "shield 0.05 eth with railgun")).map (·.action)
+    = some .railgunShield := by native_decide
+-- Aliased "deposit"/"withdraw" verbs also route when a protocol is named
+-- (regression: these used to fall through to the LLM and answer "coming
+-- soon" from the skill docs).
+example : (matchShielded (tokenize "deposit 0.2 eth with tornado cash")).map (·.action)
+    = some .tornadoDeposit := by native_decide
+example : (matchShielded (tokenize "withdraw 0.1 eth from tornado to 0x1111111111111111111111111111111111111111")).map (·.action)
+    = some .tornadoWithdraw := by native_decide
+example : (matchShielded (tokenize "deposit 0.05 eth with railgun")).map (·.action)
+    = some .railgunShield := by native_decide
+-- A bare aliased verb with NO protocol hint stays out of the shielded path
+-- (so "deposit 5 dai to aave" is not hijacked).
+example : matchShielded (tokenize "deposit 5 dai") = none := by native_decide
 
 /-- `audit [my] approvals [on <chain>]` — read-only listing of outgoing
 ERC-20 allowances. No amount, no asset; the daemon scans `Approval`

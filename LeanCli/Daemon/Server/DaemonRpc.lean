@@ -10,6 +10,7 @@ import LeanCli.Encoding.Json
 import LeanCli.Keystore.Tpm2Runtime
 import LeanCli.RPC.Server
 import LeanCli.SafeNode.Persistent
+import LeanCli.Privacy.Bridge
 
 /-!
 # Daemon server: `daemon.*` / `status.*` / `network.*` RPC family
@@ -193,7 +194,10 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       -- settings pane surfaces these read-only with an "edit daemon.env &
       -- restart" note. Reads env directly; never spawns the sidecar.
       let known := ["railgun", "privacy-pools", "tornado"]
-      let raw := ((← IO.getEnv "LEANCLI_PRIVACY").getD "")
+      -- Same resolver the sidecar forwarder uses: unset ⇒ privacy-first
+      -- default (all three). Keeps the settings-pane display honest about
+      -- what the daemon will actually load.
+      let raw ← LeanCli.Privacy.Bridge.resolveEnabledPrivacy
       let enabled : Array Json :=
         ((raw.splitOn ",").filterMap (fun part =>
           let name := (part.trimAscii.toString).map Char.toLower

@@ -16,22 +16,31 @@ UTXO model). It is documented here for **decode context**.
 
 ## Status in leanCLI
 
-**Coming soon.** There is no `@kohaku-eth/tornado-cash` package
-alongside `@kohaku-eth/privacy-pools` and `@kohaku-eth/railgun`. When
-the SDK lands, the agent will draft Tornado Cash transactions through
-the same `decode → simulate → ConfirmGate` pipeline used by the
-other shielded protocols. Until then this skill is **decode-only**:
-the agent recognizes Tornado Cash calldata when it appears in
-incoming flows and explains what it does.
+**Live.** The `@kohaku-eth/tornado-cash` package is installed and wired
+through `sidecars/kohaku/tornado.mjs`, on mainnet + Sepolia. The agent
+drafts both directions through the same `decode → simulate →
+ConfirmGate` pipeline used by the other shielded protocols:
 
-For shielded ETH today, the agent uses:
+* **Shield (deposit)** — `shield X ETH with tornado cash`. X is a
+  positive multiple of 0.1 ETH; the bridge decomposes it into N fixed-
+  denomination `deposit(commitment)` legs. Notes are derived from the
+  wallet seed — there is no note string to save.
+* **Unshield (withdraw)** — `withdraw 0.1 ETH from tornado to <addr>`.
+  Spends one fixed-denomination note per call via a groth16 proof,
+  broadcast through the 4337 paymaster (default) or a relayer. The
+  recipient must be an address derived from the wallet (the 7702
+  authorization comes from its derivation path). Withdrawals also
+  support appended tail calls (atomic withdraw-and-swap) — see
+  `LeanCli/Ethereum/TornadoTailCalls.lean`.
+
+Sibling shielded protocols for ETH:
 
 * **Privacy Pool** (`@kohaku-eth/privacy-pools`) — variable-
   denomination, association-set-proof gated. Trigger:
   `shield X ETH with privacy pool`.
 * **Railgun** (`@kohaku-eth/railgun`) — variable-denomination,
-  shielded smart-wallet model, POI-gated. Trigger: Privacy → Railgun
-  menu (chat shortcut coming soon).
+  shielded smart-wallet model, POI-gated. Trigger:
+  `shield X ETH with railgun`.
 
 ## What the agent does today
 

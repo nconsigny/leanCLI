@@ -450,8 +450,10 @@ parses its structured `Intent`); there is no Node LLM sidecar.
 ### Privacy plugins (`sidecars/kohaku/`)
 
 Wraps `@kohaku-eth/{plugins,railgun,privacy-pools}`, multi-selected via
-`LEANCLI_PRIVACY` (comma list; default empty = nothing enabled; a
-`shielded.*` call for a disabled plugin is refused before its code loads).
+`LEANCLI_PRIVACY` (comma list; unset ⇒ the privacy-first default of all
+three — `railgun,privacy-pools,tornado`; set it explicitly to narrow the
+surface; a `shielded.*` call for a disabled plugin is refused before its
+code loads).
 Methods: `ping`, `version`, `listProtocols`, `listEnabled`,
 `shielded.balance`, `shielded.prepareDeposit`, `shielded.prepareWithdraw`,
 `shielded.unshieldDrain`. Spending secrets are derived from a separate
@@ -599,8 +601,8 @@ compromised or substituted helper defeats every higher-level invariant
 
 Most sidecars are zero-config from the monorepo: when no env var is set,
 the daemon walks the working directory upward (≤ 8 hops) looking for the
-in-repo entrypoint. Privacy plugins need explicit opt-in (`LEANCLI_PRIVACY`)
-plus their own spending credential.
+in-repo entrypoint. Privacy plugins are enabled by default (privacy-first);
+each still needs its own spending credential before it can act.
 
 | Sidecar | Default behavior with no env var | Explicit override |
 |---|---|---|
@@ -608,7 +610,7 @@ plus their own spending credential.
 | Helios (default provider) | walks up for `sidecars/kohaku/helios/bridge.mjs`; fallback PATH basename | `LEANCLI_PROVIDER=helios` (default) |
 | Colibri | walks up for `sidecars/kohaku/colibri/bridge.mjs`; fallback PATH basename | `LEANCLI_PROVIDER=colibri` |
 | Sphincs (C9, SLHDSA) | walks up for `sidecars/sphincs/bin/sphincs-{c9,slhdsa-128-24}`; fallback PATH basename. Requires you to have run `make` under `sidecars/sphincs/` first. | `LEANCLI_SPHINCS_C9` / `LEANCLI_SPHINCS_SLHDSA` |
-| Privacy plugins (Railgun / Privacy Pools / Tornado) | disabled unless listed in `LEANCLI_PRIVACY` | `LEANCLI_PRIVACY=railgun,privacy-pools` plus `LEANCLI_PP_MNEMONIC` (separate spending secret) |
+| Privacy plugins (Railgun / Privacy Pools / Tornado) | all three enabled by default when `LEANCLI_PRIVACY` is unset | set `LEANCLI_PRIVACY` explicitly to narrow (e.g. `railgun,privacy-pools`, or `none` to disable all); Privacy Pools also needs `LEANCLI_PP_MNEMONIC` (separate spending secret) |
 
 The LLM agent is the native `leancli-agent` exe — no sidecar to wire; the
 model tool-use loop fires only when an LLM endpoint is configured in the

@@ -1000,9 +1000,13 @@ async function dispatch(req) {
   if (requiredPlugin !== null) {
     const enabled = enabledPrivacyPlugins(env);
     if (!enabled.includes(requiredPlugin)) {
-      return jsonrpcResult(id, {
-        ok: false,
-        error: `plugin not enabled: ${requiredPlugin}`,
+      // A top-level JSON-RPC error, NOT an {ok:false} payload inside a
+      // successful result: the Lean bridge maps top-level errors to
+      // RpcError, whereas a wrapped result reaches the TUI/CLI as a
+      // "successful" prepare with no txns (misleading empty-legs failure).
+      return jsonrpcError(id, -32001, `plugin not enabled: ${requiredPlugin}`, {
+        plugin: requiredPlugin,
+        hint: `add "${requiredPlugin}" to the daemon's LEANCLI_PRIVACY env (comma list) and restart`,
       });
     }
   }

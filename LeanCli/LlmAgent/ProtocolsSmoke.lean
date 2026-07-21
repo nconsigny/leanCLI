@@ -1,4 +1,5 @@
 import LeanCli.LlmAgent.RuleParser
+import LeanCli.LlmAgent.DirectSynth
 import LeanCli.Registry.KnownProtocols
 import LeanCli.Swap.Tokens
 import LeanCli.Ethereum.TokenRegistry
@@ -69,11 +70,11 @@ example : (parse "shield 0.05 ETH with privacy pool").action = .shieldedDeposit 
 example : (parse "unshield 0.05 ETH with privacy pool to 0x0000000000000000000000000000000000000001").action
         = .shieldedWithdraw := by native_decide
 
--- Tornado Cash chat shortcut (PR 2) — `shield <amount> ETH with
--- tornado [cash]` now routes to .tornadoDeposit; the unshield variant
--- carries the recipient + needs the user's saved deposit note (passed
--- via tool args at the agent layer, not via regex). The bridge sidecar
--- integration is a stub until snarkjs + Baby Jubjub Pedersen lands.
+-- Tornado Cash chat shortcut — `shield <amount> ETH with tornado
+-- [cash]` routes to .tornadoDeposit; the unshield variant carries the
+-- recipient in `to`. No saved note is involved anywhere: the bridge
+-- (live, @kohaku-eth/tornado-cash) derives note secrets from the
+-- wallet seed.
 example : (parse "shield 1 ETH with tornado cash").action = .tornadoDeposit := by native_decide
 example : (parse "shield 1 ETH with tornado").action = .tornadoDeposit := by native_decide
 example :
@@ -85,6 +86,39 @@ example :
       = .tornadoWithdraw ∧
     (parse "unshield 1 ETH with tornado to 0x0000000000000000000000000000000000000001").fields.lookup "to"
       = some "0x0000000000000000000000000000000000000001"
+  := by native_decide
+
+-- Tornado DirectSynth (pure Lean, no LLM). Regression anchor for the
+-- chat path falling through to the LLM — which then answered from
+-- stale knowledge ("SDK not yet shipped / coming soon") — on a prompt
+-- the wallet fully understands. The daemon injects `amountBase`
+-- before calling synth; we simulate that with `setField`. The prompt
+-- is the exact user phrasing that fell through (sender hint + chain
+-- qualifier included).
+example :
+    (match LeanCli.LlmAgent.DirectSynth.synth
+        ((parse "shield 0.1 ETH from mainEOA with tornado cash on sepolia").setField
+          "amountBase" "100000000000000000")
+        11155111 none with
+     | .ok (.tornadoDeposit 11155111 100000000000000000) => true
+     | _ => false) = true
+  := by native_decide
+example :
+    (match LeanCli.LlmAgent.DirectSynth.synth
+        ((parse "unshield 1 ETH with tornado to 0x0000000000000000000000000000000000000001").setField
+          "amountBase" "1000000000000000000")
+        11155111 none with
+     | .ok (.tornadoWithdraw 11155111 1000000000000000000 _ "") => true
+     | _ => false) = true
+  := by native_decide
+-- Non-denomination amounts must NOT synthesize (fixed 0.1/1/10/100 pools).
+example :
+    (match LeanCli.LlmAgent.DirectSynth.synth
+        ((parse "shield 0.2 ETH with tornado cash").setField
+          "amountBase" "200000000000000000")
+        11155111 none with
+     | .error _ => true
+     | .ok _ => false) = true
   := by native_decide
 
 -- Railgun chat shortcut (PR 1) — `shield <amount> ETH with railgun`

@@ -30,9 +30,10 @@ multi-word forms `LlmAgent.RuleParser` now emits (`"aave v3"`,
   `decodeIntent → simulate → ConfirmGate` pipeline, and this registry
   is only used for "does the user-facing protocol exist on this
   chain?" disambiguation.
-* Tornado Cash is listed as "coming soon" in the chat surface (see
-  `feedback_no_ofac_no_refuse`). The address entries are present so
-  decode + display work; the drafting path is intentionally absent.
+* Tornado Cash drafting is live (`@kohaku-eth/tornado-cash`, mainnet +
+  Sepolia). The address entries are present so decode + display work;
+  the chat shortcut resolves in RuleParser.matchShielded and routes to
+  shielded.tornado.prepareDeposit / executeWithdraw.
 * fxUSD currently lists only the wstETH branch — the asset most users
   interact with. Other branches (sfrxETH, weETH, …) will be added
   when the wallet ships drafting for them.

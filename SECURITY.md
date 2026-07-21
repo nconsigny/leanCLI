@@ -47,7 +47,13 @@ is defense-in-depth against a malicious dependency tree:
 - **Dynamic-imported only when flag-enabled.** A plugin's code is
   `import()`-ed only after the `LEANCLI_PRIVACY` allow-list confirms it is
   enabled; a `shielded.*` call for a disabled plugin is refused before its
-  code loads. The default privacy set is empty.
+  code loads. As a privacy-first default the daemon enables all three
+  plugins when `LEANCLI_PRIVACY` is unset, but the lazy-import model is
+  unchanged — no plugin code loads at boot; it loads on first use of a
+  method that plugin serves. Narrow the set by setting `LEANCLI_PRIVACY`
+  explicitly (e.g. `none` to disable all). The sidecar's own default stays
+  empty, so the privacy-first default is a daemon decision, not the
+  untrusted sidecar's.
 - **Treated as malicious regardless.** Even a correctly-pinned, enabled
   plugin is untrusted: its output flows through the standard pre-sign
   pipeline and its network egress is policy-gated (below). "It's shielded"

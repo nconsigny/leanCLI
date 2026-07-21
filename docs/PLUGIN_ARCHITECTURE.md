@@ -56,25 +56,36 @@ Privacy plugins are the shielded flows hosted by `sidecars/kohaku/bridge.mjs`:
 | `privacy-pools` | `@kohaku-eth/privacy-pools` | `shielded.*` (non-railgun, non-tornado) |
 | `tornado` | `@kohaku-eth/tornado-cash` | `shielded.tornado.*` |
 
-Enable plugins at daemon boot with **`LEANCLI_PRIVACY`**, a comma list:
+Select plugins at daemon boot with **`LEANCLI_PRIVACY`**, a comma list:
 
 ```
 LEANCLI_PRIVACY=railgun,privacy-pools
 ```
 
-Default is empty — **no privacy plugin is enabled** unless explicitly
-listed. The wallet daemon (`LeanCli/Privacy/Bridge.lean`) forwards the
-`LEANCLI_PRIVACY` value into the sidecar spawn env.
+leanCLI is privacy-first: when `LEANCLI_PRIVACY` is **unset**, the wallet
+daemon defaults to **all three plugins** (`railgun,privacy-pools,tornado`,
+= `Bridge.defaultEnabledPrivacy`) so a fresh install can shield without
+editing `daemon.env`. Set the variable explicitly to narrow the surface
+(a value matching no known plugin — e.g. `none` — enables nothing). The
+daemon (`LeanCli/Privacy/Bridge.lean`) resolves the effective list once
+and forwards it into the sidecar spawn env. The sidecar's **own** fail-safe
+default remains empty (deny unless told), so a directly-spawned `bridge.mjs`
+with no env still enables nothing — the privacy-first default lives in the
+daemon, not the untrusted sidecar.
 
 When a `shielded.*` method is requested for a plugin that is not in the
-enabled list, the host returns a clean
+enabled list, the host returns a clean top-level JSON-RPC error
 
 ```json
-{ "ok": false, "error": "plugin not enabled: <name>" }
+{ "error": { "code": -32001, "message": "plugin not enabled: <name>",
+             "data": { "plugin": "<name>", "hint": "add \"<name>\" to LEANCLI_PRIVACY and restart" } } }
 ```
 
 **before** lazy-importing that plugin — its code is never loaded into the
-process. Enabled plugins load on first use as today.
+process. Enabled plugins load on first use as today. (This must be a
+top-level error, not an `{ok:false}` payload inside a successful result:
+the Lean bridge maps top-level errors to `RpcError`, whereas a wrapped
+result reaches the TUI as a "successful" prepare with zero legs.)
 
 The host exposes a `listEnabled` method reporting the selected provider
 and the enabled privacy plugins:

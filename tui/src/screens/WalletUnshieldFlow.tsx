@@ -11,8 +11,24 @@ import { Wallet } from "../types.js";
 import { formatEth, hexToBigInt } from "../format.js";
 import UnlockEoaStep from "./UnlockEoaStep.js";
 
-type Protocol = "pp" | "railgun";
+type Protocol = "pp" | "railgun" | "tornado";
 type RecipientSource = "derive" | "book" | "paste";
+
+function protoName(p: Protocol): string {
+  return p === "railgun" ? "Railgun" : p === "tornado" ? "Tornado Cash" : "Privacy Pools";
+}
+
+/** Tornado runs on mainnet too, but this pane pins Sepolia to match the
+ *  rest of the dashboard — mainnet tornado stays on the CLI / chat paths. */
+const TORNADO_CHAIN_ID = 11155111;
+
+/** Tornado withdrawals spend exactly one fixed-denomination note per call
+ *  (multi-note drains are one denomination per call), or "max" = the
+ *  largest spendable note. */
+function isTornadoWithdrawAmount(v: string): boolean {
+  const t = v.trim().toLowerCase();
+  return t === "max" || /^(0\.1|1|10|100)$/.test(t);
+}
 
 /** Privacy Pools v1 immutable 7702 delegate contract (Railgun's paymaster
  *  only sponsors UserOps that delegate to this IMPL). Shown in the Railgun
@@ -36,6 +52,12 @@ export type UnshieldQuote = {
   relayerId?: string | null;
   estimatedGasFeeWei?: string | null;
   unshieldFeeBps?: number | null;
+  /* tornado paymaster quote (shielded.tornado.quoteWithdraw) */
+  paymasterFeeWei?: string | null;
+  netWei?: string | null;
+  denominationWei?: string | null;
+  spendableTotalWei?: string | null;
+  matchingNoteCount?: number | null;
 };
 
 type BookEntry = {
@@ -69,10 +91,11 @@ type Phase =
       recipient: string;
       source: RecipientSource;
     }
-  /* Railgun: EOA unlock between amount and broadcast */
+  /* Railgun/Tornado: EOA unlock between amount and broadcast (both root
+     their note keystores in the wallet seed) */
   | {
       kind: "unlock";
-      protocol: "railgun";
+      protocol: "railgun" | "tornado";
       recipient: string;
       source: RecipientSource;
       amountEth: string;
@@ -81,6 +104,13 @@ type Phase =
       kind: "railgun-max";
       recipient: string;
       source: RecipientSource;
+    }
+  /* Tornado: paymaster fee quote (no proof, no broadcast) before the gate */
+  | {
+      kind: "tornado-quote";
+      recipient: string;
+      source: RecipientSource;
+      amountEth: string;
     }
   /* PP: fetch a relayer fee quote (no broadcast) before the confirm gate */
   | {
@@ -110,6 +140,9 @@ type Phase =
       source: RecipientSource;
       amountEth: string;
       passphrase?: string;
+      /* tornado: the confirmed quote's paymasterFeeWei is forwarded as the
+         maxFeeWei ceiling so the sidecar aborts on an inflated fee */
+      quote?: UnshieldQuote;
     };
 
 type Props = {
@@ -146,16 +179,21 @@ function weiToEthInput(value: string): string {
  *  picker shape but for the reverse direction.
  *
  *  Flow:
- *    1. pick protocol  — Privacy Pools v1  /  Railgun
+ *    1. pick protocol  — Privacy Pools v1  /  Railgun  /  Tornado Cash
  *    2. pick recipient source:
  *       a) derive a fresh sub-account on THIS wallet (no 0-link)
  *       b) pick from address book (book.list)
  *       c) type / paste an address
- *    3. enter amount (and PP passphrase, if protocol=pp)
- *    4. for Railgun: unlock the EOA so the daemon can sign the 4337
- *       UserOp's 7702 authorization + fee note for the delegator;
- *       PP doesn't need the EOA at all (relayer broadcasts).
- *    5. dispatch — shielded.unshieldDrain (PP) or shielded.railgun.unshield. */
+ *       (tornado: the daemon only accepts recipients derived from THIS
+ *        wallet — the 7702 authorization comes from the recipient path)
+ *    3. enter amount (PP passphrase if protocol=pp; tornado is one fixed
+ *       denomination — 0.1/1/10/100 — or "max")
+ *    4. for Railgun/Tornado: unlock the EOA (both keystores are rooted in
+ *       the wallet seed); PP doesn't need the EOA (relayer broadcasts).
+ *       Tornado then quotes the paymaster fee for the gate.
+ *    5. dispatch — shielded.unshieldDrain (PP), shielded.railgun.unshield,
+ *       or shielded.tornado.executeWithdraw (with the confirmed fee as
+ *       the maxFeeWei ceiling). */
 export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
   const [phase, setPhase] = useState<Phase>({ kind: "pickProtocol" });
 
@@ -228,6 +266,7 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
           items={[
             { label: "Privacy Pools v1 — Sepolia · relayer-broadcast", value: "pp" as Protocol },
             { label: "Railgun — Sepolia · 4337 + 7702 broadcast", value: "railgun" as Protocol },
+            { label: "Tornado Cash — Sepolia · 4337 paymaster · one note per call", value: "tornado" as Protocol },
           ]}
           arrowNav
           onBack={() => onDone(false)}
@@ -243,7 +282,7 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
     return (
       <Layout
         title={`Unshield → recipient`}
-        subtitle={`protocol: ${protocol === "pp" ? "Privacy Pools" : "Railgun"}`}
+        subtitle={`protocol: ${protoName(protocol)}`}
         hint="↑/↓ move · enter select · esc back"
       >
         <Select
@@ -273,7 +312,9 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
           <Text color={theme.dim}>
             {protocol === "pp"
               ? "Privacy Pools relayer broadcasts; no EOA unlock needed here."
-              : "Railgun broadcast is signed by this wallet's EOA via EIP-7702 — you'll be asked to unlock it before sending."}
+              : protocol === "tornado"
+                ? "Tornado's 7702 authorization is derived from the recipient's wallet path — the recipient MUST be an address derived from this wallet (the daemon rejects anything else)."
+                : "Railgun broadcast is signed by this wallet's EOA via EIP-7702 — you'll be asked to unlock it before sending."}
           </Text>
         </Box>
       </Layout>
@@ -453,31 +494,36 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
 
   /* ─── amount ─── */
   if (phase.kind === "amount") {
-    const isRailgun = phase.protocol === "railgun";
+    const isPp = phase.protocol === "pp";
+    const isTornado = phase.protocol === "tornado";
     const fields: Field[] = [
       {
         name: "amountEth",
         label: "Amount (ETH)",
-        placeholder: "0.005 or max",
+        placeholder: isTornado ? "0.1 / 1 / 10 / 100 or max" : "0.005 or max",
         validate: (v) =>
-          v.trim().toLowerCase() === "max" || /^[0-9]+(\.[0-9]+)?$/.test(v)
-            ? null
-            : "expected a decimal ETH amount or 'max'",
+          isTornado
+            ? isTornadoWithdrawAmount(v)
+              ? null
+              : "tornado withdraws one note per call — 0.1, 1, 10, 100 or 'max'"
+            : v.trim().toLowerCase() === "max" || /^[0-9]+(\.[0-9]+)?$/.test(v)
+              ? null
+              : "expected a decimal ETH amount or 'max'",
       },
-      ...(isRailgun
-        ? []
-        : [
+      ...(isPp
+        ? [
             {
               name: "passphrase",
               label: "Privacy Pool passphrase",
               secret: true,
               validate: (v: string) => (v.length === 0 ? "required" : null),
             } satisfies Field,
-          ]),
+          ]
+        : []),
     ];
     return (
       <Layout
-        title={`Unshield → ${isRailgun ? "Railgun" : "Privacy Pools"}`}
+        title={`Unshield → ${protoName(phase.protocol)}`}
         subtitle={`recipient: ${phase.recipient}  (source: ${phase.source})`}
       >
         <Form
@@ -485,10 +531,10 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
           onCancel={() => setPhase({ kind: "pickSource", protocol: phase.protocol })}
           onSubmit={(v) => {
             const amountEth = v.amountEth ?? "0";
-            if (isRailgun) {
+            if (phase.protocol === "railgun" || phase.protocol === "tornado") {
               setPhase({
                 kind: "unlock",
-                protocol: "railgun",
+                protocol: phase.protocol,
                 recipient: phase.recipient,
                 source: phase.source,
                 amountEth,
@@ -511,25 +557,58 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
     );
   }
 
-  /* ─── Railgun-only unlock step ─── */
+  /* ─── Railgun/Tornado unlock step ─── */
   if (phase.kind === "unlock") {
     return (
       <UnlockEoaStep
         wallet={wallet}
         onUnlocked={() =>
           setPhase(
-            phase.amountEth.toLowerCase() === "max"
-              ? { kind: "railgun-max", recipient: phase.recipient, source: phase.source }
-              : {
-                  kind: "confirm",
-                  protocol: "railgun",
+            phase.protocol === "tornado"
+              ? // Tornado always quotes first (paymaster fee + net for the
+                // gate); "max" resolves to the largest spendable note there.
+                {
+                  kind: "tornado-quote",
                   recipient: phase.recipient,
                   source: phase.source,
                   amountEth: phase.amountEth,
-                },
+                }
+              : phase.amountEth.toLowerCase() === "max"
+                ? { kind: "railgun-max", recipient: phase.recipient, source: phase.source }
+                : {
+                    kind: "confirm",
+                    protocol: "railgun",
+                    recipient: phase.recipient,
+                    source: phase.source,
+                    amountEth: phase.amountEth,
+                  },
           )
         }
         onCancel={() => onDone(false)}
+      />
+    );
+  }
+
+  /* ─── Tornado quote (paymaster fee terms; no proof, no broadcast) ─── */
+  if (phase.kind === "tornado-quote") {
+    return (
+      <TornadoQuoteStep
+        walletName={wallet.name}
+        recipient={phase.recipient}
+        amountEth={phase.amountEth}
+        onReady={(quote, resolvedAmountEth) =>
+          setPhase({
+            kind: "confirm",
+            protocol: "tornado",
+            recipient: phase.recipient,
+            source: phase.source,
+            amountEth: resolvedAmountEth,
+            quote,
+          })
+        }
+        onError={(message) =>
+          setPhase({ kind: "quote-error", protocol: "tornado", message })
+        }
       />
     );
   }
@@ -605,6 +684,7 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
             source: phase.source,
             amountEth: phase.amountEth,
             passphrase: phase.passphrase,
+            quote: phase.quote,
           })
         }
         onCancel={() => onDone(false)}
@@ -614,23 +694,37 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
 
   /* ─── running ─── */
   if (phase.kind === "running") {
-    const isRailgun = phase.protocol === "railgun";
-    const method = isRailgun ? "shielded.railgun.unshield" : "shielded.unshieldDrain";
-    const params: Record<string, string> = {
+    const method =
+      phase.protocol === "railgun"
+        ? "shielded.railgun.unshield"
+        : phase.protocol === "tornado"
+          ? "shielded.tornado.executeWithdraw"
+          : "shielded.unshieldDrain";
+    const params: Record<string, unknown> = {
       recipient: phase.recipient,
       amountEth: phase.amountEth,
     };
-    if (isRailgun) {
+    if (phase.protocol === "railgun") {
       // Railgun's daemon-side handler reads the named wallet's slot
       // for the delegating EOA + the BIP-39 seed (Railgun keystore is
       // rooted at the EOA's seed since the seed-keystore change).
       params.name = wallet.name;
+    } else if (phase.protocol === "tornado") {
+      params.name = wallet.name;
+      params.chainId = TORNADO_CHAIN_ID;
+      params.mode = "paymaster";
+      // Fee ceiling: the user confirmed the quoted paymasterFeeWei — the
+      // sidecar must abort rather than pay more out of the payout.
+      if (phase.quote?.paymasterFeeWei) params.maxFeeWei = phase.quote.paymasterFeeWei;
     } else if (phase.passphrase) {
       params.passphrase = phase.passphrase;
     }
-    const subtitle = isRailgun
-      ? "Railgun · Sepolia · 4337+7702"
-      : "Privacy Pools v1 · Sepolia · relayer-broadcast";
+    const subtitle =
+      phase.protocol === "railgun"
+        ? "Railgun · Sepolia · 4337+7702"
+        : phase.protocol === "tornado"
+          ? "Tornado Cash · Sepolia · 4337 paymaster"
+          : "Privacy Pools v1 · Sepolia · relayer-broadcast";
     return (
       <RpcRunner
         title={`Unshielding ${phase.amountEth} ETH → ${phase.recipient}`}
@@ -754,6 +848,71 @@ export function QuoteUnshieldStep({
   );
 }
 
+/** Quote a tornado withdrawal WITHOUT broadcasting: the daemon returns the
+ *  paymaster fee + net payout for the confirm gate. No proof is built — the
+ *  fee is a deterministic function of the bundler gas price, so the quote is
+ *  cheap (first run still syncs pool state). "max" resolves to the largest
+ *  spendable note here. */
+function TornadoQuoteStep({
+  walletName,
+  recipient,
+  amountEth,
+  onReady,
+  onError,
+}: {
+  walletName: string;
+  recipient: string;
+  amountEth: string;
+  onReady: (quote: UnshieldQuote, resolvedAmountEth: string) => void;
+  onError: (message: string) => void;
+}) {
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const resp = await call<UnshieldQuote>(
+        "shielded.tornado.quoteWithdraw",
+        {
+          name: walletName,
+          chainId: TORNADO_CHAIN_ID,
+          recipient,
+          amountEth,
+          mode: "paymaster",
+        },
+        { timeoutMs: 20 * 60 * 1000 },
+      );
+      if (cancelled) return;
+      if (!resp.ok) {
+        onError(`quote failed: ${resp.error.message}`);
+        return;
+      }
+      const q = resp.result;
+      // Pin the exact note denomination the quote priced (also resolves
+      // "max") so execute withdraws precisely what the user confirmed.
+      const resolvedAmountEth = q?.denominationWei
+        ? weiToEthInput(q.denominationWei)
+        : amountEth;
+      onReady(q, resolvedAmountEth);
+    })().catch((error) => {
+      if (!cancelled) onError(error instanceof Error ? error.message : String(error));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return (
+    <Layout title="Unshield — quoting paymaster fee" subtitle="Tornado Cash · Sepolia">
+      <Text>
+        <Text color={theme.primary}>
+          <Spinner type="dots" />
+        </Text>{" "}
+        <Text color={theme.dim}>
+          syncing notes + pricing the 4337 paymaster fee (no broadcast yet)…
+        </Text>
+      </Text>
+    </Layout>
+  );
+}
+
 function RailgunMaxStep({
   walletName,
   onReady,
@@ -834,13 +993,14 @@ export function UnshieldConfirmGate({
     if (key.escape) onCancel();
   });
   const isRailgun = protocol === "railgun";
+  const isTornado = protocol === "tornado";
   const feePct =
     quote?.feeBPS != null && quote.feeBPS !== ""
       ? `${(Number(quote.feeBPS) / 100).toFixed(2)}%`
       : "—";
   return (
     <Layout
-      title={`Confirm unshield — ${isRailgun ? "Railgun" : "Privacy Pools v1"} · Sepolia`}
+      title={`Confirm unshield — ${protocol === "pp" ? "Privacy Pools v1" : protoName(protocol)} · Sepolia`}
       subtitle={`recipient ${recipient}`}
       hint="enter — broadcast · esc — cancel"
     >
@@ -853,7 +1013,31 @@ export function UnshieldConfirmGate({
         </Text>
       </Box>
 
-      {!isRailgun && quote && (
+      {isTornado && quote && (
+        <Box flexDirection="column" marginBottom={1}>
+          <Text>
+            <Text color={theme.dim}>{"note denomination".padEnd(18)}</Text>{" "}
+            {ethStr(quote.denominationWei)}
+          </Text>
+          <Text>
+            <Text color={theme.dim}>{"paymaster fee".padEnd(18)}</Text>{" "}
+            {ethStr(quote.paymasterFeeWei)}  (confirmed as the fee ceiling)
+          </Text>
+          <Text>
+            <Text color={theme.dim}>{"net to recipient".padEnd(18)}</Text>{" "}
+            {ethStr(quote.netWei)}
+          </Text>
+          {quote.spendableTotalWei && (
+            <Text>
+              <Text color={theme.dim}>{"spendable total".padEnd(18)}</Text>{" "}
+              {ethStr(quote.spendableTotalWei)}
+              {quote.matchingNoteCount != null ? `  (${quote.matchingNoteCount} matching note${quote.matchingNoteCount === 1 ? "" : "s"})` : ""}
+            </Text>
+          )}
+        </Box>
+      )}
+
+      {protocol === "pp" && quote && (
         <Box flexDirection="column" marginBottom={1}>
           <Text>
             <Text color={theme.dim}>{"relayer fee".padEnd(18)}</Text> {feePct}
@@ -904,6 +1088,19 @@ export function UnshieldConfirmGate({
             to sign the UserOp — the WASM signer cannot expose an unsigned
             UserOp for daemon-local signing (upstream SDK limitation). This
             confirm is the strongest in-repo gate before that signature.
+          </Text>
+        </Box>
+      ) : isTornado ? (
+        <Box flexDirection="column">
+          <Text color={theme.dim}>
+            Tornado broadcasts a 4337 UserOp; the paymaster fee above is
+            deducted from the note and forwarded as a hard ceiling — the
+            sidecar aborts rather than pay more. A groth16 proof authorizes
+            the note spend; the 7702 authorization is derived from the
+            recipient's wallet path at execute time.
+          </Text>
+          <Text color={theme.dim}>
+            Confirming these terms is what authorises the withdrawal.
           </Text>
         </Box>
       ) : (

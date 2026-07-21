@@ -15,12 +15,30 @@ type Props = {
   onDone: (success: boolean) => void;
 };
 
-type Protocol = "pp" | "railgun";
+type Protocol = "pp" | "railgun" | "tornado";
 
-/** Privacy Pools v1 and Railgun are both Sepolia-only at the contract
- *  layer (see ShieldedRpc.lean's Sepolia pinning). The gated legs are
- *  decoded/simulated/signed against this chain. */
+/** Privacy Pools v1 and Railgun are Sepolia-only at the contract layer
+ *  (see ShieldedRpc.lean's Sepolia pinning). Tornado Cash also runs on
+ *  mainnet, but this wallet-pane flow pins it to Sepolia to match the
+ *  rest of the pane — mainnet tornado stays on the CLI / chat paths.
+ *  The gated legs are decoded/simulated/signed against this chain. */
 const SHIELD_CHAIN_ID = 11155111;
+
+function protoName(p: Protocol): string {
+  return p === "railgun" ? "Railgun" : p === "tornado" ? "Tornado Cash" : "Privacy Pools";
+}
+
+/** Tornado pools are fixed-denomination (0.1 / 1 / 10 / 100 ETH); the
+ *  bridge decomposes any positive multiple of 0.1 ETH into N deposit
+ *  legs. Validate that shape client-side so the user gets an inline
+ *  error instead of a daemon round-trip. */
+function isTornadoDepositAmount(v: string): boolean {
+  if (!/^[0-9]+(\.[0-9]+)?$/.test(v)) return false;
+  const [whole = "0", frac = ""] = v.split(".");
+  const trimmedFrac = frac.replace(/0+$/, "");
+  if (trimmedFrac.length > 1) return false; // finer than 0.1 ETH
+  return !(whole.replace(/0+/, "") === "" && trimmedFrac === ""); // > 0
+}
 
 /** One unsigned shield leg returned by `shielded.prepareDeposit` /
  *  `shielded.railgun.prepareShield`. The bridge emits every numeric field
@@ -61,17 +79,18 @@ type Phase =
   | { kind: "done"; protocol: Protocol; count: number }
   | { kind: "error"; message: string };
 
-/** Shield deposit. User picks the privacy protocol (Privacy Pools v1 or
- *  Railgun), unlocks the EOA, then the daemon PREPARES the unsigned deposit
- *  legs which are routed through the canonical pre-sign gate before any
- *  signature.
+/** Shield deposit. User picks the privacy protocol (Privacy Pools v1,
+ *  Railgun, or Tornado Cash), unlocks the EOA, then the daemon PREPARES the
+ *  unsigned deposit legs which are routed through the canonical pre-sign
+ *  gate before any signature.
  *
  *  Trust model: a shield is the user's own EOA approving + depositing into a
  *  pool contract — ordinary calldata produced by an untrusted sidecar. So
  *  it MUST flow through the same gate as every other send:
  *
  *    pick → form → unlock EOA
- *      → shielded.prepareDeposit / shielded.railgun.prepareShield  (unsigned legs)
+ *      → shielded.prepareDeposit / shielded.railgun.prepareShield
+ *        / shielded.tornado.prepareDeposit  (unsigned legs)
  *      → for each leg: SendRawFlow  (decode → simulate → ConfirmGate → eoa.send)
  *
  *  The one-shot `shielded.deposit` / `shielded.railgun.shield` daemon RPCs
@@ -122,6 +141,10 @@ export default function ShieldFlow({ wallet, onDone }: Props) {
               label: "Railgun — Sepolia · POI-gated · 4337 + 7702 unshield",
               value: "railgun" as Protocol,
             },
+            {
+              label: "Tornado Cash — Sepolia · fixed 0.1×N ETH notes · seed-derived",
+              value: "tornado" as Protocol,
+            },
           ]}
           arrowNav
           onBack={() => onDone(false)}
@@ -134,34 +157,42 @@ export default function ShieldFlow({ wallet, onDone }: Props) {
   if (phase.kind === "form") {
     // EOA unlock has been factored out into UnlockEoaStep. Privacy Pools
     // still needs a *second* passphrase (PpSecretStore — kept as a
-    // separate encrypted store), but Railgun shares the EOA's BIP-39
-    // seed (derives at its own BIP-32 paths) and so doesn't ask for a
-    // distinct passphrase: the EOA unlock alone is enough.
-    const isRailgun = phase.protocol === "railgun";
+    // separate encrypted store), but Railgun and Tornado share the EOA's
+    // BIP-39 seed (each derives at its own disjoint BIP-32 root) and so
+    // don't ask for a distinct passphrase: the EOA unlock alone is enough.
+    const isPp = phase.protocol === "pp";
+    const isTornado = phase.protocol === "tornado";
     const fields: Field[] = [
       {
         name: "amountEth",
         label: "Amount (ETH)",
-        placeholder: "0.01",
+        placeholder: isTornado ? "0.1 (multiple of 0.1)" : "0.01",
         validate: (v) =>
-          /^[0-9]+(\.[0-9]+)?$/.test(v) ? null : "expected a decimal ETH amount",
+          isTornado
+            ? isTornadoDepositAmount(v)
+              ? null
+              : "tornado deposits are fixed-denomination — a positive multiple of 0.1 ETH"
+            : /^[0-9]+(\.[0-9]+)?$/.test(v)
+              ? null
+              : "expected a decimal ETH amount",
       },
-      ...(isRailgun
-        ? []
-        : [
+      ...(isPp
+        ? [
             {
               name: "protocolPass",
               label: "Privacy Pool passphrase",
               secret: true,
               validate: (v: string) => (v.length === 0 ? "required" : null),
             } satisfies Field,
-          ]),
+          ]
+        : []),
     ];
-    const title = isRailgun
-      ? `Shield from ${wallet.name} → Railgun`
-      : `Shield from ${wallet.name} → Privacy Pools`;
+    const title = `Shield from ${wallet.name} → ${protoName(phase.protocol)}`;
     return (
-      <Layout title={title}>
+      <Layout
+        title={title}
+        subtitle={isTornado ? "fixed 0.1 / 1 / 10 / 100 ETH pools — N×0.1 becomes N deposit legs" : undefined}
+      >
         <Form
           fields={fields}
           onSubmit={(v) => setPhase({ kind: "unlock", protocol: phase.protocol, v })}
@@ -207,7 +238,7 @@ export default function ShieldFlow({ wallet, onDone }: Props) {
   if (phase.kind === "gate") {
     const { legs, idx } = phase;
     const leg = legs[idx]!;
-    const protoLabel = phase.protocol === "railgun" ? "Railgun" : "Privacy Pools";
+    const protoLabel = protoName(phase.protocol);
     const signer: SendRawWallet = {
       kind: "eoa",
       name: wallet.name,
@@ -249,7 +280,7 @@ export default function ShieldFlow({ wallet, onDone }: Props) {
   }
 
   if (phase.kind === "done") {
-    const protoLabel = phase.protocol === "railgun" ? "Railgun" : "Privacy Pools";
+    const protoLabel = protoName(phase.protocol);
     return (
       <Layout
         title="Shield complete"
@@ -261,8 +292,9 @@ export default function ShieldFlow({ wallet, onDone }: Props) {
           text={`${phase.count} transaction${phase.count === 1 ? "" : "s"} confirmed and broadcast.`}
         />
         <Text color={theme.dim}>
-          Shielded balance becomes spendable once the pool indexes your
-          deposit (Railgun POI can take minutes to hours).
+          {phase.protocol === "tornado"
+            ? "Notes are derived from this wallet's seed — nothing to save. The deposit is spendable once the pool indexes it."
+            : "Shielded balance becomes spendable once the pool indexes your deposit (Railgun POI can take minutes to hours)."}
         </Text>
         <BackOnInput onDone={() => onDone(true)} />
       </Layout>
@@ -296,17 +328,23 @@ function PrepareShieldStep({
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      const isRailgun = protocol === "railgun";
-      const method = isRailgun
-        ? "shielded.railgun.prepareShield"
-        : "shielded.prepareDeposit";
-      const params: Record<string, string> = {
+      const method =
+        protocol === "railgun"
+          ? "shielded.railgun.prepareShield"
+          : protocol === "tornado"
+            ? "shielded.tornado.prepareDeposit"
+            : "shielded.prepareDeposit";
+      const params: Record<string, unknown> = {
         name: wallet.name,
         amountEth: v.amountEth ?? "0",
       };
-      // PP keeps its second secret in PpSecretStore; Railgun shares the EOA
-      // seed (no second passphrase to plumb).
-      if (!isRailgun && v.protocolPass) params.passphrase = v.protocolPass;
+      // PP keeps its second secret in PpSecretStore; Railgun and Tornado
+      // share the EOA seed (no second passphrase to plumb).
+      if (protocol === "pp" && v.protocolPass) params.passphrase = v.protocolPass;
+      // Tornado is not Sepolia-pinned daemon-side (mainnet is also live);
+      // pin this pane's flow explicitly so the prepared legs match the
+      // chainId SendRawFlow decodes/simulates against.
+      if (protocol === "tornado") params.chainId = SHIELD_CHAIN_ID;
 
       // First-run state sync can take 10+ minutes (PP walks from the 0xBow
       // entrypoint deployment; Railgun from its smart-wallet + POI start
@@ -318,6 +356,14 @@ function PrepareShieldStep({
         return;
       }
       const r = resp.result ?? {};
+      // Older bridge builds wrapped failures as a *successful* result
+      // carrying {ok:false, error} (e.g. "plugin not enabled: tornado").
+      // Surface the real error instead of a bogus "no transactions".
+      if (r.ok === false) {
+        const e = r.error;
+        onError(`prepare failed: ${typeof e === "string" ? e : (e?.message ?? "bridge reported failure")}`);
+        return;
+      }
       const raw = r.txns ?? r.txs ?? r.transactions ?? r.result?.txns ?? [];
       const legs: PreparedTx[] = (Array.isArray(raw) ? raw : [])
         .map((t: any) => ({
@@ -333,7 +379,7 @@ function PrepareShieldStep({
     };
   }, []);
 
-  const protoLabel = protocol === "railgun" ? "Railgun" : "Privacy Pools";
+  const protoLabel = protoName(protocol);
   return (
     <Layout title={`Preparing shield → ${protoLabel}`} subtitle="Sepolia">
       <Text>

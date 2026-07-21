@@ -64,7 +64,7 @@ Untrusted sidecars hosted under the Kohaku plugin model. Each Lean wrapper is th
 
 `LEANCLI_PROVIDER` is single-select (helios/colibri are mutually exclusive — "one or the other"). `LEANCLI_READ_BACKEND` is a back-compat alias; `LEANCLI_PROVIDER` wins. Unrecognized values fall back to `helios`.
 
-**Privacy plugins (shielded flows) — multi-select via `LEANCLI_PRIVACY`** (comma list, default empty = none enabled). Hosted by `sidecars/kohaku/bridge.mjs`; the Lean wrapper is `LeanCli/Privacy/Bridge.lean`, which forwards the allow-list into the sidecar env.
+**Privacy plugins (shielded flows) — multi-select via `LEANCLI_PRIVACY`** (comma list). leanCLI is privacy-first: when `LEANCLI_PRIVACY` is **unset**, the daemon defaults to all three (`railgun,privacy-pools,tornado`) so a fresh install can shield without editing `daemon.env` (`Bridge.defaultEnabledPrivacy`). Set it explicitly to narrow the surface (a value matching no known plugin — e.g. `none` — enables nothing). The Lean daemon (`LeanCli/Privacy/Bridge.lean`) resolves this once and forwards it into the sidecar env; the sidecar's own fail-safe default stays empty (deny unless told), so a standalone-spawned `bridge.mjs` still enables nothing.
 
 | `LEANCLI_PRIVACY` entry | npm package | Trusted for? |
 |---|---|---|
@@ -72,7 +72,7 @@ Untrusted sidecars hosted under the Kohaku plugin model. Each Lean wrapper is th
 | `privacy-pools` | `@kohaku-eth/privacy-pools` | Witness generation; **not** tx structure |
 | `tornado` | `@kohaku-eth/tornado-cash` | Witness/proof generation; **not** tx structure |
 
-A `shielded.*` method for a plugin not in the enabled list returns `{ok:false,error:"plugin not enabled: <name>"}` **before** lazy-importing it — disabled plugin code is never loaded.
+A `shielded.*` method for a plugin not in the enabled list returns a top-level JSON-RPC error `plugin not enabled: <name>` (code -32001) **before** lazy-importing it — disabled plugin code is never loaded.
 
 **Other sidecars:**
 

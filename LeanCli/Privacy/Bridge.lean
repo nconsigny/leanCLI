@@ -36,6 +36,30 @@ open LeanCli.Network.Policy
     PATH-resolved fallback when nothing more specific is configured. -/
 def defaultExecutable : String := "leancli-bridge"
 
+/-- The privacy plugins enabled by default when `LEANCLI_PRIVACY` is unset.
+
+    leanCLI is a privacy-first wallet, so a fresh install ships with all three
+    shielded backends available rather than requiring the user to hand-edit
+    `daemon.env` before their first shield. This is a deliberate divergence
+    from a strict "opt-in, empty by default" posture: the npm packages are all
+    installed, and the pinned-and-lazy load model means a plugin's code is
+    still only `import()`-ed on first use, so the boot-time attack surface is
+    unchanged — this only flips which methods are *permitted* to load.
+
+    Operators who want a narrower surface set `LEANCLI_PRIVACY` explicitly
+    (including to a single plugin, or to a sentinel like `none` which matches
+    no known plugin and therefore enables nothing). -/
+def defaultEnabledPrivacy : String := "railgun,privacy-pools,tornado"
+
+/-- Resolve the effective `LEANCLI_PRIVACY` allow-list: the env value if set
+    (even to empty/`none`, which the caller respects), else the privacy-first
+    default. Single source of truth for the sidecar forwarder and the
+    `daemon.privacy.status` display so they never disagree. -/
+def resolveEnabledPrivacy : IO String := do
+  match ← IO.getEnv "LEANCLI_PRIVACY" with
+  | some p => pure p
+  | none   => pure defaultEnabledPrivacy
+
 /-- Resolve via the shared `BridgeResolve` chain
     (env → cwd-walk → recorded-checkout → PATH fallback).
     See `LeanCli/Util/BridgeResolve.lean` for the resolution order.
@@ -122,6 +146,31 @@ def policyAllows
     (chainId : Option Nat := none) : Bool :=
   policy { peer := peer, purpose := methodPurpose req.method, transport := transport, chainId := chainId }
 
+/-- Sidecar failures must arrive as top-level JSON-RPC errors, but some host
+    paths historically wrapped them as a *successful* result carrying
+    `{ok:false, error:…}` (e.g. the disabled-plugin gate). Forwarding that
+    wrap as `Response.ok` makes every consumer render a bogus success — the
+    TUI's "prepare returned no transactions" with zero legs. Unwrap it here
+    so an `ok` Response never carries `ok:false`. Results without an `ok`
+    field, or with `ok:true` (ping), pass through untouched. -/
+private def resultToResponse (j : Json) : Response :=
+  match j with
+  | Json.obj fields =>
+      let lookup (k : String) : Option Json :=
+        (fields.find? (fun (key, _) => key == k)).map Prod.snd
+      match lookup "ok" with
+      | some (Json.bool false) =>
+          let msg := match lookup "error" with
+            | some (Json.str s) => s
+            | some (Json.obj ef) =>
+                match (ef.find? (fun (k, _) => k == "message")).map Prod.snd with
+                | some (Json.str s) => s
+                | _ => "bridge reported failure"
+            | _ => "bridge reported failure"
+          Response.err (-32001) msg (lookup "error")
+      | _ => Response.ok j
+  | _ => Response.ok j
+
 private def parseResponse (raw : String) : Response :=
   match parse raw.trimAscii.toString with
   | .error e => Response.crash s!"bridge returned non-JSON ({e}): {raw}" 0
@@ -140,7 +189,7 @@ private def parseResponse (raw : String) : Response :=
           Response.err code msg data
       | _ =>
           match lookup "result" with
-          | some j => Response.ok j
+          | some j => resultToResponse j
           | none => Response.crash s!"bridge response missing result: {raw}" 0
   | .ok _ => Response.crash s!"bridge response not a JSON object: {raw}" 0
 
@@ -164,17 +213,17 @@ def callWithEnv (req : Request) (env : Array (String × Option String)) : IO Res
   let t0 ← IO.monoMsNow
   -- Forward the daemon's `LEANCLI_PRIVACY` allow-list explicitly into the
   -- sidecar env (TASK 3). The host (`bridge.mjs`) reads it to gate
-  -- `shielded.*` per plugin: a disabled plugin's method returns
-  -- `{ ok:false, error:"plugin not enabled: <name>" }` without lazy-loading
+  -- `shielded.*` per plugin: a disabled plugin's method returns a top-level
+  -- JSON-RPC error `plugin not enabled: <name>` without lazy-loading
   -- its code. Passing it through the explicit env array (rather than relying
   -- on inheritance) keeps the value present across the sandbox wrap. Caller-
   -- supplied entries win, so a test can still override.
   let env ←
     if env.any (fun (k, _) => k == "LEANCLI_PRIVACY") then pure env
     else
-      match ← IO.getEnv "LEANCLI_PRIVACY" with
-      | some p => pure (env.push ("LEANCLI_PRIVACY", some p))
-      | none   => pure env
+      -- Unset ⇒ the privacy-first default (all three plugins). Caller-
+      -- supplied entries above still win, so a test can pin its own list.
+      pure (env.push ("LEANCLI_PRIVACY", some (← resolveEnabledPrivacy)))
   if v ≥ 1 then IO.eprintln s!"[bridge→] {req.method} exe={exe}"
   try
     -- Sandbox the privacy sidecar. Conservatively keep host network
