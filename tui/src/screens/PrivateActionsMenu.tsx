@@ -4,7 +4,7 @@ import { Layout } from "../widgets/Layout.js";
 import Select from "../widgets/Select.js";
 import { theme } from "../theme.js";
 
-export type PrivateActionPick = "privacy-pools" | "railgun" | "back";
+export type PrivateActionPick = "privacy-pools" | "railgun" | "tornado-vault" | "back";
 
 type Props = {
   onPick: (a: PrivateActionPick) => void;
@@ -27,6 +27,10 @@ export default function PrivateActionsMenu({ onPick }: Props) {
     {
       label: "Railgun — balance",
       value: "railgun" as PrivateActionPick,
+    },
+    {
+      label: "Tornado Cash — notes vault (backup · import)",
+      value: "tornado-vault" as PrivateActionPick,
     },
     { label: "← Back", value: "back" as PrivateActionPick },
   ];

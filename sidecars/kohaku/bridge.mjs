@@ -35,6 +35,19 @@ console.info = (...args) => console.error(...args);
 console.warn = (...args) => console.error(...args);
 console.debug = (...args) => console.error(...args);
 
+// The console redirect above does not reach worker threads: a worker gets its
+// own `console`, and Node pipes the worker's stdout into the parent's
+// `process.stdout` stream by default (`new Worker(..., { stdout: false })`).
+// @kohaku-eth/tornado-cash's state-manager worker logs progress lines
+// ("Merkle tree for N leaves took Xms", "totalGasUnits …") that way, which
+// landed ahead of the JSON-RPC response line and broke the Lean daemon's
+// parse. Capture the real writer for `main()`'s single response line, then
+// divert every other stdout write — including worker pipe-through — to
+// stderr.
+const rpcWrite = process.stdout.write.bind(process.stdout);
+process.stdout.write = (chunk, encoding, callback) =>
+  process.stderr.write(chunk, encoding, callback);
+
 import { createPublicClient, http, parseEther } from "viem";
 import { sepolia, mainnet } from "viem/chains";
 import { HDKey } from "@scure/bip32";
@@ -1090,7 +1103,9 @@ async function dispatch(req) {
     case "shielded.tornado.maxUnshield":
     case "shielded.tornado.prepareDeposit":
     case "shielded.tornado.quoteWithdraw":
-    case "shielded.tornado.executeWithdraw": {
+    case "shielded.tornado.executeWithdraw":
+    case "shielded.tornado.exportNotes":
+    case "shielded.tornado.verifyNotes": {
       const { dispatchTornado } = await import("./tornado.mjs");
       return jsonifyResult(id, await dispatchTornado(method, env, params));
     }
@@ -1113,29 +1128,29 @@ async function main() {
   const argv = process.argv.slice(2);
   const req = parseArgvRpc(argv);
   if (req === null) {
-    process.stdout.write(
+    rpcWrite(
       jsonrpcError(null, -32700, "expected --rpc <json-rpc-request>") + "\n"
     );
     process.exit(2);
   }
   if (req.__parseError) {
-    process.stdout.write(
+    rpcWrite(
       jsonrpcError(null, -32700, `parse error: ${req.__parseError}`) + "\n"
     );
     process.exit(2);
   }
   if (!req || typeof req.method !== "string") {
-    process.stdout.write(
+    rpcWrite(
       jsonrpcError(req?.id ?? null, -32600, "invalid request") + "\n"
     );
     process.exit(2);
   }
   try {
     const out = await dispatch(req);
-    process.stdout.write(out + "\n");
+    rpcWrite(out + "\n");
     process.exit(0);
   } catch (e) {
-    process.stdout.write(
+    rpcWrite(
       jsonrpcError(req.id ?? null, -32000, `bridge error: ${e?.message ?? e}`,
         e?.stack ? { stack: String(e.stack).slice(0, 4000) } : undefined) + "\n",
     );

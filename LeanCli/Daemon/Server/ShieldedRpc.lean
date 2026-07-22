@@ -12,6 +12,7 @@ import LeanCli.Ethereum.Address
 import LeanCli.Ethereum.Tx
 import LeanCli.Keystore.Tpm2Runtime
 import LeanCli.Privacy.Bridge
+import LeanCli.Privacy.NoteVault
 import LeanCli.Ethereum.TornadoTailCalls
 import LeanCli.RPC.Outbound
 import LeanCli.RPC.Server
@@ -1234,6 +1235,76 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                           ++ (if tailCalls.isEmpty then #[]
                               else #[("tailCalls", .arr tailCalls)])))
                         cid (rgSeedHexFromSlot slot) req
+      | _, _, _ => pure (.error invalidParams)
+  | "shielded.tornado.vault.export" =>
+      -- Password-gated note backup. Asks the sidecar to derive every note's
+      -- secrets from the wallet seed (`shielded.tornado.exportNotes`), then
+      -- seals the blob under a USER-chosen password (independent of the wallet
+      -- master passphrase) via `NoteVault` before it touches disk. The plaintext
+      -- secrets are never returned to the caller — only the file path + count.
+      match resolveTornadoChain cfg req.params,
+            paramString req.params "password",
+            paramString req.params "path" with
+      | .ok cid, .ok password, .ok path =>
+          let includeSpent := ((getField "includeSpent" req.params) >>= asBool).getD true
+          match ← tornadoSeedHex state req.params with
+          | .error err => pure (.error err)
+          | .ok seedHex =>
+              match ← tornadoBridgeCall cfg "shielded.tornado.exportNotes"
+                (.obj #[
+                  ("chainId", .num (Int.ofNat cid)),
+                  ("includeSpent", .bool includeSpent)
+                ]) cid seedHex req with
+              | .error err => pure (.error err)
+              | .ok payload =>
+                  match ← LeanCli.Privacy.NoteVault.sealVault password "tornado-notes" cid payload with
+                  | .error err =>
+                      pure (.error { code := -32603, message := s!"failed to seal note vault: {err}", data := none })
+                  | .ok manifest =>
+                      let count := ((getField "count" payload) >>= asNat).getD 0
+                      try
+                        IO.FS.writeFile path (compact manifest ++ "\n")
+                        pure (.ok (.obj #[
+                          ("ok", .bool true),
+                          ("path", .str path),
+                          ("chainId", .num (Int.ofNat cid)),
+                          ("count", .num (Int.ofNat count))
+                        ]))
+                      catch e =>
+                        pure (.error { code := -32603, message := s!"failed to write vault file: {e}", data := some (.str path) })
+      | _, _, _ => pure (.error invalidParams)
+  | "shielded.tornado.vault.import" =>
+      -- Import a note-vault file: decrypt with the user password, then hand the
+      -- note descriptors to the sidecar to re-derive each commitment from THIS
+      -- wallet's seed and confirm ownership + current spent status
+      -- (`shielded.tornado.verifyNotes`). Display-only: an imported note is
+      -- never a signing input, so the daemon proves ownership before showing it
+      -- as yours. Raw note secrets are never returned to the caller.
+      match resolveTornadoChain cfg req.params,
+            paramString req.params "password",
+            paramString req.params "path" with
+      | .ok cid, .ok password, .ok path =>
+          match ← (do try pure (Except.ok (← IO.FS.readFile path))
+                      catch e => pure (Except.error (toString e))) with
+          | .error e =>
+              pure (.error { code := -32602, message := s!"cannot read vault file: {e}", data := some (.str path) })
+          | .ok text =>
+              match parse text with
+              | .error e => pure (.error { code := -32602, message := s!"vault file is not valid JSON: {e}", data := none })
+              | .ok manifest =>
+                  match ← LeanCli.Privacy.NoteVault.openVault password manifest with
+                  | .error err =>
+                      pure (.error { code := -32602, message := err, data := none })
+                  | .ok payload =>
+                      let notesArr := (getField "notes" payload).getD (.arr #[])
+                      match ← tornadoSeedHex state req.params with
+                      | .error err => pure (.error err)
+                      | .ok seedHex =>
+                          tornadoBridgeCall cfg "shielded.tornado.verifyNotes"
+                            (.obj #[
+                              ("chainId", .num (Int.ofNat cid)),
+                              ("notes", notesArr)
+                            ]) cid seedHex req
       | _, _, _ => pure (.error invalidParams)
   | "shielded.tornado.deposit" => do
       unless (← ungatedShieldAllowed) do return .error ungatedShieldDenied

@@ -122,6 +122,14 @@ function keystoreFromMnemonic(mnemonic) {
   return keystoreFromSeedBytes(mnemonicToSeedSync(mnemonic));
 }
 
+// Keystore source priority mirrors railgun: EOA seed (default, one phrase
+// backs everything) → dedicated mnemonic (compromise isolation).
+function keystoreFromEnv(env) {
+  if (env.LEANCLI_TC_SEED_HEX) return keystoreFromSeedHex(env.LEANCLI_TC_SEED_HEX);
+  if (env.LEANCLI_TC_MNEMONIC) return keystoreFromMnemonic(env.LEANCLI_TC_MNEMONIC);
+  throw new Error("LEANCLI_TC_SEED_HEX or LEANCLI_TC_MNEMONIC is required (tornado keystore source)");
+}
+
 function bundlerUrlFor(chainId, override) {
   return override && override.trim() !== ""
     ? override.trim()
@@ -167,12 +175,7 @@ async function buildTornadoPlugin(env) {
     console.error(`[bridge] tornado worker gas patch skipped: ${e?.message ?? e}`);
   }
 
-  // Keystore source priority mirrors railgun: EOA seed (default, one phrase
-  // backs everything) → dedicated mnemonic (compromise isolation).
-  let keystore;
-  if (env.LEANCLI_TC_SEED_HEX) keystore = keystoreFromSeedHex(env.LEANCLI_TC_SEED_HEX);
-  else if (env.LEANCLI_TC_MNEMONIC) keystore = keystoreFromMnemonic(env.LEANCLI_TC_MNEMONIC);
-  else throw new Error("LEANCLI_TC_SEED_HEX or LEANCLI_TC_MNEMONIC is required (tornado keystore source)");
+  const keystore = keystoreFromEnv(env);
 
   const chain = chainFromId(chainId);
   const client = createPublicClient({ chain, transport: http(env.LEANCLI_RPC_URL) });
@@ -549,6 +552,120 @@ async function tornadoExecuteWithdraw(env, params) {
   return { chainId: env.LEANCLI_CHAIN_ID, recipient, denominationWei: amountWei, mode, relay: relay ?? { ok: true } };
 }
 
+// ---- Note vault (export / verify) -----------------------------------------
+//
+// This SDK derives note secrets deterministically from the wallet seed (BIP-32
+// under m/29795'/1'), so there is no classic "note string" to save. The vault
+// exists to (a) let a user back up the derived secrets so a note remains
+// recoverable even if the on-disk indexer state is lost, and (b) let a user
+// import a backup taken elsewhere and confirm which notes belong to *this*
+// wallet before trusting them. The secrets are sensitive: the Lean daemon
+// encrypts the exported blob under a user password (LeanCli/Privacy/NoteVault)
+// before it touches disk, and re-derives from the seed on import to verify.
+
+// Build a SecretManager bound to this wallet's keystore. Mirrors the plugin's
+// own internal derivation, so a re-derived commitment must match the on-chain
+// note's commitment iff the note belongs to this wallet.
+async function tornadoSecretManager(env) {
+  const { tc } = await loadTornado();
+  return tc.SecretManager({ host: { keystore: keystoreFromEnv(env) }, accountIndex: 0 });
+}
+
+// Derive the full secret set for one note (pool + depositIndex).
+async function deriveNoteSecrets(secretManager, chainId, note) {
+  const s = await secretManager.getDepositSecrets({
+    chainId,
+    poolAddress: BigInt(note.pool),
+    depositIndex: Number(note.depositIndex),
+  });
+  return {
+    nullifier: s.nullifier,
+    salt: s.salt,
+    commitment: s.commitment,
+    nullifierHash: s.nullifierHash,
+  };
+}
+
+// Export every note (optionally including spent) with its derived secrets, so
+// the daemon can seal the blob under a user password. BigInts render as hex.
+async function tornadoExportNotes(env, params) {
+  const plugin = await buildTornadoPlugin(env);
+  const tc = plugin.__tc;
+  if (plugin.sync) await plugin.sync();
+  const chainId = BigInt(env.LEANCLI_CHAIN_ID);
+  const includeSpent = params?.includeSpent !== false; // default: include spent
+  const notes = await plugin.notes([tornadoEthAsset(tc)], includeSpent);
+  const secretManager = await tornadoSecretManager(env);
+  const exported = [];
+  for (const n of notes) {
+    const secrets = await deriveNoteSecrets(secretManager, chainId, n);
+    exported.push({
+      pool: n.pool,
+      denominationWei: n.amount,
+      balanceWei: n.balance,
+      depositIndex: n.depositIndex,
+      leafIndex: n.leafIndex,
+      commitment: n.commitment,
+      timestamp: n.timestamp,
+      status: BigInt(n.balance ?? 0) > 0n ? "spendable" : "spent",
+      secrets,
+    });
+  }
+  return { chainId: env.LEANCLI_CHAIN_ID, asset: tc.E_ADDRESS, count: exported.length, notes: exported };
+}
+
+// Verify imported note descriptors against this wallet's seed: re-derive each
+// note's commitment from (pool, depositIndex) and check it matches the imported
+// commitment. A match proves the note is recoverable from the current seed.
+// Cross-reference the live indexer to report current spent/spendable status.
+async function tornadoVerifyNotes(env, params) {
+  const imported = Array.isArray(params?.notes) ? params.notes : null;
+  if (!imported) throw new Error("verifyNotes requires a `notes` array");
+  const plugin = await buildTornadoPlugin(env);
+  const tc = plugin.__tc;
+  if (plugin.sync) await plugin.sync();
+  const chainId = BigInt(env.LEANCLI_CHAIN_ID);
+  const live = await plugin.notes([tornadoEthAsset(tc)], true);
+  const liveByKey = new Map(
+    live.map((n) => [`${BigInt(n.pool)}-${Number(n.depositIndex)}`, n]),
+  );
+  const secretManager = await tornadoSecretManager(env);
+  const results = [];
+  for (const n of imported) {
+    if (n?.pool == null || n?.depositIndex == null || n?.commitment == null) {
+      results.push({ ...n, mine: false, reason: "missing pool/depositIndex/commitment" });
+      continue;
+    }
+    let derived;
+    try {
+      derived = await deriveNoteSecrets(secretManager, chainId, n);
+    } catch (e) {
+      results.push({ ...n, mine: false, reason: `derive failed: ${e?.message ?? e}` });
+      continue;
+    }
+    const mine = BigInt(derived.commitment) === BigInt(n.commitment);
+    const liveNote = liveByKey.get(`${BigInt(n.pool)}-${Number(n.depositIndex)}`);
+    const status = liveNote
+      ? (BigInt(liveNote.balance ?? 0) > 0n ? "spendable" : "spent")
+      : "unknown";
+    results.push({
+      pool: n.pool,
+      denominationWei: n.denominationWei ?? liveNote?.amount,
+      depositIndex: n.depositIndex,
+      commitment: n.commitment,
+      mine,
+      status,
+      onChain: liveNote != null,
+    });
+  }
+  return {
+    chainId: env.LEANCLI_CHAIN_ID,
+    count: results.length,
+    mineCount: results.filter((r) => r.mine).length,
+    notes: results,
+  };
+}
+
 /**
  * Dispatch a `shielded.tornado.*` method. Returns the result object (BigInts
  * are rendered as hex by bridge.mjs's jsonifyResult); throws on error.
@@ -571,6 +688,8 @@ export async function dispatchTornado(method, env, params) {
     case "shielded.tornado.prepareDeposit": return await tornadoPrepareDeposit(env, params);
     case "shielded.tornado.quoteWithdraw": return await tornadoQuoteWithdraw(env, params);
     case "shielded.tornado.executeWithdraw": return await tornadoExecuteWithdraw(env, params);
+    case "shielded.tornado.exportNotes": return await tornadoExportNotes(env, params);
+    case "shielded.tornado.verifyNotes": return await tornadoVerifyNotes(env, params);
     default: throw new Error(`unknown tornado method: ${method}`);
   }
 }
@@ -582,4 +701,6 @@ export const TORNADO_METHODS = new Set([
   "shielded.tornado.prepareDeposit",
   "shielded.tornado.quoteWithdraw",
   "shielded.tornado.executeWithdraw",
+  "shielded.tornado.exportNotes",
+  "shielded.tornado.verifyNotes",
 ]);

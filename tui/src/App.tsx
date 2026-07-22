@@ -49,6 +49,7 @@ import ArchivedAccountsScreen from "./screens/ArchivedAccountsScreen.js";
 import { archiveKey, toggleArchive } from "./archiveStore.js";
 import PrivacyMenu from "./screens/PrivacyMenu.js";
 import RailgunMenu from "./screens/RailgunMenu.js";
+import TornadoVaultFlow from "./screens/TornadoVaultFlow.js";
 import NetworkScreen from "./screens/NetworkScreen.js";
 import NetworkMonitor from "./screens/NetworkMonitor.js";
 import StatusFlow from "./screens/StatusFlow.js";
@@ -117,6 +118,7 @@ type Screen =
   | { kind: "private" }
   | { kind: "privacy" }
   | { kind: "railgun" }
+  | { kind: "tornado-vault" }
   | { kind: "network" }
   | { kind: "network-monitor" }
   | { kind: "status" }
@@ -737,6 +739,7 @@ export default function App() {
             if (a === "back") return pop();
             if (a === "privacy-pools") push({ kind: "privacy" });
             else if (a === "railgun") push({ kind: "railgun" });
+            else if (a === "tornado-vault") push({ kind: "tornado-vault" });
           }}
         />
       );
@@ -744,6 +747,8 @@ export default function App() {
       return <PrivacyMenu onDone={pop} />;
     case "railgun":
       return <RailgunMenu onDone={pop} />;
+    case "tornado-vault":
+      return <TornadoVaultFlow onDone={pop} />;
     case "network":
       return (
         <NetworkScreen

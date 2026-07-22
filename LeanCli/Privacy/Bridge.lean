@@ -171,10 +171,10 @@ private def resultToResponse (j : Json) : Response :=
       | _ => Response.ok j
   | _ => Response.ok j
 
-private def parseResponse (raw : String) : Response :=
-  match parse raw.trimAscii.toString with
-  | .error e => Response.crash s!"bridge returned non-JSON ({e}): {raw}" 0
-  | .ok (Json.obj fields) =>
+/-- Decode one parsed JSON value as a JSON-RPC 2.0 response envelope. -/
+private def decodeResponseJson (j : Json) (raw : String) : Response :=
+  match j with
+  | Json.obj fields =>
       let lookup (k : String) : Option Json :=
         (fields.find? (fun (key, _) => key == k)).map Prod.snd
       match lookup "error" with
@@ -191,7 +191,40 @@ private def parseResponse (raw : String) : Response :=
           match lookup "result" with
           | some j => resultToResponse j
           | none => Response.crash s!"bridge response missing result: {raw}" 0
-  | .ok _ => Response.crash s!"bridge response not a JSON object: {raw}" 0
+  | _ => Response.crash s!"bridge response not a JSON object: {raw}" 0
+
+/-- `true` iff `j` is a JSON object carrying a `jsonrpc` field — the marker we
+    use to pick the response line out of polluted sidecar stdout. -/
+private def isJsonRpcObj (j : Json) : Bool :=
+  match j with
+  | Json.obj fields => fields.any (fun (k, _) => k == "jsonrpc")
+  | _ => false
+
+/-- Parse the bridge's stdout into a `Response`.
+
+    The bridge reserves stdout for a single JSON-RPC line, but plugin SDKs
+    spawn worker threads whose stdout Node pipes into the parent's stdout —
+    console redirection in the bridge cannot intercept a worker that logs
+    before the redirect wins the race (observed: tornado's state-manager
+    worker printing "Merkle tree for N leaves took Xms" ahead of the
+    response). Defense in depth: when the whole blob fails to parse, scan
+    line-by-line for the **last** line that parses as a JSON object with a
+    `jsonrpc` field and decode that. The last match wins because the bridge
+    writes its response immediately before exiting, after any worker noise. -/
+private def parseResponse (raw : String) : Response :=
+  match parse raw.trimAscii.toString with
+  | .ok j => decodeResponseJson j raw
+  | .error e =>
+      let candidates := (raw.splitOn "\n").filterMap fun line =>
+        let t := line.trimAscii.toString
+        if t.startsWith "{" then
+          match parse t with
+          | .ok j => if isJsonRpcObj j then some j else none
+          | .error _ => none
+        else none
+      match candidates.getLast? with
+      | some j => decodeResponseJson j raw
+      | none => Response.crash s!"bridge returned non-JSON ({e}): {raw}" 0
 
 /-- Spawn the sidecar for one request with optional env overlay, write the
     encoded request as `--rpc <json>`, read one line of stdout, and decode
