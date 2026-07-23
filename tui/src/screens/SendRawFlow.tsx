@@ -13,11 +13,17 @@ import { ProvenancePanel } from "../widgets/ProvenancePanel.js";
 import UnlockEoaStep from "./UnlockEoaStep.js";
 
 /** A pre-selected signing wallet. Threaded in by callers (e.g. SwapFlow)
- *  who already know which wallet is active — skips the EOA picker. */
+ *  who already know which wallet is active — skips the EOA picker.
+ *  `accountIndex` selects a hardened BIP-44 sub-account of the EOA slot
+ *  (m/44'/60'/N'/0/0) as the signer — used by the unshield→DeFi composite
+ *  flow, whose leg-2 signer is the freshly derived unshield recipient.
+ *  Omitted/0 = the slot primary; the slot-level unlock covers every
+ *  sub-account (they share the seed). */
 export type SendRawWallet = {
   kind: SlotKind;
   name: string;
   address: string;
+  accountIndex?: number;
 };
 
 type Props = {
@@ -71,7 +77,7 @@ type Phase =
       signerKind: SignerKind;
     };
 
-type EoaSlot = { name: string; address: string };
+type EoaSlot = { name: string; address: string; accountIndex?: number };
 /** One row in the fallback signing-wallet picker. Carries the signer
  *  kind so a SPHINCS pick routes to the UserOp path (skipping the EOA
  *  unlock) exactly like a pre-selected SPHINCS wallet does. */
@@ -91,7 +97,14 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
   //     still sees ConfirmGate before any UserOp is submitted.
   const initialPhase: Phase =
     wallet?.kind === "eoa"
-      ? { kind: "unlock", wallet: { name: wallet.name, address: wallet.address } }
+      ? {
+          kind: "unlock",
+          wallet: {
+            name: wallet.name,
+            address: wallet.address,
+            accountIndex: wallet.accountIndex,
+          },
+        }
       : wallet?.kind === "sphincs"
         ? {
             kind: "simulate",
@@ -291,7 +304,9 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
   }
   return (
     <RpcRunner
-      title={`Sending tx as ${phase.wallet.name}`}
+      title={`Sending tx as ${phase.wallet.name}${
+        phase.wallet.accountIndex ? `/#${phase.wallet.accountIndex}` : ""
+      }`}
       subtitle={`${chainBadge} · to ${tx.to} · value ${tx.value}`}
       method="eoa.send"
       params={{
@@ -300,6 +315,11 @@ export default function SendRawFlow({ tx, chainId, wallet, onDone }: Props) {
         to: tx.to,
         value: hexToBigInt(tx.value),
         data: tx.data,
+        // Hardened sub-account signer (m/44'/60'/N'/0/0). Omitted for the
+        // primary so the historic param shape is unchanged.
+        ...(phase.wallet.accountIndex
+          ? { account: phase.wallet.accountIndex }
+          : {}),
       }}
       renderResult={(r) => <RawResult result={r} chainId={chainId} />}
       onDone={onDone}

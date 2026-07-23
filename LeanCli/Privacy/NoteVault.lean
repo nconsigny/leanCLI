@@ -39,6 +39,13 @@ def version : Nat := 1
     identical across the wallet's password surfaces. -/
 def defaultKdfIters : Nat := 100000
 
+/-- Upper bound on the `kdfIters` we will honour when opening a vault. The
+    count is read from the (untrusted, user-editable) vault file and fed to
+    PBKDF2, so an unbounded value would be a CPU-DoS on the import path. A few
+    million iterations is far above any legitimate setting while capping the
+    worst-case derivation time. -/
+def maxKdfIters : Nat := 5000000
+
 /-- AAD binding the ciphertext to this envelope's purpose and version, so a
     ciphertext lifted from another context (or a future format) fails to open. -/
 private def vaultAad : ByteArray :=
@@ -104,6 +111,9 @@ def openVault (password : String) (manifest : Json) : IO (Except String Json) :=
               fieldBytes manifest "ciphertext" with
         | .ok salt, .ok nonce, .ok ct =>
             let iters := (getField "kdfIters" manifest >>= asNat).getD defaultKdfIters
+            if iters == 0 || iters > maxKdfIters then
+              pure (.error s!"vault: kdfIters {iters} out of allowed range (1..{maxKdfIters})")
+            else
             match ← deriveKey password salt iters with
             | .error err => pure (.error err)
             | .ok key =>
@@ -114,9 +124,16 @@ def openVault (password : String) (manifest : Json) : IO (Except String Json) :=
                     (LeanCli.Crypto.Hex.encode ct) with
                 | .error _ => pure (.error "wrong vault password or corrupt vault file")
                 | .ok pt =>
-                    match parse (String.fromUTF8! pt) with
-                    | .error e => pure (.error s!"vault payload is not valid JSON: {e}")
-                    | .ok j => pure (.ok j)
+                    -- Use the checked decoder (not `fromUTF8!`): the plaintext is
+                    -- AEAD-authenticated, but the panicking variant is never right
+                    -- for decrypted bytes — a clean error beats relying on
+                    -- panic-returns-empty behaviour at v4.29.1.
+                    match String.fromUTF8? pt with
+                    | none => pure (.error "vault payload is not valid UTF-8")
+                    | some s =>
+                        match parse s with
+                        | .error e => pure (.error s!"vault payload is not valid JSON: {e}")
+                        | .ok j => pure (.ok j)
         | _, _, _ => pure (.error "vault: malformed manifest (missing salt/nonce/ciphertext)")
   | none => pure (.error "vault: manifest missing version field")
 

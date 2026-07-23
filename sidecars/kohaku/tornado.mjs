@@ -630,30 +630,47 @@ async function tornadoVerifyNotes(env, params) {
     live.map((n) => [`${BigInt(n.pool)}-${Number(n.depositIndex)}`, n]),
   );
   const secretManager = await tornadoSecretManager(env);
+  // Project down to non-secret identifiers only. NEVER spread `...n` back: an
+  // imported note carries its derived `secrets` (nullifier/salt/…), and the
+  // daemon returns this result verbatim, so echoing the whole note would leak
+  // seed-derived secrets through the RPC response even on the failure branches.
+  const view = (n, mine, extra) => ({
+    pool: n?.pool ?? null,
+    depositIndex: n?.depositIndex ?? null,
+    commitment: n?.commitment ?? null,
+    mine,
+    ...extra,
+  });
+  // BigInt() throws on non-numeric input; imported descriptors are untrusted,
+  // so coerce defensively — a bad field yields a per-note failure, never a
+  // whole-call abort.
+  const asBig = (v) => { try { return BigInt(v); } catch { return null; } };
   const results = [];
   for (const n of imported) {
     if (n?.pool == null || n?.depositIndex == null || n?.commitment == null) {
-      results.push({ ...n, mine: false, reason: "missing pool/depositIndex/commitment" });
+      results.push(view(n, false, { reason: "missing pool/depositIndex/commitment" }));
       continue;
     }
     let derived;
     try {
       derived = await deriveNoteSecrets(secretManager, chainId, n);
     } catch (e) {
-      results.push({ ...n, mine: false, reason: `derive failed: ${e?.message ?? e}` });
+      results.push(view(n, false, { reason: `derive failed: ${e?.message ?? e}` }));
       continue;
     }
-    const mine = BigInt(derived.commitment) === BigInt(n.commitment);
+    const importedCommitment = asBig(n.commitment);
+    if (importedCommitment === null) {
+      results.push(view(n, false, { reason: "malformed commitment" }));
+      continue;
+    }
+    const mine = BigInt(derived.commitment) === importedCommitment;
     const liveNote = liveByKey.get(`${BigInt(n.pool)}-${Number(n.depositIndex)}`);
     const status = liveNote
       ? (BigInt(liveNote.balance ?? 0) > 0n ? "spendable" : "spent")
       : "unknown";
     results.push({
-      pool: n.pool,
+      ...view(n, mine, {}),
       denominationWei: n.denominationWei ?? liveNote?.amount,
-      depositIndex: n.depositIndex,
-      commitment: n.commitment,
-      mine,
       status,
       onChain: liveNote != null,
     });

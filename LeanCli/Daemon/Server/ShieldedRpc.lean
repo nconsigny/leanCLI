@@ -569,6 +569,26 @@ private def tornadoBridgeCall (cfg : Config) (method : String) (params : Json)
             ("exitCode", .num (Int.ofNat exitCode.toNat))
           ]) }
 
+/-- Defense in depth for `shielded.tornado.vault.import`: the untrusted sidecar
+    is documented never to return raw note secrets, but the daemon forwards its
+    `verifyNotes` result verbatim, so a sidecar regression must not be able to
+    re-open that leak. Strip any `secrets` field from every note object in the
+    result before it leaves the daemon. -/
+private def scrubNoteSecrets (j : Json) : Json :=
+  let stripSecrets (note : Json) : Json :=
+    match note with
+    | .obj fields => .obj (fields.filter (fun (k, _) => k != "secrets"))
+    | other => other
+  match j with
+  | .obj fields =>
+      .obj (fields.map (fun (k, v) =>
+        if k == "notes" then
+          match v with
+          | .arr items => (k, .arr (items.map stripSecrets))
+          | other => (k, other)
+        else (k, v)))
+  | other => other
+
 private def unlockOrCreateRgSecret
     (state : LeanCli.Daemon.State.Shared) (passphrase? : Option String) :
     IO (Except RpcError String) := do
@@ -1300,11 +1320,13 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                       match ← tornadoSeedHex state req.params with
                       | .error err => pure (.error err)
                       | .ok seedHex =>
-                          tornadoBridgeCall cfg "shielded.tornado.verifyNotes"
+                          match ← tornadoBridgeCall cfg "shielded.tornado.verifyNotes"
                             (.obj #[
                               ("chainId", .num (Int.ofNat cid)),
                               ("notes", notesArr)
-                            ]) cid seedHex req
+                            ]) cid seedHex req with
+                          | .error err => pure (.error err)
+                          | .ok result => pure (.ok (scrubNoteSecrets result))
       | _, _, _ => pure (.error invalidParams)
   | "shielded.tornado.deposit" => do
       unless (← ungatedShieldAllowed) do return .error ungatedShieldDenied

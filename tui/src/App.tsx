@@ -48,6 +48,7 @@ import UnstickFlow from "./screens/UnstickFlow.js";
 import ArchivedAccountsScreen from "./screens/ArchivedAccountsScreen.js";
 import { archiveKey, toggleArchive } from "./archiveStore.js";
 import PrivacyMenu from "./screens/PrivacyMenu.js";
+import QuickPrivacyFlow from "./screens/QuickPrivacyFlow.js";
 import RailgunMenu from "./screens/RailgunMenu.js";
 import TornadoVaultFlow from "./screens/TornadoVaultFlow.js";
 import NetworkScreen from "./screens/NetworkScreen.js";
@@ -116,6 +117,11 @@ type Screen =
   | { kind: "add-account" }
   | { kind: "import-eoa" }
   | { kind: "private" }
+  // One-keystroke shield/unshield (dashboard `S`/`U`, main-menu quick
+  // entries): EOA picker (auto-picked when singular) → ShieldFlow /
+  // WalletUnshieldFlow. Same gated flows, fewer screens.
+  | { kind: "quick-shield" }
+  | { kind: "quick-unshield" }
   | { kind: "privacy" }
   | { kind: "railgun" }
   | { kind: "tornado-vault" }
@@ -411,6 +417,23 @@ export default function App() {
     // sub-flow owns the keys (its own esc/back drives `pop`).
     { isActive: !textInputScreen && !inSub },
   );
+  // ctrl+l — jump to the legacy main menu from ANYWHERE (the dashboard is
+  // the boot landing page; the menu is one chord away). A ctrl-combo is
+  // deliberate: ink-text-input ignores ctrl-combos, so this fires safely
+  // even mid-typing in the chat panes (chat state is lifted into App and
+  // survives). Resets to a canonical [main] stack rather than pushing, so
+  // repeated jumps can't grow the history. Gated off during boot — the
+  // config/unlock gates own that phase.
+  useInput(
+    (input, key) => {
+      if (key.ctrl && input === "l") {
+        setDashSub([]);
+        setForwardStack([]);
+        setStack([{ kind: "main" }]);
+      }
+    },
+    { isActive: stack[stack.length - 1]?.kind !== "boot" },
+  );
   const navApi: NavApi = {
     canBack: inSub ? true : stack.length > 1,
     canForward: !inSub && forwardStack.length > 0,
@@ -424,6 +447,8 @@ export default function App() {
       case "wallets":          return push({ kind: "wallets" });
       case "le-chat":          return push({ kind: "llm-chat" });
       case "create-wallet":    return push({ kind: "create-wallet" });
+      case "quick-shield":     return push({ kind: "quick-shield" });
+      case "quick-unshield":   return push({ kind: "quick-unshield" });
       case "private":          return push({ kind: "private" });
       case "status":           return push({ kind: "status" });
       case "toggle-colibri":   return void toggleColibri();
@@ -611,6 +636,11 @@ export default function App() {
       onOpenWallets={() => push({ kind: "wallets" })}
       onWalletAction={dashWalletAction}
       onWalletCreate={dashCreate}
+      // One-keystroke shield/unshield (`S` / `U` on the dashboard):
+      // render the quick flow inside the dashboard's main pane so the
+      // side panes (and the shielded-balance readout) stay visible.
+      onQuickShield={() => pushSub({ kind: "quick-shield" })}
+      onQuickUnshield={() => pushSub({ kind: "quick-unshield" })}
       onOpenStatus={() => push({ kind: "status" })}
       onOpenNetworkMonitor={() => pushSub({ kind: "network-monitor" })}
       onOpenTrustedRegistry={() => pushSub({ kind: "trusted-registry" })}
@@ -732,6 +762,10 @@ export default function App() {
       return <AddAccountFlow onDone={finishAction} />;
     case "import-eoa":
       return <ImportEoaFlow onDone={finishAction} />;
+    case "quick-shield":
+      return <QuickPrivacyFlow action="shield" onDone={finishAction} />;
+    case "quick-unshield":
+      return <QuickPrivacyFlow action="unshield" onDone={finishAction} />;
     case "private":
       return (
         <PrivateActionsMenu
@@ -872,17 +906,18 @@ export default function App() {
       return <ArchivedAccountsScreen onDone={finishAction} />;
     case "boot":
       // Master unlock gate or pass-through. `onDone` replaces the boot
-      // screen with MainMenu (not push) so back-out from MainMenu cannot
-      // return here. Also drop the forward stack — a fresh main-menu
-      // shouldn't have any phantom "forward to boot screen" entry.
+      // screen (not push) so back-out can never return here. Also drop
+      // the forward stack — a fresh landing shouldn't have any phantom
+      // "forward to boot screen" entry.
       return (
         <BootGate
           onDone={() => {
-            // Land on the main menu. The dashboard is a deliberate
-            // sub-entry of the menu, not the default landing — the menu
-            // is the stable, consistent home. Forward stack cleared as
-            // before.
-            setStack([{ kind: "main" }]);
+            // Land on the DASHBOARD — the main page. MainMenu is seeded
+            // underneath it (not dropped) so Esc still pops to the legacy
+            // menu, pop() never no-ops at the root, and the dashboard's
+            // "esc menu" footer plus the small-terminal notice stay
+            // truthful. ctrl+l jumps to the menu from anywhere.
+            setStack([{ kind: "main" }, { kind: "dashboard" }]);
             setForwardStack([]);
           }}
         />

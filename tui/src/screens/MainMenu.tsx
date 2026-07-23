@@ -10,6 +10,8 @@ export type MainAction =
   | "wallets"
   | "le-chat"
   | "create-wallet"
+  | "quick-shield"
+  | "quick-unshield"
   | "private"
   | "status"
   | "toggle-colibri"
@@ -80,10 +82,12 @@ export default function MainMenu({
   });
 
   const items: { label: string; value: MainAction }[] = [
-    { label: "Dashboard (chat · wallet · rpc · network · llm)",          value: "dashboard" },
+    { label: "Dashboard — home (chat · wallet · rpc · network · llm)",   value: "dashboard" },
+    { label: "Shield — deposit into a privacy pool",                     value: "quick-shield" },
+    { label: "Unshield — withdraw shielded funds (opt. → swap / Aave)",  value: "quick-unshield" },
     { label: "Wallets",                                                  value: "wallets" },
     { label: "le chat (local-LLM, experimental)",                        value: "le-chat" },
-    { label: "Privacy Plugins",                                          value: "private" },
+    { label: "Privacy Plugins (balances · notes · vault)",               value: "private" },
     { label: "Create wallet / Add account / Import",                     value: "create-wallet" },
     { label: "Status (daemon · sidecars · sandbox · network)",           value: "status" },
     {

@@ -87,6 +87,10 @@ type Props = {
   onWalletAction: (action: WalletsAction, wallet: Wallet, chain: string) => void;
   /** CREATE tab in the embedded hub → push a create/add/import flow. */
   onWalletCreate: (kind: CreateKind) => void;
+  /** One-keystroke shield / unshield (`S` / `U`). App renders the quick
+   *  flow in the dashboard's main pane via the sub-stack. */
+  onQuickShield: () => void;
+  onQuickUnshield: () => void;
   onOpenStatus: () => void;
   onOpenNetworkMonitor: () => void;
   /** Trusted-registry screen (reached from the embedded Status pane). */
@@ -114,6 +118,8 @@ export default function Dashboard({
   onOpenWallets,
   onWalletAction,
   onWalletCreate,
+  onQuickShield,
+  onQuickUnshield,
   onOpenStatus,
   onOpenNetworkMonitor,
   onOpenTrustedRegistry,
@@ -322,6 +328,20 @@ export default function Dashboard({
           setMainPane(activePane);
           setChatTyping(false);
         }
+        return;
+      }
+      // Quick shield / unshield — the headline privacy actions get their
+      // own uppercase chords, live from EVERY pane highlight (including
+      // chat, where lowercase letters are deliberately inert). Safe while
+      // chat is merely highlighted: this handler stands down entirely once
+      // typing starts (modalActive), so `S`/`U` can never leak into the
+      // message buffer.
+      if (ch === "S") {
+        onQuickShield();
+        return;
+      }
+      if (ch === "U") {
+        onQuickUnshield();
         return;
       }
       // Printable per-pane shortcuts. Skipped only while CHAT is the
@@ -638,7 +658,7 @@ export default function Dashboard({
       ) : (
         <Text wrap="truncate-end" color={theme.dim}>
           <BuildBadge versions={snap?.versions} />
-          {" tab panes · esc menu · ctrl+n chain · "}
+          {" S shield · U unshield · tab panes · esc/ctrl+l menu · ctrl+n chain · "}
           <Text color={theme.highlight}>{activePane}</Text>
           {" ▸ "}
           {PANE_HINTS[activePane]}

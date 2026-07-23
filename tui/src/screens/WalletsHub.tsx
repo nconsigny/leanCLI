@@ -121,12 +121,12 @@ const TABS: { label: string; value: WalletsAction; help: string }[] = [
   {
     label: "SHIELD",
     value: "shield",
-    help: "Privacy Pools or Railgun deposit. EOA only.",
+    help: "Privacy Pools, Railgun, or Tornado Cash deposit. EOA only.",
   },
   {
     label: "UNSHIELD",
     value: "unshield",
-    help: "Withdraw shielded ETH back to a 0x address (freshly derived sub-account, address-book entry, or paste). EOA only — Railgun's 4337 path is signed by the EOA.",
+    help: "Withdraw shielded ETH to a fresh sub-account (recommended), address-book entry, or pasted address — optionally chaining a swap or Aave step. EOA only.",
   },
 ];
 
