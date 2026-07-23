@@ -182,7 +182,7 @@ def actionFor : String → Option String → Option Action
   -- Tornado Cash — accept both the bare "tornado" token and the
   -- two-token "tornado cash" form (extractProtocolName joins them
   -- when `cash` is the qualifier). Fixed-denomination mixer; the
-  -- IntentParser validates denomination ∈ {0.1, 1, 10, 100 ETH} —
+  -- IntentParser validates a positive exact 0.1-ETH multiple —
   -- the regex does not.
   | "shield",   some "tornado"
   | "shield",   some "tornado cash"   => some .tornadoDeposit
@@ -970,8 +970,8 @@ def matchShielded (toks : List String) : Option RegexDraft := do
     -- (chat.draft's prepare envelope then dispatches shielded.tornado.
     -- prepareDeposit / executeWithdraw). Same recipient-extraction
     -- pattern as Railgun. The bridge sidecar's Tornado integration is
-    -- LIVE (@kohaku-eth/tornado-cash) — deposits become N fixed-
-    -- denomination legs, withdrawals spend one note via the 4337
+    -- LIVE (@kohaku-eth/tornado-cash) — deposits become fixed-denomination
+    -- legs and withdrawals can combine notes in one 4337
     -- paymaster (or relayer), each flowing through decode → simulate →
     -- ConfirmGate before signing.
     let isNoiseToken : String → Bool := fun s =>

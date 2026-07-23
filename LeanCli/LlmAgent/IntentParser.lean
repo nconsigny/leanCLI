@@ -184,39 +184,23 @@ def securityChecks (raw : Json) (expectedChainId : Nat) (intent : Intent) :
         throw "shielded.railgun.unshield: amountWei = 0 refused (no movement, leaks timing)"
       else .ok ()
   | .tornadoDeposit _ denominationWei =>
-      -- Tornado pools are fixed-denomination. Any other amount silently
-      -- mis-routes to the wrong pool contract (or no pool at all) and
-      -- the deposit either reverts or — worse — lands in a pool the
-      -- user can't track. Reject anything outside the canonical set
-      -- here; the bridge sidecar also enforces but defence in depth
-      -- belongs in the verified core.
+      -- The SDK decomposes a positive 0.1-ETH multiple across fixed pools.
+      -- Enforce exact base-unit divisibility in the verified core.
       let d01  : Nat :=     100_000_000_000_000_000  -- 0.1 ETH
-      let d1   : Nat :=   1_000_000_000_000_000_000  -- 1 ETH
-      let d10  : Nat :=  10_000_000_000_000_000_000  -- 10 ETH
-      let d100 : Nat := 100_000_000_000_000_000_000  -- 100 ETH
-      if denominationWei = d01 ∨ denominationWei = d1
-          ∨ denominationWei = d10 ∨ denominationWei = d100 then
+      if denominationWei > 0 ∧ denominationWei % d01 = 0 then
         .ok ()
       else
-        throw s!"shielded.tornado.deposit: denominationWei {denominationWei} is not a Tornado pool denomination (must be exactly 0.1, 1, 10, or 100 ETH in wei)"
+        throw s!"shielded.tornado.deposit: amountWei {denominationWei} must be a positive exact multiple of 0.1 ETH"
   | .tornadoWithdraw _ denominationWei _ noteRef =>
-      -- Same denomination gate as deposit; you cannot withdraw an amount
-      -- that doesn't correspond to a real pool. `noteRef` is NOT a secret
-      -- string — the SDK derives note secrets deterministically from the
-      -- wallet seed, so a withdraw needs no saved note. `noteRef` is an
-      -- optional deposit-index selector: empty ⇒ auto-select the oldest
-      -- spendable note of that denomination; otherwise a decimal index.
+      -- Alpha.18 combines multiple fixed-denomination notes into one paymaster
+      -- UserOp. The total must remain an exact positive 0.1-ETH multiple.
+      -- Explicit note selection is not supported: the SDK chooses the exact
+      -- note set from seed-derived spendable notes.
       let d01  : Nat :=     100_000_000_000_000_000
-      let d1   : Nat :=   1_000_000_000_000_000_000
-      let d10  : Nat :=  10_000_000_000_000_000_000
-      let d100 : Nat := 100_000_000_000_000_000_000
-      let validDenom :=
-        denominationWei = d01 ∨ denominationWei = d1
-          ∨ denominationWei = d10 ∨ denominationWei = d100
-      if !validDenom then
-        throw s!"shielded.tornado.withdraw: denominationWei {denominationWei} is not a Tornado pool denomination"
-      else if noteRef ≠ "" ∧ !(noteRef.all Char.isDigit) then
-        throw s!"shielded.tornado.withdraw: noteRef must be empty (auto-select) or a decimal deposit index, got \"{noteRef}\""
+      if denominationWei = 0 ∨ denominationWei % d01 ≠ 0 then
+        throw s!"shielded.tornado.withdraw: amountWei {denominationWei} must be a positive exact multiple of 0.1 ETH"
+      else if noteRef ≠ "" then
+        throw "shielded.tornado.withdraw: noteRef must be empty (SDK auto-selects the exact multi-note set)"
       else .ok ()
   | .approvalsAudit _ _ =>
       -- Read-only action; no signing, no chain side-effects to gate.

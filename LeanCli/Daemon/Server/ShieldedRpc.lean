@@ -417,10 +417,9 @@ private def rgSeedHexFromDefault
   | .error err => pure (.error err)
   | .ok slot => pure (.ok (rgSeedHexFromSlot slot))
 
-/-- Tornado on-disk state dir (per chain). Tornado has NO separate secret —
-    its keystore is the EOA seed derived at disjoint BIP-32 paths (m/29795'/1'),
-    so only chain-indexer state (commitments, merkle leaves, which deposit
-    indices are ours) lives here. -/
+/-- Tornado on-disk state dir (per chain). Tornado has no separate secret.
+    The daemon exposes only the hardened `m/29795'/1'` note subtree; only
+    chain-indexer state lives here. -/
 private def tornadoStoreDir : IO System.FilePath := do
   pure ((← LeanCli.Wallet.EoaStore.dataHome) / "leancli" / "tc")
 
@@ -434,21 +433,39 @@ private def resolveTornadoChain (cfg : Config) (params : Json) : Except RpcError
       message := s!"tornado cash is not deployed on chainId {cid} (supported: 1, 11155111)",
       data := none }
 
-/-- Resolve the EOA seed hex backing the tornado keystore. Optional `name`
-    param selects a specific unlocked slot; otherwise the default wallet. The
-    seed is chain-independent; the SDK derives tornado-specific keys under its
-    own BIP-32 root, disjoint from BIP-44 and from Railgun's paths. -/
+/-- Resolve the EOA seed inside the trusted daemon. Optional `name` selects a
+    specific unlocked slot; otherwise the default wallet. Callers derive and
+    export only the hardened Tornado subtree, never this full seed. -/
 private def tornadoSlot (state : LeanCli.Daemon.State.Shared) (params : Json) :
     IO (Except RpcError LeanCli.Daemon.State.UnlockedSlot) := do
   match getField "name" params >>= asString with
   | some n => unlockedSlot state n
   | none => rgSlotFromDefault state
 
-private def tornadoSeedHex (state : LeanCli.Daemon.State.Shared) (params : Json) :
-    IO (Except RpcError String) := do
+private def tornadoSeed (state : LeanCli.Daemon.State.Shared) (params : Json) :
+    IO (Except RpcError ByteArray) := do
   match ← tornadoSlot state params with
   | .error err => pure (.error err)
-  | .ok slot => pure (.ok (rgSeedHexFromSlot slot))
+  | .ok slot => pure (.ok slot.seed)
+
+/-- Derive only the hardened Tornado subtree before crossing the untrusted
+    sidecar boundary. The subtree cannot derive BIP-44 EOA keys. Withdrawals
+    separately receive exactly one daemon-verified recipient key because the
+    SDK must create that address's EIP-7702 authorization. -/
+private def tornadoScopedRoot (seed : ByteArray) :
+    IO (Except RpcError (String × String)) := do
+  match ← LeanCli.Wallet.HDKey.fromSeedIO seed with
+  | .error err =>
+      pure <| .error { code := -32603, message := "failed to derive tornado root", data := some (.str err) }
+  | .ok master =>
+      match ← LeanCli.Wallet.HDKey.derivePathIO master "m/29795'/1'" with
+      | .error err =>
+          pure <| .error { code := -32603, message := "failed to derive tornado root", data := some (.str err) }
+      | .ok root =>
+          let keyHex := LeanCli.Crypto.Hex.encode
+            (LeanCli.Wallet.HDKey.Nat.toFixedBytes 32 root.key)
+          let chainHex := LeanCli.Crypto.Hex.encode root.chainCode
+          pure (.ok (keyHex, chainHex))
 
 /-- Resolve a Tornado withdrawal recipient to a BIP-44 path owned by the
     selected wallet. The request never supplies the path: the daemon reads it
@@ -483,6 +500,20 @@ private def tornadoRecipientDerivationPath
                     message := "stored tornado recipient does not match its wallet derivation path",
                     data := some (.str recipient) }
 
+/-- The SDK needs the recipient signer only for paymaster EIP-7702 delegation.
+    Relayer operations receive no public-account private key. -/
+private def tornadoDelegatorForMode
+    (slot : LeanCli.Daemon.State.UnlockedSlot) (mode recipientPath : String) :
+    IO (Except RpcError (Option (String × String))) := do
+  if mode = "paymaster" then
+    match ← derivePrivateKeyFromSeed slot.seed recipientPath with
+    | .error err =>
+        pure <| .error { invalidParams with data := some (.str err) }
+    | .ok key =>
+        pure <| .ok (some (recipientPath, LeanCli.Crypto.Hex.encode key))
+  else
+    pure (.ok none)
+
 /-- Validate one `tailCalls` entry ({to, data, valueWei}) with the same
     predicates the CLI's `--tail-calls` parser used — the daemon does not
     trust its callers — and return the sanitized object to forward. -/
@@ -510,7 +541,7 @@ private def tornadoTailCallJson (i : Nat) (entry : Json) : Except RpcError Json 
               ])
 
 /-- Validate the optional `tailCalls` request param (paymaster withdrawals:
-    user calls appended after the payout call). Returns the sanitized array;
+    user calls appended after the note-withdrawal calls). Returns the sanitized array;
     absent param ⇒ empty. -/
 private def tornadoTailCallsParam (params : Json) : Except RpcError (Array Json) :=
   match getField "tailCalls" params with
@@ -532,13 +563,20 @@ private def tornadoTailCallsParam (params : Json) : Except RpcError (Array Json)
 /-- Forward a `shielded.tornado.*` method to the bridge. Unlike Privacy Pools
     (Sepolia-pinned), tornado runs on the caller-selected chain: the RPC
     endpoint, the LEANCLI_CHAIN_ID env, and the policy chainId all track
-    `chainId`. The keystore is the EOA seed (`tcSeedHex`); state persists per
-    chain under `tornadoStoreDir`. Routes through `callGated` (invariant 5.7):
+    `chainId`. Only the hardened Tornado subtree crosses into the sidecar; a
+    paymaster prepare additionally receives its verified recipient key. State
+    persists per chain under `tornadoStoreDir`. Routes through `callGated` (invariant 5.7):
     tornado withdrawals are classified `shieldedBroadcast`, so strict policy
     denies them on mainnet exactly like PP/railgun (mainnet needs tor/permissive). -/
 private def tornadoBridgeCall (cfg : Config) (method : String) (params : Json)
-    (chainId : Nat) (tcSeedHex : String) (_req : Request) :
+    (chainId : Nat) (tcSeed : ByteArray) (_req : Request)
+    (delegator? : Option (String × String) := none) :
     IO (Except RpcError Json) := do
+  let rootResult ← tornadoScopedRoot tcSeed
+  let (tcRootKeyHex, tcRootChainCodeHex) ←
+    match rootResult with
+    | .error err => return .error err
+    | .ok root => pure root
   let bridgeReq : LeanCli.Privacy.Bridge.Request :=
     { method := method, params := params, id := 0 }
   let ep := chainEndpointFor cfg params chainId
@@ -549,8 +587,19 @@ private def tornadoBridgeCall (cfg : Config) (method : String) (params : Json)
     ("LEANCLI_RPC_URL", some ep.url),
     ("LEANCLI_CHAIN_ID", some (toString chainId)),
     ("LEANCLI_TC_STORAGE_PATH", some storagePath),
-    ("LEANCLI_TC_SEED_HEX", some tcSeedHex)
+    ("LEANCLI_TC_ROOT_KEY_HEX", some tcRootKeyHex),
+    ("LEANCLI_TC_ROOT_CHAIN_CODE_HEX", some tcRootChainCodeHex),
+    -- Explicitly clear inherited legacy/full-seed and delegator credentials.
+    ("LEANCLI_TC_SEED_HEX", none),
+    ("LEANCLI_TC_MNEMONIC", none),
+    ("LEANCLI_TC_DELEGATOR_PATH", none),
+    ("LEANCLI_TC_DELEGATOR_KEY_HEX", none)
   ]
+  let baseEnv := match delegator? with
+    | some (path, key) => baseEnv
+        |>.push ("LEANCLI_TC_DELEGATOR_PATH", some path)
+        |>.push ("LEANCLI_TC_DELEGATOR_KEY_HEX", some key)
+    | none => baseEnv
   let env : Array (String × Option String) ←
     (match ← IO.getEnv "LEANCLI_TC_BUNDLER_URL" with
      | some u => pure (baseEnv ++ #[("LEANCLI_TC_BUNDLER_URL", some u)])
@@ -1114,17 +1163,17 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       | _, _, _, _ => pure (.error invalidParams)
   | "shielded.tornado.balance" =>
       -- Read-only tornado balance for the selected chain. Keystore is the
-      -- EOA seed (disjoint BIP-32 paths); optional `name` selects a slot.
+      -- hardened Tornado subtree; optional `name` selects a wallet slot.
       -- First call is slow (pool sync via saga CDN + chain tail); cached
       -- state persists per chain.
       match resolveTornadoChain cfg req.params with
       | .error err => pure (.error err)
       | .ok cid =>
-          match ← tornadoSeedHex state req.params with
+          match ← tornadoSeed state req.params with
           | .error err => pure (.error err)
-          | .ok seedHex =>
+          | .ok seed =>
               tornadoBridgeCall cfg "shielded.tornado.balance"
-                (.obj #[("chainId", .num (Int.ofNat cid))]) cid seedHex req
+                (.obj #[("chainId", .num (Int.ofNat cid))]) cid seed req
   | "shielded.tornado.notes" =>
       -- Per-note detail (pool, denomination, depositIndex, spendable/spent).
       -- Notes are identified by (pool, depositIndex) and recovered from the
@@ -1133,23 +1182,23 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       | .error err => pure (.error err)
       | .ok cid =>
           let includeSpent := ((getField "includeSpent" req.params) >>= asBool).getD false
-          match ← tornadoSeedHex state req.params with
+          match ← tornadoSeed state req.params with
           | .error err => pure (.error err)
-          | .ok seedHex =>
+          | .ok seed =>
               tornadoBridgeCall cfg "shielded.tornado.notes"
                 (.obj #[
                   ("chainId", .num (Int.ofNat cid)),
                   ("includeSpent", .bool includeSpent)
-                ]) cid seedHex req
+                ]) cid seed req
   | "shielded.tornado.maxUnshield" =>
       match resolveTornadoChain cfg req.params with
       | .error err => pure (.error err)
       | .ok cid =>
-          match ← tornadoSeedHex state req.params with
+          match ← tornadoSeed state req.params with
           | .error err => pure (.error err)
-          | .ok seedHex =>
+          | .ok seed =>
               tornadoBridgeCall cfg "shielded.tornado.maxUnshield"
-                (.obj #[("chainId", .num (Int.ofNat cid))]) cid seedHex req
+                (.obj #[("chainId", .num (Int.ofNat cid))]) cid seed req
   | "shielded.tornado.prepareDeposit" =>
       -- Tornado Cash deposit. The bridge derives the spending note secrets
       -- deterministically from the seed, Pedersen-hashes the commitment, and
@@ -1161,20 +1210,21 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
       | .error err, _ => pure (.error err)
       | _, .error err => pure (.error err)
       | .ok cid, .ok amountEth =>
-          match ← tornadoSeedHex state req.params with
+          match ← tornadoSeed state req.params with
           | .error err => pure (.error err)
-          | .ok seedHex =>
+          | .ok seed =>
               tornadoBridgeCall cfg "shielded.tornado.prepareDeposit"
                 (.obj #[
                   ("chainId", .num (Int.ofNat cid)),
                   ("amountEth", .str amountEth)
-                ]) cid seedHex req
+                ]) cid seed req
   | "shielded.tornado.quoteWithdraw" =>
       -- Quote a withdrawal WITHOUT broadcasting: returns the paymaster fee +
-      -- net amount (paymaster mode) or note context (relayer mode) for the
-      -- ConfirmGate. A groth16 proof authorizes the note spend; paymaster mode
-      -- also builds a deterministic EIP-7702 authorization from the verified
-      -- recipient path at execute time. Confirming the quoted terms is the
+      -- net amount and a hard fee ceiling for the ConfirmGate. Both transports
+      -- build the proof locally to obtain the SDK's refined exact fee but do
+      -- not broadcast. A groth16 proof authorizes the note spend; paymaster
+      -- mode also builds a deterministic EIP-7702 authorization from the
+      -- verified recipient path. Confirming the quoted terms is the
       -- pre-broadcast gate (mirrors PP quoteUnshield). `mode` defaults to
       -- "paymaster"; "relayer" is optional.
       match resolveTornadoChain cfg req.params,
@@ -1200,16 +1250,19 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                   match ← tornadoRecipientDerivationPath slot recipient with
                   | .error err => pure (.error err)
                   | .ok recipientPath =>
-                      tornadoBridgeCall cfg "shielded.tornado.quoteWithdraw"
-                        (.obj (#[
-                          ("chainId", .num (Int.ofNat cid)),
-                          ("amountEth", .str amountEth),
-                          ("recipient", .str recipient),
-                          ("recipientDerivationPath", .str recipientPath),
-                          ("mode", .str mode)
-                        ] ++ (if tailCalls.isEmpty then #[]
-                              else #[("tailCalls", .arr tailCalls)])))
-                        cid (rgSeedHexFromSlot slot) req
+                      match ← tornadoDelegatorForMode slot mode recipientPath with
+                      | .error err => pure (.error err)
+                      | .ok delegator =>
+                          tornadoBridgeCall cfg "shielded.tornado.quoteWithdraw"
+                            (.obj (#[
+                              ("chainId", .num (Int.ofNat cid)),
+                              ("amountEth", .str amountEth),
+                              ("recipient", .str recipient),
+                              ("recipientDerivationPath", .str recipientPath),
+                              ("mode", .str mode)
+                            ] ++ (if tailCalls.isEmpty then #[]
+                                  else #[("tailCalls", .arr tailCalls)])))
+                            cid slot.seed req delegator
       | _, _, _ => pure (.error invalidParams)
   | "shielded.tornado.executeWithdraw" =>
       -- Build the withdrawal proof and broadcast it (paymaster default, or
@@ -1234,31 +1287,42 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                       data := none
                     }
                   else
+                  let maxFeeWei? := getField "maxFeeWei" req.params >>= asString
+                  if maxFeeWei?.isNone then
+                    pure <| .error {
+                      code := -32602
+                      message := "tornado execution requires maxFeeWei from shielded.tornado.quoteWithdraw"
+                      data := none
+                    }
+                  else
                   match ← tornadoRecipientDerivationPath slot recipient with
                   | .error err => pure (.error err)
                   | .ok recipientPath =>
-                      -- H2: forward the user-confirmed fee ceiling (the quoted
-                      -- paymasterFeeWei) so the sidecar aborts rather than paying an
-                      -- inflated fee out of the recipient's proceeds. Optional and
-                      -- backward-compatible: absent ⇒ no ceiling (legacy behaviour).
-                      let maxFeeWei? := getField "maxFeeWei" req.params >>= asString
-                      tornadoBridgeCall cfg "shielded.tornado.executeWithdraw"
-                        (.obj (#[
-                          ("chainId", .num (Int.ofNat cid)),
-                          ("amountEth", .str amountEth),
-                          ("recipient", .str recipient),
-                          ("recipientDerivationPath", .str recipientPath),
-                          ("mode", .str mode)
-                        ] ++ (match maxFeeWei? with
-                              | some w => #[("maxFeeWei", .str w)]
-                              | none   => #[])
-                          ++ (if tailCalls.isEmpty then #[]
-                              else #[("tailCalls", .arr tailCalls)])))
-                        cid (rgSeedHexFromSlot slot) req
+                      -- Forward the user-confirmed transport fee ceiling so the
+                      -- sidecar aborts rather than embedding an inflated fee in
+                      -- the proof. Required for both paymaster and relayer mode.
+                      let delegatorResult ←
+                        tornadoDelegatorForMode slot mode recipientPath
+                      match delegatorResult with
+                      | .error err => pure (.error err)
+                      | .ok delegator =>
+                          tornadoBridgeCall cfg "shielded.tornado.executeWithdraw"
+                            (.obj (#[
+                              ("chainId", .num (Int.ofNat cid)),
+                              ("amountEth", .str amountEth),
+                              ("recipient", .str recipient),
+                              ("recipientDerivationPath", .str recipientPath),
+                              ("mode", .str mode)
+                            ] ++ (match maxFeeWei? with
+                                  | some w => #[("maxFeeWei", .str w)]
+                                  | none   => #[])
+                              ++ (if tailCalls.isEmpty then #[]
+                                  else #[("tailCalls", .arr tailCalls)])))
+                            cid slot.seed req delegator
       | _, _, _ => pure (.error invalidParams)
   | "shielded.tornado.vault.export" =>
       -- Password-gated note backup. Asks the sidecar to derive every note's
-      -- secrets from the wallet seed (`shielded.tornado.exportNotes`), then
+      -- secrets from the hardened subtree (`shielded.tornado.exportNotes`), then
       -- seals the blob under a USER-chosen password (independent of the wallet
       -- master passphrase) via `NoteVault` before it touches disk. The plaintext
       -- secrets are never returned to the caller — only the file path + count.
@@ -1267,14 +1331,14 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
             paramString req.params "path" with
       | .ok cid, .ok password, .ok path =>
           let includeSpent := ((getField "includeSpent" req.params) >>= asBool).getD true
-          match ← tornadoSeedHex state req.params with
+          match ← tornadoSeed state req.params with
           | .error err => pure (.error err)
-          | .ok seedHex =>
+          | .ok seed =>
               match ← tornadoBridgeCall cfg "shielded.tornado.exportNotes"
                 (.obj #[
                   ("chainId", .num (Int.ofNat cid)),
                   ("includeSpent", .bool includeSpent)
-                ]) cid seedHex req with
+                ]) cid seed req with
               | .error err => pure (.error err)
               | .ok payload =>
                   match ← LeanCli.Privacy.NoteVault.sealVault password "tornado-notes" cid payload with
@@ -1317,14 +1381,14 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
                       pure (.error { code := -32602, message := err, data := none })
                   | .ok payload =>
                       let notesArr := (getField "notes" payload).getD (.arr #[])
-                      match ← tornadoSeedHex state req.params with
+                      match ← tornadoSeed state req.params with
                       | .error err => pure (.error err)
-                      | .ok seedHex =>
+                      | .ok seed =>
                           match ← tornadoBridgeCall cfg "shielded.tornado.verifyNotes"
                             (.obj #[
                               ("chainId", .num (Int.ofNat cid)),
                               ("notes", notesArr)
-                            ]) cid seedHex req with
+                            ]) cid seed req with
                           | .error err => pure (.error err)
                           | .ok result => pure (.ok (scrubNoteSecrets result))
       | _, _, _ => pure (.error invalidParams)
@@ -1349,13 +1413,12 @@ def dispatch (cfg : Config) (state : LeanCli.Daemon.State.Shared)
               | .error err =>
                   pure <| .error { invalidParams with data := some (.str err) }
               | .ok privateKey =>
-                  let seedHex := rgSeedHexFromSlot slot
                   IO.eprintln "[shield-tc] calling bridge shielded.tornado.prepareDeposit (loads the SDK + syncs pool state; may take a while on first run)"
                   match ← tornadoBridgeCall cfg "shielded.tornado.prepareDeposit"
                             (.obj #[
                               ("chainId", .num (Int.ofNat cid)),
                               ("amountEth", .str amountEth)
-                            ]) cid seedHex req with
+                            ]) cid slot.seed req with
                   | .error err =>
                       IO.eprintln s!"[shield-tc] bridge prepare failed: {err.message}"
                       pure (.error err)

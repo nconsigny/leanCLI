@@ -138,8 +138,9 @@ tornado runs on the caller-selected chain, mainnet or Sepolia):
 
 | Env var | Meaning |
 |---|---|
-| `LEANCLI_TC_SEED_HEX` | EOA master seed (hex) — the tornado keystore source; the SDK derives note secrets at disjoint BIP-32 paths (`m/29795'/1'`). Default source. |
-| `LEANCLI_TC_MNEMONIC` | Alternative dedicated mnemonic (compromise-isolation); `LEANCLI_TC_SEED_HEX` wins. |
+| `LEANCLI_TC_ROOT_KEY_HEX` / `LEANCLI_TC_ROOT_CHAIN_CODE_HEX` | Hardened `m/29795'/1'` extended-private subtree derived inside the Lean daemon. This is the normal daemon path; the full EOA seed never crosses the sidecar boundary. |
+| `LEANCLI_TC_DELEGATOR_PATH` / `LEANCLI_TC_DELEGATOR_KEY_HEX` | One daemon-verified BIP-44 recipient key, supplied only while building a paymaster withdrawal's EIP-7702 authorization. |
+| `LEANCLI_TC_SEED_HEX` / `LEANCLI_TC_MNEMONIC` | Legacy standalone-sidecar inputs. The Lean daemon does not set them. |
 | `LEANCLI_TC_STORAGE_PATH` | Per-chain indexer state file (commitments, merkle leaves, our deposit indices). |
 | `LEANCLI_TC_BUNDLER_URL` | Optional Pimlico bundler override; default `https://public.pimlico.io/v2/<chainId>/rpc`. |
 | `LEANCLI_TC_EXTERNAL_SYNC_DISABLE` | Set to `1` to skip the saga-CDN cold-sync provider (chain-only sync). |

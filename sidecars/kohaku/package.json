@@ -15,7 +15,12 @@
     "@kohaku-eth/plugins": "0.0.1-alpha.11",
     "@kohaku-eth/railgun": "0.0.1-alpha.28",
     "@kohaku-eth/privacy-pools": "0.0.2-alpha.14",
-    "@kohaku-eth/tornado-cash": "0.0.2-alpha.16"
+    "@kohaku-eth/tornado-cash": "0.0.2-alpha.18",
+    "ethers": "6.16.0"
+  },
+  "overrides": {
+    "tar": "7.5.21",
+    "ws": "8.21.1"
   },
   "scripts": {
     "start": "node bridge.mjs",

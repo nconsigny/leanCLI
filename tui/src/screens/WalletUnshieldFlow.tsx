@@ -124,12 +124,18 @@ const TORNADO_CHAIN_ID = 11155111;
  *  against Sepolia too. */
 const SEPOLIA_CHAIN_ID = 11155111;
 
-/** Tornado withdrawals spend exactly one fixed-denomination note per call
- *  (multi-note drains are one denomination per call), or "max" = the
- *  largest spendable note. */
+/** Alpha.18 can combine fixed-denomination notes in one paymaster UserOp.
+ *  ETH pools have a 0.1 ETH minimum, so every explicit amount must be an
+ *  exact positive multiple of 0.1. */
 function isTornadoWithdrawAmount(v: string): boolean {
   const t = v.trim().toLowerCase();
-  return t === "max" || /^(0\.1|1|10|100)$/.test(t);
+  if (t === "max") return true;
+  if (!/^[0-9]+(?:\.[0-9]+)?$/.test(t)) return false;
+  const [whole, fraction = ""] = t.split(".");
+  return (
+    fraction.length <= 1 &&
+    (BigInt(whole!) > 0n || /^[1-9]$/.test(fraction))
+  );
 }
 
 /** Privacy Pools v1 immutable 7702 delegate contract (Railgun's paymaster
@@ -157,9 +163,11 @@ export type UnshieldQuote = {
   /* tornado paymaster quote (shielded.tornado.quoteWithdraw) */
   paymasterFeeWei?: string | null;
   netWei?: string | null;
+  amountWei?: string | null;
   denominationWei?: string | null;
   spendableTotalWei?: string | null;
   matchingNoteCount?: number | null;
+  withdrawalCount?: number | null;
 };
 
 type BookEntry = {
@@ -518,7 +526,7 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
           items={[
             { label: "Privacy Pools v1 — Sepolia · relayer-broadcast", value: "pp" as Protocol },
             { label: "Railgun — Sepolia · 4337 + 7702 · unshield needs daemon opt-in", value: "railgun" as Protocol },
-            { label: "Tornado Cash — Sepolia · 4337 paymaster · one note per call", value: "tornado" as Protocol },
+            { label: "Tornado Cash — Sepolia · multi-note 4337 paymaster", value: "tornado" as Protocol },
           ]}
           arrowNav
           onBack={() => onDone(false)}
@@ -778,12 +786,12 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
       {
         name: "amountEth",
         label: "Amount (ETH)",
-        placeholder: isTornado ? "0.1 / 1 / 10 / 100 or max" : "0.005 or max",
+        placeholder: isTornado ? "0.1 multiple or max" : "0.005 or max",
         validate: (v) =>
           isTornado
             ? isTornadoWithdrawAmount(v)
               ? null
-              : "tornado withdraws one note per call — 0.1, 1, 10, 100 or 'max'"
+              : "expected a positive exact 0.1 ETH multiple or 'max'"
             : v.trim().toLowerCase() === "max" || /^[0-9]+(\.[0-9]+)?$/.test(v)
               ? null
               : "expected a decimal ETH amount or 'max'",
@@ -972,7 +980,7 @@ export default function WalletUnshieldFlow({ wallet, onDone }: Props) {
           setPhase(
             phase.protocol === "tornado"
               ? // Tornado always quotes first (paymaster fee + net for the
-                // gate); "max" resolves to the largest spendable note there.
+                // gate); "max" resolves to the total spendable balance there.
                 {
                   kind: "tornado-quote",
                   recipient: phase.recipient,
@@ -1485,11 +1493,9 @@ export function QuoteUnshieldStep({
   );
 }
 
-/** Quote a tornado withdrawal WITHOUT broadcasting: the daemon returns the
- *  paymaster fee + net payout for the confirm gate. No proof is built — the
- *  fee is a deterministic function of the bundler gas price, so the quote is
- *  cheap (first run still syncs pool state). "max" resolves to the largest
- *  spendable note here. */
+/** Quote a tornado withdrawal WITHOUT broadcasting: the daemon prepares and
+ *  discards the proof so the confirm gate is bound to the SDK-refined fee.
+ *  "max" resolves to the total spendable note balance here. */
 function TornadoQuoteStep({
   walletName,
   recipient,
@@ -1523,10 +1529,11 @@ function TornadoQuoteStep({
         return;
       }
       const q = resp.result;
-      // Pin the exact note denomination the quote priced (also resolves
-      // "max") so execute withdraws precisely what the user confirmed.
-      const resolvedAmountEth = q?.denominationWei
-        ? weiToEthInput(q.denominationWei)
+      // Pin the exact total the quote priced (also resolves "max") so execute
+      // withdraws precisely what the user confirmed.
+      const quotedAmountWei = q?.amountWei ?? q?.denominationWei;
+      const resolvedAmountEth = quotedAmountWei
+        ? weiToEthInput(quotedAmountWei)
         : amountEth;
       onReady(q, resolvedAmountEth);
     })().catch((error) => {
@@ -1664,8 +1671,11 @@ export function UnshieldConfirmGate({
       {isTornado && quote && (
         <Box flexDirection="column" marginBottom={1}>
           <Text>
-            <Text color={theme.dim}>{"note denomination".padEnd(18)}</Text>{" "}
-            {ethStr(quote.denominationWei)}
+            <Text color={theme.dim}>{"withdraw total".padEnd(18)}</Text>{" "}
+            {ethStr(quote.amountWei ?? quote.denominationWei)}
+            {quote.withdrawalCount != null
+              ? `  (${quote.withdrawalCount} note${quote.withdrawalCount === 1 ? "" : "s"}, one UserOp)`
+              : ""}
           </Text>
           <Text>
             <Text color={theme.dim}>{"paymaster fee".padEnd(18)}</Text>{" "}
@@ -1679,7 +1689,6 @@ export function UnshieldConfirmGate({
             <Text>
               <Text color={theme.dim}>{"spendable total".padEnd(18)}</Text>{" "}
               {ethStr(quote.spendableTotalWei)}
-              {quote.matchingNoteCount != null ? `  (${quote.matchingNoteCount} matching note${quote.matchingNoteCount === 1 ? "" : "s"})` : ""}
             </Text>
           )}
         </Box>

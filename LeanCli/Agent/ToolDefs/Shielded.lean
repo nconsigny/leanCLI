@@ -120,10 +120,10 @@ private def tornadoModeProp : Json := .obj #[
   ("description",
     .str "Withdrawal transport: \"paymaster\" (default — gas is paid out of the note via an ERC-4337 paymaster and the net is forwarded to the recipient) or \"relayer\" (a classic ENS relayer submits the proof). Omit for paymaster.")
 ]
-private def tornadoDenominationEthProp : Json := .obj #[
+private def tornadoAmountEthProp : Json := .obj #[
   ("type", .str "string"),
   ("description",
-    .str "Tornado pool denomination as a decimal-ETH string. MUST be exactly \"0.1\", \"1\", \"10\", or \"100\" — Tornado pools are fixed-denomination and any other value mis-routes to the wrong contract.")
+    .str "Tornado amount as a decimal-ETH string. MUST be a positive exact multiple of 0.1 ETH. The SDK decomposes deposits and combines spendable fixed-denomination notes for paymaster withdrawals.")
 ]
 private def nameProp : Json := .obj #[
   ("type", .str "string"),
@@ -325,7 +325,7 @@ def prepareTornadoDeposit : ToolDecl := {
     ("required", .arr #[.str "chainId", .str "amountEth"]),
     ("properties", .obj #[
       ("chainId",   chainIdProp),
-      ("amountEth", tornadoDenominationEthProp)
+      ("amountEth", tornadoAmountEthProp)
     ])
   ],
   classify := .read,
@@ -349,10 +349,12 @@ def prepareTornadoDeposit : ToolDecl := {
 def prepareTornadoWithdraw : ToolDecl := {
   name := "prepare_tornado_withdraw",
   description :=
-    "Quote a Tornado Cash withdrawal of one fixed denomination (0.1 / 1 / \
-     10 / 100 ETH) to `recipient`, WITHOUT broadcasting. Returns the \
-     paymaster fee and net amount (paymaster mode) or note context \
-     (relayer mode) for the user to confirm; the actual withdrawal is a \
+    "Quote a Tornado Cash withdrawal of a positive 0.1-ETH multiple to \
+     `recipient`, WITHOUT broadcasting. Multiple fixed-denomination notes \
+     are combined in one paymaster UserOp. Returns the \
+     exact transport fee ceiling and net amount for the user to confirm; \
+     relayer mode builds its proof locally during quote but does not submit \
+     it. The actual withdrawal is a \
      separate confirmed step. No deposit note is needed — the wallet \
      re-derives spendable notes from its seed. Recipient MUST be a FRESH \
      address with no on-chain link to the deposit source, or the mix is \
@@ -363,7 +365,7 @@ def prepareTornadoWithdraw : ToolDecl := {
       .arr #[.str "chainId", .str "amountEth", .str "recipient"]),
     ("properties", .obj #[
       ("chainId",   chainIdProp),
-      ("amountEth", tornadoDenominationEthProp),
+      ("amountEth", tornadoAmountEthProp),
       ("recipient", recipientProp),
       ("mode",      tornadoModeProp)
     ])

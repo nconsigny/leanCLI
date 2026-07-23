@@ -49,17 +49,17 @@ want 'multiple of 0.1 ETH' \
      run '{"jsonrpc":"2.0","id":4,"method":"shielded.tornado.prepareDeposit","params":{"amountEth":"0.15"}}')" \
   "deposit rejects non-multiple of 0.1"
 
-# 5. withdraw amount must be exactly one denomination (offline reject)
-want 'exactly one pool denomination' \
+# 5. paymaster multi-withdraw totals must remain exact 0.1 ETH multiples
+want 'positive exact multiple of 0.1 ETH' \
   "$(LEANCLI_PRIVACY=tornado LEANCLI_CHAIN_ID=1 LEANCLI_RPC_URL=http://127.0.0.1:1 \
-     run '{"jsonrpc":"2.0","id":5,"method":"shielded.tornado.quoteWithdraw","params":{"amountEth":"0.3","recipient":"0x1111111111111111111111111111111111111111","recipientDerivationPath":"m/44\u0027/60\u0027/0\u0027/0/0"}}')" \
-  "withdraw rejects non-denomination amount"
+     run '{"jsonrpc":"2.0","id":5,"method":"shielded.tornado.quoteWithdraw","params":{"amountEth":"0.15","recipient":"0x1111111111111111111111111111111111111111","recipientDerivationPath":"m/44\u0027/60\u0027/0\u0027/0/0"}}')" \
+  "withdraw rejects non-0.1-multiple amount"
 
-# 5b. 10 ETH is a real mainnet pool but NOT deployed on Sepolia — reject per-chain
+# 5b. Classic relayer mode remains single-note and chain-aware.
 want 'on chain 11155111 (0.1/1 ETH)' \
   "$(LEANCLI_PRIVACY=tornado LEANCLI_CHAIN_ID=11155111 LEANCLI_RPC_URL=http://127.0.0.1:1 \
-     run '{"jsonrpc":"2.0","id":7,"method":"shielded.tornado.quoteWithdraw","params":{"amountEth":"10","recipient":"0x1111111111111111111111111111111111111111","recipientDerivationPath":"m/44\u0027/60\u0027/0\u0027/0/0"}}')" \
-  "withdraw rejects 10 ETH on Sepolia (no such pool)"
+     run '{"jsonrpc":"2.0","id":7,"method":"shielded.tornado.quoteWithdraw","params":{"amountEth":"10","recipient":"0x1111111111111111111111111111111111111111","recipientDerivationPath":"m/44\u0027/60\u0027/0\u0027/0/0","mode":"relayer"}}')" \
+  "relayer rejects 10 ETH on Sepolia (no such pool)"
 
 # 5c. the same 10 ETH IS a valid denomination on mainnet — it passes the
 #     denom gate and proceeds to plugin construction (here it trips the unset
@@ -67,8 +67,8 @@ want 'on chain 11155111 (0.1/1 ETH)' \
 #     did NOT reject 10 ETH on mainnet).
 want 'LEANCLI_TC_STORAGE_PATH is required' \
   "$(LEANCLI_PRIVACY=tornado LEANCLI_CHAIN_ID=1 LEANCLI_RPC_URL=http://127.0.0.1:1 \
-     run '{"jsonrpc":"2.0","id":8,"method":"shielded.tornado.quoteWithdraw","params":{"amountEth":"10","recipient":"0x1111111111111111111111111111111111111111","recipientDerivationPath":"m/44\u0027/60\u0027/0\u0027/0/0"}}')" \
-  "withdraw accepts 10 ETH denom on mainnet (passes chain-aware gate)"
+     run '{"jsonrpc":"2.0","id":8,"method":"shielded.tornado.quoteWithdraw","params":{"amountEth":"10","recipient":"0x1111111111111111111111111111111111111111","recipientDerivationPath":"m/44\u0027/60\u0027/0\u0027/0/0","mode":"relayer"}}')" \
+  "relayer accepts 10 ETH denomination on mainnet"
 
 # 6. withdraw requires a valid recipient (offline reject)
 want 'recipient must be' \

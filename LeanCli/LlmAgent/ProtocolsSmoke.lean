@@ -111,11 +111,19 @@ example :
      | .ok (.tornadoWithdraw 11155111 1000000000000000000 _ "") => true
      | _ => false) = true
   := by native_decide
--- Non-denomination amounts must NOT synthesize (fixed 0.1/1/10/100 pools).
+-- Multi-note amounts synthesize; non-0.1 multiples remain rejected.
 example :
     (match LeanCli.LlmAgent.DirectSynth.synth
         ((parse "shield 0.2 ETH with tornado cash").setField
           "amountBase" "200000000000000000")
+        11155111 none with
+     | .ok (.tornadoDeposit 11155111 200000000000000000) => true
+     | _ => false) = true
+  := by native_decide
+example :
+    (match LeanCli.LlmAgent.DirectSynth.synth
+        ((parse "unshield 0.05 ETH with tornado cash to 0x0000000000000000000000000000000000000001").setField
+          "amountBase" "50000000000000000")
         11155111 none with
      | .error _ => true
      | .ok _ => false) = true

@@ -2748,14 +2748,35 @@ def run (args : List String) : IO UInt32 := do
                     ("data", .str c.data),
                     ("valueWei", .str (toString c.valueWei))
                   ]
-                DaemonClient.printCall "shielded.tornado.executeWithdraw"
-                  (.obj (#[
+                let fields : Array (String × LeanCli.Encoding.Json.Json) := #[
                     ("chainId", .num (Int.ofNat cid)),
                     ("recipient", .str to),
                     ("amountEth", .str amountEth),
                     ("mode", .str mode)
                   ] ++ (if tailCalls.isEmpty then #[]
-                        else #[("tailCalls", .arr tailCallsJson)])))
+                        else #[("tailCalls", .arr tailCallsJson)])
+                let params := LeanCli.Encoding.Json.Json.obj fields
+                -- Bind every execution transport to a fresh quote. The daemon
+                -- also requires this ceiling, and the sidecar checks it again
+                -- against the fee embedded in the prepared proof.
+                match ← DaemonClient.call "shielded.tornado.quoteWithdraw" params with
+                | .error err =>
+                    IO.eprintln s!"tornado quote failed {err.code}: {err.message}"
+                    pure 2
+                | .ok quote =>
+                    let feeField :=
+                      if mode = "relayer" then "relayerFeeWei" else "paymasterFeeWei"
+                    match LeanCli.Encoding.Json.getField feeField quote
+                        >>= LeanCli.Encoding.Json.asString with
+                    | none =>
+                        IO.eprintln s!"tornado quote did not return {feeField}; refusing to broadcast"
+                        pure 2
+                    | some feeWei =>
+                        let count := (LeanCli.Encoding.Json.getField "withdrawalCount" quote
+                          >>= LeanCli.Encoding.Json.asNat).getD 1
+                        IO.println s!"Tornado quote: {count} note(s), {mode} fee ceiling {feeWei} wei"
+                        DaemonClient.printCall "shielded.tornado.executeWithdraw"
+                          (.obj (fields ++ #[("maxFeeWei", .str feeWei)]))
   | .sphincsCreate name paramSet walletName ecdsaKind accountIndexOrPath chainOverride? backend? =>
       -- Why one prompt UX: per CLAUDE.md the CLI is a printer. We prompt
       -- for one passphrase (`slot`) and optionally a wallet-unlock pass

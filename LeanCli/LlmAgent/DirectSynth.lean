@@ -104,15 +104,12 @@ private def natOrErr (ctx s : String) : Except String Nat :=
   | some n => .ok n
   | none   => .error s!"DirectSynth: {ctx}: '{s}' is not a non-negative integer"
 
-/-- Is `wei` exactly one of the four Tornado pool denominations
-    (0.1 / 1 / 10 / 100 ETH)? Mirrors the gate in
+/-- Is `wei` a positive exact 0.1-ETH multiple? The SDK decomposes deposits
+    and combines withdrawal notes across fixed pools. Mirrors the gate in
     `IntentParser.validate` — the DirectSynth path bypasses that
-    validator, so the denomination check must live here too. -/
-private def isTornadoDenomination (wei : Nat) : Bool :=
-  wei =     100_000_000_000_000_000  -- 0.1 ETH
-  || wei =   1_000_000_000_000_000_000  -- 1 ETH
-  || wei =  10_000_000_000_000_000_000  -- 10 ETH
-  || wei = 100_000_000_000_000_000_000  -- 100 ETH
+    validator, so the amount check must live here too. -/
+private def isTornadoAmount (wei : Nat) : Bool :=
+  wei > 0 && wei % 100_000_000_000_000_000 = 0
 
 /-- Top-level: try to build an `Intent` from a `RegexDraft` + chainId
     using only wallet-side state. `.ok i` ⇒ the caller can encode and
@@ -256,8 +253,7 @@ def synth (draft : RegexDraft) (chainId : Nat) (senderAddr? : Option String := n
         let _ := chain
         pure (.railgunUnshield chainId amount recipient)
   | .tornadoDeposit =>
-      -- Tornado Cash deposit. ETH-only, and the amount must be exactly a
-      -- pool denomination (0.1 / 1 / 10 / 100 ETH) — the same gate
+      -- Tornado Cash deposit. ETH-only and an exact 0.1-ETH multiple — the same gate
       -- `IntentParser.validate` applies to LLM-drafted intents. The
       -- synthesized intent goes straight to the chat prepare envelope
       -- (`shielded.tornado.prepareDeposit`), so this gate cannot be
@@ -270,24 +266,22 @@ def synth (draft : RegexDraft) (chainId : Nat) (senderAddr? : Option String := n
       else
         let amtStr ← fieldOrErr draft "amountBase"
         let amount ← natOrErr "amountBase" amtStr
-        if !isTornadoDenomination amount then
-          .error s!"DirectSynth: {amtStr} wei is not a Tornado pool denomination (exactly 0.1, 1, 10, or 100 ETH)"
+        if !isTornadoAmount amount then
+          .error s!"DirectSynth: {amtStr} wei is not a positive exact 0.1-ETH multiple"
         else
           let _ := chain
           pure (.tornadoDeposit chainId amount)
   | .tornadoWithdraw =>
-      -- Tornado Cash withdraw: one denomination note to a resolved 0x
-      -- recipient. `noteRef` is always empty on this path (auto-select
-      -- the oldest spendable note); the RuleParser never extracts a
-      -- deposit-index selector — that stays an LLM-path refinement.
+      -- Tornado Cash withdraw: alpha.18 combines an exact set of notes into
+      -- one paymaster UserOp. `noteRef` stays empty so the SDK auto-selects.
       let sym ← fieldOrErr draft "asset"
       if sym.toLower ≠ "eth" then
         .error s!"DirectSynth: tornado unshield only supports native ETH; got '{sym}'"
       else
         let amtStr    ← fieldOrErr draft "amountBase"
         let amount    ← natOrErr "amountBase" amtStr
-        if !isTornadoDenomination amount then
-          .error s!"DirectSynth: {amtStr} wei is not a Tornado pool denomination (exactly 0.1, 1, 10, or 100 ETH)"
+        if !isTornadoAmount amount then
+          .error s!"DirectSynth: {amtStr} wei is not a positive exact 0.1-ETH multiple"
         else
           let recipStr  ← fieldOrErr draft "to"
           let recipient ← parseAddr "recipient" recipStr
